@@ -1,0 +1,5 @@
+# 把 hub.example.com 换成你的域名（DNS 需已解析到本 VPS）
+hub.example.com {
+	# SSH 反向隧道把 VPS 的 127.0.0.1:8787 连到家里 PC 的 Hub
+	reverse_proxy 127.0.0.1:8787
+}

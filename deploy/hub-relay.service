@@ -1,0 +1,21 @@
+# 家里 PC -> VPS 的 SSH 反向隧道（把 VPS:8787 转发到本机 Hub:8787）
+# 用法：替换 user@<VPS_IP> 后放到 /etc/systemd/system/，需先 ssh-copy-id 免密
+[Unit]
+Description=Agent Hub reverse tunnel to VPS
+After=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+Environment=AUTOSSH_GATETIME=0
+ExecStart=/usr/bin/autossh -N \
+	-o "ServerAliveInterval 30" \
+	-o "ServerAliveCountMax 3" \
+	-o "ExitOnForwardFailure yes" \
+	-R 127.0.0.1:8787:127.0.0.1:8787 \
+	user@VPS_IP
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

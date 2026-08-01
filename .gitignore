@@ -1,0 +1,31 @@
+# Node
+hub/node_modules/
+hub/data/
+hub/package-lock.json
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/*.iml
+android/.idea/
+
+# Kotlin/Java
+*.class
+*.jar
+*.war
+*.ear
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
