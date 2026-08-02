@@ -20,9 +20,11 @@ HUB_TUNNEL=1 npx tsx src/index.ts
 
 ## 方式二：自建 VPS + 域名（推荐生产用）
 
-架构：手机 → `wss://hub.你的域名` → VPS(Caddy 终结 TLS) → SSH 反向隧道 → 家里 PC(Hub:8787)
+架构：手机 → `wss://hub.你的域名` → VPS(Caddy 或 Nginx 终结 TLS) → SSH 反向隧道 → 家里 PC(Hub:8787)
 
-### 1. VPS 上：装 Caddy
+VPS 上**任选 Caddy 或 Nginx 一种**即可。
+
+### 1. VPS 上：选择 Caddy（自动 HTTPS，推荐新手）
 
 ```bash
 sudo apt install -y caddy   # Debian/Ubuntu
@@ -32,6 +34,30 @@ sudo systemctl reload caddy
 ```
 
 域名 DNS 需先解析到 VPS IP。Caddy 自动申请/续期 HTTPS 证书，并透传 WebSocket。
+
+### 或：选择 Nginx + certbot
+
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+sudo cp deploy/nginx-site.conf /etc/nginx/sites-available/agent-hub
+# 编辑 /etc/nginx/sites-available/agent-hub：把 hub.example.com 换成你的域名
+
+# 申请证书；certbot 安装后会自带 systemd timer，到期自动续期
+sudo certbot certonly --nginx -d hub.example.com --deploy-hook "systemctl reload nginx"
+
+# 证书生成后再启用配置，避免 nginx -t 因证书路径不存在而失败
+sudo ln -s /etc/nginx/sites-available/agent-hub /etc/nginx/sites-enabled/agent-hub
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+`deploy/nginx-site.conf` 已包含 WebSocket 升级、反向代理到 `127.0.0.1:8787`、SSL 证书路径占位符和安全响应头。
+
+续期测试：
+
+```bash
+sudo certbot renew --dry-run
+```
 
 ### 2. 家里 PC 上：SSH 反向隧道
 
@@ -60,7 +86,7 @@ App 地址栏填 `wss://hub.你的域名`，Token 填 `HUB_TOKEN` 的值。
 **安全提醒**：token 是唯一鉴权手段，公网部署务必：
 - 设置强随机 `HUB_TOKEN`（如 `openssl rand -hex 24`）
 - 不要用默认 `dev-token`
-- 可再加一层 Caddy basicauth 或仅放行指定 IP
+- Caddy 可再加一层 basicauth，Nginx 可用 `auth_basic` 或仅放行指定 IP
 
 ## 方式三：Tailscale（最省心）
 

@@ -27,6 +27,8 @@ Hub 内置多 agent 注册表，群聊可混编不同类型的 agent 会话。
 
 ### 1. 启动 Hub（PC 上）
 
+**临时运行**
+
 ```bash
 cd hub
 HUB_TOKEN=dev-token npx tsx src/index.ts
@@ -36,6 +38,27 @@ HUB_TOKEN=dev-token npx tsx src/index.ts
 HUB_TUNNEL=1 npx tsx src/index.ts
 # 输出: [tunnel] remote connect: wss://xxx.trycloudflare.com/?token=dev-token
 ```
+
+**PM2 常驻（推荐，适合长期挂机）**
+
+项目根目录已提供 `ecosystem.config.cjs.example` 模板：
+
+```bash
+# 1. 安装 pm2（如未安装）
+npm i -g pm2
+
+# 2. 从模板复制本地配置，并修改 HUB_TOKEN
+#    公网部署务必改成强随机串，例如：
+#    openssl rand -hex 24
+cp ecosystem.config.cjs.example ecosystem.config.cjs
+
+# 3. 启动并常驻
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup
+```
+
+PM2 会自动处理崩溃重启、内存超限重启、日志滚动。查看运行状态：`pm2 logs agent-hub`。
 
 环境变量：`HUB_PORT`（默认 8787）、`HUB_TOKEN`、`HUB_TUNNEL=1`（开隧道）、`HUB_DATA_DIR`（数据目录）、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`。
 前提：`devin auth login` 已登录；远程隧道需 `cloudflared` 在 PATH。
@@ -60,7 +83,7 @@ HUB_TUNNEL=1 npx tsx src/index.ts
 三种方式（详见 `deploy/README.md`）：
 
 1. **cloudflared 快速隧道**：`HUB_TUNNEL=1` 启动即可，零配置，地址每次变化
-2. **自建 VPS + 域名**：`deploy/` 内含 Caddy 配置 + systemd unit（Hub 常驻 + autossh 反向隧道），固定 `wss://hub.你的域名`
+2. **自建 VPS + 域名**：`deploy/` 内含 Caddy / Nginx 配置 + systemd unit（Hub 常驻 + autossh 反向隧道），固定 `wss://hub.你的域名`
 3. **Tailscale**：PC/手机组网后直接填 Tailscale IP
 
 App 连接界面支持保存多个配置档案（局域网/远程随意切换，点一下即连）。
@@ -111,7 +134,7 @@ npx tsx scripts/claude-check.ts    # claude-code-acp 会话（需先 claude auth
 
 - `hub/` — Node.js 网关（WS 服务 + ACP client + 权限代理 + SQLite 持久化）
 - `android/` — Kotlin + Jetpack Compose App
-- `deploy/` — VPS 自建中继部署套件（Caddy + systemd + autossh）
+- `deploy/` — VPS 自建中继部署套件（Caddy / Nginx + systemd + autossh）
 - `docs/design.md` — 完整产品设计（含群聊编排规划）
 
 ## MVP 之外（后续）

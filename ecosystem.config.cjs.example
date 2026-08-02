@@ -1,0 +1,51 @@
+const path = require('path')
+
+// PM2 配置参考：将 Agent Hub 作为常驻 Node 进程托管
+// 用法：
+//   pm2 start ecosystem.config.cjs
+//   pm2 save
+//   pm2 startup
+// 注意：公网部署前请把 HUB_TOKEN 改成强随机串（openssl rand -hex 24）
+
+module.exports = {
+  apps: [
+    {
+      name: 'agent-hub',
+      // Hub 源码在 hub/ 子目录，PM2 工作目录指向该目录
+      cwd: path.join(__dirname, 'hub'),
+      // 使用 npx tsx 直接执行 TypeScript，无需先编译
+      script: 'npx',
+      args: ['tsx', 'src/index.ts'],
+      // 以 fork 模式运行（Hub 是单进程 WebSocket 服务）
+      exec_mode: 'fork',
+      instances: 1,
+      // 崩溃后自动重启，退避 3 秒
+      autorestart: true,
+      restart_delay: 3000,
+      max_restarts: 10,
+      min_uptime: '10s',
+      // 环境变量
+      env: {
+        NODE_ENV: 'production',
+        HUB_PORT: 8787,
+        // 默认 dev-token 仅适合内网测试，公网务必替换
+        HUB_TOKEN: 'dev-token',
+        // HUB_TUNNEL: '1',          // 需要 cloudflared 快速隧道时取消注释
+        // HUB_DATA_DIR: './data',   // 指定数据目录时取消注释
+      },
+      // PM2 日志路径，默认已足够，可自定义如下
+      // log_file: '~/.pm2/logs/agent-hub-combined.log',
+      // out_file: '~/.pm2/logs/agent-hub-out.log',
+      // error_file: '~/.pm2/logs/agent-hub-error.log',
+      // 合并输出到单一日志文件
+      merge_logs: true,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      // 不监听文件变化，避免开发保存触发线上重启
+      watch: false,
+      // 内存限制 512MB，超限时自动重启
+      max_memory_restart: '512M',
+      // 优雅退出超时
+      kill_timeout: 5000,
+    },
+  ],
+}

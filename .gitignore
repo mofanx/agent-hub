@@ -29,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# local PM2 config, copy from ecosystem.config.cjs.example
+ecosystem.config.cjs
