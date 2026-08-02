@@ -628,10 +628,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call(method, buildJsonObject { put(idKey, id) })
                 val entries = result["entries"]?.jsonArray ?: return@launch
-                val room = currentRoom
-                val conductorName = if (room != null && room.mode == "conductor" && room.conductorId != null) {
-                    room.members.find { it.first == room.conductorId }?.second
-                } else null
                 for (e in entries) {
                     val o = e.jsonObject
                     val kind = o["kind"]!!.jsonPrimitive.content
@@ -639,11 +635,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val text = o["text"]!!.jsonPrimitive.content
                     when (kind) {
                         "user" -> chatItems.add(ChatItem.User(text))
-                        "assistant" -> {
-                            if (conductorName == null || author == conductorName) {
-                                chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
-                            }
-                        }
+                        "assistant" -> chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
                         "system" -> chatItems.add(ChatItem.System(text))
                     }
                 }

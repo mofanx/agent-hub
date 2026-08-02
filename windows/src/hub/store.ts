@@ -1059,11 +1059,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
             text: String(o.text ?? ""),
           };
         });
-        const room = get().currentRoom;
-        const conductorName =
-          room && room.mode === "conductor" && room.conductorId
-            ? room.members.find((m) => m[0] === room.conductorId)?.[1]
-            : null;
         const chat: ChatItem[] = [];
         for (const e of entries) {
           switch (e.kind) {
@@ -1071,9 +1066,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
               chat.push({ kind: "user", text: e.text, author: e.author });
               break;
             case "assistant":
-              if (!conductorName || e.author === conductorName) {
-                chat.push({ kind: "assistant", id: 0, text: e.text, author: e.author });
-              }
+              chat.push({ kind: "assistant", id: 0, text: e.text, author: e.author });
               break;
             case "system":
               chat.push({ kind: "system", text: e.text, author: e.author });
