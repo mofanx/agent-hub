@@ -1,11 +1,11 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { Readable, Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
+import type { Stream } from "@agentclientprotocol/sdk";
+import type { ChildProcess } from "node:child_process";
 
 export type HubEvent =
   | { method: "session.update"; params: { sessionId: string; update: unknown } }
+  | { method: "session.generating"; params: { sessionId: string; stoppable: boolean } }
   | {
       method: "prompt.done";
       params: { sessionId: string; stopReason: string; output: string };
@@ -29,25 +29,67 @@ type SessionEntry = {
   cwd: string;
   name: string;
   busy: boolean;
+  stoppable: boolean;
   turnText: string;
   loading?: boolean;
 };
 
 const PERMISSION_TIMEOUT_MS = 120_000;
 const OUTPUT_CAPTURE_LEN = 800;
+let permissionBypass = process.env.HUB_PERMISSION_BYPASS === "1";
+
+export function getPermissionBypass(): boolean {
+  return permissionBypass;
+}
+
+export function setPermissionBypass(v: boolean): void {
+  permissionBypass = v;
+}
+
+function findAutoAllowOption(options: PermissionOption[]): PermissionOption | undefined {
+  // 优先“始终允许”，让 agent 自己下次不再询问
+  const always = options.find(
+    (o) => /always/i.test(o.name) || /always/i.test(o.kind),
+  );
+  if (always) return always;
+  // 退而求其次选择任意“允许”选项
+  const allow = options.find(
+    (o) => /allow/i.test(o.name) || /allow/i.test(o.kind),
+  );
+  if (allow) return allow;
+  // 最后兜底：选择第一个非 reject/deny/block 的选项
+  return options.find(
+    (o) =>
+      !/reject|deny|denied|block/i.test(o.kind) &&
+      !/reject|deny|denied|block/i.test(o.name),
+  );
+}
 
 export class AcpAgent {
-  private proc: ChildProcess | null = null;
+  private conn: acp.ClientConnection | null = null;
   private ctx: acp.ClientContext | null = null;
   private sessions = new Map<string, SessionEntry>();
   private pendingPermissions = new Map<string, (optionId: string) => void>();
   private starting: Promise<void> | null = null;
 
   constructor(
-    private readonly bin: string,
-    private readonly args: string[],
+    private readonly name: string,
+    private readonly stream: Stream,
     private readonly emit: (event: HubEvent) => void,
+    private readonly onClose?: () => void,
+    private readonly process?: ChildProcess,
   ) {}
+
+  get isReady(): boolean {
+    return this.ctx !== null;
+  }
+
+  close(): void {
+    this.conn?.close();
+    if (this.process && this.process.exitCode === null) {
+      this.process.kill();
+    }
+  }
 
   async ensureStarted(): Promise<void> {
     if (this.ctx) return;
@@ -57,22 +99,6 @@ export class AcpAgent {
 
   private async start(): Promise<void> {
     this.emit({ method: "agent.status", params: { status: "starting" } });
-    this.proc = spawn(this.bin, this.args, {
-      stdio: ["pipe", "pipe", "inherit"],
-    });
-    this.proc.on("exit", (code: number | null) => {
-      this.ctx = null;
-      this.proc = null;
-      this.emit({
-        method: "agent.status",
-        params: { status: "exited", detail: `code=${code}` },
-      });
-    });
-
-    const stream = acp.ndJsonStream(
-      Writable.toWeb(this.proc.stdin!) as WritableStream<Uint8Array>,
-      Readable.toWeb(this.proc.stdout!) as ReadableStream<Uint8Array>,
-    );
 
     const app = acp
       .client({ name: "agent-hub" })
@@ -81,30 +107,32 @@ export class AcpAgent {
       )
       .onNotification(acp.methods.client.session.update, (ctx) =>
         this.routeUpdate(ctx.params),
-      )
-      .onRequest(acp.methods.client.fs.readTextFile, async (ctx) => ({
-        content: await fs.readFile(ctx.params.path, "utf8"),
-      }))
-      .onRequest(acp.methods.client.fs.writeTextFile, async (ctx) => {
-        await fs.writeFile(ctx.params.path, ctx.params.content, "utf8");
-        return {};
-      });
+      );
 
-    const conn = app.connect(stream);
-    this.ctx = conn.agent;
+    this.conn = app.connect(this.stream);
+    this.ctx = this.conn.agent;
+
+    this.conn.closed
+      .then(() => this.onDisconnected())
+      .catch(() => this.onDisconnected());
 
     const init = await this.ctx.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
-      clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
-      },
+      clientCapabilities: {},
       clientInfo: { name: "agent-hub", version: "0.1.0" },
     });
-    console.log("[agent] initialized:", JSON.stringify(init));
+    console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
     this.emit({
       method: "agent.status",
       params: { status: "ready", detail: `protocol v${init.protocolVersion}` },
     });
+  }
+
+  private onDisconnected(): void {
+    this.ctx = null;
+    this.conn = null;
+    this.emit({ method: "agent.status", params: { status: "exited" } });
+    this.onClose?.();
   }
 
   private routeUpdate(params: { sessionId: string; update: unknown }): void {
@@ -127,6 +155,11 @@ export class AcpAgent {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     entry.busy = false;
+    entry.stoppable = false;
+    this.emit({
+      method: "session.generating",
+      params: { sessionId, stoppable: false },
+    });
     this.emit({
       method: "prompt.done",
       params: {
@@ -144,6 +177,26 @@ export class AcpAgent {
     options: PermissionOption[];
   }): Promise<{ outcome: { outcome: "selected"; optionId: string } }> {
     const requestId = randomUUID();
+
+    if (permissionBypass) {
+      const chosen =
+        findAutoAllowOption(params.options) ??
+        params.options[params.options.length - 1];
+      const optionId = chosen?.optionId ?? "";
+      const toolName =
+        typeof params.toolCall === "object" &&
+        params.toolCall != null &&
+        "name" in params.toolCall
+          ? String(params.toolCall.name)
+          : "?";
+      console.warn(
+        `[permission] bypass=${permissionBypass}, auto-selecting "${chosen?.name ?? optionId}" for ${toolName} in session ${params.sessionId}`,
+      );
+      return Promise.resolve({
+        outcome: { outcome: "selected", optionId },
+      });
+    }
+
     this.emit({
       method: "permission.request",
       params: {
@@ -195,6 +248,7 @@ export class AcpAgent {
       cwd,
       name: sessionName,
       busy: false,
+      stoppable: false,
       turnText: "",
     });
     return { sessionId: resp.sessionId, name: sessionName };
@@ -215,6 +269,7 @@ export class AcpAgent {
           cwd,
           name,
           busy: false,
+          stoppable: false,
           turnText: "",
           loading: true,
         });
@@ -230,7 +285,7 @@ export class AcpAgent {
         return false;
       }
     }
-    this.sessions.set(sessionId, { cwd, name, busy: false, turnText: "" });
+    this.sessions.set(sessionId, { cwd, name, busy: false, stoppable: false, turnText: "" });
     return true;
   }
 
@@ -239,7 +294,12 @@ export class AcpAgent {
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (entry.busy) throw new Error(`session busy: ${entry.name}`);
     entry.busy = true;
+    entry.stoppable = true;
     entry.turnText = "";
+    this.emit({
+      method: "session.generating",
+      params: { sessionId, stoppable: true },
+    });
     this.ctx!.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt: [{ type: "text", text }],
@@ -247,6 +307,11 @@ export class AcpAgent {
       .then((resp) => this.finishTurn(sessionId, resp.stopReason))
       .catch((err: unknown) => {
         entry.busy = false;
+        entry.stoppable = false;
+        this.emit({
+          method: "session.generating",
+          params: { sessionId, stoppable: false },
+        });
         this.emit({
           method: "prompt.error",
           params: { sessionId, message: String(err) },
@@ -255,12 +320,18 @@ export class AcpAgent {
   }
 
   async cancel(sessionId: string): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (!this.ctx) throw new Error("agent not started");
     await this.ctx.notify(acp.methods.agent.session.cancel, { sessionId });
   }
 
   isBusy(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.busy ?? false;
+  }
+
+  isStoppable(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.stoppable ?? false;
   }
 
   /** 本地摘除会话（不通知 agent，用于删除） */
@@ -273,12 +344,15 @@ export class AcpAgent {
     cwd: string;
     name: string;
     busy: boolean;
+    stoppable: boolean;
   }[] {
     return [...this.sessions.entries()].map(([sessionId, s]) => ({
       sessionId,
       cwd: s.cwd,
       name: s.name,
       busy: s.busy,
+      stoppable: s.stoppable,
     }));
   }
+
 }

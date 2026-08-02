@@ -18,6 +18,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import com.agenthub.ui.stringsFor
 
 sealed class ChatItem {
     abstract val author: String
@@ -48,12 +49,25 @@ sealed class ChatItem {
     ) : ChatItem()
 }
 
+data class ConnectionInfo(
+    val id: String,
+    val name: String,
+    val agent: String,
+    val token: String = "",
+    val address: String = "",
+    val cwd: String = "",
+    val online: Boolean = false,
+    val local: Boolean = false,
+)
+
 data class SessionInfo(
     val sessionId: String,
     val cwd: String,
     val name: String,
     val busy: Boolean,
     val agent: String = "devin",
+    val address: String = "",
+    val connectionId: String? = null,
     val offline: Boolean = false,
     val archived: Boolean = false,
 )
@@ -79,6 +93,8 @@ data class RoleInfo(
     val persona: String,
     val cwd: String?,
     val agent: String?,
+    val address: String?,
+    val connectionId: String?,
     val builtin: Boolean,
 )
 
@@ -205,6 +221,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessions = mutableStateListOf<SessionInfo>()
     val rooms = mutableStateListOf<RoomInfo>()
     val roles = mutableStateListOf<RoleInfo>()
+    val connections = mutableStateListOf<ConnectionInfo>()
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
@@ -222,9 +239,86 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var itemSeq = 0L
 
     fun sessionName(sessionId: String): String =
-        sessions.find { it.sessionId == sessionId }?.name
+        sessions.find { it.sessionId == sessionId }?.let { displayName(it) }
             ?: currentRoom?.members?.find { it.first == sessionId }?.second
             ?: sessionId
+
+    fun sessionOrigin(s: SessionInfo): String {
+        if (s.connectionId != null) {
+            connections.find { it.id == s.connectionId }?.let { return it.name }
+        }
+        return s.address
+    }
+
+    fun displayName(s: SessionInfo): String {
+        val origin = sessionOrigin(s)
+        return if (origin.isNotBlank()) "${s.name} (${origin})" else s.name
+    }
+
+    fun refreshBusy() {
+        viewModelScope.launch { syncBusyIds() }
+    }
+
+    fun toggleBypass(arg: String? = null) {
+        viewModelScope.launch {
+            try {
+                val enabled = when (arg?.lowercase()) {
+                    "on", "true", "1" -> true
+                    "off", "false", "0" -> false
+                    else -> null
+                }
+                val result = hub.call("permission.bypass", buildJsonObject {
+                    if (enabled != null) put("enabled", enabled)
+                })
+                val bypass = result["bypass"]?.jsonPrimitive?.content?.toBoolean() ?: false
+                val S = stringsFor(lang)
+                chatItems.add(ChatItem.System(if (bypass) S.bypassEnabled else S.bypassDisabled))
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(e.message ?: "bypass failed"))
+            }
+        }
+    }
+
+    data class SlashCommand(val name: String, val description: String)
+
+    val slashCommands: List<SlashCommand>
+        get() {
+            val S = stringsFor(lang)
+            return listOf(
+                SlashCommand("help", S.slashHelpHelp),
+                SlashCommand("stop", S.slashHelpStop),
+                SlashCommand("bypass", S.slashHelpBypass),
+            )
+        }
+
+    private fun showSlashHelp() {
+        val S = stringsFor(lang)
+        chatItems.add(
+            ChatItem.System(
+                buildString {
+                    appendLine(S.slashHelpTitle)
+                    slashCommands.forEach { appendLine(it.description) }
+                }.trim()
+            )
+        )
+    }
+
+    private fun handleSlashCommand(text: String): Boolean {
+        if (!text.startsWith("/")) return false
+        val parts = text.substring(1).trim().split("""\s+""".toRegex()).filter { it.isNotBlank() }
+        val command = parts.firstOrNull() ?: return false
+        val arg = parts.drop(1).firstOrNull()
+        when (command) {
+            "help" -> showSlashHelp()
+            "bypass" -> toggleBypass(arg)
+            "stop" -> stopCurrent()
+            else -> {
+                val S = stringsFor(lang)
+                chatItems.add(ChatItem.Error("/$command\n${S.unknownCommandHint}"))
+            }
+        }
+        return true
+    }
 
     fun connect(host: String, port: String, token: String) {
         connecting = true
@@ -258,6 +352,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshAll() {
         viewModelScope.launch {
             try {
+                val cResult = hub.call("connection.list")
+                val cList = cResult["connections"]?.jsonArray ?: return@launch
+                connections.clear()
+                for (c in cList) {
+                    val o = c.jsonObject
+                    connections.add(
+                        ConnectionInfo(
+                            o["id"]!!.jsonPrimitive.content,
+                            o["name"]!!.jsonPrimitive.content,
+                            o["agent"]!!.jsonPrimitive.content,
+                            o["token"]?.jsonPrimitive?.content ?: "",
+                            o["address"]?.jsonPrimitive?.content ?: "",
+                            o["cwd"]?.jsonPrimitive?.content ?: "",
+                            o["online"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                            o["local"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                        )
+                    )
+                }
+            } catch (_: Exception) {
+            }
+            try {
                 val result = hub.call("session.list")
                 val list = result["sessions"]?.jsonArray ?: return@launch
                 sessions.clear()
@@ -270,11 +385,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             o["name"]!!.jsonPrimitive.content,
                             o["busy"]!!.jsonPrimitive.content.toBoolean(),
                             o["agent"]?.jsonPrimitive?.content ?: "devin",
+                            o["address"]?.jsonPrimitive?.content ?: "",
+                            o["connectionId"]?.jsonPrimitive?.content,
                             o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         )
                     )
                 }
+                syncBusyIdsFromList(sessions)
             } catch (_: Exception) {
             }
             try {
@@ -289,6 +407,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["persona"]!!.jsonPrimitive.content,
                         o["cwd"]?.jsonPrimitive?.content,
                         o["agent"]?.jsonPrimitive?.content,
+                        o["address"]?.jsonPrimitive?.content,
+                        o["connectionId"]?.jsonPrimitive?.content,
                         o["builtin"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                     ))
                 }
@@ -319,22 +439,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createSession(cwd: String, name: String, agent: String = "devin", roleId: String? = null) {
+    fun createSession(
+        cwd: String,
+        name: String,
+        connectionId: String,
+        roleId: String? = null,
+    ) {
         viewModelScope.launch {
             try {
                 val result = hub.call("session.create", buildJsonObject {
                     put("cwd", cwd)
                     put("name", name)
-                    put("agent", agent)
+                    put("connectionId", connectionId)
                     roleId?.let { put("roleId", it) }
                 })
-                val o = result as JsonObject
+                val o = result
                 val session = SessionInfo(
                     o["sessionId"]!!.jsonPrimitive.content,
                     cwd,
                     o["name"]?.jsonPrimitive?.content ?: name,
                     false,
-                    agent,
+                    o["agent"]?.jsonPrimitive?.content ?: "devin",
+                    o["address"]?.jsonPrimitive?.content ?: "",
+                    o["connectionId"]?.jsonPrimitive?.content,
                 )
                 noteCwd(cwd)
                 sessions.add(session)
@@ -345,14 +472,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createRole(name: String, persona: String, cwd: String) {
+    fun createRole(
+        name: String,
+        persona: String,
+        cwd: String,
+        connectionId: String? = null,
+    ) {
         viewModelScope.launch {
             try {
                 hub.call("role.create", buildJsonObject {
                     put("name", name)
                     put("persona", persona)
                     if (cwd.isNotBlank()) put("cwd", cwd)
+                    if (connectionId != null) put("connectionId", connectionId)
                 })
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun createConnection(name: String, agent: String, address: String, cwd: String, token: String = "", local: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                hub.call("connection.create", buildJsonObject {
+                    put("name", name)
+                    put("agent", agent)
+                    if (address.isNotBlank()) put("address", address)
+                    if (cwd.isNotBlank()) put("cwd", cwd)
+                    if (token.isNotBlank()) put("token", token)
+                    if (local) put("local", true)
+                })
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun deleteConnection(id: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("connection.delete", buildJsonObject { put("id", id) })
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -420,6 +582,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resumeSession(session: SessionInfo) {
         viewModelScope.launch {
+            connectError = null
             try {
                 val result = hub.call("session.resume", buildJsonObject {
                     put("sessionId", session.sessionId)
@@ -442,6 +605,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call(method, buildJsonObject { put(idKey, id) })
                 val entries = result["entries"]?.jsonArray ?: return@launch
+                val room = currentRoom
+                val conductorName = if (room != null && room.mode == "conductor" && room.conductorId != null) {
+                    room.members.find { it.first == room.conductorId }?.second
+                } else null
                 for (e in entries) {
                     val o = e.jsonObject
                     val kind = o["kind"]!!.jsonPrimitive.content
@@ -449,13 +616,52 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val text = o["text"]!!.jsonPrimitive.content
                     when (kind) {
                         "user" -> chatItems.add(ChatItem.User(text))
-                        "assistant" -> chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
+                        "assistant" -> {
+                            if (conductorName == null || author == conductorName) {
+                                chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
+                            }
+                        }
                         "system" -> chatItems.add(ChatItem.System(text))
                     }
                 }
+                syncBusyIds()
             } catch (_: Exception) {
             }
         }
+    }
+
+    private fun syncBusyIdsFromList(list: List<SessionInfo>) {
+        val currentIds = currentRoom?.members?.map { it.first }?.toSet()
+            ?: setOfNotNull(currentSession?.sessionId)
+        if (currentIds.isEmpty()) return
+        val busy = list.filter { it.busy && currentIds.contains(it.sessionId) }
+            .map { it.sessionId }
+            .toSet()
+        busyIds.removeAll { !busy.contains(it) && currentIds.contains(it) }
+        busy.forEach { if (!busyIds.contains(it)) busyIds.add(it) }
+    }
+
+    private suspend fun syncBusyIds() {
+        val result = hub.call("session.list")
+        val list = result["sessions"]?.jsonArray ?: return
+        val sessionsList = mutableListOf<SessionInfo>()
+        for (s in list) {
+            val o = s.jsonObject
+            sessionsList.add(
+                SessionInfo(
+                    o["sessionId"]!!.jsonPrimitive.content,
+                    o["cwd"]!!.jsonPrimitive.content,
+                    o["name"]!!.jsonPrimitive.content,
+                    o["busy"]!!.jsonPrimitive.content.toBoolean(),
+                    o["agent"]?.jsonPrimitive?.content ?: "devin",
+                    o["address"]?.jsonPrimitive?.content ?: "",
+                    o["connectionId"]?.jsonPrimitive?.content,
+                    o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                    o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                )
+            )
+        }
+        syncBusyIdsFromList(sessionsList)
     }
 
     val searchResults = mutableStateListOf<SearchHit>()
@@ -523,6 +729,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sendPrompt(text: String) {
         val session = currentSession ?: return
+        if (handleSlashCommand(text)) return
         val q = quote
         chatItems.add(ChatItem.User(text, quoteAuthor = q?.first, quoteText = q?.second))
         quote = null
@@ -543,6 +750,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sendRoomMessage(text: String) {
         val room = currentRoom ?: return
+        if (handleSlashCommand(text)) return
         val q = quote
         chatItems.add(ChatItem.User(text, quoteAuthor = q?.first, quoteText = q?.second))
         quote = null
@@ -604,17 +812,37 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return currentSession?.sessionId == sessionId
     }
 
+    private fun shouldShowInRoom(sessionId: String): Boolean {
+        val room = currentRoom ?: return true
+        if (room.mode != "conductor") return true
+        return sessionId == room.conductorId
+    }
+
     private fun handleEvent(obj: JsonObject) {
         when (obj["method"]?.jsonPrimitive?.content) {
             "agent.status" -> {
                 val p = obj["params"]!!.jsonObject
                 agentStatus = p["status"]!!.jsonPrimitive.content +
                     (p["detail"]?.jsonPrimitive?.content?.let { " ($it)" } ?: "")
+                refreshAll()
+            }
+            "session.generating" -> {
+                val p = obj["params"]!!.jsonObject
+                val sid = p["sessionId"]!!.jsonPrimitive.content
+                val stoppable = p["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false
+                if (!inScope(sid)) return
+                if (stoppable) {
+                    if (!busyIds.contains(sid)) busyIds.add(sid)
+                } else {
+                    busyIds.remove(sid)
+                    refreshAll()
+                }
             }
             "session.update" -> {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
-                if (inScope(sid)) applyUpdate(sid, p["update"]!!.jsonObject)
+                if (!inScope(sid)) return
+                if (shouldShowInRoom(sid)) applyUpdate(sid, p["update"]!!.jsonObject)
             }
             "prompt.done" -> {
                 val p = obj["params"]!!.jsonObject
@@ -626,7 +854,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 busyIds.remove(sid)
-                if (inScope(sid) || sid.isEmpty()) {
+                if ((inScope(sid) || sid.isEmpty()) && shouldShowInRoom(sid)) {
                     chatItems.add(
                         ChatItem.Error(p["message"]!!.jsonPrimitive.content, sessionName(sid))
                     )
@@ -642,6 +870,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 if (!inScope(sid)) return
+                if (!busyIds.contains(sid)) busyIds.add(sid)
                 val tool = p["toolCall"]!!.jsonObject
                 val title = tool["title"]?.jsonPrimitive?.content ?: "工具调用"
                 val options = p["options"]!!.jsonArray.map {

@@ -5,10 +5,14 @@
 ## 架构
 
 ```
-                    ┌──> devin acp
-Android App ──WS──> Hub (Node.js)
-                    └──> claude-code-acp (npx @zed-industries/claude-code-acp)
+                    ┌─> worker ──> devin acp
+Android App ──WS──> Hub (Node.js) ──WS──> worker ──> claude-code-acp
+                    └─> worker ──> codex-acp
 ```
+
+- **Hub**：常驻 Node.js WebSocket 网关，管理连接、会话、群聊编排与持久化。
+- **Worker**：在运行 agent 的机器上执行 `npx tsx src/worker.ts`，把本地 agent 的 ACP stdio 桥接到 Hub。
+- **Android App**：通过 `HUB_TOKEN` 连接 Hub，管理连接、创建会话、下发 prompt、审批工具调用。
 
 Hub 内置多 agent 注册表，群聊可混编不同类型的 agent 会话。
 
@@ -60,8 +64,69 @@ pm2 startup
 
 PM2 会自动处理崩溃重启、内存超限重启、日志滚动。查看运行状态：`pm2 logs agent-hub`。
 
-环境变量：`HUB_PORT`（默认 8787）、`HUB_TOKEN`、`HUB_TUNNEL=1`（开隧道）、`HUB_DATA_DIR`（数据目录）、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`。
+**修改代码后统一重启：**
+
+```bash
+# 代码更新后使用 pm2 restart 重载，不要直接再跑 npx tsx
+pm2 restart agent-hub
+
+# 常用运维
+pm2 logs agent-hub -f
+pm2 monit
+pm2 save
+```
+
+Hub 环境变量：`HUB_PORT`（默认 8787）、`HUB_TOKEN`、`HUB_TUNNEL=1`（开隧道）、`HUB_DATA_DIR`（数据目录）、`HUB_PERMISSION_BYPASS=1`（自动通过工具调用，仅本地可信环境）。
 前提：`devin auth login` 已登录；远程隧道需 `cloudflared` 在 PATH。
+
+### 2. 安装 App（Android 手机）
+
+```bash
+cd android
+./gradlew assembleDebug
+adb install app/build/outputs/apk/debug/app-debug.apk
+```
+
+### 3. 添加连接并复制 token
+
+打开 App，**连接**页填入 Hub IP、端口 `8787`、token `dev-token`（即 `HUB_TOKEN`）。
+
+连接成功后进入 **设置 → Agent 来源**，点击**添加来源**：
+
+- 输入名称、选择 Agent 类型。
+- token 选择**自动生成**或**手动填写**；自动生成会在创建后显示在列表中。
+- 点击创建后，在来源列表右侧点击**复制图标**，把 `CONNECTION_TOKEN` 复制到剪贴板。
+
+> 这个 token 是给 worker 用的，不是 App 连接 Hub 的 `HUB_TOKEN`。
+
+### 4. 启动 Worker（运行 agent 的机器上）
+
+worker 负责把本地 agent（`devin` / `claude` / `codex` / `opencode`）桥接到 Hub。必须**在 `hub/` 目录下**启动，因为依赖 `hub/node_modules`。
+
+```bash
+cd /path/to/agent-hub/hub
+HUB_URL=ws://<hub-ip>:8787/worker \
+  CONNECTION_TOKEN=<从 App 复制的 token> \
+  AGENT=devin \
+  npx tsx src/worker.ts
+```
+
+说明：
+
+- `HUB_URL`：填 Hub 的 IP 和端口（局域网 IP 或远程地址），路径必须是 `/worker`。
+- `CONNECTION_TOKEN`：App 中为该来源生成的 token（**不是** App 连接 Hub 用的 `dev-token`）。
+- `AGENT`：支持 `devin`（默认）、`claude`、`codex`、`opencode`，对应的 agent 需要在该机器上安装并登录。
+- worker 和 agent 运行在同一台机器上；可以在多台机器分别启动多个 worker，每台对应 App 里的一个连接。
+- **不要**在项目根目录执行 `npx tsx worker.js` 或 `npx tsx hub/src/worker.ts`；根目录没有 `tsx` 等依赖，`npx` 会重新下载一个孤立的 tsx，找不到 `worker.ts` 也会找不到 `ws` 等包。
+
+worker 环境变量：`HUB_URL`、`CONNECTION_TOKEN`、`AGENT`、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`、`CODEX_ACP_BIN/CODEX_ACP_ARGS`、`OPENCODE_BIN/OPENCODE_ARGS`。
+
+### 5. 创建会话/群聊
+
+worker 上线后，回到 App：
+
+- **新建会话**：选择已在线的来源（connection），填写工作目录，开始聊天。
+- **新建群聊**：勾选多个会话，混编多个 worker/agent。
 
 ## 持久化与历史
 
@@ -118,6 +183,7 @@ App 中输入 Hub IP、端口 8787、token（默认 dev-token）→ 新建会话
 - 每个 agent 收到的 prompt 自动附带「共享黑板」（其他成员最近输出摘要）
 - 长按消息气泡可「引用」，引用内容随消息注入目标成员的上下文
 - 执行中可点「停止」中断当前会话（群内所有忙碌成员）
+- 群聊中发送 `/stop` 可停止当前群内所有生成；`/stop @成员` 只停止指定成员
 
 ## 验证（无手机时）
 

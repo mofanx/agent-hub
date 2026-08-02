@@ -49,6 +49,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import com.agenthub.ChatViewModel
 import com.agenthub.Screen
 import com.agenthub.SessionInfo
@@ -64,8 +66,20 @@ fun SessionListScreen(vm: ChatViewModel) {
     var confirmDelete by remember { mutableStateOf<SessionInfo?>(null) }
     var searchQuery by remember { mutableStateOf("") }
 
+    LaunchedEffect(Unit) {
+        vm.refreshAll()
+    }
+
+    val context = LocalContext.current
+
     LaunchedEffect(searchQuery) {
         if (searchQuery.isNotBlank()) vm.search(searchQuery)
+    }
+
+    LaunchedEffect(vm.connectError) {
+        val msg = vm.connectError ?: return@LaunchedEffect
+        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+        vm.connectError = null
     }
 
     Scaffold(
@@ -208,7 +222,10 @@ fun SessionListScreen(vm: ChatViewModel) {
                                 }
                             }
                             Text(
-                                r.members.joinToString("、") { it.second },
+                                r.members.joinToString("、") { m ->
+                                    val s = vm.sessions.find { it.sessionId == m.first }
+                                    if (s != null) vm.displayName(s) else m.second
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -267,14 +284,11 @@ fun SessionListScreen(vm: ChatViewModel) {
         if (showCreate) {
             var cwd by remember { mutableStateOf("") }
             var name by remember { mutableStateOf("") }
-            var agentType by remember { mutableStateOf("devin") }
+            var selectedConnectionId by remember { mutableStateOf<String?>(null) }
             var selectedRoleId by remember { mutableStateOf<String?>(null) }
             var showAddRole by remember { mutableStateOf(false) }
             var deleteRoleTarget by remember { mutableStateOf<String?>(null) }
-            val agentTypes = listOf(
-                "devin" to "Devin", "claude" to "Claude",
-                "codex" to "Codex", "opencode" to "OpenCode",
-            )
+            var connectionMenu by remember { mutableStateOf(false) }
             AlertDialog(
                 onDismissRequest = { showCreate = false },
                 title = { Text(S.newSession) },
@@ -322,7 +336,7 @@ fun SessionListScreen(vm: ChatViewModel) {
                                             selectedRoleId = role.id
                                             name = role.name
                                             role.cwd?.let { cwd = it }
-                                            role.agent?.let { agentType = it }
+                                            role.connectionId?.let { selectedConnectionId = it }
                                             roleMenu = false
                                         },
                                     )
@@ -336,26 +350,52 @@ fun SessionListScreen(vm: ChatViewModel) {
                             }
                         }
                         Spacer(Modifier.height(8.dp))
-                        Text(S.agentLabel, style = MaterialTheme.typography.labelLarge)
-                        var agentMenu by remember { mutableStateOf(false) }
+                        Text(S.selectConnection, style = MaterialTheme.typography.labelLarge)
                         Box {
+                            val selected = vm.connections.find { it.id == selectedConnectionId }
                             OutlinedButton(
-                                onClick = { agentMenu = true },
+                                onClick = { connectionMenu = true },
                                 modifier = Modifier.fillMaxWidth(),
+                                enabled = vm.connections.isNotEmpty(),
                             ) {
                                 Text(
-                                    agentTypes.find { it.first == agentType }?.second ?: agentType,
+                                    selected?.let {
+                                        val status = when {
+                                            it.local -> S.localConnection
+                                            it.online -> S.online
+                                            else -> S.offline
+                                        }
+                                        "${it.name} · ${it.agent} · $status"
+                                    } ?: S.noConnections,
                                     Modifier.weight(1f),
                                 )
                                 Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
                             }
-                            DropdownMenu(expanded = agentMenu, onDismissRequest = { agentMenu = false }) {
-                                agentTypes.forEach { (key, label) ->
+                            DropdownMenu(expanded = connectionMenu, onDismissRequest = { connectionMenu = false }) {
+                                vm.connections.forEach { c ->
+                                    val local = c.local
+                                    val status = when {
+                                        local -> S.localConnection
+                                        c.online -> S.online
+                                        else -> S.offline
+                                    }
+                                    val color = when {
+                                        local -> MaterialTheme.colorScheme.tertiary
+                                        c.online -> MaterialTheme.colorScheme.primary
+                                        else -> MaterialTheme.colorScheme.error
+                                    }
                                     DropdownMenuItem(
-                                        text = { Text(label) },
-                                        onClick = { agentType = key; agentMenu = false },
+                                        text = {
+                                            Text("${c.name} · ${c.agent} · $status", color = color)
+                                        },
+                                        onClick = { selectedConnectionId = c.id; connectionMenu = false },
+                                        enabled = c.online || local,
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text(S.addConnection, color = MaterialTheme.colorScheme.primary) },
+                                    onClick = { showAddRole = false; vm.screen = Screen.Settings; showCreate = false; connectionMenu = false },
+                                )
                             }
                         }
                         OutlinedTextField(
@@ -411,12 +451,15 @@ fun SessionListScreen(vm: ChatViewModel) {
                     }
                 },
                 confirmButton = {
+                    val selectedConnection = vm.connections.find { it.id == selectedConnectionId }
                     TextButton(
                         onClick = {
                             showCreate = false
-                            vm.createSession(cwd.trim(), name.trim(), agentType, selectedRoleId)
+                            selectedConnectionId?.let {
+                                vm.createSession(cwd.trim(), name.trim(), it, selectedRoleId)
+                            }
                         },
-                        enabled = cwd.isNotBlank(),
+                        enabled = cwd.isNotBlank() && selectedConnectionId != null && (selectedConnection?.online == true || selectedConnection?.local == true),
                     ) { Text(S.create) }
                 },
                 dismissButton = {
@@ -428,6 +471,8 @@ fun SessionListScreen(vm: ChatViewModel) {
                 var roleName by remember { mutableStateOf("") }
                 var persona by remember { mutableStateOf("") }
                 var roleCwd by remember { mutableStateOf("") }
+                var roleConnectionId by remember { mutableStateOf<String?>(null) }
+                var connectionMenu by remember { mutableStateOf(false) }
                 AlertDialog(
                     onDismissRequest = { showAddRole = false },
                     title = { Text(S.addRole) },
@@ -453,13 +498,43 @@ fun SessionListScreen(vm: ChatViewModel) {
                                 label = { Text(S.defaultCwdLabel) },
                                 singleLine = true,
                             )
+                            Spacer(Modifier.height(8.dp))
+                            Text(S.selectConnection, style = MaterialTheme.typography.labelLarge)
+                            Box {
+                                val selected = vm.connections.find { it.id == roleConnectionId }
+                                OutlinedButton(
+                                    onClick = { connectionMenu = true },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = vm.connections.isNotEmpty(),
+                                ) {
+                                    Text(
+                                        selected?.let {
+                                            val origin = it.address.ifBlank { S.localConnection }
+                                            "${it.name} · ${it.agent} · $origin"
+                                        } ?: S.selectConnection,
+                                        Modifier.weight(1f),
+                                    )
+                                    Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
+                                }
+                                DropdownMenu(expanded = connectionMenu, onDismissRequest = { connectionMenu = false }) {
+                                    vm.connections.forEach { c ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                val origin = c.address.ifBlank { S.localConnection }
+                                                Text("${c.name} · ${c.agent} · $origin")
+                                            },
+                                            onClick = { roleConnectionId = c.id; connectionMenu = false },
+                                        )
+                                    }
+                                }
+                            }
                         }
                     },
                     confirmButton = {
                         TextButton(
                             onClick = {
                                 showAddRole = false
-                                vm.createRole(roleName.trim(), persona.trim(), roleCwd.trim())
+                                vm.createRole(roleName.trim(), persona.trim(), roleCwd.trim(), roleConnectionId)
                             },
                             enabled = roleName.isNotBlank() && persona.isNotBlank(),
                         ) { Text(S.create) }
@@ -527,7 +602,7 @@ fun SessionListScreen(vm: ChatViewModel) {
                                         }
                                     },
                                 )
-                                Text(s.name)
+                                Text(vm.displayName(s))
                                 if (mode == "conductor" && selected.contains(s.sessionId)) {
                                     TextButton(onClick = { conductorId = s.sessionId }) {
                                         Text(
@@ -629,7 +704,16 @@ private fun SessionCard(
                     }
                 }
                 Text(
-                    "${s.cwd} · ${s.agent}",
+                    buildString {
+                        append(s.cwd)
+                        append(" · ")
+                        append(s.agent)
+                        val origin = vm.sessionOrigin(s)
+                        if (origin.isNotBlank()) {
+                            append(" · ")
+                            append(origin)
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

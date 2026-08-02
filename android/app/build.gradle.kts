@@ -43,4 +43,5 @@ dependencies {
     implementation(libs.compose.icons)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
+    implementation(libs.markdown.m3)
 }

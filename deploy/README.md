@@ -73,6 +73,19 @@ sudo systemctl enable --now hub-relay
 
 ### 3. 家里 PC 上：Hub 常驻
 
+推荐使用 PM2 托管（统一用 `pm2 restart/reload` 重启，详见根目录 `README.md`）：
+
+```bash
+npm i -g pm2
+cp ecosystem.config.cjs.example ecosystem.config.cjs
+# 编辑 ecosystem.config.cjs 替换 HUB_TOKEN
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup
+```
+
+如更习惯 systemd，也可用 `deploy/agent-hub.service`：
+
 ```bash
 sudo cp deploy/agent-hub.service /etc/systemd/system/
 # 编辑 unit 文件：替换用户名/项目路径/HUB_TOKEN（务必改成强随机串）

@@ -5,6 +5,11 @@ const path = require('path')
 //   pm2 start ecosystem.config.cjs
 //   pm2 save
 //   pm2 startup
+// 代码修改后重启：
+//   pm2 restart agent-hub
+//   pm2 reload agent-hub
+// 查看日志：
+//   pm2 logs agent-hub
 // 注意：公网部署前请把 HUB_TOKEN 改成强随机串（openssl rand -hex 24）
 
 module.exports = {
@@ -13,9 +18,9 @@ module.exports = {
       name: 'agent-hub',
       // Hub 源码在 hub/ 子目录，PM2 工作目录指向该目录
       cwd: path.join(__dirname, 'hub'),
-      // 使用 npx tsx 直接执行 TypeScript，无需先编译
-      script: 'npx',
-      args: ['tsx', 'src/index.ts'],
+      // 使用 node --import tsx 直接启动，避免 npx/npm 多层子进程，PM2 直接管理 listener 进程
+      script: 'node',
+      args: ['--import', 'tsx', 'src/index.ts'],
       // 以 fork 模式运行（Hub 是单进程 WebSocket 服务）
       exec_mode: 'fork',
       instances: 1,
@@ -27,11 +32,12 @@ module.exports = {
       // 环境变量
       env: {
         NODE_ENV: 'production',
-        HUB_PORT: 8787,
+        HUB_PORT: '8787',
         // 默认 dev-token 仅适合内网测试，公网务必替换
         HUB_TOKEN: 'dev-token',
-        // HUB_TUNNEL: '1',          // 需要 cloudflared 快速隧道时取消注释
-        // HUB_DATA_DIR: './data',   // 指定数据目录时取消注释
+        // HUB_TUNNEL: '1',                    // 需要 cloudflared 快速隧道时取消注释
+        // HUB_DATA_DIR: './data',              // 指定数据目录时取消注释
+        // HUB_PERMISSION_BYPASS: '1',          // 自动允许所有工具调用（仅本地可信环境）
       },
       // PM2 日志路径，默认已足够，可自定义如下
       // log_file: '~/.pm2/logs/agent-hub-combined.log',
@@ -42,8 +48,10 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       // 不监听文件变化，避免开发保存触发线上重启
       watch: false,
-      // 内存限制 512MB，超限时自动重启
-      max_memory_restart: '512M',
+      // Node 堆上限 1024MB（与 max_memory_restart 对齐，避免 V8 先 OOM）
+      node_args: '--max-old-space-size=1024',
+      // 内存限制 1GB，超限时 PM2 自动重启；Hub 当前只维持 WS/ACP 连接，实际占用约 80MB，留足余量给多 worker/大消息
+      max_memory_restart: '1G',
       // 优雅退出超时
       kill_timeout: 5000,
     },

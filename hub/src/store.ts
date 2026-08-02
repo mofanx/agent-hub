@@ -3,12 +3,24 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Room } from "./room.js";
 
+export type Connection = {
+  id: string;
+  name: string;
+  agent: string;
+  token: string;
+  address?: string | undefined;
+  cwd?: string | undefined;
+  local?: boolean | undefined;
+};
+
 export type SessionMeta = {
   sessionId: string;
   cwd: string;
   name: string;
   agent: string;
-  archived?: boolean;
+  address?: string | undefined;
+  connectionId?: string | undefined;
+  archived?: boolean | undefined;
 };
 
 export type HistoryEntry = {
@@ -22,9 +34,11 @@ export type Role = {
   id: string;
   name: string;
   agent?: string | undefined;
+  address?: string | undefined;
+  connectionId?: string | undefined;
   cwd?: string | undefined;
   persona: string;
-  builtin?: boolean;
+  builtin?: boolean | undefined;
 };
 
 const BUILTIN_ROLES: Role[] = [
@@ -104,17 +118,42 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_history_scope
         ON history(scope, scope_id, at);
+      CREATE TABLE IF NOT EXISTS connections (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        token TEXT NOT NULL,
+        address TEXT,
+        cwd TEXT,
+        local INTEGER NOT NULL DEFAULT 0
+      );
       CREATE TABLE IF NOT EXISTS roles (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         agent TEXT,
+        address TEXT,
+        connectionId TEXT,
         cwd TEXT,
         persona TEXT NOT NULL,
         builtin INTEGER NOT NULL DEFAULT 0
       );
     `);
     this.seedRoles();
+    this.migrateSchema();
     this.migrateLegacy();
+  }
+
+  private migrateSchema(): void {
+    try {
+      this.db.exec("ALTER TABLE connections ADD COLUMN token TEXT");
+    } catch {
+      // already exists
+    }
+    try {
+      this.db.exec("ALTER TABLE connections ADD COLUMN local INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      // already exists
+    }
   }
 
   /** 旧版 JSONL/state.json 数据迁移（只在数据库为空时执行一次） */
@@ -171,22 +210,50 @@ export class Store {
     const count = this.db.prepare("SELECT COUNT(*) AS c FROM roles").get() as { c: number };
     if (count.c > 0) return;
     const insert = this.db.prepare(
-      "INSERT INTO roles(id, name, agent, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO roles(id, name, agent, address, connectionId, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     for (const r of BUILTIN_ROLES) {
-      insert.run(r.id, r.name, r.agent ?? null, r.cwd ?? null, r.persona, 1);
+      insert.run(r.id, r.name, r.agent ?? null, r.address ?? null, r.connectionId ?? null, r.cwd ?? null, r.persona, 1);
     }
     console.log(`[store] seeded ${BUILTIN_ROLES.length} builtin roles`);
   }
 
+  listConnections(): Connection[] {
+    const rows = this.db
+      .prepare("SELECT id, name, agent, token, address, cwd, local FROM connections ORDER BY rowid")
+      .all() as { id: string; name: string; agent: string; token: string; address: string | null; cwd: string | null; local: number }[];
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      agent: r.agent,
+      token: r.token,
+      address: r.address ?? undefined,
+      cwd: r.cwd ?? undefined,
+      local: r.local === 1,
+    }));
+  }
+
+  addConnection(c: Connection): void {
+    this.db
+      .prepare("INSERT INTO connections(id, name, agent, token, address, cwd, local) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(c.id, c.name, c.agent, c.token, c.address ?? null, c.cwd ?? null, c.local ? 1 : 0);
+  }
+
+  deleteConnection(id: string): boolean {
+    const res = this.db.prepare("DELETE FROM connections WHERE id = ?").run(id);
+    return res.changes > 0;
+  }
+
   listRoles(): Role[] {
     const rows = this.db
-      .prepare("SELECT id, name, agent, cwd, persona, builtin FROM roles ORDER BY builtin DESC, rowid")
-      .all() as { id: string; name: string; agent: string | null; cwd: string | null; persona: string; builtin: number }[];
+      .prepare("SELECT id, name, agent, address, connectionId, cwd, persona, builtin FROM roles ORDER BY builtin DESC, rowid")
+      .all() as { id: string; name: string; agent: string | null; address: string | null; connectionId: string | null; cwd: string | null; persona: string; builtin: number }[];
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
       agent: r.agent ?? undefined,
+      address: r.address ?? undefined,
+      connectionId: r.connectionId ?? undefined,
       cwd: r.cwd ?? undefined,
       persona: r.persona,
       builtin: r.builtin === 1,
@@ -195,14 +262,33 @@ export class Store {
 
   addRole(role: Role): void {
     this.db
-      .prepare("INSERT INTO roles(id, name, agent, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, 0)")
-      .run(role.id, role.name, role.agent ?? null, role.cwd ?? null, role.persona);
+      .prepare("INSERT INTO roles(id, name, agent, address, connectionId, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, ?, ?, 0)")
+      .run(role.id, role.name, role.agent ?? null, role.address ?? null, role.connectionId ?? null, role.cwd ?? null, role.persona);
   }
 
   /** 只能删除非内置角色 */
   deleteRole(id: string): boolean {
     const res = this.db.prepare("DELETE FROM roles WHERE id = ? AND builtin = 0").run(id);
     return res.changes > 0;
+  }
+
+  getMeta(key: string): string | undefined {
+    try {
+      const row = this.db
+        .prepare("SELECT value FROM meta WHERE key = ?")
+        .get(key) as { value: string } | undefined;
+      return row?.value;
+    } catch {
+      return undefined;
+    }
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, value);
   }
 
   load(): State {

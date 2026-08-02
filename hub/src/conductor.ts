@@ -29,6 +29,47 @@ export class ConductorOrchestrator {
     return this.flows.has(roomId);
   }
 
+  /** 强制中断某个房间的指挥编排 */
+  cancel(roomId: string, reason?: string): boolean {
+    const flow = this.flows.get(roomId);
+    if (!flow) return false;
+    this.flows.delete(roomId);
+    if (reason) this.notice({ roomId, message: reason });
+    return true;
+  }
+
+  /** prompt 异常（含取消）时清理该会话在编排中的状态 */
+  onPromptError(sessionId: string): boolean {
+    for (const [roomId, flow] of [...this.flows]) {
+      const room = this.rooms.get(roomId);
+      if (!room) {
+        this.flows.delete(roomId);
+        continue;
+      }
+      if (sessionId === room.conductorId) {
+        this.flows.delete(roomId);
+        this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
+        return true;
+      }
+      if (flow.phase === "working" && flow.pending.has(sessionId)) {
+        flow.pending.delete(sessionId);
+        this.notice({
+          roomId,
+          message: `@${
+            room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId
+          } 子任务中断（剩 ${flow.pending.size} 项）`,
+        });
+        if (flow.pending.size === 0) {
+          void this.summarize(flow, room).catch((err) => {
+            console.error("[conductor] summarize after error failed:", err);
+          });
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
   async start(room: Room, text: string): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
     const others = room.members

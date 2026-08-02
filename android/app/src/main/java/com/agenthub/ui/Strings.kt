@@ -34,6 +34,20 @@ interface Strings {
     val deleteConfirmText: String
     val create: String
     val agentLabel: String
+    val addressLabel: String
+    val connectionLabel: String
+    val addConnection: String
+    val manageConnections: String
+    val agentSources: String
+    val online: String
+    val connectionNoteLabel: String
+    val tokenAuto: String
+    val tokenManual: String
+    val connectionNameLabel: String
+    val localConnection: String
+    val localLaunch: String
+    val noConnections: String
+    val selectConnection: String
     val nameLabel: String
     val cwdLabel: String
     val roomName: String
@@ -45,6 +59,8 @@ interface Strings {
     val generating: String
     val stop: String
     val quoting: String
+    val copy: String
+    val copied: String
     val inputRoom: String
     val inputSingle: String
     val send: String
@@ -72,9 +88,16 @@ interface Strings {
     val unpin: String
     val quickCommands: String
     val saveCommand: String
+    val bypassEnabled: String
+    val bypassDisabled: String
     val keepAlive: String
     val keepAliveDesc: String
     val batteryOptimization: String
+    val slashHelpTitle: String
+    val slashHelpHelp: String
+    val slashHelpStop: String
+    val slashHelpBypass: String
+    val unknownCommandHint: String
 }
 
 object ZhStrings : Strings {
@@ -109,6 +132,20 @@ object ZhStrings : Strings {
     override val deleteConfirmText = "将从 Hub 移除该会话及其历史记录，所在的群会相应移除该成员。不可撤销。"
     override val create = "创建"
     override val agentLabel = "Agent："
+    override val addressLabel = "地址（留空为本机，或 SSH 如 user@host）"
+    override val connectionLabel = "连接"
+    override val addConnection = "添加连接"
+    override val manageConnections = "管理连接"
+    override val agentSources = "Agent 来源"
+    override val online = "在线"
+    override val connectionNoteLabel = "备注（可选，如地址/用途）"
+    override val tokenAuto = "自动生成"
+    override val tokenManual = "手动填写"
+    override val connectionNameLabel = "连接名称（如 公司服务器、家里电脑）"
+    override val localConnection = "本机"
+    override val localLaunch = "本地直接启动 (Hub 自动启 agent)"
+    override val noConnections = "暂无连接，请先在设置中添加"
+    override val selectConnection = "选择连接"
     override val nameLabel = "名字（如 后端、前端）"
     override val cwdLabel = "工作目录（PC 绝对路径）"
     override val roomName = "群名称"
@@ -120,6 +157,8 @@ object ZhStrings : Strings {
     override val generating = "执行中…"
     override val stop = "停止"
     override val quoting = "引用"
+    override val copy = "复制"
+    override val copied = "已复制"
     override val inputRoom = "群聊消息，@名字 指定成员"
     override val inputSingle = "给 AI 下指令…"
     override val send = "发送"
@@ -147,9 +186,16 @@ object ZhStrings : Strings {
     override val unpin = "取消置顶"
     override val quickCommands = "快捷指令"
     override val saveCommand = "保存当前输入为指令"
+    override val bypassEnabled = "已开启工具审批自动通过"
+    override val bypassDisabled = "已关闭工具审批自动通过"
     override val keepAlive = "后台保活"
     override val keepAliveDesc = "连接后由前台服务保持与 Hub 的长连接，息屏/切后台也能收到回复与审批通知。若通知仍不及时，请关闭电池优化并在系统设置中允许本应用自启动（小米/华为/OPPO 等需单独开启）。"
     override val batteryOptimization = "关闭电池优化"
+    override val slashHelpTitle = "可用命令："
+    override val slashHelpHelp = "/help — 显示命令说明"
+    override val slashHelpStop = "/stop — 停止当前生成（在群里可 @成员 指定）"
+    override val slashHelpBypass = "/bypass [on|off|toggle] — 切换权限自动审批"
+    override val unknownCommandHint = "未知命令，输入 /help 查看说明"
 }
 
 object EnStrings : Strings {
@@ -184,6 +230,20 @@ object EnStrings : Strings {
     override val deleteConfirmText = "Removes the session and its history from the Hub, and removes it from rooms. This cannot be undone."
     override val create = "Create"
     override val agentLabel = "Agent:"
+    override val addressLabel = "Address (blank for local, or SSH user@host)"
+    override val connectionLabel = "Connection"
+    override val addConnection = "Add Connection"
+    override val manageConnections = "Manage Connections"
+    override val agentSources = "Agent Sources"
+    override val online = "online"
+    override val connectionNoteLabel = "Note (optional, e.g. address/purpose)"
+    override val tokenAuto = "Auto-generate"
+    override val tokenManual = "Manual"
+    override val connectionNameLabel = "Connection name (e.g. company server, home PC)"
+    override val localConnection = "Local"
+    override val localLaunch = "Launch locally (Hub auto-starts agent)"
+    override val noConnections = "No connections, please add one in Settings"
+    override val selectConnection = "Select Connection"
     override val nameLabel = "Name (e.g. backend, frontend)"
     override val cwdLabel = "Working directory (absolute path on PC)"
     override val roomName = "Room name"
@@ -194,7 +254,9 @@ object EnStrings : Strings {
     override val back = "Back"
     override val generating = "Running…"
     override val stop = "Stop"
-    override val quoting = "Quoting"
+    override val quoting = "Quote"
+    override val copy = "Copy"
+    override val copied = "Copied"
     override val inputRoom = "Message, @name to mention"
     override val inputSingle = "Send an instruction…"
     override val send = "Send"
@@ -222,9 +284,16 @@ object EnStrings : Strings {
     override val unpin = "Unpin"
     override val quickCommands = "Quick commands"
     override val saveCommand = "Save current input as command"
+    override val bypassEnabled = "Tool approval auto-allow enabled"
+    override val bypassDisabled = "Tool approval auto-allow disabled"
     override val keepAlive = "Background keep-alive"
     override val keepAliveDesc = "A foreground service keeps the connection to the Hub alive so you get reply and approval notifications even with the screen off. If notifications are still delayed, disable battery optimization and allow auto-start in system settings (required on Xiaomi/Huawei/OPPO etc.)."
     override val batteryOptimization = "Disable battery optimization"
+    override val slashHelpTitle = "Available commands:"
+    override val slashHelpHelp = "/help — show command help"
+    override val slashHelpStop = "/stop — stop current generation (use @name in a room)"
+    override val slashHelpBypass = "/bypass [on|off|toggle] — toggle permission auto-approve"
+    override val unknownCommandHint = "Unknown command, type /help for usage"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }
