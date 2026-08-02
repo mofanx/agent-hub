@@ -256,7 +256,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshBusy() {
-        viewModelScope.launch { syncBusyIds() }
+        viewModelScope.launch {
+            if (!hub.isConnected) return@launch
+            try { syncBusyIds() } catch (_: Exception) {}
+        }
     }
 
     fun toggleBypass(arg: String? = null) {
@@ -662,26 +665,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun syncBusyIds() {
-        val result = hub.call("session.list")
-        val list = result["sessions"]?.jsonArray ?: return
-        val sessionsList = mutableListOf<SessionInfo>()
-        for (s in list) {
-            val o = s.jsonObject
-            sessionsList.add(
-                SessionInfo(
-                    o["sessionId"]!!.jsonPrimitive.content,
-                    o["cwd"]!!.jsonPrimitive.content,
-                    o["name"]!!.jsonPrimitive.content,
-                    o["busy"]!!.jsonPrimitive.content.toBoolean(),
-                    o["agent"]?.jsonPrimitive?.content ?: "devin",
-                    o["address"]?.jsonPrimitive?.content ?: "",
-                    o["connectionId"]?.jsonPrimitive?.content,
-                    o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-                    o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+        if (!hub.isConnected) return
+        try {
+            val result = hub.call("session.list")
+            val list = result["sessions"]?.jsonArray ?: return
+            val sessionsList = mutableListOf<SessionInfo>()
+            for (s in list) {
+                val o = s.jsonObject
+                sessionsList.add(
+                    SessionInfo(
+                        o["sessionId"]?.jsonPrimitive?.content ?: continue,
+                        o["cwd"]?.jsonPrimitive?.content ?: continue,
+                        o["name"]?.jsonPrimitive?.content ?: continue,
+                        o["busy"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                        o["agent"]?.jsonPrimitive?.content ?: "devin",
+                        o["address"]?.jsonPrimitive?.content ?: "",
+                        o["connectionId"]?.jsonPrimitive?.content,
+                        o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                        o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                    )
                 )
-            )
+            }
+            syncBusyIdsFromList(sessionsList)
+        } catch (_: Exception) {
         }
-        syncBusyIdsFromList(sessionsList)
     }
 
     val searchResults = mutableStateListOf<SearchHit>()

@@ -26,6 +26,8 @@ class HubClient(private val scope: CoroutineScope) {
         .writeTimeout(0, TimeUnit.SECONDS)
         .build()
     private var ws: WebSocket? = null
+    var isConnected = false
+        private set
     private var nextId = 1
     private val pending = mutableMapOf<Int, CompletableDeferred<JsonObject>>()
     private val json = Json { ignoreUnknownKeys = true }
@@ -37,11 +39,17 @@ class HubClient(private val scope: CoroutineScope) {
     var onEvent: ((String) -> Unit)? = null
 
     fun connect(url: String, onOpen: () -> Unit, onFailure: (String) -> Unit) {
+        disconnect()
         val request = Request.Builder().url(url).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) = onOpen()
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (webSocket != ws) return
+                isConnected = true
+                onOpen()
+            }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (webSocket != ws) return
                 onEvent?.invoke(text)
                 val obj = try {
                     json.parseToJsonElement(text).jsonObject
@@ -57,16 +65,28 @@ class HubClient(private val scope: CoroutineScope) {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (webSocket == ws) {
+                    isConnected = false
+                    ws = null
+                    failPending(t)
+                }
                 onFailure(t.message ?: "connection failed")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket == ws) {
+                    isConnected = false
+                    ws = null
+                    failPending(IllegalStateException("connection closed"))
+                }
                 onClosed?.invoke()
             }
         })
     }
 
     suspend fun call(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject {
+        val socket = ws ?: throw IllegalStateException("not connected")
+        if (!isConnected) throw IllegalStateException("not connected")
         val id = nextId++
         val deferred = CompletableDeferred<JsonObject>()
         pending[id] = deferred
@@ -75,9 +95,12 @@ class HubClient(private val scope: CoroutineScope) {
             put("method", method)
             put("params", params)
         }
-        val socket = ws ?: throw IllegalStateException("not connected")
         if (!socket.send(msg.toString())) {
             pending.remove(id)
+            if (ws == socket) {
+                isConnected = false
+                ws = null
+            }
             throw IllegalStateException("send failed")
         }
         val resp = deferred.await()
@@ -86,7 +109,16 @@ class HubClient(private val scope: CoroutineScope) {
     }
 
     fun disconnect() {
+        isConnected = false
         ws?.close(1000, "bye")
         ws = null
+    }
+
+    private fun failPending(t: Throwable) {
+        val pendingCopy = pending.toMap()
+        pending.clear()
+        for (deferred in pendingCopy.values) {
+            deferred.completeExceptionally(t)
+        }
     }
 }
