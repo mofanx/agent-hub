@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,13 +18,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Circle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomAppBar
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -53,6 +59,7 @@ import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import com.agenthub.ChatViewModel
 import com.agenthub.Screen
+import com.agenthub.RoomInfo
 import com.agenthub.SessionInfo
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -62,8 +69,11 @@ fun SessionListScreen(vm: ChatViewModel) {
     var showCreate by remember { mutableStateOf(false) }
     var showCreateRoom by remember { mutableStateOf(false) }
     var showArchived by remember { mutableStateOf(false) }
-    var actionTarget by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmDelete by remember { mutableStateOf<SessionInfo?>(null) }
+    var confirmBatchDelete by remember { mutableStateOf(false) }
+    var inBatchMode by remember { mutableStateOf(false) }
+    val selectedSessionIds = remember { mutableStateListOf<String>() }
+    val selectedRoomIds = remember { mutableStateListOf<String>() }
     var searchQuery by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
@@ -82,16 +92,83 @@ fun SessionListScreen(vm: ChatViewModel) {
         vm.connectError = null
     }
 
+    BackHandler(enabled = inBatchMode) {
+        inBatchMode = false
+        selectedSessionIds.clear()
+        selectedRoomIds.clear()
+    }
+
+    val selectedCount = selectedSessionIds.size + selectedRoomIds.size
+
+    val selectAll = {
+        if (selectedSessionIds.size == vm.sessions.size && selectedRoomIds.size == vm.rooms.size) {
+            selectedSessionIds.clear()
+            selectedRoomIds.clear()
+        } else {
+            selectedSessionIds.clear()
+            selectedRoomIds.clear()
+            selectedSessionIds.addAll(vm.sessions.map { it.sessionId })
+            selectedRoomIds.addAll(vm.rooms.map { it.roomId })
+        }
+        Unit
+    }
+
+    val invertSelection = {
+        val allSessionIds = vm.sessions.map { it.sessionId }
+        val allRoomIds = vm.rooms.map { it.roomId }
+        val oldSession = selectedSessionIds.toSet()
+        val oldRoom = selectedRoomIds.toSet()
+        selectedSessionIds.clear()
+        selectedRoomIds.clear()
+        selectedSessionIds.addAll(allSessionIds.filterNot { oldSession.contains(it) })
+        selectedRoomIds.addAll(allRoomIds.filterNot { oldRoom.contains(it) })
+        Unit
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(S.appName) },
+                title = {
+                    Text(if (inBatchMode) S.selectedCount.format(selectedCount) else S.appName)
+                },
+                navigationIcon = {
+                    if (inBatchMode) {
+                        IconButton(onClick = {
+                            inBatchMode = false
+                            selectedSessionIds.clear()
+                            selectedRoomIds.clear()
+                        }) {
+                            Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                        }
+                    }
+                },
                 actions = {
-                    IconButton(onClick = { vm.screen = Screen.Settings }) {
-                        Icon(Icons.Filled.Settings, contentDescription = S.settings)
+                    if (!inBatchMode) {
+                        IconButton(onClick = { vm.screen = Screen.Settings }) {
+                            Icon(Icons.Filled.Settings, contentDescription = S.settings)
+                        }
                     }
                 },
             )
+        },
+        bottomBar = {
+            if (inBatchMode) {
+                BottomAppBar(
+                    actions = {
+                        TextButton(onClick = selectAll) { Text(S.selectAll) }
+                        TextButton(onClick = invertSelection) { Text(S.invertSelection) }
+                    },
+                    floatingActionButton = {
+                        FloatingActionButton(
+                            onClick = { if (selectedCount > 0) confirmBatchDelete = true },
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        ) {
+                            Icon(Icons.Filled.Delete, contentDescription = S.delete)
+                        }
+                    },
+                )
+            }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
@@ -167,7 +244,31 @@ fun SessionListScreen(vm: ChatViewModel) {
                 val visible = vm.sessions.filter { !it.archived }
                     .sortedByDescending { vm.pinnedIds.contains(it.sessionId) }
                 items(visible.size) { i ->
-                    SessionCard(visible[i], vm, S, onLongClick = { actionTarget = it })
+                    val s = visible[i]
+                    SessionCard(
+                        s = s,
+                        vm = vm,
+                        S = S,
+                        inBatchMode = inBatchMode,
+                        selected = selectedSessionIds.contains(s.sessionId),
+                        onClick = {
+                            if (inBatchMode) {
+                                if (selectedSessionIds.contains(s.sessionId)) selectedSessionIds.remove(s.sessionId)
+                                else selectedSessionIds.add(s.sessionId)
+                            } else {
+                                vm.openChat(s)
+                            }
+                        },
+                        onLongClick = {
+                            if (!inBatchMode) {
+                                inBatchMode = true
+                                selectedSessionIds.clear()
+                                selectedRoomIds.clear()
+                            }
+                            selectedSessionIds.add(s.sessionId)
+                        },
+                        onDelete = { confirmDelete = s },
+                    )
                 }
                 val archived = vm.sessions.filter { it.archived }
                 if (archived.isNotEmpty()) {
@@ -178,7 +279,31 @@ fun SessionListScreen(vm: ChatViewModel) {
                     }
                     if (showArchived) {
                         items(archived.size) { i ->
-                            SessionCard(archived[i], vm, S, onLongClick = { actionTarget = it })
+                            val s = archived[i]
+                            SessionCard(
+                                s = s,
+                                vm = vm,
+                                S = S,
+                                inBatchMode = inBatchMode,
+                                selected = selectedSessionIds.contains(s.sessionId),
+                                onClick = {
+                                    if (inBatchMode) {
+                                        if (selectedSessionIds.contains(s.sessionId)) selectedSessionIds.remove(s.sessionId)
+                                        else selectedSessionIds.add(s.sessionId)
+                                    } else {
+                                        vm.openChat(s)
+                                    }
+                                },
+                                onLongClick = {
+                                    if (!inBatchMode) {
+                                        inBatchMode = true
+                                        selectedSessionIds.clear()
+                                        selectedRoomIds.clear()
+                                    }
+                                    selectedSessionIds.add(s.sessionId)
+                                },
+                                onDelete = { confirmDelete = s },
+                            )
                         }
                     }
                 }
@@ -202,66 +327,31 @@ fun SessionListScreen(vm: ChatViewModel) {
                 }
                 items(vm.rooms.size) { i ->
                     val r = vm.rooms[i]
-                    Card(
-                        onClick = { vm.openRoom(r) },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
-                        ),
-                    ) {
-                        Column(Modifier.padding(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(r.name, style = MaterialTheme.typography.titleSmall)
-                                if (r.mode == "conductor") {
-                                    Text(
-                                        "  · ${S.modeConductor}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.primary,
-                                    )
-                                }
+                    RoomCard(
+                        r = r,
+                        vm = vm,
+                        S = S,
+                        inBatchMode = inBatchMode,
+                        selected = selectedRoomIds.contains(r.roomId),
+                        onClick = {
+                            if (inBatchMode) {
+                                if (selectedRoomIds.contains(r.roomId)) selectedRoomIds.remove(r.roomId)
+                                else selectedRoomIds.add(r.roomId)
+                            } else {
+                                vm.openRoom(r)
                             }
-                            Text(
-                                r.members.joinToString("、") { m ->
-                                    val s = vm.sessions.find { it.sessionId == m.first }
-                                    if (s != null) vm.displayName(s) else m.second
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
+                        },
+                        onLongClick = {
+                            if (!inBatchMode) {
+                                inBatchMode = true
+                                selectedSessionIds.clear()
+                                selectedRoomIds.clear()
+                            }
+                            selectedRoomIds.add(r.roomId)
+                        },
+                    )
                 }
             }
-        }
-
-        actionTarget?.let { s ->
-            AlertDialog(
-                onDismissRequest = { actionTarget = null },
-                title = { Text(s.name) },
-                text = { Text(S.chooseAction) },
-                confirmButton = {
-                    Row {
-                        TextButton(onClick = {
-                            vm.togglePin(s.sessionId)
-                            actionTarget = null
-                        }) { Text(if (vm.pinnedIds.contains(s.sessionId)) S.unpin else S.pin) }
-                        TextButton(onClick = {
-                            vm.archiveSession(s, !s.archived)
-                            actionTarget = null
-                        }) { Text(if (s.archived) S.unarchive else S.archive) }
-                    }
-                },
-                dismissButton = {
-                    Row {
-                        TextButton(onClick = {
-                            confirmDelete = s
-                            actionTarget = null
-                        }) { Text(S.delete, color = MaterialTheme.colorScheme.error) }
-                        TextButton(onClick = { actionTarget = null }) { Text(S.cancel) }
-                    }
-                },
-            )
         }
 
         confirmDelete?.let { s ->
@@ -635,6 +725,33 @@ fun SessionListScreen(vm: ChatViewModel) {
                 },
             )
         }
+
+        if (confirmBatchDelete) {
+            AlertDialog(
+                onDismissRequest = { confirmBatchDelete = false },
+                title = { Text(S.batchDeleteTitle) },
+                text = { Text(S.batchDeleteConfirm.format(selectedCount)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            vm.batchDelete(
+                                selectedSessionIds.toList(),
+                                selectedRoomIds.toList(),
+                            )
+                            selectedSessionIds.clear()
+                            selectedRoomIds.clear()
+                            confirmBatchDelete = false
+                            inBatchMode = false
+                        },
+                    ) {
+                        Text(S.delete, color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmBatchDelete = false }) { Text(S.cancel) }
+                },
+            )
+        }
     }
 }
 
@@ -644,16 +761,21 @@ private fun SessionCard(
     s: SessionInfo,
     vm: ChatViewModel,
     S: Strings,
-    onLongClick: (SessionInfo) -> Unit,
+    inBatchMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val pinned = vm.pinnedIds.contains(s.sessionId)
+    var showMenu by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
             .combinedClickable(
-                onClick = { vm.openChat(s) },
-                onLongClick = { onLongClick(s) },
+                onClick = onClick,
+                onLongClick = onLongClick,
             ),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
@@ -666,17 +788,22 @@ private fun SessionCard(
             Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                Icons.Filled.Circle,
-                contentDescription = null,
-                modifier = Modifier.size(10.dp),
-                tint = when {
-                    s.offline -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    s.busy || vm.busyIds.contains(s.sessionId) -> MaterialTheme.colorScheme.tertiary
-                    else -> MaterialTheme.colorScheme.primary
-                },
-            )
-            Spacer(Modifier.size(12.dp))
+            if (inBatchMode) {
+                Checkbox(checked = selected, onCheckedChange = null)
+                Spacer(Modifier.size(12.dp))
+            } else {
+                Icon(
+                    Icons.Filled.Circle,
+                    contentDescription = null,
+                    modifier = Modifier.size(10.dp),
+                    tint = when {
+                        s.offline -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        s.busy || vm.busyIds.contains(s.sessionId) -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.primary
+                    },
+                )
+                Spacer(Modifier.size(12.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (pinned) {
@@ -689,13 +816,13 @@ private fun SessionCard(
                         Spacer(Modifier.size(4.dp))
                     }
                     Text(s.name, style = MaterialTheme.typography.titleSmall)
-                    if (s.offline) {
+                    if (!inBatchMode && s.offline) {
                         Text(
                             "  ${S.offline}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    } else if (s.busy || vm.busyIds.contains(s.sessionId)) {
+                    } else if (!inBatchMode && (s.busy || vm.busyIds.contains(s.sessionId))) {
                         Text(
                             "  ${S.busyTag}",
                             style = MaterialTheme.typography.bodySmall,
@@ -718,8 +845,97 @@ private fun SessionCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (s.offline) {
-                TextButton(onClick = { vm.resumeSession(s) }) { Text(S.resume) }
+            if (!inBatchMode) {
+                if (s.offline) {
+                    TextButton(onClick = { vm.resumeSession(s) }) { Text(S.resume) }
+                }
+                Box {
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = S.chooseAction)
+                    }
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(if (pinned) S.unpin else S.pin) },
+                            onClick = {
+                                vm.togglePin(s.sessionId)
+                                showMenu = false
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (s.archived) S.unarchive else S.archive) },
+                            onClick = {
+                                vm.archiveSession(s, !s.archived)
+                                showMenu = false
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(S.delete) },
+                            onClick = {
+                                onDelete()
+                                showMenu = false
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RoomCard(
+    r: RoomInfo,
+    vm: ChatViewModel,
+    S: Strings,
+    inBatchMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            ),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+        ),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (inBatchMode) {
+                Checkbox(checked = selected, onCheckedChange = null)
+                Spacer(Modifier.size(12.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(r.name, style = MaterialTheme.typography.titleSmall)
+                    if (r.mode == "conductor") {
+                        Text(
+                            "  · ${S.modeConductor}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                Text(
+                    r.members.joinToString("、") { m ->
+                        val s = vm.sessions.find { it.sessionId == m.first }
+                        if (s != null) vm.displayName(s) else m.second
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

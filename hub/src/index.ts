@@ -460,6 +460,55 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       persistState();
       return { deleted: true, dissolvedRooms: dissolved };
     }
+    case "session.deleteBatch": {
+      const sessionIds = Array.isArray(req.params?.sessionIds)
+        ? (req.params?.sessionIds as string[])
+        : [];
+      const uniqueIds = [...new Set(sessionIds)];
+      for (const sessionId of uniqueIds) {
+        if (!sessionMetas.has(sessionId) && !owners.has(sessionId)) {
+          throw new Error(`unknown session: ${sessionId}`);
+        }
+        if (owners.has(sessionId) && agentOps.isBusy(sessionId)) {
+          throw new Error(`session busy, cancel first: ${sessionId}`);
+        }
+      }
+      const dissolved: string[] = [];
+      for (const sessionId of uniqueIds) {
+        const ownerConnectionId = owners.get(sessionId);
+        if (ownerConnectionId) agents.get(ownerConnectionId)?.dropSession(sessionId);
+        owners.delete(sessionId);
+        sessionMetas.delete(sessionId);
+        store.deleteHistory("session", sessionId);
+        dissolved.push(...rooms.removeMember(sessionId));
+      }
+      for (const roomId of new Set(dissolved)) store.deleteHistory("room", roomId);
+      persistState();
+      return { deleted: true, count: uniqueIds.length, dissolvedRooms: [...new Set(dissolved)] };
+    }
+    case "room.delete": {
+      const roomId = String(req.params?.roomId ?? "");
+      if (!rooms.get(roomId)) throw new Error(`unknown room: ${roomId}`);
+      rooms.delete(roomId);
+      store.deleteHistory("room", roomId);
+      persistState();
+      return { deleted: true };
+    }
+    case "room.deleteBatch": {
+      const roomIds = Array.isArray(req.params?.roomIds)
+        ? (req.params?.roomIds as string[])
+        : [];
+      const uniqueIds = [...new Set(roomIds)];
+      for (const roomId of uniqueIds) {
+        if (!rooms.get(roomId)) throw new Error(`unknown room: ${roomId}`);
+      }
+      for (const roomId of uniqueIds) {
+        rooms.delete(roomId);
+        store.deleteHistory("room", roomId);
+      }
+      persistState();
+      return { deleted: true, count: uniqueIds.length };
+    }
     case "connection.list":
       return {
         connections: store.listConnections().map((c) => ({

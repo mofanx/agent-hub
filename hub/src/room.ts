@@ -78,6 +78,12 @@ export class RoomManager {
     return [...this.rooms.values()];
   }
 
+  delete(roomId: string): boolean {
+    const ok = this.rooms.delete(roomId);
+    this.blackboards.delete(roomId);
+    return ok;
+  }
+
   /** 解析 @mention，返回目标 sessionId 列表；无 mention 时返回全部成员 */
   route(roomId: string, text: string): { targets: string[]; mentioned: string[] } {
     const room = this.rooms.get(roomId);

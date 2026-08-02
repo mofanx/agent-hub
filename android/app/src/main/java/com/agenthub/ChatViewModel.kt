@@ -720,6 +720,52 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun deleteSessions(sessionIds: List<String>) {
+        viewModelScope.launch {
+            try {
+                hub.call("session.deleteBatch", buildJsonObject {
+                    put("sessionIds", buildJsonArray { sessionIds.forEach { add(it) } })
+                })
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun deleteRooms(roomIds: List<String>) {
+        viewModelScope.launch {
+            try {
+                hub.call("room.deleteBatch", buildJsonObject {
+                    put("roomIds", buildJsonArray { roomIds.forEach { add(it) } })
+                })
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun batchDelete(sessionIds: List<String>, roomIds: List<String>) {
+        viewModelScope.launch {
+            try {
+                if (sessionIds.isNotEmpty()) {
+                    hub.call("session.deleteBatch", buildJsonObject {
+                        put("sessionIds", buildJsonArray { sessionIds.forEach { add(it) } })
+                    })
+                }
+                if (roomIds.isNotEmpty()) {
+                    hub.call("room.deleteBatch", buildJsonObject {
+                        put("roomIds", buildJsonArray { roomIds.forEach { add(it) } })
+                    })
+                }
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
     fun backToList() {
         currentSession = null
         currentRoom = null

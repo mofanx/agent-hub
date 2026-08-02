@@ -26,6 +26,12 @@ interface Strings {
     val roomTag: String
     val systemTag: String
     val chooseAction: String
+    val batchDelete: String
+    val batchDeleteTitle: String
+    val batchDeleteConfirm: String
+    val selectAll: String
+    val invertSelection: String
+    val selectedCount: String
     val archive: String
     val unarchive: String
     val delete: String
@@ -124,6 +130,12 @@ object ZhStrings : Strings {
     override val roomTag = "群"
     override val systemTag = "系统"
     override val chooseAction = "选择操作"
+    override val batchDelete = "批量删除"
+    override val batchDeleteTitle = "批量删除会话/群聊"
+    override val batchDeleteConfirm = "确认删除选中的 %d 项？此操作不可撤销。"
+    override val selectAll = "全选"
+    override val invertSelection = "反选"
+    override val selectedCount = "已选 %d 项"
     override val archive = "归档"
     override val unarchive = "取消归档"
     override val delete = "删除"
@@ -222,6 +234,12 @@ object EnStrings : Strings {
     override val roomTag = "Room"
     override val systemTag = "System"
     override val chooseAction = "Choose action"
+    override val batchDelete = "Batch delete"
+    override val batchDeleteTitle = "Batch delete sessions/rooms"
+    override val batchDeleteConfirm = "Delete selected %d items? This cannot be undone."
+    override val selectAll = "Select all"
+    override val invertSelection = "Invert"
+    override val selectedCount = "%d selected"
     override val archive = "Archive"
     override val unarchive = "Unarchive"
     override val delete = "Delete"
