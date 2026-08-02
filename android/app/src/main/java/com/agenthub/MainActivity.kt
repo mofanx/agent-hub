@@ -47,9 +47,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         ChatViewModel.appForeground = true
-        try {
-            startForegroundService(Intent(this, HubService::class.java))
-        } catch (_: Exception) {
+        if (vm.screen != Screen.Connect) {
+            try {
+                startForegroundService(Intent(this, HubService::class.java))
+            } catch (_: Exception) {
+            }
         }
     }
 

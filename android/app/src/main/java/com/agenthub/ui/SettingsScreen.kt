@@ -9,9 +9,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -72,7 +76,7 @@ fun SettingsScreen(vm: ChatViewModel) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
+        Column(Modifier.padding(padding).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
             Card(
                 Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 shape = RoundedCornerShape(20.dp),
@@ -353,12 +357,106 @@ fun SettingsScreen(vm: ChatViewModel) {
                     ) { Text("应用详情设置") }
                 }
             }
-            Row(Modifier.padding(top = 16.dp)) {
-                Text(
-                    "Agent Hub · ACP multi-agent gateway",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Card(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                ),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    val repoUrl = "https://github.com/mofanx/agent-hub"
+                    val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
+                    Text(S.about, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "${S.version} ${packageInfo.versionName} (${packageInfo.versionCode})",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(S.repository, style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .clickable {
+                                try {
+                                    context.startActivity(
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW,
+                                            android.net.Uri.parse(repoUrl),
+                                        ),
+                                    )
+                                } catch (_: Exception) {
+                                }
+                            },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            repoUrl,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowForwardIos,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse("$repoUrl/releases"),
+                                    ),
+                                )
+                            } catch (_: Exception) {
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    ) { Text(S.checkForUpdates) }
+                }
+            }
+            Card(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                ),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    var showExit by remember { mutableStateOf(false) }
+                    TextButton(
+                        onClick = { showExit = true },
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    ) {
+                        Text(S.exit, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (showExit) {
+                        AlertDialog(
+                            onDismissRequest = { showExit = false },
+                            title = { Text(S.exitConfirmTitle) },
+                            text = { Text(S.exitConfirmText) },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showExit = false
+                                        vm.disconnect()
+                                    },
+                                ) {
+                                    Text(S.exit, color = MaterialTheme.colorScheme.error)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showExit = false }) { Text(S.cancel) }
+                            },
+                        )
+                    }
+                }
             }
         }
     }

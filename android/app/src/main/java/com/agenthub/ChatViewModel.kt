@@ -349,6 +349,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun disconnect() {
+        hub.disconnect()
+        val app = getApplication<Application>()
+        app.stopService(Intent(app, HubService::class.java))
+        prefs.edit().remove("last").apply()
+        sessions.clear()
+        rooms.clear()
+        roles.clear()
+        connections.clear()
+        chatItems.clear()
+        busyIds.clear()
+        currentSession = null
+        currentRoom = null
+        quote = null
+        connecting = false
+        connectError = null
+        agentStatus = "未连接"
+        screen = Screen.Connect
+    }
+
     fun refreshAll() {
         viewModelScope.launch {
             try {

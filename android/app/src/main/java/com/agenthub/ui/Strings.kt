@@ -104,6 +104,15 @@ interface Strings {
     val slashHelpStop: String
     val slashHelpBypass: String
     val unknownCommandHint: String
+    val exit: String
+    val exitConfirmTitle: String
+    val exitConfirmText: String
+    val about: String
+    val version: String
+    val repository: String
+    val checkForUpdates: String
+    val openInBrowser: String
+    val copyLink: String
 }
 
 object ZhStrings : Strings {
@@ -208,6 +217,15 @@ object ZhStrings : Strings {
     override val slashHelpStop = "/stop — 停止当前生成（在群里可 @成员 指定）"
     override val slashHelpBypass = "/bypass [on|off|toggle] — 切换权限自动审批"
     override val unknownCommandHint = "未知命令，输入 /help 查看说明"
+    override val exit = "退出"
+    override val exitConfirmTitle = "退出当前连接？"
+    override val exitConfirmText = "断开后将返回连接页面，可以重新选择或添加 Hub。"
+    override val about = "关于"
+    override val version = "版本"
+    override val repository = "仓库地址"
+    override val checkForUpdates = "检查更新"
+    override val openInBrowser = "打开"
+    override val copyLink = "复制"
 }
 
 object EnStrings : Strings {
@@ -312,6 +330,15 @@ object EnStrings : Strings {
     override val slashHelpStop = "/stop — stop current generation (use @name in a room)"
     override val slashHelpBypass = "/bypass [on|off|toggle] — toggle permission auto-approve"
     override val unknownCommandHint = "Unknown command, type /help for usage"
+    override val exit = "Exit"
+    override val exitConfirmTitle = "Exit current connection?"
+    override val exitConfirmText = "You will return to the connection screen to choose or add another Hub."
+    override val about = "About"
+    override val version = "Version"
+    override val repository = "Repository"
+    override val checkForUpdates = "Check for updates"
+    override val openInBrowser = "Open"
+    override val copyLink = "Copy"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }

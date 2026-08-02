@@ -11,6 +11,8 @@
 
     <application
         android:label="Agent Hub"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.AgentHub">
         <activity
