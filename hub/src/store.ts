@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Room } from "./room.js";
 
 export type Connection = {
@@ -98,7 +99,7 @@ export class Store {
     this.dir =
       dir ??
       process.env.HUB_DATA_DIR ??
-      path.resolve(new URL("..", import.meta.url).pathname, "data");
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
     fs.mkdirSync(this.dir, { recursive: true });
     this.db = new Database(path.join(this.dir, "hub.db"));
     this.db.pragma("journal_mode = WAL");
