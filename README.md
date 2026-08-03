@@ -200,6 +200,7 @@ npx tsx scripts/claude-check.ts    # claude-code-acp 会话（需先 claude auth
 
 - `hub/` — Node.js 网关（WS 服务 + ACP client + 权限代理 + SQLite 持久化）
 - `android/` — Kotlin + Jetpack Compose App
+- `desktop/` — Tauri 桌面客户端（Windows / Linux）
 - `deploy/` — VPS 自建中继部署套件（Caddy / Nginx + systemd + autossh）
 - `docs/design.md` — 完整产品设计（含群聊编排规划）
 

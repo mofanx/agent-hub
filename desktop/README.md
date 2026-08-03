@@ -13,7 +13,7 @@ Tauri 2 + React + TypeScript 桌面客户端，复用 Android 端的 WebSocket J
 ## 开发
 
 ```bash
-cd windows
+cd desktop
 pnpm install
 pnpm tauri dev
 ```
@@ -23,7 +23,7 @@ pnpm tauri dev
 在 Windows 环境运行：
 
 ```bash
-cd windows
+cd desktop
 pnpm install
 pnpm tauri build
 ```
