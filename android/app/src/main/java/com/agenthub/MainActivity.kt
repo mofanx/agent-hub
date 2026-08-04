@@ -8,18 +8,23 @@ import androidx.activity.compose.setContent
 import android.content.Intent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import com.agenthub.ui.AgentHubTheme
 import com.agenthub.ui.ChatScreen
-import com.agenthub.ui.ConnectScreen
+import com.agenthub.ui.HubDrawer
 import com.agenthub.ui.LocalStrings
 import com.agenthub.ui.SessionListScreen
 import com.agenthub.ui.SettingsScreen
 import com.agenthub.ui.stringsFor
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val vm: ChatViewModel by viewModels()
@@ -37,7 +42,14 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background,
                     ) {
-                        AppRoot(vm)
+                        val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+                        val scope = rememberCoroutineScope()
+                        ModalNavigationDrawer(
+                            drawerState = drawerState,
+                            drawerContent = { HubDrawer(vm, drawerState) },
+                        ) {
+                            AppRoot(vm, onMenuClick = { scope.launch { drawerState.open() } })
+                        }
                     }
                 }
             }
@@ -62,11 +74,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppRoot(vm: ChatViewModel) {
+fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     when (vm.screen) {
-        Screen.Connect -> ConnectScreen(vm)
-        Screen.Sessions -> SessionListScreen(vm)
-        Screen.Chat, Screen.Room -> ChatScreen(vm)
-        Screen.Settings -> SettingsScreen(vm)
+        Screen.Connect -> SessionListScreen(vm, onMenuClick)
+        Screen.Sessions -> SessionListScreen(vm, onMenuClick)
+        Screen.Chat, Screen.Room -> ChatScreen(vm, onMenuClick)
+        Screen.Settings -> SettingsScreen(vm, onMenuClick)
     }
 }

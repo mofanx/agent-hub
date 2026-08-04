@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GroupAdd
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -64,12 +67,13 @@ import com.agenthub.SessionInfo
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun SessionListScreen(vm: ChatViewModel) {
+fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
     var showCreate by remember { mutableStateOf(false) }
     var showCreateRoom by remember { mutableStateOf(false) }
     var showArchived by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<SessionInfo?>(null) }
+    var renameTarget by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
     var inBatchMode by remember { mutableStateOf(false) }
     val selectedSessionIds = remember { mutableStateListOf<String>() }
@@ -99,6 +103,36 @@ fun SessionListScreen(vm: ChatViewModel) {
     }
 
     val selectedCount = selectedSessionIds.size + selectedRoomIds.size
+
+    renameTarget?.let { s ->
+        var name by remember(s) { mutableStateOf(s.name) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("重命名会话") },
+            text = {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("新名称") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.renameSession(s, name)
+                        renameTarget = null
+                    },
+                    enabled = name.isNotBlank(),
+                ) { Text(S.ok) }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text(S.cancel) }
+            },
+        )
+    }
 
     val selectAll = {
         if (selectedSessionIds.size == vm.sessions.size && selectedRoomIds.size == vm.rooms.size) {
@@ -139,6 +173,10 @@ fun SessionListScreen(vm: ChatViewModel) {
                             selectedRoomIds.clear()
                         }) {
                             Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                        }
+                    } else {
+                        IconButton(onClick = onMenuClick) {
+                            Icon(Icons.Filled.Menu, contentDescription = "Menu")
                         }
                     }
                 },
@@ -226,6 +264,48 @@ fun SessionListScreen(vm: ChatViewModel) {
             }
 
             LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                if (vm.currentProfile == null) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            ),
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                if (vm.connecting) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(32.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Spacer(Modifier.height(12.dp))
+                                    Text("正在连接 Hub…", style = MaterialTheme.typography.bodyMedium)
+                                } else {
+                                    Text(
+                                        "当前未连接到 Hub",
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        if (vm.profiles.isEmpty()) "还没有保存的 Hub，点击下方按钮添加"
+                                        else "点击下方按钮选择或添加 Hub",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(Modifier.height(12.dp))
+                                    Button(onClick = onMenuClick) {
+                                        Text("添加 / 选择 Hub")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 item {
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -267,6 +347,7 @@ fun SessionListScreen(vm: ChatViewModel) {
                             }
                             selectedSessionIds.add(s.sessionId)
                         },
+                        onEdit = { renameTarget = s },
                         onDelete = { confirmDelete = s },
                     )
                 }
@@ -302,6 +383,7 @@ fun SessionListScreen(vm: ChatViewModel) {
                                     }
                                     selectedSessionIds.add(s.sessionId)
                                 },
+                                onEdit = { renameTarget = s },
                                 onDelete = { confirmDelete = s },
                             )
                         }
@@ -765,6 +847,7 @@ private fun SessionCard(
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val pinned = vm.pinnedIds.contains(s.sessionId)
@@ -868,6 +951,13 @@ private fun SessionCard(
                             text = { Text(if (s.archived) S.unarchive else S.archive) },
                             onClick = {
                                 vm.archiveSession(s, !s.archived)
+                                showMenu = false
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("重命名") },
+                            onClick = {
+                                onEdit()
                                 showMenu = false
                             },
                         )

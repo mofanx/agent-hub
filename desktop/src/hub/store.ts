@@ -49,6 +49,8 @@ interface State {
   searchResults: SearchHit[];
   selectedIds: SelectedIds;
   itemSeq: number;
+  drawerOpen: boolean;
+  currentProfile: ConnProfile | null;
 }
 
 interface Actions {
@@ -65,8 +67,11 @@ interface Actions {
   updateThemeMode(mode: string): void;
   updateLang(lang: string): void;
 
-  connect(host: string, port: string, token: string): void;
+  connect(host: string, port: string, token: string, name?: string): void;
   disconnect(): void;
+  toggleDrawer(): void;
+  closeDrawer(): void;
+  switchProfile(p: ConnProfile): void;
   refreshAll(): Promise<void>;
   refreshBusy(): void;
 
@@ -137,7 +142,7 @@ interface Actions {
   syncBusyIdsFromList(list: SessionInfo[]): void;
   syncBusyIds(): Promise<void>;
   handleSlashCommand(text: string): boolean;
-  saveProfileAndConnect(address: string, port: string, token: string): void;
+  saveProfileAndConnect(address: string, port: string, token: string, name?: string): void;
 }
 
 const defaultConfig: AppConfig = {
@@ -386,6 +391,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     searchResults: [],
     selectedIds: { sessions: [], rooms: [] },
     itemSeq: 0,
+    drawerOpen: false,
+    currentProfile: null,
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -454,6 +461,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     deleteProfile: (p: ConnProfile) => {
+      const current = get().currentProfile;
+      if (current && profileKey(current) === profileKey(p)) {
+        get().disconnect();
+      }
       set({ profiles: get().profiles.filter((it) => profileKey(it) !== profileKey(p)) });
       persist();
     },
@@ -468,7 +479,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       persist();
     },
 
-    connect: (host: string, port: string, token: string) => {
+    connect: (host: string, port: string, token: string, name?: string) => {
       get().disconnect();
       set({ connecting: true, connectError: null });
       const url =
@@ -492,7 +503,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         url,
         () => {
           set({ connecting: false, connectError: null });
-          get().saveProfileAndConnect(host, port, token);
+          get().saveProfileAndConnect(host, port, token, name);
         },
         (msg) => {
           set({ connecting: false, connectError: msg });
@@ -517,8 +528,19 @@ export const useHubStore = create<State & Actions>((set, get) => {
         connectError: null,
         agentStatus: stringsFor(get().lang).notConnected,
         selectedIds: { sessions: [], rooms: [] },
+        currentProfile: null,
       });
       updateTray();
+    },
+
+    toggleDrawer: () => set({ drawerOpen: !get().drawerOpen }),
+
+    closeDrawer: () => set({ drawerOpen: false }),
+
+    switchProfile: (p: ConnProfile) => {
+      const current = get().currentProfile;
+      if (current && profileKey(current) === profileKey(p)) return;
+      get().connect(p.address, p.port, p.token, p.name);
     },
 
     refreshAll: async () => {
@@ -1134,14 +1156,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    saveProfileAndConnect: (address: string, port: string, token: string) => {
-      const name = address
+    saveProfileAndConnect: (address: string, port: string, token: string, name?: string) => {
+      const derived = address
         .replace(/^wss?:\/\//, "")
       .split(/[\/\?:]/)[0];
+      const profileName = name?.trim() || derived;
       let profiles = get().profiles.filter((p) => !(p.address === address && p.port === port));
-      const profile: ConnProfile = { name, address, port, token };
+      const profile: ConnProfile = { name: profileName, address, port, token };
       profiles = [...profiles, profile];
-      set({ profiles });
+      set({ profiles, currentProfile: profile, drawerOpen: false });
       persist();
       saveLastProfile(address, port, token).catch(() => {});
       set({ screen: "sessions" });

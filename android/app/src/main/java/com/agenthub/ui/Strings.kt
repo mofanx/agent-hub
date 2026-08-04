@@ -36,6 +36,7 @@ interface Strings {
     val unarchive: String
     val delete: String
     val cancel: String
+    val ok: String
     val deleteConfirmTitle: String
     val deleteConfirmText: String
     val create: String
@@ -149,6 +150,7 @@ object ZhStrings : Strings {
     override val unarchive = "取消归档"
     override val delete = "删除"
     override val cancel = "取消"
+    override val ok = "确定"
     override val deleteConfirmTitle = "删除会话「%s」？"
     override val deleteConfirmText = "将从 Hub 移除该会话及其历史记录，所在的群会相应移除该成员。不可撤销。"
     override val create = "创建"
@@ -262,6 +264,7 @@ object EnStrings : Strings {
     override val unarchive = "Unarchive"
     override val delete = "Delete"
     override val cancel = "Cancel"
+    override val ok = "OK"
     override val deleteConfirmTitle = "Delete session \"%s\"?"
     override val deleteConfirmText = "Removes the session and its history from the Hub, and removes it from rooms. This cannot be undone."
     override val create = "Create"

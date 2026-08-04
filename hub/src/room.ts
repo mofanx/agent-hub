@@ -128,6 +128,19 @@ export class RoomManager {
     return lines.join("\n");
   }
 
+  /** 同步更新所有包含该 session 的群中成员显示名 */
+  updateMemberName(sessionId: string, name: string): string[] {
+    const touched: string[] = [];
+    for (const room of this.rooms.values()) {
+      const member = room.members.find((m) => m.sessionId === sessionId);
+      if (member) {
+        member.name = name;
+        touched.push(room.roomId);
+      }
+    }
+    return touched;
+  }
+
   /** 某个 session 一轮结束后，把输出摘要写上黑板（供其他成员参考） */
   recordOutput(sessionId: string, sessionName: string, output: string): string[] {
     const touched: string[] = [];

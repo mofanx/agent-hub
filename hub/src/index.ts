@@ -434,6 +434,17 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (ok) owners.set(sessionId, connectionId);
       return { resumed: ok };
     }
+    case "session.rename": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const name = String(req.params?.name ?? "").trim();
+      const meta = sessionMetas.get(sessionId);
+      if (!meta) throw new Error(`unknown session: ${sessionId}`);
+      if (!name) throw new Error("name required");
+      meta.name = name;
+      const roomIds = rooms.updateMemberName(sessionId, name);
+      persistState();
+      return { renamed: true, name, roomIds };
+    }
     case "session.archive": {
       const sessionId = String(req.params?.sessionId ?? "");
       const meta = sessionMetas.get(sessionId);

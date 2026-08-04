@@ -22,6 +22,7 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
@@ -57,7 +58,7 @@ import com.agenthub.Screen
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(vm: ChatViewModel) {
+fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
 
     LaunchedEffect(Unit) {
@@ -69,6 +70,11 @@ fun SettingsScreen(vm: ChatViewModel) {
             TopAppBar(
                 title = { Text(S.settings) },
                 navigationIcon = {
+                    IconButton(onClick = onMenuClick) {
+                        Icon(Icons.Filled.Menu, contentDescription = "Menu")
+                    }
+                },
+                actions = {
                     IconButton(onClick = { vm.screen = Screen.Sessions }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
                     }

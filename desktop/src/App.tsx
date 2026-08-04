@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useHubStore } from "./hub/store";
-import { ConnectScreen } from "./screens/ConnectScreen";
+import { HubConfigScreen } from "./screens/HubConfigScreen";
+import { HubDrawer } from "./screens/HubDrawer";
 import { SessionListScreen } from "./screens/SessionListScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -24,6 +25,9 @@ function App() {
   return (
     <div className="app">
       <div className="toolbar">
+        <button className="secondary menu-btn" onClick={store.toggleDrawer}>
+          ☰
+        </button>
         <h1>Agent Hub</h1>
         <span className="subtitle">{store.agentStatus}</span>
         {store.screen !== "connect" && (
@@ -40,14 +44,12 @@ function App() {
             >
               设置
             </button>
-            <button className="danger" onClick={store.disconnect}>
-              断开
-            </button>
           </>
         )}
       </div>
+      <HubDrawer />
       <div className="screen">
-        {store.screen === "connect" && <ConnectScreen />}
+        {store.screen === "connect" && <HubConfigScreen />}
         {store.screen === "sessions" && <SessionListScreen />}
         {(store.screen === "chat" || store.screen === "room") && <ChatScreen />}
         {store.screen === "settings" && <SettingsScreen />}

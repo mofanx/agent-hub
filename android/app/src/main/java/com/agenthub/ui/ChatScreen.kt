@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
@@ -68,7 +69,7 @@ import com.agenthub.ChatViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(vm: ChatViewModel) {
+fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -105,11 +106,14 @@ fun ChatScreen(vm: ChatViewModel) {
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = { vm.backToList() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
+                    IconButton(onClick = onMenuClick) {
+                        Icon(Icons.Filled.Menu, contentDescription = "Menu")
                     }
                 },
                 actions = {
+                    IconButton(onClick = { vm.backToList() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
+                    }
                     if (vm.generating) {
                         IconButton(onClick = { vm.stopCurrent() }) {
                             Icon(

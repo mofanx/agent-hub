@@ -165,11 +165,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var appForeground = true
     }
 
+    var screen by mutableStateOf(Screen.Sessions)
+    var connecting by mutableStateOf(false)
+    var connectError by mutableStateOf<String?>(null)
+    var agentStatus by mutableStateOf("未连接")
+    var currentProfile by mutableStateOf<ConnProfile?>(null)
+
+    val sessions = mutableStateListOf<SessionInfo>()
+    val rooms = mutableStateListOf<RoomInfo>()
+    val roles = mutableStateListOf<RoleInfo>()
+    val connections = mutableStateListOf<ConnectionInfo>()
+    var currentSession by mutableStateOf<SessionInfo?>(null)
+    var currentRoom by mutableStateOf<RoomInfo?>(null)
+    val chatItems = mutableStateListOf<ChatItem>()
+    val busyIds = mutableStateListOf<String>()
+    var quote by mutableStateOf<Pair<String, String>?>(null)
+
     init {
         prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
             val parts = line.split("\u0001")
             if (parts.size == 4) {
                 profiles.add(ConnProfile(parts[0], parts[1], parts[2], parts[3]))
+            }
+        }
+        prefs.getString("last", null)?.let { line ->
+            val parts = line.split("\u0001")
+            if (parts.size == 3) {
+                val (address, port, token) = parts
+                val profile = profiles.find { it.address == address && it.port == port }
+                    ?: ConnProfile(
+                        address.removePrefix("wss://").removePrefix("ws://")
+                            .substringBefore("/").substringBefore(":").substringBefore("?"),
+                        address, port, token,
+                    )
+                currentProfile = profile
+                connect(address, port, token, profile.name)
             }
         }
     }
@@ -182,17 +212,60 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteProfile(p: ConnProfile) {
+        if (currentProfile == p) {
+            disconnect()
+        }
         profiles.remove(p)
         persistProfiles()
     }
 
-    private fun saveProfile(address: String, port: String, token: String) {
-        val name = address.removePrefix("wss://").removePrefix("ws://")
-            .substringBefore("/").substringBefore(":").substringBefore("?")
+    fun switchProfile(p: ConnProfile) {
+        if (currentProfile == p) return
+        connect(p.address, p.port, p.token, p.name)
+    }
+
+    fun upsertProfile(
+        old: ConnProfile?,
+        name: String,
+        address: String,
+        port: String,
+        token: String,
+        connectNow: Boolean = false,
+    ) {
+        val newProfile = ConnProfile(
+            name.ifBlank {
+                address.removePrefix("wss://").removePrefix("ws://")
+                    .substringBefore("/").substringBefore(":").substringBefore("?")
+            },
+            address, port, token,
+        )
+        if (old != null) {
+            profiles.remove(old)
+        }
         profiles.removeAll { it.address == address && it.port == port }
-        profiles.add(ConnProfile(name, address, port, token))
+        profiles.add(newProfile)
+        if (connectNow) {
+            currentProfile = newProfile
+        } else if (currentProfile == old && old?.address == address && old.port == port) {
+            currentProfile = newProfile
+        }
+        persistProfiles()
+        if (connectNow) {
+            connect(address, port, token, newProfile.name)
+        }
+    }
+
+    private fun saveProfile(address: String, port: String, token: String, name: String? = null) {
+        val derived = address.removePrefix("wss://").removePrefix("ws://")
+            .substringBefore("/").substringBefore(":").substringBefore("?")
+        val profileName = name?.takeIf { it.isNotBlank() } ?: derived
+        profiles.removeAll { it.address == address && it.port == port }
+        val profile = ConnProfile(profileName, address, port, token)
+        profiles.add(profile)
+        currentProfile = profile
         persistProfiles()
         prefs.edit().putString("last", "$address\u0001$port\u0001$token").apply()
+        if (screen == Screen.Connect) screen = Screen.Sessions
     }
 
     private fun startHubService() {
@@ -200,7 +273,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         app.startForegroundService(Intent(app, HubService::class.java))
     }
 
-    var screen by mutableStateOf(Screen.Connect)
     var themeMode by mutableStateOf(prefs.getString("theme", "system") ?: "system")
     var lang by mutableStateOf(prefs.getString("lang", "zh") ?: "zh")
 
@@ -213,20 +285,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lang = l
         prefs.edit().putString("lang", l).apply()
     }
-
-    var connecting by mutableStateOf(false)
-    var connectError by mutableStateOf<String?>(null)
-    var agentStatus by mutableStateOf("未连接")
-
-    val sessions = mutableStateListOf<SessionInfo>()
-    val rooms = mutableStateListOf<RoomInfo>()
-    val roles = mutableStateListOf<RoleInfo>()
-    val connections = mutableStateListOf<ConnectionInfo>()
-    var currentSession by mutableStateOf<SessionInfo?>(null)
-    var currentRoom by mutableStateOf<RoomInfo?>(null)
-    val chatItems = mutableStateListOf<ChatItem>()
-    val busyIds = mutableStateListOf<String>()
-    var quote by mutableStateOf<Pair<String, String>?>(null)
 
     val generating: Boolean
         get() {
@@ -323,7 +381,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    fun connect(host: String, port: String, token: String) {
+    fun connect(host: String, port: String, token: String, name: String? = null) {
+        disconnect()
         connecting = true
         connectError = null
         val url = if (host.startsWith("ws://") || host.startsWith("wss://")) {
@@ -336,7 +395,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             onOpen = {
                 viewModelScope.launch {
                     connecting = false
-                    saveProfile(host, port, token)
+                    saveProfile(host, port, token, name)
                     startHubService()
                     screen = Screen.Sessions
                     refreshAll()
@@ -369,7 +428,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         connecting = false
         connectError = null
         agentStatus = "未连接"
-        screen = Screen.Connect
+        currentProfile = null
+        screen = Screen.Sessions
     }
 
     fun refreshAll() {
@@ -616,6 +676,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     openChat(session.copy(offline = false))
                 } else {
                     connectError = "恢复失败：agent 不支持或会话已失效"
+                }
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun renameSession(session: SessionInfo, name: String) {
+        viewModelScope.launch {
+            connectError = null
+            val trimmed = name.trim()
+            if (trimmed.isBlank()) return@launch
+            try {
+                hub.call("session.rename", buildJsonObject {
+                    put("sessionId", session.sessionId)
+                    put("name", trimmed)
+                })
+                val idx = sessions.indexOfFirst { it.sessionId == session.sessionId }
+                if (idx >= 0) sessions[idx] = session.copy(name = trimmed)
+                if (currentSession?.sessionId == session.sessionId) {
+                    currentSession = currentSession?.copy(name = trimmed)
+                }
+                rooms.forEachIndexed { i, room ->
+                    if (room.members.any { it.first == session.sessionId }) {
+                        rooms[i] = room.copy(
+                            members = room.members.map {
+                                if (it.first == session.sessionId) it.first to trimmed else it
+                            },
+                        )
+                    }
+                }
+                if (currentRoom?.members?.any { it.first == session.sessionId } == true) {
+                    currentRoom = currentRoom?.copy(
+                        members = currentRoom!!.members.map {
+                            if (it.first == session.sessionId) it.first to trimmed else it
+                        },
+                    )
                 }
             } catch (e: Exception) {
                 connectError = e.message
