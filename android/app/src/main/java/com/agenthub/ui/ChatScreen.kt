@@ -127,10 +127,14 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         uri?.let { vm.addAttachment(it) }
     }
 
-    LaunchedEffect(vm.chatItems.lastOrNull()) {
-        val latest = vm.chatItems.lastOrNull()
-        if (latest != null && (latest is ChatItem.User || isAtBottom)) {
-            listState.scrollToItem(0, 0)
+    LaunchedEffect(vm.chatItems.size) {
+        val latest = vm.chatItems.lastOrNull() ?: return@LaunchedEffect
+        if (latest is ChatItem.User || isAtBottom) {
+            val alreadyAtBottom =
+                listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 20
+            if (!alreadyAtBottom) {
+                listState.scrollToItem(0, 0)
+            }
         }
     }
 
@@ -791,12 +795,18 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                     }
                     if (expanded) {
                         val thoughtColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        Markdown(
-                            item.text,
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                            colors = markdownColor(text = thoughtColor),
-                            typography = markdownTypography(text = MaterialTheme.typography.bodySmall),
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                item.text,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = thoughtColor,
+                            )
+                        }
                     }
                 }
             }
