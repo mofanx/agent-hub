@@ -187,11 +187,6 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 },
                 actions = {
-                    if (!inBatchMode) {
-                        IconButton(onClick = { vm.screen = Screen.Settings }) {
-                            Icon(Icons.Filled.Settings, contentDescription = S.settings)
-                        }
-                    }
                 },
             )
         },
@@ -225,6 +220,12 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         label = { Text(S.rooms) },
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
+                    )
+                    NavigationBarItem(
+                        icon = { Icon(Icons.Filled.Settings, contentDescription = S.settings) },
+                        label = { Text(S.settings) },
+                        selected = false,
+                        onClick = { vm.screen = Screen.Settings },
                     )
                 }
             }
