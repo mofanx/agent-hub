@@ -79,6 +79,9 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var showArchived by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<SessionInfo?>(null) }
     var renameTarget by remember { mutableStateOf<SessionInfo?>(null) }
+    var roomRenameTarget by remember { mutableStateOf<RoomInfo?>(null) }
+    var roomEditTarget by remember { mutableStateOf<RoomInfo?>(null) }
+    var roomDeleteTarget by remember { mutableStateOf<RoomInfo?>(null) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
     var inBatchMode by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(0) }
@@ -479,6 +482,10 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             }
                             selectedRoomIds.add(r.roomId)
                         },
+                        onRename = { roomRenameTarget = r },
+                        onEdit = { roomEditTarget = r },
+                        onClone = { vm.cloneRoom(r) { roomRenameTarget = it } },
+                        onDelete = { roomDeleteTarget = r },
                     )
                 }
                 }
@@ -784,75 +791,60 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             }
         }
 
-        if (showCreateRoom) {
-            var roomName by remember { mutableStateOf("") }
-            var mode by remember { mutableStateOf("mention") }
-            var conductorId by remember { mutableStateOf<String?>(null) }
-            val selected = remember { mutableStateListOf<String>() }
+        if (showCreateRoom || roomEditTarget != null) {
+            RoomEditorDialog(
+                room = roomEditTarget,
+                vm = vm,
+                S = S,
+                onDismiss = { showCreateRoom = false; roomEditTarget = null },
+            )
+        }
+
+        roomRenameTarget?.let { room ->
+            var name by remember(room) { mutableStateOf(room.name) }
             AlertDialog(
-                onDismissRequest = { showCreateRoom = false },
-                title = { Text(S.createRoom) },
+                onDismissRequest = { roomRenameTarget = null },
+                title = { Text(S.rename) },
                 text = {
-                    Column {
-                        OutlinedTextField(
-                            value = roomName,
-                            onValueChange = { roomName = it },
-                            label = { Text(S.roomName) },
-                            singleLine = true,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(S.modeLabel)
-                            TextButton(onClick = { mode = "mention" }) {
-                                Text(if (mode == "mention") "◉ ${S.modeMention}" else "○ ${S.modeMention}")
-                            }
-                            TextButton(onClick = { mode = "conductor" }) {
-                                Text(if (mode == "conductor") "◉ ${S.modeConductor}" else "○ ${S.modeConductor}")
-                            }
-                        }
-                        vm.sessions.filter { !it.archived }.forEach { s ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(
-                                    checked = selected.contains(s.sessionId),
-                                    onCheckedChange = {
-                                        if (it) {
-                                            selected.add(s.sessionId)
-                                        } else {
-                                            selected.remove(s.sessionId)
-                                            if (conductorId == s.sessionId) conductorId = null
-                                        }
-                                    },
-                                )
-                                Text(vm.displayName(s))
-                                if (mode == "conductor" && selected.contains(s.sessionId)) {
-                                    TextButton(onClick = { conductorId = s.sessionId }) {
-                                        Text(
-                                            if (conductorId == s.sessionId) "◉ ${S.conductorTag}"
-                                            else "○ ${S.conductorTag}"
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text(S.roomName) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                    )
                 },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            showCreateRoom = false
-                            vm.createRoom(
-                                roomName.trim().ifBlank { S.rooms },
-                                selected.toList(),
-                                mode,
-                                conductorId,
-                            )
+                            vm.renameRoom(room, name)
+                            roomRenameTarget = null
                         },
-                        enabled = selected.size >= 2 &&
-                            (mode != "conductor" || conductorId != null),
-                    ) { Text(S.create) }
+                        enabled = name.isNotBlank(),
+                    ) { Text(S.ok) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showCreateRoom = false }) { Text(S.cancel) }
+                    TextButton(onClick = { roomRenameTarget = null }) { Text(S.cancel) }
+                },
+            )
+        }
+
+        roomDeleteTarget?.let { room ->
+            AlertDialog(
+                onDismissRequest = { roomDeleteTarget = null },
+                title = { Text(S.deleteRoomConfirmTitle.format(room.name)) },
+                text = { Text(S.deleteRoomConfirmText) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            vm.deleteRoom(room)
+                            roomDeleteTarget = null
+                        },
+                    ) { Text(S.delete, color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { roomDeleteTarget = null }) { Text(S.cancel) }
                 },
             )
         }
@@ -884,6 +876,103 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             )
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RoomEditorDialog(
+    room: RoomInfo?,
+    vm: ChatViewModel,
+    S: Strings,
+    onDismiss: () -> Unit,
+) {
+    val editing = room
+    val isCreate = editing == null
+    var roomName by remember(room) { mutableStateOf(editing?.name ?: "") }
+    var mode by remember(room) { mutableStateOf(editing?.mode ?: "mention") }
+    var conductorId by remember(room) { mutableStateOf<String?>(editing?.conductorId) }
+    val selected = remember(room) {
+        mutableStateListOf<String>().apply {
+            addAll(editing?.members?.map { it.first } ?: emptyList())
+        }
+    }
+    val minMembers = if (isCreate) 2 else 1
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (isCreate) S.createRoom else S.editRoom) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = roomName,
+                    onValueChange = { roomName = it },
+                    label = { Text(S.roomName) },
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(S.modeLabel)
+                    TextButton(onClick = { mode = "mention" }) {
+                        Text(if (mode == "mention") "◉ ${S.modeMention}" else "○ ${S.modeMention}")
+                    }
+                    TextButton(onClick = { mode = "conductor" }) {
+                        Text(if (mode == "conductor") "◉ ${S.modeConductor}" else "○ ${S.modeConductor}")
+                    }
+                }
+                vm.sessions.filter { !it.archived }.forEach { s ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = selected.contains(s.sessionId),
+                            onCheckedChange = {
+                                if (it) {
+                                    selected.add(s.sessionId)
+                                } else {
+                                    selected.remove(s.sessionId)
+                                    if (conductorId == s.sessionId) conductorId = null
+                                }
+                            },
+                        )
+                        Text(vm.displayName(s))
+                        if (mode == "conductor" && selected.contains(s.sessionId)) {
+                            TextButton(onClick = { conductorId = s.sessionId }) {
+                                Text(
+                                    if (conductorId == s.sessionId) "◉ ${S.conductorTag}"
+                                    else "○ ${S.conductorTag}"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onDismiss()
+                    if (isCreate) {
+                        vm.createRoom(
+                            roomName.trim().ifBlank { S.rooms },
+                            selected.toList(),
+                            mode,
+                            conductorId,
+                        )
+                    } else {
+                        vm.updateRoom(
+                            editing,
+                            roomName.trim().ifBlank { editing.name },
+                            selected.toList(),
+                            mode,
+                            conductorId,
+                        )
+                    }
+                },
+                enabled = roomName.isNotBlank() && selected.size >= minMembers &&
+                    (mode != "conductor" || conductorId != null),
+            ) { Text(if (isCreate) S.create else S.ok) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(S.cancel) }
+        },
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1005,7 +1094,7 @@ private fun SessionCard(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("重命名") },
+                            text = { Text(S.rename) },
                             onClick = {
                                 onEdit()
                                 showMenu = false
@@ -1042,7 +1131,12 @@ private fun RoomCard(
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onRename: () -> Unit,
+    onEdit: () -> Unit,
+    onClone: () -> Unit,
+    onDelete: () -> Unit,
 ) {
+    val showMenu = remember { mutableStateOf(false) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1083,6 +1177,34 @@ private fun RoomCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            if (!inBatchMode) {
+                Box {
+                    IconButton(onClick = { showMenu.value = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = S.chooseAction)
+                    }
+                    DropdownMenu(
+                        expanded = showMenu.value,
+                        onDismissRequest = { showMenu.value = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(S.rename) },
+                            onClick = { onRename(); showMenu.value = false },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(S.edit) },
+                            onClick = { onEdit(); showMenu.value = false },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(S.clone) },
+                            onClick = { onClone(); showMenu.value = false },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(S.delete) },
+                            onClick = { onDelete(); showMenu.value = false },
+                        )
+                    }
+                }
             }
         }
     }

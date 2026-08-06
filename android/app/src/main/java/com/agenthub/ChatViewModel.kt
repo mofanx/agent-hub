@@ -800,17 +800,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (conductorId != null) put("conductorId", conductorId)
                 })
                 val o = result["room"]!!.jsonObject
-                val room = RoomInfo(
-                    o["roomId"]!!.jsonPrimitive.content,
-                    o["name"]!!.jsonPrimitive.content,
-                    o["mode"]?.jsonPrimitive?.content ?: "mention",
-                    o["conductorId"]?.jsonPrimitive?.content,
-                    o["members"]!!.jsonArray.map {
-                        val m = it.jsonObject
-                        m["sessionId"]!!.jsonPrimitive.content to
-                            m["name"]!!.jsonPrimitive.content
-                    },
-                )
+                val room = parseRoom(o)
                 rooms.add(room)
                 openRoom(room)
             } catch (e: Exception) {
@@ -818,6 +808,95 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    fun renameRoom(room: RoomInfo, name: String) {
+        viewModelScope.launch {
+            connectError = null
+            val trimmed = name.trim()
+            if (trimmed.isBlank()) return@launch
+            try {
+                hub.call("room.rename", buildJsonObject {
+                    put("roomId", room.roomId)
+                    put("name", trimmed)
+                })
+                val idx = rooms.indexOfFirst { it.roomId == room.roomId }
+                if (idx >= 0) rooms[idx] = rooms[idx].copy(name = trimmed)
+                if (currentRoom?.roomId == room.roomId) {
+                    currentRoom = currentRoom?.copy(name = trimmed)
+                }
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun updateRoom(room: RoomInfo, name: String, memberIds: List<String>, mode: String, conductorId: String?) {
+        viewModelScope.launch {
+            connectError = null
+            val trimmed = name.trim()
+            if (trimmed.isBlank()) return@launch
+            try {
+                val result = hub.call("room.update", buildJsonObject {
+                    put("roomId", room.roomId)
+                    put("name", trimmed)
+                    put("sessionIds", buildJsonArray { memberIds.forEach { add(it) } })
+                    put("mode", mode)
+                    if (conductorId != null) put("conductorId", conductorId)
+                })
+                val o = result["room"]!!.jsonObject
+                val updated = parseRoom(o)
+                val idx = rooms.indexOfFirst { it.roomId == room.roomId }
+                if (idx >= 0) rooms[idx] = updated
+                if (currentRoom?.roomId == room.roomId) currentRoom = updated
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun cloneRoom(room: RoomInfo, onCloned: ((RoomInfo) -> Unit)? = null) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("room.clone", buildJsonObject {
+                    put("roomId", room.roomId)
+                })
+                val o = result["room"]!!.jsonObject
+                val newRoom = parseRoom(o)
+                rooms.add(newRoom)
+                onCloned?.invoke(newRoom)
+                val S = stringsFor(lang)
+                chatItems.add(ChatItem.System(++itemSeq, S.clonedRoom.format(newRoom.name)))
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun deleteRoom(room: RoomInfo) {
+        viewModelScope.launch {
+            try {
+                hub.call("room.delete", buildJsonObject {
+                    put("roomId", room.roomId)
+                })
+                if (currentRoom?.roomId == room.roomId) backToList()
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    private fun parseRoom(o: JsonObject): RoomInfo = RoomInfo(
+        o["roomId"]!!.jsonPrimitive.content,
+        o["name"]!!.jsonPrimitive.content,
+        o["mode"]?.jsonPrimitive?.content ?: "mention",
+        o["conductorId"]?.jsonPrimitive?.content,
+        o["members"]!!.jsonArray.map {
+            val m = it.jsonObject
+            m["sessionId"]!!.jsonPrimitive.content to
+                m["name"]!!.jsonPrimitive.content
+        },
+    )
 
     fun openChat(session: SessionInfo) {
         currentSession = session

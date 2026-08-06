@@ -131,6 +131,12 @@ interface Strings {
     val copyLink: String
     val clone: String
     val clonedSession: String
+    val rename: String
+    val edit: String
+    val editRoom: String
+    val clonedRoom: String
+    val deleteRoomConfirmTitle: String
+    val deleteRoomConfirmText: String
 }
 
 object ZhStrings : Strings {
@@ -262,6 +268,12 @@ object ZhStrings : Strings {
     override val copyLink = "复制"
     override val clone = "克隆"
     override val clonedSession = "已克隆会话「%s」"
+    override val rename = "重命名"
+    override val edit = "编辑"
+    override val editRoom = "编辑群聊"
+    override val clonedRoom = "已克隆群聊「%s」"
+    override val deleteRoomConfirmTitle = "删除群聊「%s」？"
+    override val deleteRoomConfirmText = "将从 Hub 移除该群聊及其聊天记录。不可撤销。"
 }
 
 object EnStrings : Strings {
@@ -393,6 +405,12 @@ object EnStrings : Strings {
     override val copyLink = "Copy"
     override val clone = "Clone"
     override val clonedSession = "Cloned session \"%s\""
+    override val rename = "Rename"
+    override val edit = "Edit"
+    override val editRoom = "Edit room"
+    override val clonedRoom = "Cloned room \"%s\""
+    override val deleteRoomConfirmTitle = "Delete room \"%s\"?"
+    override val deleteRoomConfirmText = "Removes the room and its chat history from the Hub. This cannot be undone."
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }

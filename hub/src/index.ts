@@ -598,6 +598,49 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       persistState();
       return { deleted: true, count: uniqueIds.length };
     }
+    case "room.rename": {
+      const roomId = String(req.params?.roomId ?? "");
+      const name = String(req.params?.name ?? "").trim();
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      if (!name) throw new Error("name required");
+      rooms.rename(roomId, name);
+      persistState();
+      return { room };
+    }
+    case "room.update": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      const name = String(req.params?.name ?? "").trim() || room.name;
+      const ids = (req.params?.sessionIds as string[]) ?? [];
+      const mode = req.params?.mode === "conductor" ? "conductor" : "mention";
+      const conductorId =
+        req.params?.conductorId != null ? String(req.params.conductorId) : undefined;
+      const all = listAllSessions();
+      const members = ids.map((id) => {
+        const s = all.find((x) => x.sessionId === id);
+        if (!s) throw new Error(`unknown session: ${id}`);
+        return { sessionId: s.sessionId, name: s.name };
+      });
+      if (members.length === 0) throw new Error("room needs at least 1 session");
+      if (mode === "conductor") {
+        if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
+          throw new Error("conductor room needs a valid conductorId");
+        }
+      }
+      rooms.update(roomId, name, members, mode, conductorId);
+      persistState();
+      return { room };
+    }
+    case "room.clone": {
+      const roomId = String(req.params?.roomId ?? "");
+      const newName = String(req.params?.newName ?? "").trim() || undefined;
+      if (!rooms.get(roomId)) throw new Error(`unknown room: ${roomId}`);
+      const room = rooms.clone(roomId, newName);
+      persistState();
+      return { room };
+    }
     case "connection.list":
       return {
         connections: store.listConnections().map((c) => ({

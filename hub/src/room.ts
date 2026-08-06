@@ -84,6 +84,46 @@ export class RoomManager {
     return ok;
   }
 
+  rename(roomId: string, name: string): Room {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error(`unknown room: ${roomId}`);
+    room.name = name;
+    return room;
+  }
+
+  update(
+    roomId: string,
+    name: string,
+    members: { sessionId: string; name: string }[],
+    mode: RoomMode,
+    conductorId?: string,
+  ): Room {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error(`unknown room: ${roomId}`);
+    if (members.length === 0) throw new Error("room needs at least 1 member");
+    if (mode === "conductor") {
+      if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
+        throw new Error("conductor room needs a valid conductorId");
+      }
+    }
+    room.name = name;
+    room.mode = mode;
+    room.members = members;
+    room.conductorId = mode === "conductor" ? conductorId : undefined;
+    return room;
+  }
+
+  clone(roomId: string, newName?: string): Room {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error(`unknown room: ${roomId}`);
+    return this.create(
+      newName || `${room.name} 副本`,
+      room.members,
+      room.mode,
+      room.conductorId,
+    );
+  }
+
   /** 解析 @mention，返回目标 sessionId 列表；无 mention 时返回全部成员 */
   route(roomId: string, text: string): { targets: string[]; mentioned: string[] } {
     const room = this.rooms.get(roomId);
