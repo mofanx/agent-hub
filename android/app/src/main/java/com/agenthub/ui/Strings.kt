@@ -115,6 +115,10 @@ interface Strings {
     val costTierLow: String
     val costTierMed: String
     val costTierHigh: String
+    val modelFilterHint: String
+    val modelNoResults: String
+    val modelClearFilters: String
+    val modelCurrentLabel: String
     val unknownCommandHint: String
     val exit: String
     val exitConfirmTitle: String
@@ -242,6 +246,10 @@ object ZhStrings : Strings {
     override val costTierLow = "低成本"
     override val costTierMed = "中等成本"
     override val costTierHigh = "高成本"
+    override val modelFilterHint = "搜索模型名称、UID 或别名"
+    override val modelNoResults = "没有匹配的模型"
+    override val modelClearFilters = "清除筛选"
+    override val modelCurrentLabel = "当前"
     override val unknownCommandHint = "未知命令，输入 /help 查看说明"
     override val exit = "退出"
     override val exitConfirmTitle = "退出当前连接？"
@@ -369,6 +377,10 @@ object EnStrings : Strings {
     override val costTierLow = "Low cost"
     override val costTierMed = "Medium cost"
     override val costTierHigh = "High cost"
+    override val modelFilterHint = "Search by name, UID or alias"
+    override val modelNoResults = "No matching models"
+    override val modelClearFilters = "Clear filters"
+    override val modelCurrentLabel = "Current"
     override val unknownCommandHint = "Unknown command, type /help for usage"
     override val exit = "Exit"
     override val exitConfirmTitle = "Exit current connection?"

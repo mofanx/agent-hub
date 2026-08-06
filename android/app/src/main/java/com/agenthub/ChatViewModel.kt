@@ -33,6 +33,18 @@ data class Attachment(
     val name: String = "",
 )
 
+data class ModelInfo(
+    val uid: String,
+    val label: String,
+    val family: String,
+    val vendor: String,
+    val slug: String,
+    val aliases: List<String>,
+    val costTier: String,
+    val costSummary: String?,
+    val isCurrent: Boolean = false,
+)
+
 sealed class ChatItem {
     abstract val id: Long
     abstract val author: String
@@ -213,6 +225,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
 
+    var showModelPicker by mutableStateOf(false)
+    val modelList = mutableStateListOf<ModelInfo>()
+    var modelFilter by mutableStateOf("")
+    var modelCurrent by mutableStateOf("")
+
     init {
         prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
             val parts = line.split("\u0001")
@@ -378,11 +395,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val S = stringsFor(lang)
             try {
                 if (arg.isNullOrBlank()) {
-                    val result = hub.call("model.list")
-                    val current = result["current"]?.jsonPrimitive?.content ?: ""
-                    val list = result["models"]?.jsonArray ?: emptyList()
-                    val text = formatModelList(S, current, list)
-                    chatItems.add(ChatItem.System(++itemSeq, text))
+                    loadModelList()
                 } else {
                     val result = hub.call("model.set", buildJsonObject { put("model", arg) })
                     val model = result["model"]?.jsonObject
@@ -401,6 +414,60 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun loadModelList() {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("model.list")
+                val current = result["current"]?.jsonPrimitive?.content ?: ""
+                modelCurrent = current
+                modelList.clear()
+                val list = result["models"]?.jsonArray ?: emptyList()
+                modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
+                modelFilter = ""
+                showModelPicker = true
+            } catch (e: Exception) {
+                val S = stringsFor(lang)
+                chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+            }
+        }
+    }
+
+    fun switchModel(model: ModelInfo) {
+        viewModelScope.launch {
+            val S = stringsFor(lang)
+            try {
+                val result = hub.call("model.set", buildJsonObject { put("model", model.uid) })
+                val m = result["model"]?.jsonObject
+                if (m != null) {
+                    val uid = m["uid"]?.jsonPrimitive?.content ?: model.uid
+                    val label = m["label"]?.jsonPrimitive?.content ?: ""
+                    val cost = formatModelCost(S, m)
+                    chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                }
+                showModelPicker = false
+                modelFilter = ""
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "model switch failed"))
+            }
+        }
+    }
+
+    fun refreshModelList() {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("model.refresh")
+                val current = result["current"]?.jsonPrimitive?.content ?: ""
+                modelCurrent = current
+                modelList.clear()
+                val list = result["models"]?.jsonArray ?: emptyList()
+                modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
+            } catch (e: Exception) {
+                val S = stringsFor(lang)
+                chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+            }
+        }
+    }
+
     private fun formatModelCost(S: Strings, model: JsonObject): String {
         val tier = model["costTier"]?.jsonPrimitive?.content ?: ""
         val summary = model["costSummary"]?.jsonPrimitive?.content
@@ -412,37 +479,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             else -> tier
         }
         return if (summary.isNullOrBlank()) "($tierName)" else "($tierName · $summary)"
-    }
-
-    private fun formatModelList(S: Strings, current: String, list: List<JsonElement>): String {
-        val order = listOf("Free", "Low cost", "Med cost", "High cost")
-        val grouped = list.groupBy { it.jsonObject["costTier"]?.jsonPrimitive?.content ?: "" }
-        return buildString {
-            appendLine(S.modelCurrentPrefix.format(current))
-            appendLine()
-            appendLine(S.modelListTitle)
-            for (tier in order) {
-                val group = grouped[tier] ?: continue
-                val tierName = when (tier) {
-                    "Free" -> S.costTierFree
-                    "Low cost" -> S.costTierLow
-                    "Med cost" -> S.costTierMed
-                    "High cost" -> S.costTierHigh
-                    else -> tier
-                }
-                appendLine("[$tierName]")
-                for (m in group) {
-                    val o = m.jsonObject
-                    val uid = o["uid"]?.jsonPrimitive?.content ?: ""
-                    val label = o["label"]?.jsonPrimitive?.content ?: ""
-                    val summary = o["costSummary"]?.jsonPrimitive?.content
-                    val aliases = o["aliases"]?.jsonArray?.map { it.jsonPrimitive.content }?.filter { it.isNotBlank() } ?: emptyList()
-                    val aliasStr = if (aliases.isNotEmpty()) " · ${aliases.joinToString(",")}" else ""
-                    val costStr = if (summary.isNullOrBlank()) "" else " · $summary"
-                    appendLine("- $uid · $label$costStr$aliasStr")
-                }
-            }
-        }.trim()
     }
 
     data class SlashCommand(val name: String, val description: String)
@@ -1340,5 +1376,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatItems.add(ChatItem.Plan(++itemSeq, entries, author))
             }
         }
+    }
+
+    private fun JsonObject.toModelInfo(current: String): ModelInfo {
+        val uid = this["uid"]?.jsonPrimitive?.content ?: ""
+        val family = this["family"]?.jsonPrimitive?.content ?: ""
+        return ModelInfo(
+            uid = uid,
+            label = this["label"]?.jsonPrimitive?.content ?: "",
+            family = family,
+            vendor = family.split(Regex("[-.\\s]")).firstOrNull { it.isNotBlank() } ?: family,
+            slug = this["slug"]?.jsonPrimitive?.content ?: "",
+            aliases = this["aliases"]?.jsonArray?.map { it.jsonPrimitive.content }?.filter { it.isNotBlank() } ?: emptyList(),
+            costTier = this["costTier"]?.jsonPrimitive?.content ?: "",
+            costSummary = this["costSummary"]?.jsonPrimitive?.content,
+            isCurrent = uid == current,
+        )
     }
 }
