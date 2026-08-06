@@ -11,6 +11,7 @@ import { Store, type SessionMeta, type Connection } from "./store.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
 import { AGENT_DEFS } from "./agent-defs.js";
+import { ModelManager } from "./model.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -26,6 +27,7 @@ const agents = new Map<string, AcpAgent>();
 const owners = new Map<string, string>();
 const localStarts = new Map<string, Promise<void>>();
 const store = new Store();
+const modelManager = new ModelManager();
 ensureDefaultLocalConnections();
 const savedState = store.load();
 const sessionMetas = new Map<string, SessionMeta>(
@@ -812,6 +814,24 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       setPermissionBypass(enabled);
       console.warn(`[hub] permission bypass set to ${enabled}`);
       return { bypass: enabled };
+    }
+    case "model.list": {
+      const models = await modelManager.list();
+      const current = modelManager.current();
+      return { current: current.uid, models };
+    }
+    case "model.current": {
+      return modelManager.current();
+    }
+    case "model.refresh": {
+      const models = await modelManager.refresh();
+      return { current: modelManager.current().uid, models };
+    }
+    case "model.set": {
+      const name = String(req.params?.model ?? "").trim();
+      if (!name) throw new Error("model name required");
+      const model = await modelManager.set(name);
+      return { set: true, model };
     }
     default:
       throw new Error(`unknown method: ${req.method}`);

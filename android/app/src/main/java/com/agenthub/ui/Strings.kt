@@ -105,6 +105,16 @@ interface Strings {
     val slashHelpHelp: String
     val slashHelpStop: String
     val slashHelpBypass: String
+    val slashHelpModel: String
+    val modelListTitle: String
+    val modelCurrentPrefix: String
+    val modelSwitched: String
+    val modelUnknown: String
+    val modelListError: String
+    val costTierFree: String
+    val costTierLow: String
+    val costTierMed: String
+    val costTierHigh: String
     val unknownCommandHint: String
     val exit: String
     val exitConfirmTitle: String
@@ -222,6 +232,16 @@ object ZhStrings : Strings {
     override val slashHelpHelp = "/help — 显示命令说明"
     override val slashHelpStop = "/stop — 停止当前生成（在群里可 @成员 指定）"
     override val slashHelpBypass = "/bypass [on|off|toggle] — 切换权限自动审批"
+    override val slashHelpModel = "/model [name] — 列出或切换模型"
+    override val modelListTitle = "可选模型："
+    override val modelCurrentPrefix = "当前：%s"
+    override val modelSwitched = "已切换到 %s（%s）"
+    override val modelUnknown = "未知模型：%s"
+    override val modelListError = "获取模型列表失败：%s"
+    override val costTierFree = "免费"
+    override val costTierLow = "低成本"
+    override val costTierMed = "中等成本"
+    override val costTierHigh = "高成本"
     override val unknownCommandHint = "未知命令，输入 /help 查看说明"
     override val exit = "退出"
     override val exitConfirmTitle = "退出当前连接？"
@@ -339,6 +359,16 @@ object EnStrings : Strings {
     override val slashHelpHelp = "/help — show command help"
     override val slashHelpStop = "/stop — stop current generation (use @name in a room)"
     override val slashHelpBypass = "/bypass [on|off|toggle] — toggle permission auto-approve"
+    override val slashHelpModel = "/model [name] — list or switch model"
+    override val modelListTitle = "Available models:"
+    override val modelCurrentPrefix = "Current: %s"
+    override val modelSwitched = "Switched to %s (%s)"
+    override val modelUnknown = "Unknown model: %s"
+    override val modelListError = "Failed to load models: %s"
+    override val costTierFree = "Free"
+    override val costTierLow = "Low cost"
+    override val costTierMed = "Medium cost"
+    override val costTierHigh = "High cost"
     override val unknownCommandHint = "Unknown command, type /help for usage"
     override val exit = "Exit"
     override val exitConfirmTitle = "Exit current connection?"

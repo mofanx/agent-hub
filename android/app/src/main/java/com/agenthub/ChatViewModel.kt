@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import com.agenthub.ui.Strings
 import com.agenthub.ui.stringsFor
 
 data class Attachment(
@@ -371,6 +373,78 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun handleModelSlash(arg: String?) {
+        viewModelScope.launch {
+            val S = stringsFor(lang)
+            try {
+                if (arg.isNullOrBlank()) {
+                    val result = hub.call("model.list")
+                    val current = result["current"]?.jsonPrimitive?.content ?: ""
+                    val list = result["models"]?.jsonArray ?: emptyList()
+                    val text = formatModelList(S, current, list)
+                    chatItems.add(ChatItem.System(++itemSeq, text))
+                } else {
+                    val result = hub.call("model.set", buildJsonObject { put("model", arg) })
+                    val model = result["model"]?.jsonObject
+                    if (model != null) {
+                        val uid = model["uid"]?.jsonPrimitive?.content ?: arg
+                        val label = model["label"]?.jsonPrimitive?.content ?: ""
+                        val cost = formatModelCost(S, model)
+                        chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                    } else {
+                        chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(arg)))
+                    }
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+            }
+        }
+    }
+
+    private fun formatModelCost(S: Strings, model: JsonObject): String {
+        val tier = model["costTier"]?.jsonPrimitive?.content ?: ""
+        val summary = model["costSummary"]?.jsonPrimitive?.content
+        val tierName = when (tier) {
+            "Free" -> S.costTierFree
+            "Low cost" -> S.costTierLow
+            "Med cost" -> S.costTierMed
+            "High cost" -> S.costTierHigh
+            else -> tier
+        }
+        return if (summary.isNullOrBlank()) "($tierName)" else "($tierName · $summary)"
+    }
+
+    private fun formatModelList(S: Strings, current: String, list: List<JsonElement>): String {
+        val order = listOf("Free", "Low cost", "Med cost", "High cost")
+        val grouped = list.groupBy { it.jsonObject["costTier"]?.jsonPrimitive?.content ?: "" }
+        return buildString {
+            appendLine(S.modelCurrentPrefix.format(current))
+            appendLine()
+            appendLine(S.modelListTitle)
+            for (tier in order) {
+                val group = grouped[tier] ?: continue
+                val tierName = when (tier) {
+                    "Free" -> S.costTierFree
+                    "Low cost" -> S.costTierLow
+                    "Med cost" -> S.costTierMed
+                    "High cost" -> S.costTierHigh
+                    else -> tier
+                }
+                appendLine("[$tierName]")
+                for (m in group) {
+                    val o = m.jsonObject
+                    val uid = o["uid"]?.jsonPrimitive?.content ?: ""
+                    val label = o["label"]?.jsonPrimitive?.content ?: ""
+                    val summary = o["costSummary"]?.jsonPrimitive?.content
+                    val aliases = o["aliases"]?.jsonArray?.map { it.jsonPrimitive.content }?.filter { it.isNotBlank() } ?: emptyList()
+                    val aliasStr = if (aliases.isNotEmpty()) " · ${aliases.joinToString(",")}" else ""
+                    val costStr = if (summary.isNullOrBlank()) "" else " · $summary"
+                    appendLine("- $uid · $label$costStr$aliasStr")
+                }
+            }
+        }.trim()
+    }
+
     data class SlashCommand(val name: String, val description: String)
 
     val slashCommands: List<SlashCommand>
@@ -380,6 +454,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 SlashCommand("help", S.slashHelpHelp),
                 SlashCommand("stop", S.slashHelpStop),
                 SlashCommand("bypass", S.slashHelpBypass),
+                SlashCommand("model", S.slashHelpModel),
             )
         }
 
@@ -404,6 +479,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "help" -> showSlashHelp()
             "bypass" -> toggleBypass(arg)
             "stop" -> stopCurrent()
+            "model", "models" -> handleModelSlash(arg)
             else -> {
                 val S = stringsFor(lang)
                 chatItems.add(ChatItem.Error(++itemSeq, "/$command\n${S.unknownCommandHint}"))
