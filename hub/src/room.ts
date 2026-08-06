@@ -34,6 +34,7 @@ export class RoomManager {
     };
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
+    this.dedupMemberNames(room.roomId);
     return room;
   }
 
@@ -110,6 +111,7 @@ export class RoomManager {
     room.mode = mode;
     room.members = members;
     room.conductorId = mode === "conductor" ? conductorId : undefined;
+    this.dedupMemberNames(room.roomId);
     return room;
   }
 
@@ -118,10 +120,27 @@ export class RoomManager {
     if (!room) throw new Error(`unknown room: ${roomId}`);
     return this.create(
       newName || `${room.name} 副本`,
-      room.members,
+      room.members.map((m) => ({ ...m })),
       room.mode,
       room.conductorId,
     );
+  }
+
+  private dedupMemberNames(roomId: string): void {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+    const used = new Set<string>();
+    for (const m of room.members) {
+      let name = m.name;
+      let attempt = 1;
+      while (used.has(name)) {
+        attempt++;
+        const shortId = m.sessionId.slice(-4);
+        name = `${m.name} (${shortId}${attempt > 2 ? `-${attempt}` : ""})`;
+      }
+      used.add(name);
+      m.name = name;
+    }
   }
 
   /** 解析 @mention，返回目标 sessionId 列表；无 mention 时返回全部成员 */
@@ -175,6 +194,7 @@ export class RoomManager {
       const member = room.members.find((m) => m.sessionId === sessionId);
       if (member) {
         member.name = name;
+        this.dedupMemberNames(room.roomId);
         touched.push(room.roomId);
       }
     }

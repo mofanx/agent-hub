@@ -11,6 +11,7 @@ type Flow = {
   roomId: string;
   phase: "planning" | "working" | "summarizing";
   pending: Map<string, string>;
+  /** 结果以 sessionId 为 key，避免重名覆盖 */
   results: Map<string, string>;
 };
 
@@ -72,22 +73,43 @@ export class ConductorOrchestrator {
     return false;
   }
 
+  private buildMemberList(room: Room): string {
+    return room.members
+      .filter((m) => m.sessionId !== room.conductorId)
+      .map((m) => `${m.name} (id: ${m.sessionId})`)
+      .join("、") || "（无）";
+  }
+
+  private buildExample(room: Room): string {
+    const others = room.members.filter((m) => m.sessionId !== room.conductorId);
+    if (others.length === 0) return '{"tasks":[]}';
+    const sample = others.slice(0, 2).map((m, i) =>
+      JSON.stringify({ to: m.sessionId, task: i === 0 ? "先处理第一个子任务" : "再处理第二个子任务" })
+    );
+    return `{"tasks":[${sample.join(",")}]}`;
+  }
+
   async start(room: Room, text: string): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
-    const others = room.members
-      .filter((m) => m.sessionId !== room.conductorId)
-      .map((m) => m.name);
+    const example = this.buildExample(room);
     const prompt = [
       `你是群聊「${room.name}」的指挥家（Conductor）。`,
-      `可派工的成员：${others.map((n) => `@${n}`).join("、") || "（无）"}。`,
+      `可派工的成员：${this.buildMemberList(room)}。`,
       "",
       `用户任务：${text}`,
       "",
-      "请把任务拆解并派发给成员。在回复末尾输出且仅输出一个 json 代码块，格式：",
+      "请把任务拆解并派发给成员。",
+      "",
+      "要求：",
+      "- 输出必须且仅包含一个 JSON code block。",
+      "- `to` 字段必须是上面列出的成员 ID（括号中的 `id:...` 部分），不能写占位符或说明文字。",
+      "- `to` 字段也可以写 `@成员名` 作为兼容写法，但当成员名字重复时请用成员 ID。",
+      "- 如果任务简单、无需分工，输出 `{\"tasks\":[]}` 并直接给出你的回答。",
+      "",
+      "示例（请用实际成员 ID 替换，不要原样复制说明文字）：",
       "```json",
-      '{"tasks":[{"to":"成员名","task":"具体子任务描述"}]}',
+      example,
       "```",
-      "如果任务简单、无需分工，输出 {\"tasks\":[]} 并直接给出你的回答。",
     ].join("\n");
     this.flows.set(room.roomId, {
       roomId: room.roomId,
@@ -122,7 +144,7 @@ export class ConductorOrchestrator {
           room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
         flow.pending.delete(sessionId);
         flow.results.set(
-          name,
+          sessionId,
           output.trim().replace(/\s+/g, " ").slice(0, PLAN_RESULT_LEN),
         );
         this.notice({
@@ -136,6 +158,21 @@ export class ConductorOrchestrator {
       }
     }
     return false;
+  }
+
+  private resolveMember(
+    room: Room,
+    rawTo: string,
+  ): { sessionId: string; name: string } | undefined {
+    const to = rawTo.replace(/^@/, "").trim();
+    // 优先按 sessionId 匹配，支持从 "name (id: xxx)" 中提取 ID
+    const idMatch = to.match(/id:\s*([^\s)]+)/);
+    const id = idMatch?.[1] ?? to;
+    let member = room.members.find((m) => m.sessionId === id);
+    if (member) return member;
+    // 回退按名字匹配
+    member = room.members.find((m) => m.name === to);
+    return member;
   }
 
   private async dispatch(flow: Flow, room: Room, conductorOutput: string): Promise<void> {
@@ -154,12 +191,23 @@ export class ConductorOrchestrator {
     }
     flow.phase = "working";
     const assignments: string[] = [];
+    const assigned = new Set<string>();
     for (const t of tasks) {
-      const member = room.members.find(
-        (m) => m.name === t.to && m.sessionId !== room.conductorId,
-      );
+      if (!t.task.trim()) continue;
+      const member = this.resolveMember(room, t.to);
       if (!member) {
         this.notice({ roomId: flow.roomId, message: `派工跳过：未知成员 ${t.to}` });
+        continue;
+      }
+      if (member.sessionId === room.conductorId) {
+        this.notice({ roomId: flow.roomId, message: `派工跳过：${member.name} 是指挥家` });
+        continue;
+      }
+      if (assigned.has(member.sessionId)) {
+        this.notice({
+          roomId: flow.roomId,
+          message: `派工跳过：${member.name} 已被派发过，请拆分进同一条任务`,
+        });
         continue;
       }
       if (this.agent.isBusy(member.sessionId)) {
@@ -167,6 +215,7 @@ export class ConductorOrchestrator {
         continue;
       }
       flow.pending.set(member.sessionId, t.task);
+      assigned.add(member.sessionId);
       assignments.push(`@${member.name}：${t.task}`);
     }
     if (flow.pending.size === 0) {
@@ -192,7 +241,10 @@ export class ConductorOrchestrator {
 
   private async summarize(flow: Flow, room: Room): Promise<void> {
     flow.phase = "summarizing";
-    const lines = [...flow.results.entries()].map(([name, r]) => `- @${name}: ${r}`);
+    const lines = [...flow.results.entries()].map(([sessionId, r]) => {
+      const name = room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+      return `- @${name}: ${r}`;
+    });
     const prompt = [
       `你是群聊「${room.name}」的指挥家。你之前派发的子任务已全部完成，结果：`,
       ...lines,
@@ -206,7 +258,18 @@ export class ConductorOrchestrator {
 
 function parseTasks(output: string): { to: string; task: string }[] | null {
   const fence = output.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const raw = fence?.[1] ?? output.match(/\{[\s\S]*"tasks"[\s\S]*\}/)?.[0];
+  let raw = fence?.[1]?.trim();
+  if (!raw) {
+    // 没有 code fence 时，尝试找出包含 "tasks" 的最大 JSON 对象
+    const match = output.match(/\{[\s\S]*"tasks"[\s\S]*\}/);
+    if (match) {
+      raw = match[0];
+      // 简单尝试从第一个 '{' 到最后一个 '}'
+      const first = raw.indexOf("{");
+      const last = raw.lastIndexOf("}");
+      if (first >= 0 && last > first) raw = raw.slice(first, last + 1);
+    }
+  }
   if (!raw) return null;
   try {
     const obj = JSON.parse(raw);
@@ -217,8 +280,8 @@ function parseTasks(output: string): { to: string; task: string }[] | null {
         return typeof o?.to === "string" && typeof o?.task === "string";
       })
       .map((t: { to: string; task: string }) => ({
-        to: t.to.replace(/^@/, ""),
-        task: t.task,
+        to: t.to.replace(/^@/, "").trim(),
+        task: t.task.trim(),
       }));
   } catch {
     return null;
