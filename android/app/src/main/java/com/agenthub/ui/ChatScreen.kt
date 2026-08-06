@@ -1,7 +1,15 @@
 package com.agenthub.ui
 
+import android.graphics.BitmapFactory
+import android.util.Base64
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.composed
 import androidx.compose.ui.input.pointer.*
@@ -11,24 +19,43 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.FormatQuote
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -39,10 +66,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,18 +78,31 @@ import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.launch
+import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
 
@@ -72,25 +111,39 @@ import com.agenthub.ChatViewModel
 fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
     var input by remember { mutableStateOf("") }
-    val listState = rememberLazyListState()
+    val sessionKey = vm.currentRoom?.roomId ?: vm.currentSession?.sessionId ?: ""
+    val listState = remember(sessionKey) { LazyListState(0, 0) }
+    val isAtBottom by produceState(false, listState, vm.chatItems.size) {
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                value = index == 0 && offset <= 20
+            }
+    }
+    val scope = rememberCoroutineScope()
+    val messages by remember { derivedStateOf { vm.chatItems.asReversed() } }
     val isRoom = vm.currentRoom != null
     val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let { vm.addAttachment(it) }
+    }
 
-    LaunchedEffect(vm.chatItems.size, vm.chatItems.lastOrNull()?.let {
-        when (it) {
-            is ChatItem.Assistant -> it.text.length
-            is ChatItem.Thought -> it.text.length
-            else -> 0
+    LaunchedEffect(vm.chatItems.lastOrNull()) {
+        val latest = vm.chatItems.lastOrNull()
+        if (latest != null && (latest is ChatItem.User || isAtBottom)) {
+            listState.scrollToItem(0, 0)
         }
-    }) {
-        if (vm.chatItems.isNotEmpty()) listState.animateScrollToItem(vm.chatItems.lastIndex)
     }
 
     LaunchedEffect(vm.currentRoom?.roomId, vm.currentSession?.sessionId) {
         vm.refreshBusy()
     }
 
+    BackHandler {
+        vm.backToList()
+    }
+
     Scaffold(
+        contentWindowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
         topBar = {
             TopAppBar(
                 title = {
@@ -127,13 +180,56 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+        Box(
+            Modifier
+                .padding(padding)
+                .fillMaxSize(),
+        ) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(
+                        WindowInsets.ime.exclude(WindowInsets.navigationBars),
+                    ),
             ) {
-                items(vm.chatItems.size) { i ->
-                    ChatBubble(vm.chatItems[i], vm, showAuthor = isRoom)
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    reverseLayout = true,
+                    state = listState,
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                ) {
+                    itemsIndexed(
+                        messages,
+                        key = { _, item -> item.id },
+                    ) { index, item ->
+                        val nextAuthor = messages.getOrNull(index + 1)?.author
+                        ChatBubble(
+                            item,
+                            vm,
+                            showAuthor = isRoom && nextAuthor != item.author,
+                        )
+                    }
+                }
+                if (!isAtBottom && vm.chatItems.isNotEmpty()) {
+                    FilledIconButton(
+                        onClick = {
+                            scope.launch { listState.scrollToLast() }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 12.dp)
+                            .size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                        ),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.KeyboardArrowDown,
+                            contentDescription = "跳转到最下方",
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                 }
             }
             if (vm.generating) {
@@ -206,7 +302,24 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 val q = input.substring(at + 1)
                 if (q.contains(' ') || q.contains('\n')) null else q
             }
-            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (vm.pendingAttachments.isNotEmpty()) {
+                AttachmentPreviews(
+                    attachments = vm.pendingAttachments,
+                    onRemove = { vm.removeAttachment(it) },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                )
+            }
+            Row(
+                Modifier
+                    .padding(horizontal = 12.dp, vertical = 3.dp)
+                    .fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        RoundedCornerShape(24.dp),
+                    )
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 var cmdMenu by remember { mutableStateOf(false) }
                 Box {
                     IconButton(onClick = { cmdMenu = true }) {
@@ -259,23 +372,32 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
                 Box(Modifier.weight(1f)) {
-                    OutlinedTextField(
+                    BasicTextField(
                         value = input,
                         onValueChange = { input = it },
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = {
-                            Text(if (isRoom) S.inputRoom else S.inputSingle)
-                        },
-                        shape = RoundedCornerShape(24.dp),
-                        maxLines = 4,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            unfocusedBorderColor = Color.Transparent,
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedContainerColor =
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            focusedContainerColor =
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
                         ),
+                        maxLines = 4,
+                        minLines = 1,
+                        decorationBox = { innerTextField ->
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                if (input.isEmpty()) {
+                                    Text(
+                                        if (isRoom) S.inputRoom else S.inputSingle,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        },
                     )
                     if (mentionQuery != null) {
                         val matches = vm.currentRoom!!.members.filter {
@@ -321,16 +443,95 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     }
                 }
-                Spacer(Modifier.size(8.dp))
-                FilledIconButton(
-                    onClick = {
-                        if (isRoom) vm.sendRoomMessage(input.trim()) else vm.sendPrompt(input.trim())
-                        input = ""
-                    },
-                    enabled = input.isNotBlank() && !vm.generating,
-                    modifier = Modifier.size(48.dp),
+                IconButton(onClick = { pickImage.launch("image/*") }) {
+                    Icon(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = "上传图片",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (input.isNotBlank() || vm.pendingAttachments.isNotEmpty()) {
+                    Spacer(Modifier.size(4.dp))
+                    FilledIconButton(
+                        onClick = {
+                            if (isRoom) vm.sendRoomMessage(input.trim()) else vm.sendPrompt(input.trim())
+                            input = ""
+                        },
+                        enabled = !vm.generating,
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = S.send)
+                    }
+                }
+            }
+        }
+    }
+}
+}
+
+private suspend fun LazyListState.scrollToLast() {
+    if (layoutInfo.totalItemsCount > 0) {
+        scrollToItem(0, 0)
+    }
+}
+
+@Composable
+fun AttachmentImage(attachment: Attachment, modifier: Modifier = Modifier) {
+    val bitmap = remember(attachment.base64) {
+        try {
+            val bytes = Base64.decode(attachment.base64, Base64.NO_WRAP)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) {
+            null
+        }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = attachment.name,
+            modifier = modifier,
+            contentScale = ContentScale.Crop,
+        )
+    } else {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Icon(
+                Icons.Filled.AttachFile,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+fun AttachmentPreviews(
+    attachments: List<Attachment>,
+    onRemove: (Attachment) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyRow(modifier = modifier.fillMaxWidth().height(96.dp)) {
+        items(attachments, key = { it.base64.hashCode() }) { a ->
+            Box(Modifier.padding(4.dp).size(88.dp)) {
+                AttachmentImage(
+                    a,
+                    Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)),
+                )
+                IconButton(
+                    onClick = { onRemove(a) },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(20.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                            shape = RoundedCornerShape(50),
+                        ),
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = S.send)
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "移除",
+                        modifier = Modifier.size(14.dp),
+                    )
                 }
             }
         }
@@ -360,24 +561,46 @@ private fun MessageBubbleBox(
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
+    var showSelectText by remember { mutableStateOf(false) }
+    var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     Box(
         modifier = modifier
-            .rightClickable { expanded = true }
+            .rightClickable {
+                menuOffset = IntOffset(it.x.toInt(), it.y.toInt())
+                expanded = true
+            }
             .pointerInput(Unit) {
-                detectTapGestures(onLongPress = { expanded = true })
+                detectTapGestures(
+                    onLongPress = { offset ->
+                        menuOffset = IntOffset(offset.x.toInt(), offset.y.toInt())
+                        expanded = true
+                    },
+                )
             },
     ) {
         content()
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
+        Box(
+            Modifier
+                .offset { menuOffset }
+                .size(1.dp),
         ) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
             DropdownMenuItem(
                 text = { Text(S.copy) },
                 onClick = {
                     clipboard.setText(AnnotatedString(copyText))
                     expanded = false
                     Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(S.selectText) },
+                onClick = {
+                    expanded = false
+                    showSelectText = true
                 },
             )
             quote?.let { (author, text) ->
@@ -389,19 +612,63 @@ private fun MessageBubbleBox(
                     },
                 )
             }
+            }
+        }
+        if (showSelectText) {
+            Dialog(onDismissRequest = { showSelectText = false }) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                ) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                    ) {
+                        Text(
+                            S.selectText,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(bottom = 12.dp),
+                        )
+                        SelectionContainer {
+                            Text(
+                                copyText,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 360.dp)
+                                    .verticalScroll(rememberScrollState()),
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(
+                            onClick = { showSelectText = false },
+                            modifier = Modifier.align(Alignment.End),
+                        ) {
+                            Text(S.ok)
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-fun Modifier.rightClickable(onRightClick: () -> Unit): Modifier = composed {
+fun Modifier.rightClickable(onRightClick: (Offset) -> Unit): Modifier = composed {
     val updated by rememberUpdatedState(onRightClick)
     pointerInput(Unit) {
         awaitPointerEventScope {
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                    val pos = event.changes.firstOrNull()?.position ?: Offset.Zero
                     event.changes.forEach { it.consume() }
-                    updated()
+                    updated(pos)
                 }
             }
         }
@@ -440,7 +707,7 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
-                modifier = Modifier.padding(vertical = 4.dp).widthIn(max = 300.dp),
+                modifier = Modifier.padding(vertical = 4.dp),
             ) {
                 Surface(
                     shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
@@ -456,7 +723,23 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                             )
                             Spacer(Modifier.height(4.dp))
                         }
-                        Text(item.text, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        if (item.text.isNotBlank()) {
+                            Text(item.text, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                        if (item.attachments.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            LazyRow(Modifier.height(120.dp)) {
+                                items(item.attachments, key = { it.base64.hashCode() }) { a ->
+                                    AttachmentImage(
+                                        a,
+                                        Modifier
+                                            .padding(end = 8.dp)
+                                            .size(120.dp)
+                                            .clip(RoundedCornerShape(12.dp)),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -468,10 +751,11 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
-                modifier = Modifier.widthIn(max = 320.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 val assistantColor = MaterialTheme.colorScheme.onSurfaceVariant
                 Surface(
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
                 ) {

@@ -141,6 +141,20 @@ export class RoomManager {
     return touched;
   }
 
+  /** 把某个成员的 sessionId 替换为新的 sessionId，用于空会话重建 */
+  updateMemberSessionId(oldSessionId: string, newSessionId: string): string[] {
+    const touched: string[] = [];
+    for (const room of this.rooms.values()) {
+      const member = room.members.find((m) => m.sessionId === oldSessionId);
+      if (member) {
+        member.sessionId = newSessionId;
+        if (room.conductorId === oldSessionId) room.conductorId = newSessionId;
+        touched.push(room.roomId);
+      }
+    }
+    return touched;
+  }
+
   /** 某个 session 一轮结束后，把输出摘要写上黑板（供其他成员参考） */
   recordOutput(sessionId: string, sessionName: string, output: string): string[] {
     const touched: string[] = [];

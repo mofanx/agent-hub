@@ -290,21 +290,40 @@ export class AcpAgent {
   }
 
   async prompt(sessionId: string, text: string): Promise<void> {
+    await this.promptContent(sessionId, [{ type: "text", text }]);
+  }
+
+  async promptContent(
+    sessionId: string,
+    prompt: Array<Record<string, unknown>>,
+  ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (entry.busy) throw new Error(`session busy: ${entry.name}`);
     entry.busy = true;
     entry.stoppable = true;
     entry.turnText = "";
+    for (const block of prompt) {
+      if (block.type === "text") {
+        entry.turnText += (block.text as string) ?? "";
+      } else if (block.type === "image") {
+        entry.turnText += "[图片]";
+      }
+    }
     this.emit({
       method: "session.generating",
       params: { sessionId, stoppable: true },
     });
     this.ctx!.request(acp.methods.agent.session.prompt, {
       sessionId,
-      prompt: [{ type: "text", text }],
+      prompt,
     })
-      .then((resp) => this.finishTurn(sessionId, resp.stopReason))
+      .then((resp) =>
+        this.finishTurn(
+          sessionId,
+          (resp as { stopReason?: unknown }).stopReason as string,
+        ),
+      )
       .catch((err: unknown) => {
         entry.busy = false;
         entry.stoppable = false;
@@ -337,6 +356,11 @@ export class AcpAgent {
   /** 本地摘除会话（不通知 agent，用于删除） */
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+  }
+
+  renameSession(sessionId: string, name: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) entry.name = name;
   }
 
   listSessions(): {

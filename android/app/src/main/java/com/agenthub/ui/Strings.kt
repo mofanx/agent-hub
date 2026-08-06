@@ -67,6 +67,7 @@ interface Strings {
     val stop: String
     val quoting: String
     val copy: String
+    val selectText: String
     val copied: String
     val inputRoom: String
     val inputSingle: String
@@ -114,6 +115,8 @@ interface Strings {
     val checkForUpdates: String
     val openInBrowser: String
     val copyLink: String
+    val clone: String
+    val clonedSession: String
 }
 
 object ZhStrings : Strings {
@@ -181,6 +184,7 @@ object ZhStrings : Strings {
     override val stop = "停止"
     override val quoting = "引用"
     override val copy = "复制"
+    override val selectText = "选取文字"
     override val copied = "已复制"
     override val inputRoom = "群聊消息，@名字 指定成员"
     override val inputSingle = "给 AI 下指令…"
@@ -228,6 +232,8 @@ object ZhStrings : Strings {
     override val checkForUpdates = "检查更新"
     override val openInBrowser = "打开"
     override val copyLink = "复制"
+    override val clone = "克隆"
+    override val clonedSession = "已克隆会话「%s」"
 }
 
 object EnStrings : Strings {
@@ -295,6 +301,7 @@ object EnStrings : Strings {
     override val stop = "Stop"
     override val quoting = "Quote"
     override val copy = "Copy"
+    override val selectText = "Select text"
     override val copied = "Copied"
     override val inputRoom = "Message, @name to mention"
     override val inputSingle = "Send an instruction…"
@@ -342,6 +349,8 @@ object EnStrings : Strings {
     override val checkForUpdates = "Check for updates"
     override val openInBrowser = "Open"
     override val copyLink = "Copy"
+    override val clone = "Clone"
+    override val clonedSession = "Cloned session \"%s\""
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }

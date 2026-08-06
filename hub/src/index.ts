@@ -103,7 +103,11 @@ async function ensureLocalAgent(connection: Connection): Promise<void> {
 }
 
 const agentOps: AgentOps = {
-  prompt: (sessionId, text) => ownerOf(sessionId).prompt(sessionId, text),
+  prompt: (sessionId, content) => {
+    const agent = ownerOf(sessionId);
+    if (typeof content === "string") return agent.prompt(sessionId, content);
+    return agent.promptContent(sessionId, content);
+  },
   isBusy: (sessionId) => ownerOf(sessionId).isBusy(sessionId),
 };
 const conductor = new ConductorOrchestrator(agentOps, rooms, (n) =>
@@ -139,6 +143,7 @@ function listAllSessions(): {
   agent: string;
   address?: string | undefined;
   connectionId?: string | undefined;
+  roleId?: string | undefined;
   origin?: string | undefined;
   offline: boolean;
   archived: boolean;
@@ -154,6 +159,7 @@ function listAllSessions(): {
         ...s,
         agent: c?.agent ?? meta?.agent ?? "devin",
         connectionId,
+        roleId: meta?.roleId,
         origin: originFor(meta) ?? c?.name,
         offline: false,
         archived: meta?.archived ?? false,
@@ -371,12 +377,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const cwd = String(req.params?.cwd ?? connection.cwd ?? role?.cwd ?? "");
       const name = req.params?.name ? String(req.params.name) : role?.name;
       const s = await agent.createSession(cwd, name);
+      const finalRoleId = role?.id ?? roleId ?? undefined;
       sessionMetas.set(s.sessionId, {
         sessionId: s.sessionId,
         cwd,
         name: s.name,
         agent: connection.agent,
         connectionId: connection.id,
+        roleId: finalRoleId,
       });
       owners.set(s.sessionId, connection.id);
       persistState();
@@ -387,7 +395,59 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           .prompt(s.sessionId, personaPrompt)
           .catch((err) => console.warn("[role] persona inject failed:", String(err)));
       }
-      return { ...s, agent: connection.agent, connectionId: connection.id };
+      return { ...s, agent: connection.agent, connectionId: connection.id, roleId: finalRoleId };
+    }
+    case "session.clone": {
+      const sourceSessionId = String(req.params?.sessionId ?? "");
+      const source = sessionMetas.get(sourceSessionId);
+      if (!source) throw new Error(`unknown session: ${sourceSessionId}`);
+      const connectionId = source.connectionId;
+      if (!connectionId) throw new Error("source session has no connection");
+      const connection = getConnectionById(connectionId);
+      if (!connection) throw new Error(`unknown connection: ${connectionId}`);
+      if (connection.local) await ensureLocalAgent(connection);
+      const agent = agents.get(connection.id);
+      if (!agent) throw new Error("agent 未连接");
+
+      const baseName = source.name;
+      const existingNames = new Set(
+        [...sessionMetas.values()].map((m) => m.name),
+      );
+      let newName = `${baseName} (2)`;
+      let counter = 2;
+      while (existingNames.has(newName)) {
+        counter++;
+        newName = `${baseName} (${counter})`;
+      }
+
+      const s = await agent.createSession(source.cwd, newName);
+      sessionMetas.set(s.sessionId, {
+        sessionId: s.sessionId,
+        cwd: source.cwd,
+        name: s.name,
+        agent: connection.agent,
+        connectionId: connection.id,
+        roleId: source.roleId,
+      });
+      owners.set(s.sessionId, connection.id);
+      persistState();
+
+      if (source.roleId) {
+        const role = store.listRoles().find((r) => r.id === source.roleId);
+        if (role) {
+          const personaPrompt =
+            `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
+          agentOps
+            .prompt(s.sessionId, personaPrompt)
+            .catch((err) => console.warn("[role] persona inject failed:", String(err)));
+        }
+      }
+      return {
+        ...s,
+        agent: connection.agent,
+        connectionId: connection.id,
+        roleId: source.roleId,
+      };
     }
     case "role.list":
       return { roles: store.listRoles() };
@@ -430,7 +490,22 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (connection?.local) await ensureLocalAgent(connection);
       const agent = agents.get(connectionId);
       if (!agent) throw new Error("agent 未连接");
-      const ok = await agent.resumeSession(meta.sessionId, meta.cwd, meta.name);
+      let ok = await agent.resumeSession(meta.sessionId, meta.cwd, meta.name);
+      if (!ok && store.read("session", sessionId).length === 0) {
+        // 该会话在 agent 中没有持久化记录且没有任何对话历史，直接重建同名会话
+        const s = await agent.createSession(meta.cwd, meta.name);
+        sessionMetas.delete(sessionId);
+        owners.delete(sessionId);
+        const newMeta = { ...meta, sessionId: s.sessionId, name: s.name };
+        sessionMetas.set(s.sessionId, newMeta);
+        owners.set(s.sessionId, connectionId);
+        rooms.updateMemberSessionId(sessionId, s.sessionId);
+        persistState();
+        console.log(
+          `[hub] recreated empty session ${sessionId} -> ${s.sessionId} (${s.name})`,
+        );
+        return { resumed: true, sessionId: s.sessionId };
+      }
       if (ok) owners.set(sessionId, connectionId);
       return { resumed: ok };
     }
@@ -441,6 +516,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!meta) throw new Error(`unknown session: ${sessionId}`);
       if (!name) throw new Error("name required");
       meta.name = name;
+      agentForSession(sessionId)?.renameSession(sessionId, name);
       const roomIds = rooms.updateMemberName(sessionId, name);
       persistState();
       return { renamed: true, name, roomIds };
@@ -615,6 +691,17 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
 
+      const rawContent = req.params?.content;
+      const content: Array<Record<string, unknown>> = Array.isArray(rawContent)
+        ? (rawContent as Array<Record<string, unknown>>)
+        : text
+        ? [{ type: "text", text }]
+        : [];
+      const imageBlocks = content.filter((b) => b.type !== "text");
+      const historyText = content
+        .map((b) => (b.type === "text" ? String(b.text ?? "") : "[图片]"))
+        .join("") || "（图片）";
+
       const slash = parseSlash(text);
       if (slash?.command === "stop") {
         return handleRoomSlash(room, slash, text, quote);
@@ -624,7 +711,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         at: Date.now(),
         kind: "user",
         author: "我",
-        text: quote ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${text}` : text,
+        text: quote
+          ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
+          : historyText,
       });
       const { targets, mentioned } = rooms.route(roomId, text);
       if (room.mode === "conductor" && mentioned.length === 0) {
@@ -643,8 +732,11 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           skipped.push(sid);
           continue;
         }
-        const prompt = rooms.buildPrompt(roomId, text, sid, quote);
-        await agentOps.prompt(sid, prompt);
+        const promptText = rooms.buildPrompt(roomId, text, sid, quote);
+        const promptContent = imageBlocks.length > 0
+          ? [{ type: "text", text: promptText }, ...imageBlocks]
+          : promptText;
+        await agentOps.prompt(sid, promptContent);
         sent.push(sid);
       }
       if (skipped.length > 0) {
@@ -661,17 +753,33 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     case "prompt.send": {
       const sessionId = String(req.params?.sessionId ?? "");
       const text = String(req.params?.text ?? "");
-      const slash = parseSlash(text);
+      const rawContent = req.params?.content;
+      let promptContent: Array<Record<string, unknown>>;
+      if (Array.isArray(rawContent)) {
+        promptContent = rawContent as Array<Record<string, unknown>>;
+      } else if (text) {
+        promptContent = [{ type: "text", text }];
+      } else {
+        throw new Error("prompt content or text required");
+      }
+      const slashText = text || promptContent
+        .filter((b) => b.type === "text")
+        .map((b) => String(b.text ?? ""))
+        .join("");
+      const slash = parseSlash(slashText);
       if (slash?.command === "stop") {
         return handleSessionSlash(sessionId, slash);
       }
+      const historyText = promptContent
+        .map((b) => (b.type === "text" ? String(b.text ?? "") : "[图片]"))
+        .join("") || "（图片）";
       store.append("session", sessionId, {
         at: Date.now(),
         kind: "user",
         author: "我",
-        text,
+        text: historyText,
       });
-      await agentOps.prompt(sessionId, text);
+      await agentOps.prompt(sessionId, promptContent);
       return { accepted: true };
     }
     case "session.cancel":

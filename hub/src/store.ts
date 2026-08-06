@@ -21,6 +21,7 @@ export type SessionMeta = {
   agent: string;
   address?: string | undefined;
   connectionId?: string | undefined;
+  roleId?: string | undefined;
   archived?: boolean | undefined;
 };
 

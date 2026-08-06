@@ -1,7 +1,9 @@
 import type { Room, RoomManager } from "./room.js";
 
+export type PromptContent = Array<Record<string, unknown>>;
+
 export interface AgentOps {
-  prompt(sessionId: string, text: string): Promise<void>;
+  prompt(sessionId: string, content: string | PromptContent): Promise<void>;
   isBusy(sessionId: string): boolean;
 }
 

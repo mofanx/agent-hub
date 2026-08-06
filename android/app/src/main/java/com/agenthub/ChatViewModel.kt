@@ -3,13 +3,18 @@ package com.agenthub
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.util.Base64
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -20,27 +25,50 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import com.agenthub.ui.stringsFor
 
+data class Attachment(
+    val mimeType: String,
+    val base64: String,
+    val name: String = "",
+)
+
 sealed class ChatItem {
+    abstract val id: Long
     abstract val author: String
 
     data class User(
+        override val id: Long,
         val text: String,
+        val attachments: List<Attachment> = emptyList(),
         override val author: String = "我",
         val quoteAuthor: String? = null,
         val quoteText: String? = null,
     ) : ChatItem()
-    data class System(val text: String, override val author: String = "") : ChatItem()
-    data class Assistant(val id: Long, val text: String, override val author: String) : ChatItem()
-    data class Thought(val id: Long, val text: String, override val author: String) : ChatItem()
+    data class System(
+        override val id: Long,
+        val text: String,
+        override val author: String = "",
+    ) : ChatItem()
+    data class Assistant(override val id: Long, val text: String, override val author: String) : ChatItem()
+    data class Thought(override val id: Long, val text: String, override val author: String) : ChatItem()
     data class Tool(
+        override val id: Long,
         val toolCallId: String,
         val title: String,
         val status: String,
         override val author: String,
     ) : ChatItem()
-    data class Plan(val entries: List<String>, override val author: String) : ChatItem()
-    data class Error(val text: String, override val author: String = "") : ChatItem()
+    data class Plan(
+        override val id: Long,
+        val entries: List<String>,
+        override val author: String,
+    ) : ChatItem()
+    data class Error(
+        override val id: Long,
+        val text: String,
+        override val author: String = "",
+    ) : ChatItem()
     data class Permission(
+        override val id: Long,
         val requestId: String,
         val title: String,
         val options: List<Pair<String, String>>,
@@ -68,6 +96,7 @@ data class SessionInfo(
     val agent: String = "devin",
     val address: String = "",
     val connectionId: String? = null,
+    val roleId: String? = null,
     val offline: Boolean = false,
     val archived: Boolean = false,
 )
@@ -179,6 +208,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
     val busyIds = mutableStateListOf<String>()
+    val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
 
     init {
@@ -295,6 +325,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     private var itemSeq = 0L
+    private var eventJob: Job? = null
 
     fun sessionName(sessionId: String): String =
         sessions.find { it.sessionId == sessionId }?.let { displayName(it) }
@@ -333,9 +364,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 })
                 val bypass = result["bypass"]?.jsonPrimitive?.content?.toBoolean() ?: false
                 val S = stringsFor(lang)
-                chatItems.add(ChatItem.System(if (bypass) S.bypassEnabled else S.bypassDisabled))
+                chatItems.add(ChatItem.System(++itemSeq, if (bypass) S.bypassEnabled else S.bypassDisabled))
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(e.message ?: "bypass failed"))
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "bypass failed"))
             }
         }
     }
@@ -355,7 +386,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun showSlashHelp() {
         val S = stringsFor(lang)
         chatItems.add(
-            ChatItem.System(
+            ChatItem.System(++itemSeq, 
                 buildString {
                     appendLine(S.slashHelpTitle)
                     slashCommands.forEach { appendLine(it.description) }
@@ -375,7 +406,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "stop" -> stopCurrent()
             else -> {
                 val S = stringsFor(lang)
-                chatItems.add(ChatItem.Error("/$command\n${S.unknownCommandHint}"))
+                chatItems.add(ChatItem.Error(++itemSeq, "/$command\n${S.unknownCommandHint}"))
             }
         }
         return true
@@ -406,12 +437,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 connectError = msg
             })
         hub.onClosed = { agentStatus = "连接已断开" }
-        viewModelScope.launch {
+        eventJob = viewModelScope.launch {
             hub.events.collect { handleEvent(it) }
         }
     }
 
     fun disconnect() {
+        eventJob?.cancel()
+        eventJob = null
         hub.disconnect()
         val app = getApplication<Application>()
         app.stopService(Intent(app, HubService::class.java))
@@ -470,6 +503,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             o["agent"]?.jsonPrimitive?.content ?: "devin",
                             o["address"]?.jsonPrimitive?.content ?: "",
                             o["connectionId"]?.jsonPrimitive?.content,
+                            o["roleId"]?.jsonPrimitive?.content,
                             o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         )
@@ -545,10 +579,38 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["agent"]?.jsonPrimitive?.content ?: "devin",
                     o["address"]?.jsonPrimitive?.content ?: "",
                     o["connectionId"]?.jsonPrimitive?.content,
+                    o["roleId"]?.jsonPrimitive?.content,
                 )
                 noteCwd(cwd)
                 sessions.add(session)
-                openChat(session)
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    fun cloneSession(session: SessionInfo, onCloned: ((SessionInfo) -> Unit)? = null) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("session.clone", buildJsonObject {
+                    put("sessionId", session.sessionId)
+                })
+                val o = result
+                val newSession = SessionInfo(
+                    o["sessionId"]!!.jsonPrimitive.content,
+                    o["cwd"]?.jsonPrimitive?.content ?: session.cwd,
+                    o["name"]?.jsonPrimitive?.content ?: "",
+                    false,
+                    o["agent"]?.jsonPrimitive?.content ?: session.agent,
+                    o["address"]?.jsonPrimitive?.content ?: "",
+                    o["connectionId"]?.jsonPrimitive?.content ?: session.connectionId,
+                    o["roleId"]?.jsonPrimitive?.content ?: session.roleId,
+                )
+                sessions.add(newSession)
+                onCloned?.invoke(newSession)
+                val S = stringsFor(lang)
+                chatItems.add(ChatItem.System(++itemSeq, S.clonedSession.format(newSession.name)))
             } catch (e: Exception) {
                 connectError = e.message
             }
@@ -671,9 +733,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("sessionId", session.sessionId)
                 })
                 if (result["resumed"]?.jsonPrimitive?.content?.toBoolean() == true) {
-                    val idx = sessions.indexOfFirst { it.sessionId == session.sessionId }
-                    if (idx >= 0) sessions[idx] = session.copy(offline = false)
-                    openChat(session.copy(offline = false))
+                    val newSessionId = result["sessionId"]?.jsonPrimitive?.content
+                    val updatedSession = if (newSessionId != null && newSessionId != session.sessionId) {
+                        val newSession = session.copy(sessionId = newSessionId, offline = false)
+                        val oldIdx = sessions.indexOfFirst { it.sessionId == session.sessionId }
+                        if (oldIdx >= 0) sessions.removeAt(oldIdx)
+                        sessions.add(0, newSession)
+                        newSession
+                    } else {
+                        val idx = sessions.indexOfFirst { it.sessionId == session.sessionId }
+                        if (idx >= 0) sessions[idx] = session.copy(offline = false)
+                        session.copy(offline = false)
+                    }
+                    openChat(updatedSession)
                 } else {
                     connectError = "恢复失败：agent 不支持或会话已失效"
                 }
@@ -725,17 +797,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call(method, buildJsonObject { put(idKey, id) })
                 val entries = result["entries"]?.jsonArray ?: return@launch
+                val items = mutableListOf<ChatItem>()
                 for (e in entries) {
                     val o = e.jsonObject
                     val kind = o["kind"]!!.jsonPrimitive.content
                     val author = o["author"]!!.jsonPrimitive.content
                     val text = o["text"]!!.jsonPrimitive.content
                     when (kind) {
-                        "user" -> chatItems.add(ChatItem.User(text))
-                        "assistant" -> chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
-                        "system" -> chatItems.add(ChatItem.System(text))
+                        "user" -> items.add(ChatItem.User(++itemSeq, text))
+                        "assistant" -> items.add(ChatItem.Assistant(++itemSeq, text, author))
+                        "system" -> items.add(ChatItem.System(++itemSeq, text))
                     }
                 }
+                chatItems.addAll(items)
                 syncBusyIds()
             } catch (_: Exception) {
             }
@@ -770,6 +844,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["agent"]?.jsonPrimitive?.content ?: "devin",
                         o["address"]?.jsonPrimitive?.content ?: "",
                         o["connectionId"]?.jsonPrimitive?.content,
+                        o["roleId"]?.jsonPrimitive?.content,
                         o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                     )
@@ -891,36 +966,88 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sendPrompt(text: String) {
         val session = currentSession ?: return
+        if (text.isBlank() && pendingAttachments.isEmpty()) return
         if (handleSlashCommand(text)) return
         val q = quote
-        chatItems.add(ChatItem.User(text, quoteAuthor = q?.first, quoteText = q?.second))
+        val attachments = pendingAttachments.toList()
+        chatItems.add(
+            ChatItem.User(
+                ++itemSeq,
+                text,
+                attachments,
+                quoteAuthor = q?.first,
+                quoteText = q?.second,
+            ),
+        )
         quote = null
+        pendingAttachments.clear()
         val fullText = if (q != null) "（引用 ${q.first} 的消息：\"${q.second.take(300)}\"）\n$text" else text
         busyIds.add(session.sessionId)
         viewModelScope.launch {
             try {
                 hub.call("prompt.send", buildJsonObject {
                     put("sessionId", session.sessionId)
-                    put("text", fullText)
+                    put("content", buildJsonArray {
+                        if (fullText.isNotBlank()) {
+                            add(buildJsonObject {
+                                put("type", "text")
+                                put("text", fullText)
+                            })
+                        }
+                        attachments.forEach { a ->
+                            add(buildJsonObject {
+                                put("type", "image")
+                                put("mimeType", a.mimeType)
+                                put("data", a.base64)
+                            })
+                        }
+                    })
                 })
             } catch (e: Exception) {
                 busyIds.remove(session.sessionId)
-                chatItems.add(ChatItem.Error(e.message ?: "send failed"))
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "send failed"))
             }
         }
     }
 
     fun sendRoomMessage(text: String) {
         val room = currentRoom ?: return
+        if (text.isBlank() && pendingAttachments.isEmpty()) return
         if (handleSlashCommand(text)) return
         val q = quote
-        chatItems.add(ChatItem.User(text, quoteAuthor = q?.first, quoteText = q?.second))
+        val attachments = pendingAttachments.toList()
+        chatItems.add(
+            ChatItem.User(
+                ++itemSeq,
+                text,
+                attachments,
+                quoteAuthor = q?.first,
+                quoteText = q?.second,
+            ),
+        )
         quote = null
+        pendingAttachments.clear()
         viewModelScope.launch {
             try {
+                val content = buildJsonArray {
+                    if (text.isNotBlank()) {
+                        add(buildJsonObject {
+                            put("type", "text")
+                            put("text", text)
+                        })
+                    }
+                    attachments.forEach { a ->
+                        add(buildJsonObject {
+                            put("type", "image")
+                            put("mimeType", a.mimeType)
+                            put("data", a.base64)
+                        })
+                    }
+                }
                 val result = hub.call("room.message", buildJsonObject {
                     put("roomId", room.roomId)
                     put("text", text)
+                    put("content", content)
                     if (q != null) {
                         put("quote", buildJsonObject {
                             put("author", q.first)
@@ -933,8 +1060,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (!busyIds.contains(sid)) busyIds.add(sid)
                 }
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(e.message ?: "send failed"))
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "send failed"))
             }
+        }
+    }
+
+    fun addAttachment(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val cr = getApplication<Application>().contentResolver
+                val mime = cr.getType(uri) ?: inferMimeType(uri)
+                val bytes = withContext(Dispatchers.IO) {
+                    cr.openInputStream(uri)?.use { it.readBytes() } ?: byteArrayOf()
+                }
+                if (bytes.isEmpty()) throw Exception("empty file")
+                val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                val name = uri.lastPathSegment ?: ""
+                pendingAttachments.add(Attachment(mime, base64, name))
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "attach failed"))
+            }
+        }
+    }
+
+    fun removeAttachment(attachment: Attachment) {
+        pendingAttachments.remove(attachment)
+    }
+
+    private fun inferMimeType(uri: Uri): String {
+        val ext = uri.path?.substringAfterLast('.', "")?.lowercase()
+        return when (ext) {
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "svg" -> "image/svg+xml"
+            else -> "image/*"
         }
     }
 
@@ -1018,14 +1179,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 busyIds.remove(sid)
                 if ((inScope(sid) || sid.isEmpty()) && shouldShowInRoom(sid)) {
                     chatItems.add(
-                        ChatItem.Error(p["message"]!!.jsonPrimitive.content, sessionName(sid))
+                        ChatItem.Error(++itemSeq, p["message"]!!.jsonPrimitive.content, sessionName(sid))
                     )
                 }
             }
             "room.notice" -> {
                 val p = obj["params"]!!.jsonObject
                 if (p["roomId"]!!.jsonPrimitive.content == currentRoom?.roomId) {
-                    chatItems.add(ChatItem.System(p["message"]!!.jsonPrimitive.content))
+                    chatItems.add(ChatItem.System(++itemSeq, p["message"]!!.jsonPrimitive.content))
                 }
             }
             "permission.request" -> {
@@ -1040,7 +1201,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["optionId"]!!.jsonPrimitive.content to o["name"]!!.jsonPrimitive.content
                 }
                 chatItems.add(
-                    ChatItem.Permission(
+                    ChatItem.Permission(++itemSeq, 
                         p["requestId"]!!.jsonPrimitive.content,
                         title,
                         options,
@@ -1074,7 +1235,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             "tool_call" -> {
                 chatItems.add(
-                    ChatItem.Tool(
+                    ChatItem.Tool(++itemSeq, 
                         u["toolCallId"]!!.jsonPrimitive.content,
                         u["title"]?.jsonPrimitive?.content ?: "tool",
                         u["status"]?.jsonPrimitive?.content ?: "pending",
@@ -1100,7 +1261,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val content = e["content"]?.jsonPrimitive?.content ?: ""
                     "[$status] $content"
                 } ?: return
-                chatItems.add(ChatItem.Plan(entries, author))
+                chatItems.add(ChatItem.Plan(++itemSeq, entries, author))
             }
         }
     }

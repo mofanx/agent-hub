@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -17,9 +18,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.FolderOpen
@@ -42,6 +45,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -76,6 +81,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var renameTarget by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
     var inBatchMode by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableStateOf(0) }
     val selectedSessionIds = remember { mutableStateListOf<String>() }
     val selectedRoomIds = remember { mutableStateListOf<String>() }
     var searchQuery by remember { mutableStateOf("") }
@@ -206,6 +212,32 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     },
                 )
+            } else {
+                NavigationBar {
+                    NavigationBarItem(
+                        icon = { Icon(Icons.Filled.Chat, contentDescription = S.sessions) },
+                        label = { Text(S.sessions) },
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                    )
+                    NavigationBarItem(
+                        icon = { Icon(Icons.Filled.Groups, contentDescription = S.rooms) },
+                        label = { Text(S.rooms) },
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                    )
+                }
+            }
+        },
+        floatingActionButton = {
+            if (!inBatchMode) {
+                FloatingActionButton(
+                    onClick = {
+                        if (selectedTab == 0) showCreate = true else showCreateRoom = true
+                    },
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = S.newSession)
+                }
             }
         },
     ) { padding ->
@@ -220,7 +252,10 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 singleLine = true,
             )
             if (searchQuery.isNotBlank()) {
-                LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                LazyColumn(
+                Modifier.weight(1f).padding(horizontal = 12.dp),
+                contentPadding = PaddingValues(bottom = 88.dp),
+            ) {
                     items(vm.searchResults.size) { i ->
                         val hit = vm.searchResults[i]
                         Card(
@@ -263,8 +298,11 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 return@Column
             }
 
-            LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                if (vm.currentProfile == null) {
+            LazyColumn(
+                Modifier.weight(1f).padding(horizontal = 12.dp),
+                contentPadding = PaddingValues(bottom = 88.dp),
+            ) {
+                if (inBatchMode && vm.currentProfile == null) {
                     item {
                         Card(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -306,21 +344,24 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
 
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            S.sessions,
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        IconButton(onClick = { showCreate = true }) {
-                            Icon(Icons.Filled.Add, contentDescription = S.newSession)
+                if (inBatchMode) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                S.sessions,
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            IconButton(onClick = { showCreate = true }) {
+                                Icon(Icons.Filled.Add, contentDescription = S.newSession)
+                            }
                         }
                     }
                 }
+                if (selectedTab == 0 || inBatchMode) {
                 val visible = vm.sessions.filter { !it.archived }
                     .sortedByDescending { vm.pinnedIds.contains(it.sessionId) }
                 items(visible.size) { i ->
@@ -348,6 +389,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             selectedSessionIds.add(s.sessionId)
                         },
                         onEdit = { renameTarget = s },
+                        onClone = { vm.cloneSession(s) { renameTarget = it } },
                         onDelete = { confirmDelete = s },
                     )
                 }
@@ -384,29 +426,34 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     selectedSessionIds.add(s.sessionId)
                                 },
                                 onEdit = { renameTarget = s },
+                                onClone = { vm.cloneSession(s) { renameTarget = it } },
                                 onDelete = { confirmDelete = s },
                             )
                         }
                     }
                 }
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            S.rooms,
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        IconButton(
-                            onClick = { showCreateRoom = true },
-                            enabled = vm.sessions.count { !it.archived } >= 2,
+                }
+                if (inBatchMode) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(Icons.Filled.GroupAdd, contentDescription = S.createRoom)
+                            Text(
+                                S.rooms,
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            IconButton(
+                                onClick = { showCreateRoom = true },
+                                enabled = vm.sessions.count { !it.archived } >= 2,
+                            ) {
+                                Icon(Icons.Filled.GroupAdd, contentDescription = S.createRoom)
+                            }
                         }
                     }
                 }
+                if (selectedTab == 1 || inBatchMode) {
                 items(vm.rooms.size) { i ->
                     val r = vm.rooms[i]
                     RoomCard(
@@ -432,6 +479,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             selectedRoomIds.add(r.roomId)
                         },
                     )
+                }
                 }
             }
         }
@@ -848,6 +896,7 @@ private fun SessionCard(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onEdit: () -> Unit,
+    onClone: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val pinned = vm.pinnedIds.contains(s.sessionId)
@@ -958,6 +1007,13 @@ private fun SessionCard(
                             text = { Text("重命名") },
                             onClick = {
                                 onEdit()
+                                showMenu = false
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(S.clone) },
+                            onClick = {
+                                onClone()
                                 showMenu = false
                             },
                         )
