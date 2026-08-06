@@ -347,8 +347,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var eventJob: Job? = null
 
     fun sessionName(sessionId: String): String =
-        sessions.find { it.sessionId == sessionId }?.let { displayName(it) }
-            ?: currentRoom?.members?.find { it.first == sessionId }?.second
+        currentRoom?.members?.find { it.first == sessionId }?.second
+            ?: sessions.find { it.sessionId == sessionId }?.let { displayName(it) }
             ?: sessionId
 
     fun sessionOrigin(s: SessionInfo): String {
@@ -854,15 +854,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun cloneRoom(room: RoomInfo, onCloned: ((RoomInfo) -> Unit)? = null) {
+    fun cloneRoom(room: RoomInfo, newName: String, onCloned: ((RoomInfo) -> Unit)? = null) {
         viewModelScope.launch {
             try {
                 val result = hub.call("room.clone", buildJsonObject {
                     put("roomId", room.roomId)
+                    put("newName", newName)
                 })
                 val o = result["room"]!!.jsonObject
                 val newRoom = parseRoom(o)
                 rooms.add(newRoom)
+                refreshAll()
                 onCloned?.invoke(newRoom)
                 val S = stringsFor(lang)
                 chatItems.add(ChatItem.System(++itemSeq, S.clonedRoom.format(newRoom.name)))

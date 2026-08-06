@@ -39,6 +39,59 @@ function persistState(): void {
   store.save({ sessions: [...sessionMetas.values()], rooms: rooms.list() });
 }
 
+function isSessionNameTaken(name: string, excludeSessionId?: string): boolean {
+  for (const meta of sessionMetas.values()) {
+    if (meta.sessionId === excludeSessionId) continue;
+    if (meta.name === name) return true;
+  }
+  return false;
+}
+
+function isRoomNameTaken(name: string, excludeRoomId?: string): boolean {
+  for (const room of rooms.list()) {
+    if (room.roomId === excludeRoomId) continue;
+    if (room.name === name) return true;
+  }
+  return false;
+}
+
+async function cloneSessionWithName(
+  source: SessionMeta,
+  targetName: string,
+): Promise<{ sessionId: string; name: string }> {
+  const connectionId = source.connectionId;
+  if (!connectionId) throw new Error("source session has no connection");
+  const connection = getConnectionById(connectionId);
+  if (!connection) throw new Error(`unknown connection: ${connectionId}`);
+  if (connection.local) await ensureLocalAgent(connection);
+  const agent = agents.get(connection.id);
+  if (!agent) throw new Error("agent 未连接");
+
+  const s = await agent.createSession(source.cwd, targetName);
+  sessionMetas.set(s.sessionId, {
+    sessionId: s.sessionId,
+    cwd: source.cwd,
+    name: s.name,
+    agent: connection.agent,
+    connectionId: connection.id,
+    roleId: source.roleId,
+  });
+  owners.set(s.sessionId, connection.id);
+  persistState();
+
+  if (source.roleId) {
+    const role = store.listRoles().find((r) => r.id === source.roleId);
+    if (role) {
+      const personaPrompt =
+        `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
+      agentOps
+        .prompt(s.sessionId, personaPrompt)
+        .catch((err) => console.warn("[role] persona inject failed:", String(err)));
+    }
+  }
+  return s;
+}
+
 function ensureDefaultLocalConnections(): void {
   if (store.getMeta("default-connections-seeded") === "1") return;
   for (const agent of Object.keys(AGENT_DEFS)) {
@@ -378,6 +431,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!agent) throw new Error("agent 未连接");
       const cwd = String(req.params?.cwd ?? connection.cwd ?? role?.cwd ?? "");
       const name = req.params?.name ? String(req.params.name) : role?.name;
+      if (name && isSessionNameTaken(name)) throw new Error("session name already exists");
       const s = await agent.createSession(cwd, name);
       const finalRoleId = role?.id ?? roleId ?? undefined;
       sessionMetas.set(s.sessionId, {
@@ -517,6 +571,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const meta = sessionMetas.get(sessionId);
       if (!meta) throw new Error(`unknown session: ${sessionId}`);
       if (!name) throw new Error("name required");
+      if (isSessionNameTaken(name, sessionId)) throw new Error("session name already exists");
       meta.name = name;
       agentForSession(sessionId)?.renameSession(sessionId, name);
       const roomIds = rooms.updateMemberName(sessionId, name);
@@ -604,6 +659,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
       if (!name) throw new Error("name required");
+      if (isRoomNameTaken(name, roomId)) throw new Error("room name already exists");
       rooms.rename(roomId, name);
       persistState();
       return { room };
@@ -635,9 +691,32 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "room.clone": {
       const roomId = String(req.params?.roomId ?? "");
-      const newName = String(req.params?.newName ?? "").trim() || undefined;
-      if (!rooms.get(roomId)) throw new Error(`unknown room: ${roomId}`);
-      const room = rooms.clone(roomId, newName);
+      const newName = String(req.params?.newName ?? "").trim();
+      const source = rooms.get(roomId);
+      if (!source) throw new Error(`unknown room: ${roomId}`);
+      if (!newName) throw new Error("name required");
+      if (isRoomNameTaken(newName)) throw new Error("room name already exists");
+
+      const idMap = new Map<string, string>();
+      const newMembers: { sessionId: string; name: string }[] = [];
+      for (const m of source.members) {
+        const meta = sessionMetas.get(m.sessionId);
+        if (!meta) throw new Error(`unknown session: ${m.sessionId}`);
+        const sessionName = `${newName}-${meta.name}`;
+        const s = await cloneSessionWithName(meta, sessionName);
+        idMap.set(m.sessionId, s.sessionId);
+        newMembers.push({ sessionId: s.sessionId, name: m.name });
+      }
+
+      const newConductorId = source.conductorId
+        ? idMap.get(source.conductorId)
+        : undefined;
+      const room = rooms.create(
+        newName,
+        newMembers,
+        source.mode,
+        newConductorId,
+      );
       persistState();
       return { room };
     }
@@ -704,7 +783,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         ),
       };
     case "room.create": {
-      const name = String(req.params?.name ?? "群聊");
+      const name = String(req.params?.name ?? "群聊").trim() || "群聊";
+      if (isRoomNameTaken(name)) throw new Error("room name already exists");
       const ids = (req.params?.sessionIds as string[]) ?? [];
       const mode = req.params?.mode === "conductor" ? "conductor" : "mention";
       const conductorId =

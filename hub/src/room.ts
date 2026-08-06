@@ -115,17 +115,6 @@ export class RoomManager {
     return room;
   }
 
-  clone(roomId: string, newName?: string): Room {
-    const room = this.rooms.get(roomId);
-    if (!room) throw new Error(`unknown room: ${roomId}`);
-    return this.create(
-      newName || `${room.name} 副本`,
-      room.members.map((m) => ({ ...m })),
-      room.mode,
-      room.conductorId,
-    );
-  }
-
   private dedupMemberNames(roomId: string): void {
     const room = this.rooms.get(roomId);
     if (!room) return;

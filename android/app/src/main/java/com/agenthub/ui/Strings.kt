@@ -78,6 +78,7 @@ interface Strings {
     val permissionRequest: String
     val chose: String
     val errorTag: String
+    val nameExists: String
     val chat: String
     val settings: String
     val theme: String
@@ -215,6 +216,7 @@ object ZhStrings : Strings {
     override val permissionRequest = "审批请求"
     override val chose = "已选择：%s"
     override val errorTag = "错误"
+    override val nameExists = "名称已存在"
     override val chat = "聊天"
     override val settings = "设置"
     override val theme = "主题"
@@ -352,6 +354,7 @@ object EnStrings : Strings {
     override val permissionRequest = "Approval request"
     override val chose = "Selected: %s"
     override val errorTag = "Error"
+    override val nameExists = "Name already exists"
     override val chat = "Chat"
     override val settings = "Settings"
     override val theme = "Theme"

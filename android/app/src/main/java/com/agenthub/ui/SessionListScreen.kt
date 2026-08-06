@@ -80,6 +80,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var confirmDelete by remember { mutableStateOf<SessionInfo?>(null) }
     var renameTarget by remember { mutableStateOf<SessionInfo?>(null) }
     var roomRenameTarget by remember { mutableStateOf<RoomInfo?>(null) }
+    var roomCloneTarget by remember { mutableStateOf<RoomInfo?>(null) }
     var roomEditTarget by remember { mutableStateOf<RoomInfo?>(null) }
     var roomDeleteTarget by remember { mutableStateOf<RoomInfo?>(null) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
@@ -115,6 +116,9 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     renameTarget?.let { s ->
         var name by remember(s) { mutableStateOf(s.name) }
+        val nameTaken = name.isNotBlank() &&
+            name.trim() != s.name &&
+            vm.sessions.any { it.sessionId != s.sessionId && it.name == name.trim() }
         AlertDialog(
             onDismissRequest = { renameTarget = null },
             title = { Text("重命名会话") },
@@ -126,15 +130,19 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
+                    isError = nameTaken,
+                    supportingText = {
+                        if (nameTaken) Text(S.nameExists, color = MaterialTheme.colorScheme.error)
+                    },
                 )
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        vm.renameSession(s, name)
+                        vm.renameSession(s, name.trim())
                         renameTarget = null
                     },
-                    enabled = name.isNotBlank(),
+                    enabled = name.isNotBlank() && !nameTaken,
                 ) { Text(S.ok) }
             },
             dismissButton = {
@@ -484,7 +492,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         },
                         onRename = { roomRenameTarget = r },
                         onEdit = { roomEditTarget = r },
-                        onClone = { vm.cloneRoom(r) { roomRenameTarget = it } },
+                        onClone = { roomCloneTarget = r },
                         onDelete = { roomDeleteTarget = r },
                     )
                 }
@@ -512,6 +520,8 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         if (showCreate) {
             var cwd by remember { mutableStateOf("") }
             var name by remember { mutableStateOf("") }
+            val nameTaken = name.isNotBlank() &&
+                vm.sessions.any { it.name == name.trim() }
             var selectedConnectionId by remember { mutableStateOf<String?>(null) }
             var selectedRoleId by remember { mutableStateOf<String?>(null) }
             var showAddRole by remember { mutableStateOf(false) }
@@ -631,6 +641,10 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             onValueChange = { name = it },
                             label = { Text(S.nameLabel) },
                             singleLine = true,
+                            isError = nameTaken,
+                            supportingText = {
+                                if (nameTaken) Text(S.nameExists, color = MaterialTheme.colorScheme.error)
+                            },
                         )
                         Spacer(Modifier.height(8.dp))
                         Box {
@@ -687,7 +701,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 vm.createSession(cwd.trim(), name.trim(), it, selectedRoleId)
                             }
                         },
-                        enabled = cwd.isNotBlank() && selectedConnectionId != null && (selectedConnection?.online == true || selectedConnection?.local == true),
+                        enabled = !nameTaken && name.isNotBlank() && cwd.isNotBlank() && selectedConnectionId != null && (selectedConnection?.online == true || selectedConnection?.local == true),
                     ) { Text(S.create) }
                 },
                 dismissButton = {
@@ -802,6 +816,9 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
         roomRenameTarget?.let { room ->
             var name by remember(room) { mutableStateOf(room.name) }
+            val nameTaken = name.isNotBlank() &&
+                name.trim() != room.name &&
+                vm.rooms.any { it.roomId != room.roomId && it.name == name.trim() }
             AlertDialog(
                 onDismissRequest = { roomRenameTarget = null },
                 title = { Text(S.rename) },
@@ -813,19 +830,59 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         shape = RoundedCornerShape(16.dp),
+                        isError = nameTaken,
+                        supportingText = {
+                            if (nameTaken) Text(S.nameExists, color = MaterialTheme.colorScheme.error)
+                        },
                     )
                 },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            vm.renameRoom(room, name)
+                            vm.renameRoom(room, name.trim())
                             roomRenameTarget = null
                         },
-                        enabled = name.isNotBlank(),
+                        enabled = name.isNotBlank() && !nameTaken,
                     ) { Text(S.ok) }
                 },
                 dismissButton = {
                     TextButton(onClick = { roomRenameTarget = null }) { Text(S.cancel) }
+                },
+            )
+        }
+
+        roomCloneTarget?.let { room ->
+            var name by remember(room) { mutableStateOf(room.name + " " + S.clone) }
+            val nameTaken = name.isNotBlank() &&
+                vm.rooms.any { it.name == name.trim() }
+            AlertDialog(
+                onDismissRequest = { roomCloneTarget = null },
+                title = { Text(S.clone) },
+                text = {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text(S.roomName) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                        isError = nameTaken,
+                        supportingText = {
+                            if (nameTaken) Text(S.nameExists, color = MaterialTheme.colorScheme.error)
+                        },
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            vm.cloneRoom(room, name.trim())
+                            roomCloneTarget = null
+                        },
+                        enabled = name.isNotBlank() && !nameTaken,
+                    ) { Text(S.ok) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { roomCloneTarget = null }) { Text(S.cancel) }
                 },
             )
         }
@@ -889,6 +946,8 @@ private fun RoomEditorDialog(
     val editing = room
     val isCreate = editing == null
     var roomName by remember(room) { mutableStateOf(editing?.name ?: "") }
+    val roomNameTaken = roomName.isNotBlank() &&
+        vm.rooms.any { it.roomId != editing?.roomId && it.name == roomName.trim() }
     var mode by remember(room) { mutableStateOf(editing?.mode ?: "mention") }
     var conductorId by remember(room) { mutableStateOf<String?>(editing?.conductorId) }
     val selected = remember(room) {
@@ -907,6 +966,10 @@ private fun RoomEditorDialog(
                     onValueChange = { roomName = it },
                     label = { Text(S.roomName) },
                     singleLine = true,
+                    isError = roomNameTaken,
+                    supportingText = {
+                        if (roomNameTaken) Text(S.nameExists, color = MaterialTheme.colorScheme.error)
+                    },
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -965,7 +1028,7 @@ private fun RoomEditorDialog(
                         )
                     }
                 },
-                enabled = roomName.isNotBlank() && selected.size >= minMembers &&
+                enabled = roomName.isNotBlank() && !roomNameTaken && selected.size >= minMembers &&
                     (mode != "conductor" || conductorId != null),
             ) { Text(if (isCreate) S.create else S.ok) }
         },
@@ -1170,10 +1233,7 @@ private fun RoomCard(
                     }
                 }
                 Text(
-                    r.members.joinToString("、") { m ->
-                        val s = vm.sessions.find { it.sessionId == m.first }
-                        if (s != null) vm.displayName(s) else m.second
-                    },
+                    r.members.joinToString("、") { it.second },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
