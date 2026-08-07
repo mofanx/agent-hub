@@ -578,10 +578,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshAll() {
-        viewModelScope.launch {
-            try {
-                val cResult = hub.call("connection.list")
-                val cList = cResult["connections"]?.jsonArray ?: return@launch
+        viewModelScope.launch { syncRefreshAll() }
+    }
+
+    private suspend fun syncRefreshAll() {
+        try {
+            val cResult = hub.call("connection.list")
+            val cList = cResult["connections"]?.jsonArray ?: return
                 connections.clear()
                 for (c in cList) {
                     val o = c.jsonObject
@@ -602,7 +605,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             try {
                 val result = hub.call("session.list")
-                val list = result["sessions"]?.jsonArray ?: return@launch
+                val list = result["sessions"]?.jsonArray ?: return
                 sessions.clear()
                 for (s in list) {
                     val o = s.jsonObject
@@ -626,7 +629,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             try {
                 val result = hub.call("role.list")
-                val list = result["roles"]?.jsonArray ?: return@launch
+                val list = result["roles"]?.jsonArray ?: return
                 roles.clear()
                 for (r in list) {
                     val o = r.jsonObject
@@ -645,7 +648,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             try {
                 val result = hub.call("room.list")
-                val list = result["rooms"]?.jsonArray ?: return@launch
+                val list = result["rooms"]?.jsonArray ?: return
                 rooms.clear()
                 for (r in list) {
                     val o = r.jsonObject
@@ -666,7 +669,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: Exception) {
             }
         }
-    }
 
     fun createSession(
         cwd: String,
@@ -901,6 +903,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     )
 
     fun openChat(session: SessionInfo) {
+        if (session.offline) {
+            resumeSession(session, autoOpen = true)
+            return
+        }
         currentSession = session
         currentRoom = null
         chatItems.clear()
@@ -910,36 +916,59 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openRoom(room: RoomInfo) {
-        currentRoom = room
-        currentSession = null
-        chatItems.clear()
-        quote = null
-        screen = Screen.Room
-        loadHistory("room.history", "roomId", room.roomId)
-    }
-
-    fun resumeSession(session: SessionInfo) {
         viewModelScope.launch {
             connectError = null
             try {
-                val result = hub.call("session.resume", buildJsonObject {
-                    put("sessionId", session.sessionId)
-                })
-                if (result["resumed"]?.jsonPrimitive?.content?.toBoolean() == true) {
-                    val newSessionId = result["sessionId"]?.jsonPrimitive?.content
-                    val updatedSession = if (newSessionId != null && newSessionId != session.sessionId) {
-                        val newSession = session.copy(sessionId = newSessionId, offline = false)
-                        val oldIdx = sessions.indexOfFirst { it.sessionId == session.sessionId }
-                        if (oldIdx >= 0) sessions.removeAt(oldIdx)
-                        sessions.add(0, newSession)
-                        newSession
-                    } else {
-                        val idx = sessions.indexOfFirst { it.sessionId == session.sessionId }
-                        if (idx >= 0) sessions[idx] = session.copy(offline = false)
-                        session.copy(offline = false)
-                    }
-                    openChat(updatedSession)
-                } else {
+                syncRefreshAll()
+                val latestRoom = rooms.find { it.roomId == room.roomId } ?: room
+                val toResume = latestRoom.members.mapNotNull { (sid, _) ->
+                    sessions.find { it.sessionId == sid && it.offline }
+                }
+                for (s in toResume) {
+                    resumeOne(s)
+                }
+                syncRefreshAll()
+                val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
+                currentRoom = updatedRoom
+                currentSession = null
+                chatItems.clear()
+                quote = null
+                screen = Screen.Room
+                loadHistory("room.history", "roomId", updatedRoom.roomId)
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
+    private suspend fun resumeOne(session: SessionInfo): SessionInfo? {
+        val result = hub.call("session.resume", buildJsonObject {
+            put("sessionId", session.sessionId)
+        })
+        return if (result["resumed"]?.jsonPrimitive?.content?.toBoolean() == true) {
+            val newSessionId = result["sessionId"]?.jsonPrimitive?.content
+            if (newSessionId != null && newSessionId != session.sessionId) {
+                val newSession = session.copy(sessionId = newSessionId, offline = false)
+                val oldIdx = sessions.indexOfFirst { it.sessionId == session.sessionId }
+                if (oldIdx >= 0) sessions.removeAt(oldIdx)
+                sessions.add(0, newSession)
+                newSession
+            } else {
+                val idx = sessions.indexOfFirst { it.sessionId == session.sessionId }
+                if (idx >= 0) sessions[idx] = session.copy(offline = false)
+                session.copy(offline = false)
+            }
+        } else null
+    }
+
+    fun resumeSession(session: SessionInfo, autoOpen: Boolean = false) {
+        viewModelScope.launch {
+            connectError = null
+            try {
+                val updated = resumeOne(session)
+                if (updated != null && autoOpen) {
+                    openChat(updated)
+                } else if (updated == null) {
                     connectError = "恢复失败：agent 不支持或会话已失效"
                 }
             } catch (e: Exception) {

@@ -341,6 +341,12 @@ export class Store {
     this.db.prepare("DELETE FROM history WHERE scope = ? AND scope_id = ?").run(scope, id);
   }
 
+  renameHistory(scope: "session" | "room", oldId: string, newId: string): void {
+    this.db
+      .prepare("UPDATE history SET scope_id = ? WHERE scope = ? AND scope_id = ?")
+      .run(newId, scope, oldId);
+  }
+
   search(
     query: string,
     limit = 50,

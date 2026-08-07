@@ -126,6 +126,9 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     () => {
       console.log(`[hub] local agent ${connection.id} removed`);
       agents.delete(connection.id);
+      for (const [sid, cid] of [...owners.entries()]) {
+        if (cid === connection.id) owners.delete(sid);
+      }
     },
     proc,
   );
@@ -135,6 +138,9 @@ async function startLocalAgent(connection: Connection): Promise<void> {
   a.ensureStarted().catch((err) => {
     console.warn(`[hub] local agent ${connection.id} failed:`, err);
     agents.delete(connection.id);
+    for (const [sid, cid] of [...owners.entries()]) {
+      if (cid === connection.id) owners.delete(sid);
+    }
     try {
       proc.kill();
     } catch {}
@@ -547,9 +553,13 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const agent = agents.get(connectionId);
       if (!agent) throw new Error("agent 未连接");
       let ok = await agent.resumeSession(meta.sessionId, meta.cwd, meta.name);
-      if (!ok && store.read("session", sessionId).length === 0) {
-        // 该会话在 agent 中没有持久化记录且没有任何对话历史，直接重建同名会话
+      if (!ok) {
+        const hasHistory = store.read("session", sessionId).length > 0;
+        // 无论是否有历史，agent 已无法恢复该 session，直接用同名/cwd 重建
         const s = await agent.createSession(meta.cwd, meta.name);
+        if (hasHistory) {
+          store.renameHistory("session", sessionId, s.sessionId);
+        }
         sessionMetas.delete(sessionId);
         owners.delete(sessionId);
         const newMeta = { ...meta, sessionId: s.sessionId, name: s.name };
@@ -558,12 +568,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         rooms.updateMemberSessionId(sessionId, s.sessionId);
         persistState();
         console.log(
-          `[hub] recreated empty session ${sessionId} -> ${s.sessionId} (${s.name})`,
+          `[hub] recreated session ${sessionId} -> ${s.sessionId} (${s.name})${
+            hasHistory ? " with history" : ""
+          }`,
         );
         return { resumed: true, sessionId: s.sessionId };
       }
-      if (ok) owners.set(sessionId, connectionId);
-      return { resumed: ok };
+      owners.set(sessionId, connectionId);
+      return { resumed: true };
     }
     case "session.rename": {
       const sessionId = String(req.params?.sessionId ?? "");
@@ -998,6 +1010,9 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   ws.on("close", () => {
     console.log(`[hub] worker disconnected ${connectionId}`);
     if (agents.get(connectionId) === a) agents.delete(connectionId);
+    for (const [sid, cid] of [...owners.entries()]) {
+      if (cid === connectionId) owners.delete(sid);
+    }
   });
 }
 
