@@ -143,8 +143,19 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     Column {
                         Text(title)
                         if (isRoom) {
+                            val room = vm.currentRoom!!
+                            val modeLabel = when (room.mode) {
+                                "mention" -> S.modeMention
+                                "conductor" -> S.modeConductor
+                                "roundrobin" -> S.modeRoundRobin
+                                "parallel" -> S.modeParallel
+                                "pipeline" -> S.modePipeline
+                                "debate" -> S.modeDebate
+                                "auto" -> S.modeAuto
+                                else -> room.mode
+                            }
                             Text(
-                                vm.currentRoom!!.members.joinToString("  ") { "@${it.second}" },
+                                "${modeLabel}${room.subMode?.let { " · $it" } ?: ""} | ${room.members.joinToString("  ") { "@${it.second}" }}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

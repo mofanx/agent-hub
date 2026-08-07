@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 
-export type RoomMode = "mention" | "conductor";
+export type RoomMode =
+  | "mention"
+  | "conductor"
+  | "roundrobin"
+  | "parallel"
+  | "pipeline"
+  | "debate"
+  | "auto";
 
 export type Room = {
   roomId: string;
@@ -8,6 +15,18 @@ export type Room = {
   mode: RoomMode;
   conductorId?: string | undefined;
   members: { sessionId: string; name: string }[];
+  /** 轮询模式：当前轮到第几个成员 */
+  roundRobinIndex?: number;
+  /** 流水线模式：成员执行顺序，未设置则按 members 顺序 */
+  pipelineOrder?: string[];
+  /** 辩论模式：正方/反方 sessionId */
+  debateSides?: [string, string];
+  /** 辩论模式：裁判 sessionId */
+  debateJudge?: string;
+  /** 辩论模式：轮数 */
+  debateRounds?: number;
+  /** 并发模式：汇总者 sessionId */
+  parallelSummarizerId?: string;
 };
 
 type BlackboardEntry = { from: string; text: string; at: number };
@@ -25,12 +44,21 @@ export class RoomManager {
     mode: RoomMode = "mention",
     conductorId?: string,
   ): Room {
+    if (mode === "conductor" || mode === "auto") {
+      if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
+        throw new Error(`${mode} room needs a valid conductorId`);
+      }
+    }
+    if (conductorId && !members.some((m) => m.sessionId === conductorId)) {
+      throw new Error("conductorId must be a member of the room");
+    }
     const room: Room = {
       roomId: randomUUID().slice(0, 8),
       name,
       mode,
       conductorId,
       members,
+      roundRobinIndex: 0,
     };
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
@@ -59,13 +87,16 @@ export class RoomManager {
     const dissolved: string[] = [];
     for (const room of [...this.rooms.values()]) {
       if (!room.members.some((m) => m.sessionId === sessionId)) continue;
-      if (room.mode === "conductor" && room.conductorId === sessionId) {
+      if ((room.mode === "conductor" || room.mode === "auto") && room.conductorId === sessionId) {
         this.rooms.delete(room.roomId);
         this.blackboards.delete(room.roomId);
         dissolved.push(room.roomId);
         continue;
       }
       room.members = room.members.filter((m) => m.sessionId !== sessionId);
+      if (room.conductorId === sessionId) {
+        room.conductorId = room.members[0]?.sessionId;
+      }
       if (room.members.length < 2) {
         this.rooms.delete(room.roomId);
         this.blackboards.delete(room.roomId);
@@ -102,15 +133,18 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) throw new Error(`unknown room: ${roomId}`);
     if (members.length === 0) throw new Error("room needs at least 1 member");
-    if (mode === "conductor") {
+    if (mode === "conductor" || mode === "auto") {
       if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
-        throw new Error("conductor room needs a valid conductorId");
+        throw new Error(`${mode} room needs a valid conductorId`);
       }
+    }
+    if (conductorId && !members.some((m) => m.sessionId === conductorId)) {
+      throw new Error("conductorId must be a member of the room");
     }
     room.name = name;
     room.mode = mode;
     room.members = members;
-    room.conductorId = mode === "conductor" ? conductorId : undefined;
+    room.conductorId = conductorId;
     this.dedupMemberNames(room.roomId);
     return room;
   }
@@ -143,6 +177,11 @@ export class RoomManager {
       targets: mentioned.length > 0 ? mentioned : room.members.map((m) => m.sessionId),
       mentioned,
     };
+  }
+
+  /** 获取房间共享黑板 */
+  getBlackboard(roomId: string): BlackboardEntry[] {
+    return [...(this.blackboards.get(roomId) ?? [])];
   }
 
   /** 构造发给某个成员的最终 prompt：注入房间上下文与共享黑板 */
@@ -198,6 +237,18 @@ export class RoomManager {
       if (member) {
         member.sessionId = newSessionId;
         if (room.conductorId === oldSessionId) room.conductorId = newSessionId;
+        if (room.parallelSummarizerId === oldSessionId) room.parallelSummarizerId = newSessionId;
+        if (room.debateJudge === oldSessionId) room.debateJudge = newSessionId;
+        if (room.debateSides) {
+          room.debateSides = room.debateSides.map((s) =>
+            s === oldSessionId ? newSessionId : s,
+          ) as [string, string];
+        }
+        if (room.pipelineOrder) {
+          room.pipelineOrder = room.pipelineOrder.map((s) =>
+            s === oldSessionId ? newSessionId : s,
+          );
+        }
         touched.push(room.roomId);
       }
     }

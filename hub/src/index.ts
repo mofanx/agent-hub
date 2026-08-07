@@ -5,8 +5,9 @@ import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAgent, getPermissionBypass, setPermissionBypass, type HubEvent } from "./agent.js";
-import { RoomManager, type Room } from "./room.js";
-import { ConductorOrchestrator, type AgentOps } from "./conductor.js";
+import { RoomManager, type Room, type RoomMode } from "./room.js";
+import { RoomModeManager } from "./room-modes.js";
+import type { AgentOps } from "./room-modes.js";
 import { Store, type SessionMeta, type Connection } from "./store.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
@@ -113,6 +114,26 @@ function repairHistoryAtStartup(): void {
 }
 
 repairHistoryAtStartup();
+
+function parseRoomMode(raw: unknown): RoomMode {
+  const modes: RoomMode[] = [
+    "mention",
+    "conductor",
+    "roundrobin",
+    "parallel",
+    "pipeline",
+    "debate",
+    "auto",
+  ];
+  const m = String(raw ?? "").toLowerCase();
+  if (modes.includes(m as RoomMode)) return m as RoomMode;
+  return "mention";
+}
+
+function enrichRoom(room: Room): Record<string, unknown> {
+  const sub = roomModeManager.subModeFor(room.roomId);
+  return { ...room, subMode: sub?.mode, activeSpeaker: sub?.activeSpeaker, reason: sub?.reason };
+}
 
 function persistState(): void {
   store.save({ sessions: [...sessionMetas.values()], rooms: rooms.list() });
@@ -250,9 +271,10 @@ const agentOps: AgentOps = {
     return agent.promptContent(sessionId, content);
   },
   isBusy: (sessionId) => ownerOf(sessionId).isBusy(sessionId),
+  cancel: (sessionId) => ownerOf(sessionId).cancel(sessionId),
 };
-const conductor = new ConductorOrchestrator(agentOps, rooms, (n) =>
-  broadcast({ method: "room.notice", params: n }),
+const roomModeManager = new RoomModeManager(agentOps, rooms, (method, params) =>
+  broadcast({ method, params } as HubEvent),
 );
 
 function ownerOf(sessionId: string): AcpAgent {
@@ -321,17 +343,6 @@ function listAllSessions(): {
   return [...online, ...offline];
 }
 
-function isConductorMemberSession(sessionId: string): boolean {
-  const roomsFor = rooms.roomsFor(sessionId);
-  const isConductor = roomsFor.some(
-    (r) => r.mode === "conductor" && r.conductorId === sessionId,
-  );
-  const isMember = roomsFor.some(
-    (r) => r.mode === "conductor" && r.conductorId !== sessionId,
-  );
-  return isMember && !isConductor;
-}
-
 function onTurnEnd(sessionId: string, text: string): void {
   const meta = sessionMetas.get(sessionId);
   const baseName = meta?.name ?? sessionId;
@@ -345,7 +356,7 @@ function onTurnEnd(sessionId: string, text: string): void {
       text,
     });
     for (const room of rooms.roomsFor(sessionId)) {
-      if (room.mode === "conductor" && room.conductorId !== sessionId) continue;
+      if (roomModeManager.isHiddenTurn(sessionId, room.roomId)) continue;
       store.append("room", room.roomId, {
         at: Date.now(),
         kind: "assistant",
@@ -357,24 +368,26 @@ function onTurnEnd(sessionId: string, text: string): void {
 }
 
 function onAgentEvent(event: HubEvent): void {
-  let skipBroadcast = false;
+  const sessionId = (event.params as Record<string, unknown> | undefined)?.sessionId as string | undefined;
+  let skipBroadcast =
+    sessionId != null &&
+    roomModeManager.isHiddenSession(sessionId) &&
+    event.method !== "permission.request";
   if (event.method === "prompt.done") {
-    const { sessionId, output } = event.params;
-    const meta = sessionMetas.get(sessionId);
-    const baseName = meta?.name ?? sessionId;
+    const { output } = event.params;
+    const meta = sessionMetas.get(sessionId!);
+    const baseName = meta?.name ?? sessionId!;
     const origin = originFor(meta);
     const displayName = origin ? `${baseName} (${origin})` : baseName;
-    rooms.recordOutput(sessionId, displayName, output);
-    if (output.trim()) {
-      skipBroadcast = isConductorMemberSession(sessionId);
+    if (!roomModeManager.isHiddenSession(sessionId!)) {
+      rooms.recordOutput(sessionId!, displayName, output);
     }
-    void conductor.onPromptDone(sessionId, output).catch((err) => {
-      console.error("[conductor] error:", err);
+    void roomModeManager.onPromptDone(sessionId!, output).catch((err) => {
+      console.error("[room-modes] error:", err);
     });
   } else if (event.method === "prompt.error") {
-    const { sessionId } = event.params;
     if (sessionId) {
-      conductor.onPromptError(sessionId);
+      roomModeManager.onPromptError(sessionId);
     }
   } else if (event.method === "room.notice") {
     store.append("room", event.params.roomId, {
@@ -473,9 +486,11 @@ async function handleRoomSlash(
     }
   }
 
-  // 如果是指挥家群，中断当前编排流
-  const flowCancelled =
-    room.mode === "conductor" && conductor.cancel(room.roomId);
+  // 中断当前房间所有编排流（含 auto、pipeline、debate 等）
+  const hadFlow = roomModeManager.hasActiveFlow(room.roomId);
+  if (hadFlow) {
+    await roomModeManager.cancelActive(room.roomId, "用户停止");
+  }
 
   const stoppedNames = stopped.map(
     (sid) => room.members.find((m) => m.sessionId === sid)?.name ?? sid,
@@ -484,7 +499,7 @@ async function handleRoomSlash(
   let notice: string;
   if (stopped.length > 0) {
     notice = `已停止: ${stoppedNames.join(", ")}`;
-    if (flowCancelled) notice += "；指挥编排已中断";
+    if (hadFlow) notice += "；编排已中断";
   } else if (errors.length > 0) {
     notice = `停止失败: ${errors.join("; ")}`;
   } else {
@@ -771,7 +786,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!room) throw new Error(`unknown room: ${roomId}`);
       const name = String(req.params?.name ?? "").trim() || room.name;
       const ids = (req.params?.sessionIds as string[]) ?? [];
-      const mode = req.params?.mode === "conductor" ? "conductor" : "mention";
+      const mode = parseRoomMode(req.params?.mode);
       const conductorId =
         req.params?.conductorId != null ? String(req.params.conductorId) : undefined;
       const all = listAllSessions();
@@ -780,15 +795,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         if (!s) throw new Error(`unknown session: ${id}`);
         return { sessionId: s.sessionId, name: s.name };
       });
-      if (members.length === 0) throw new Error("room needs at least 1 session");
-      if (mode === "conductor") {
-        if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
-          throw new Error("conductor room needs a valid conductorId");
-        }
-      }
       rooms.update(roomId, name, members, mode, conductorId);
       persistState();
-      return { room };
+      return { room: enrichRoom(rooms.get(roomId)!) };
     }
     case "room.clone": {
       const roomId = String(req.params?.roomId ?? "");
@@ -887,7 +896,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const name = String(req.params?.name ?? "群聊").trim() || "群聊";
       if (isRoomNameTaken(name)) throw new Error("room name already exists");
       const ids = (req.params?.sessionIds as string[]) ?? [];
-      const mode = req.params?.mode === "conductor" ? "conductor" : "mention";
+      const mode = parseRoomMode(req.params?.mode);
       const conductorId =
         req.params?.conductorId != null ? String(req.params.conductorId) : undefined;
       const all = listAllSessions();
@@ -896,18 +905,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         if (!s) throw new Error(`unknown session: ${id}`);
         return { sessionId: s.sessionId, name: s.name };
       });
-      if (members.length < 2) throw new Error("room needs at least 2 sessions");
-      if (mode === "conductor") {
-        if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
-          throw new Error("conductor room needs a valid conductorId");
-        }
-      }
       const room = rooms.create(name, members, mode, conductorId);
       persistState();
-      return { room };
+      return { room: enrichRoom(room) };
     }
     case "room.list":
-      return { rooms: rooms.list() };
+      return { rooms: rooms.list().map(enrichRoom) };
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");
       const text = String(req.params?.text ?? "");
@@ -943,46 +946,22 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
           : historyText,
       });
-      const { targets, mentioned } = rooms.route(roomId, text);
-      if (room.mode === "conductor" && mentioned.length === 0) {
-        if (conductor.hasActiveFlow(roomId)) {
-          throw new Error("指挥家正在编排中，请等本轮完成");
-        }
-        const cNote = room.conductorId ? sessionLostReplyNote(room.conductorId) : undefined;
-        const promptText = quote
-          ? `${text}\n（用户引用了 ${quote.author} 的消息："${quote.text}"）`
-          : text;
-        const finalText = cNote ? `${cNote}\n\n${promptText}` : promptText;
-        await conductor.start(room, finalText);
-        return { sent: [room.conductorId], mentioned: [], skipped: [] };
-      }
-      const sent: string[] = [];
-      const skipped: string[] = [];
-      for (const sid of targets) {
-        if (agentOps.isBusy(sid)) {
-          skipped.push(sid);
-          continue;
-        }
-        const sNote = sessionLostReplyNote(sid);
-        const promptText = rooms.buildPrompt(roomId, text, sid, quote);
-        const combinedNote = roomNote || sNote;
-        const finalText = combinedNote ? `${combinedNote}\n\n${promptText}` : promptText;
-        const promptContent = imageBlocks.length > 0
-          ? [{ type: "text", text: finalText }, ...imageBlocks]
-          : finalText;
-        await agentOps.prompt(sid, promptContent);
-        sent.push(sid);
-      }
-      if (skipped.length > 0) {
+      const result = await roomModeManager.handle(room, historyText, {
+        note: roomNote,
+        quote,
+        content,
+        sessionNote: (sid) => sessionLostReplyNote(sid),
+      });
+      if (result.skipped.length > 0) {
         broadcast({
           method: "prompt.error",
           params: {
-            sessionId: skipped[0] ?? "",
-            message: `跳过忙碌会话: ${skipped.join(", ")}`,
+            sessionId: result.skipped[0] ?? "",
+            message: `跳过忙碌会话: ${result.skipped.join(", ")}`,
           },
         });
       }
-      return { sent, mentioned, skipped };
+      return result;
     }
     case "prompt.send": {
       const sessionId = String(req.params?.sessionId ?? "");

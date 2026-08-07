@@ -85,7 +85,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var roomDeleteTarget by remember { mutableStateOf<RoomInfo?>(null) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
     var inBatchMode by remember { mutableStateOf(false) }
-    var selectedTab by remember { mutableStateOf(0) }
+    var selectedTab by remember { vm.listTab }
     val selectedSessionIds = remember { mutableStateListOf<String>() }
     val selectedRoomIds = remember { mutableStateListOf<String>() }
     var searchQuery by remember { mutableStateOf("") }
@@ -972,35 +972,67 @@ private fun RoomEditorDialog(
                     },
                 )
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(S.modeLabel)
-                    TextButton(onClick = { mode = "mention" }) {
-                        Text(if (mode == "mention") "◉ ${S.modeMention}" else "○ ${S.modeMention}")
+                val modes = remember { listOf("mention", "conductor", "roundrobin", "parallel", "pipeline", "debate", "auto") }
+                fun modeLabel(m: String) = when (m) {
+                    "mention" -> S.modeMention
+                    "conductor" -> S.modeConductor
+                    "roundrobin" -> S.modeRoundRobin
+                    "parallel" -> S.modeParallel
+                    "pipeline" -> S.modePipeline
+                    "debate" -> S.modeDebate
+                    "auto" -> S.modeAuto
+                    else -> m
+                }
+                var expanded by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { expanded = true }) {
+                        Text("${S.modeLabel} ${modeLabel(mode)}")
                     }
-                    TextButton(onClick = { mode = "conductor" }) {
-                        Text(if (mode == "conductor") "◉ ${S.modeConductor}" else "○ ${S.modeConductor}")
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                    ) {
+                        modes.forEach { m ->
+                            DropdownMenuItem(
+                                text = { Text(modeLabel(m)) },
+                                onClick = {
+                                    mode = m
+                                    if (m != "conductor" && m != "auto") conductorId = null
+                                    expanded = false
+                                },
+                            )
+                        }
                     }
                 }
-                vm.sessions.filter { !it.archived }.forEach { s ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = selected.contains(s.sessionId),
-                            onCheckedChange = {
-                                if (it) {
-                                    selected.add(s.sessionId)
-                                } else {
-                                    selected.remove(s.sessionId)
-                                    if (conductorId == s.sessionId) conductorId = null
+                val needsConductor = mode in listOf("conductor", "auto", "parallel", "debate")
+                val sessions = remember(vm.sessions) { vm.sessions.filter { !it.archived } }
+                LazyColumn(
+                    Modifier
+                        .heightIn(max = 360.dp)
+                        .fillMaxWidth(),
+                ) {
+                    items(sessions.size) { i ->
+                        val s = sessions[i]
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = selected.contains(s.sessionId),
+                                onCheckedChange = {
+                                    if (it) {
+                                        selected.add(s.sessionId)
+                                    } else {
+                                        selected.remove(s.sessionId)
+                                        if (conductorId == s.sessionId) conductorId = null
+                                    }
+                                },
+                            )
+                            Text(vm.displayName(s), modifier = Modifier.weight(1f))
+                            if (needsConductor && selected.contains(s.sessionId)) {
+                                TextButton(onClick = { conductorId = s.sessionId }) {
+                                    Text(
+                                        if (conductorId == s.sessionId) "◉ ${S.conductorTag}"
+                                        else "○ ${S.conductorTag}"
+                                    )
                                 }
-                            },
-                        )
-                        Text(vm.displayName(s))
-                        if (mode == "conductor" && selected.contains(s.sessionId)) {
-                            TextButton(onClick = { conductorId = s.sessionId }) {
-                                Text(
-                                    if (conductorId == s.sessionId) "◉ ${S.conductorTag}"
-                                    else "○ ${S.conductorTag}"
-                                )
                             }
                         }
                     }
@@ -1029,7 +1061,7 @@ private fun RoomEditorDialog(
                     }
                 },
                 enabled = roomName.isNotBlank() && !roomNameTaken && selected.size >= minMembers &&
-                    (mode != "conductor" || conductorId != null),
+                    (mode !in listOf("conductor", "auto") || conductorId != null),
             ) { Text(if (isCreate) S.create else S.ok) }
         },
         dismissButton = {
@@ -1224,13 +1256,21 @@ private fun RoomCard(
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(r.name, style = MaterialTheme.typography.titleSmall)
-                    if (r.mode == "conductor") {
-                        Text(
-                            "  · ${S.modeConductor}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
+                    val modeLabel = when (r.mode) {
+                        "mention" -> S.modeMention
+                        "conductor" -> S.modeConductor
+                        "roundrobin" -> S.modeRoundRobin
+                        "parallel" -> S.modeParallel
+                        "pipeline" -> S.modePipeline
+                        "debate" -> S.modeDebate
+                        "auto" -> S.modeAuto
+                        else -> r.mode
                     }
+                    Text(
+                        "  · $modeLabel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
                 Text(
                     r.members.joinToString("、") { it.second },

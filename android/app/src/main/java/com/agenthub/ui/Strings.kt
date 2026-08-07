@@ -61,6 +61,11 @@ interface Strings {
     val modeLabel: String
     val modeMention: String
     val modeConductor: String
+    val modeRoundRobin: String
+    val modeParallel: String
+    val modePipeline: String
+    val modeDebate: String
+    val modeAuto: String
     val conductorTag: String
     val back: String
     val generating: String
@@ -199,6 +204,11 @@ object ZhStrings : Strings {
     override val modeLabel = "模式："
     override val modeMention = "普通群"
     override val modeConductor = "指挥家"
+    override val modeRoundRobin = "轮询"
+    override val modeParallel = "并行"
+    override val modePipeline = "流水线"
+    override val modeDebate = "辩论"
+    override val modeAuto = "自动"
     override val conductorTag = "指挥"
     override val back = "返回"
     override val generating = "执行中…"
@@ -337,6 +347,11 @@ object EnStrings : Strings {
     override val modeLabel = "Mode:"
     override val modeMention = "Normal"
     override val modeConductor = "Conductor"
+    override val modeRoundRobin = "Round-robin"
+    override val modeParallel = "Parallel"
+    override val modePipeline = "Pipeline"
+    override val modeDebate = "Debate"
+    override val modeAuto = "Auto"
     override val conductorTag = "Conductor"
     override val back = "Back"
     override val generating = "Running…"

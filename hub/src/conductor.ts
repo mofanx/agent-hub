@@ -33,12 +33,44 @@ export class ConductorOrchestrator {
   }
 
   /** 强制中断某个房间的指挥编排 */
-  cancel(roomId: string, reason?: string): boolean {
+  cancel(roomId: string, reason?: string): string[] {
     const flow = this.flows.get(roomId);
-    if (!flow) return false;
+    if (!flow) return [];
+    const touched = [...flow.pending.keys()];
+    if (flow.phase !== "planning" && flow.phase !== "summarizing") {
+      // working 阶段成员也算在活跃中
+    }
     this.flows.delete(roomId);
     if (reason) this.notice({ roomId, message: reason });
-    return true;
+    return touched;
+  }
+
+  /** 判断某 session 是否是指挥家且正在指挥编排中 */
+  isConductorSession(sessionId: string): boolean {
+    for (const flow of this.flows.values()) {
+      const room = this.rooms.get(flow.roomId);
+      if (room && room.conductorId === sessionId) return true;
+    }
+    return false;
+  }
+
+  /** 获取某 session 在当前编排中的角色与阶段 */
+  getFlowForSession(
+    sessionId: string,
+  ):
+    | { roomId: string; role: "conductor" | "worker"; phase: Flow["phase"] }
+    | undefined {
+    for (const flow of this.flows.values()) {
+      const room = this.rooms.get(flow.roomId);
+      if (!room) continue;
+      if (room.conductorId === sessionId) {
+        return { roomId: flow.roomId, role: "conductor", phase: flow.phase };
+      }
+      if (flow.phase === "working" && (flow.pending.has(sessionId) || flow.results.has(sessionId))) {
+        return { roomId: flow.roomId, role: "worker", phase: flow.phase };
+      }
+    }
+    return undefined;
   }
 
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */

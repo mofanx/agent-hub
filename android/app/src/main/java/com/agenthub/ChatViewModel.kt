@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Base64
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
@@ -129,6 +130,9 @@ data class RoomInfo(
     val mode: String,
     val conductorId: String?,
     val members: List<Pair<String, String>>,
+    val subMode: String? = null,
+    val activeSpeaker: String? = null,
+    val reason: String? = null,
 )
 
 data class RoleInfo(
@@ -211,6 +215,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     var screen by mutableStateOf(Screen.Sessions)
+    val listTab = mutableIntStateOf(0)
     var connecting by mutableStateOf(false)
     var connectError by mutableStateOf<String?>(null)
     var agentStatus by mutableStateOf("未连接")
@@ -938,6 +943,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             m["sessionId"]!!.jsonPrimitive.content to
                 m["name"]!!.jsonPrimitive.content
         },
+        o["subMode"]?.jsonPrimitive?.content,
+        o["activeSpeaker"]?.jsonPrimitive?.content,
+        o["reason"]?.jsonPrimitive?.content,
     )
 
     fun openChat(session: SessionInfo) {
@@ -945,6 +953,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             resumeSession(session, autoOpen = true)
             return
         }
+        listTab.value = 0
         currentSession = session
         currentRoom = null
         chatItems.clear()
@@ -967,6 +976,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 syncRefreshAll()
                 val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
+                listTab.value = 1
                 currentRoom = updatedRoom
                 currentSession = null
                 chatItems.clear()
@@ -1402,8 +1412,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun shouldShowInRoom(sessionId: String): Boolean {
         val room = currentRoom ?: return true
-        if (room.mode != "conductor") return true
-        return sessionId == room.conductorId
+        val sub = room.subMode
+        return when {
+            room.mode == "conductor" -> sessionId == room.conductorId
+            room.mode == "auto" && (sub == "deciding" || sub == "self" || sub == "conductor" || sub == "roundrobin") -> sessionId == room.activeSpeaker
+            else -> true
+        }
     }
 
     private fun handleEvent(obj: JsonObject) {
@@ -1452,6 +1466,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 if (p["roomId"]!!.jsonPrimitive.content == currentRoom?.roomId) {
                     chatItems.add(ChatItem.System(++itemSeq, p["message"]!!.jsonPrimitive.content))
+                }
+            }
+            "room.modeSelected" -> {
+                val p = obj["params"]!!.jsonObject
+                val roomId = p["roomId"]!!.jsonPrimitive.content
+                val r = currentRoom
+                if (r != null && r.roomId == roomId) {
+                    currentRoom = r.copy(
+                        subMode = p["mode"]?.jsonPrimitive?.content,
+                        activeSpeaker = p["activeSpeaker"]?.jsonPrimitive?.content,
+                        reason = p["reason"]?.jsonPrimitive?.content,
+                    )
+                    val idx = rooms.indexOfFirst { it.roomId == roomId }
+                    if (idx >= 0) rooms[idx] = currentRoom!!
                 }
             }
             "permission.request" -> {
