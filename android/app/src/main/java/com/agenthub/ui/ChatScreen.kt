@@ -160,15 +160,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     IconButton(onClick = { vm.backToList() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
                     }
-                    if (vm.generating) {
-                        IconButton(onClick = { vm.stopCurrent() }) {
-                            Icon(
-                                imageVector = Icons.Filled.Stop,
-                                contentDescription = S.stop,
-                                tint = MaterialTheme.colorScheme.error,
-                            )
-                        }
-                    }
                 },
             )
         },
@@ -222,31 +213,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             contentDescription = "跳转到最下方",
                             modifier = Modifier.size(22.dp),
                         )
-                    }
-                }
-            }
-            if (vm.generating) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                        )
-                        Spacer(Modifier.size(8.dp))
-                        Text(
-                            S.generating,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { vm.stopCurrent() }) {
-                            Text(S.stop, color = MaterialTheme.colorScheme.error)
-                        }
                     }
                 }
             }
@@ -443,14 +409,25 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (input.isNotBlank() || vm.pendingAttachments.isNotEmpty()) {
+                if (vm.generating) {
+                    Spacer(Modifier.size(4.dp))
+                    FilledIconButton(
+                        onClick = { vm.stopCurrent() },
+                        modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.Stop, contentDescription = S.stop)
+                    }
+                } else if (input.isNotBlank() || vm.pendingAttachments.isNotEmpty()) {
                     Spacer(Modifier.size(4.dp))
                     FilledIconButton(
                         onClick = {
                             if (isRoom) vm.sendRoomMessage(input.trim()) else vm.sendPrompt(input.trim())
                             input = ""
                         },
-                        enabled = !vm.generating,
                         modifier = Modifier.size(40.dp),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = S.send)
