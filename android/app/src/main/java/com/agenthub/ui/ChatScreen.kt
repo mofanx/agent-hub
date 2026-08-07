@@ -74,9 +74,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import com.mikepenz.markdown.m3.Markdown
-import com.mikepenz.markdown.m3.markdownColor
-import com.mikepenz.markdown.m3.markdownTypography
+import com.agenthub.ui.MarkdownText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
@@ -125,17 +123,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.addAttachment(it) }
-    }
-
-    LaunchedEffect(vm.chatItems.size) {
-        val latest = vm.chatItems.lastOrNull() ?: return@LaunchedEffect
-        if (latest is ChatItem.User || isAtBottom) {
-            val alreadyAtBottom =
-                listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 20
-            if (!alreadyAtBottom) {
-                listState.scrollToItem(0, 0)
-            }
-        }
     }
 
     LaunchedEffect(vm.currentRoom?.roomId, vm.currentSession?.sessionId) {
@@ -765,11 +752,11 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                     shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
                 ) {
-                    Markdown(
-                        item.text,
+                    MarkdownText(
+                        text = item.text,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        colors = markdownColor(text = assistantColor),
-                        typography = markdownTypography(text = MaterialTheme.typography.bodyLarge),
+                        textColor = assistantColor,
+                        fontSize = MaterialTheme.typography.bodyLarge.fontSize,
                     )
                 }
             }
@@ -800,12 +787,19 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         ) {
-                            Text(
-                                item.text,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = thoughtColor,
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 360.dp)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                            ) {
+                                Text(
+                                    item.text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = thoughtColor,
+                                )
+                            }
                         }
                     }
                 }

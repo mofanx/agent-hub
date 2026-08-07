@@ -44,4 +44,5 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.markdown.m3)
+    implementation(libs.markwon.core)
 }
