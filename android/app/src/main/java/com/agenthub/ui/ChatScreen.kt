@@ -304,7 +304,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             }
             Row(
                 Modifier
-                    .padding(horizontal = 12.dp, vertical = 3.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .background(
                         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
