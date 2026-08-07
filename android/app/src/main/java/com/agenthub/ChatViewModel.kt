@@ -113,6 +113,7 @@ data class SessionInfo(
     val roleId: String? = null,
     val offline: Boolean = false,
     val archived: Boolean = false,
+    val stoppable: Boolean = false,
 )
 
 data class SearchHit(
@@ -621,6 +622,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             o["roleId"]?.jsonPrimitive?.content,
                             o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                            o["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         )
                     )
                 }
@@ -694,6 +696,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["address"]?.jsonPrimitive?.content ?: "",
                     o["connectionId"]?.jsonPrimitive?.content,
                     o["roleId"]?.jsonPrimitive?.content,
+                    stoppable = false,
                 )
                 noteCwd(cwd)
                 sessions.add(session)
@@ -720,6 +723,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["address"]?.jsonPrimitive?.content ?: "",
                     o["connectionId"]?.jsonPrimitive?.content ?: session.connectionId,
                     o["roleId"]?.jsonPrimitive?.content ?: session.roleId,
+                    stoppable = false,
                 )
                 sessions.add(newSession)
                 onCloned?.invoke(newSession)
@@ -1042,7 +1046,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val currentIds = currentRoom?.members?.map { it.first }?.toSet()
             ?: setOfNotNull(currentSession?.sessionId)
         if (currentIds.isEmpty()) return
-        val busy = list.filter { it.busy && currentIds.contains(it.sessionId) }
+        val busy = list.filter { it.busy && it.stoppable && currentIds.contains(it.sessionId) }
             .map { it.sessionId }
             .toSet()
         busyIds.removeAll { !busy.contains(it) && currentIds.contains(it) }
@@ -1069,6 +1073,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["roleId"]?.jsonPrimitive?.content,
                         o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                        o["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                     )
                 )
             }

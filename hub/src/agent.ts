@@ -342,7 +342,13 @@ export class AcpAgent {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (!this.ctx) throw new Error("agent not started");
+    if (!entry.stoppable) return;
     await this.ctx.notify(acp.methods.agent.session.cancel, { sessionId });
+    entry.stoppable = false;
+    this.emit({
+      method: "session.generating",
+      params: { sessionId, stoppable: false },
+    });
   }
 
   isBusy(sessionId: string): boolean {
