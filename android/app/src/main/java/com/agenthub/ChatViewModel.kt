@@ -207,6 +207,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         @Volatile
         var appForeground = true
+        const val LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]"
     }
 
     var screen by mutableStateOf(Screen.Sessions)
@@ -1064,7 +1065,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val text = o["text"]!!.jsonPrimitive.content
                     when (kind) {
                         "user" -> items.add(ChatItem.User(++itemSeq, text))
-                        "assistant" -> items.add(ChatItem.Assistant(++itemSeq, text, author))
+                        "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
+                            items.add(ChatItem.System(++itemSeq, "上一条回复在 Hub 重启中丢失"))
+                        } else {
+                            items.add(ChatItem.Assistant(++itemSeq, text, author))
+                        }
                         "system" -> items.add(ChatItem.System(++itemSeq, text))
                     }
                 }

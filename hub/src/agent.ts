@@ -78,6 +78,7 @@ export class AcpAgent {
     private readonly emit: (event: HubEvent) => void,
     private readonly onClose?: () => void,
     private readonly process?: ChildProcess,
+    private readonly onTurnEnd?: (sessionId: string, text: string) => void,
   ) {}
 
   get isReady(): boolean {
@@ -144,6 +145,8 @@ export class AcpAgent {
     };
     if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
       entry.turnText += u.content.text ?? "";
+    } else if (u.sessionUpdate === "agent_message" && u.content?.type === "text") {
+      entry.turnText = u.content.text ?? "";
     }
     this.emit({
       method: "session.update",
@@ -154,6 +157,8 @@ export class AcpAgent {
   private finishTurn(sessionId: string, stopReason: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    const fullText = entry.turnText;
+    this.onTurnEnd?.(sessionId, fullText);
     entry.busy = false;
     entry.stoppable = false;
     this.emit({
@@ -165,7 +170,7 @@ export class AcpAgent {
       params: {
         sessionId,
         stopReason,
-        output: entry.turnText.slice(-OUTPUT_CAPTURE_LEN),
+        output: fullText.slice(-OUTPUT_CAPTURE_LEN),
       },
     });
     entry.turnText = "";

@@ -35,6 +35,85 @@ const sessionMetas = new Map<string, SessionMeta>(
 );
 for (const room of savedState.rooms) rooms.import(room);
 
+const LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]";
+const LOST_REPLY_NOTE = "上一条用户消息已处理，但回复因 Hub 重启未保存。请直接回答以下新消息，不要重复处理上一条：";
+
+function sessionLostReplyNote(sessionId: string): string | undefined {
+  const meta = sessionMetas.get(sessionId);
+  const baseName = meta?.name ?? sessionId;
+  const origin = originFor(meta);
+  const displayName = origin ? `${baseName} (${origin})` : baseName;
+  const entries = store.read("session", sessionId);
+  const last = entries[entries.length - 1];
+  if (!last) return undefined;
+  if (last.kind === "user") {
+    store.append("session", sessionId, {
+      at: Date.now(),
+      kind: "assistant",
+      author: displayName,
+      text: LOST_REPLY_PLACEHOLDER,
+    });
+    return LOST_REPLY_NOTE;
+  }
+  if (last.kind === "assistant" && last.text === LOST_REPLY_PLACEHOLDER) {
+    return LOST_REPLY_NOTE;
+  }
+  return undefined;
+}
+
+function roomLostReplyNote(roomId: string): string | undefined {
+  const room = rooms.get(roomId);
+  if (!room) return undefined;
+  const entries = store.read("room", roomId);
+  const last = entries[entries.length - 1];
+  if (!last) return undefined;
+  if (last.kind === "user") {
+    store.append("room", roomId, {
+      at: Date.now(),
+      kind: "assistant",
+      author: room.name,
+      text: LOST_REPLY_PLACEHOLDER,
+    });
+    return LOST_REPLY_NOTE;
+  }
+  if (last.kind === "assistant" && last.text === LOST_REPLY_PLACEHOLDER) {
+    return LOST_REPLY_NOTE;
+  }
+  return undefined;
+}
+
+function repairHistoryAtStartup(): void {
+  for (const [sessionId, meta] of sessionMetas) {
+    const entries = store.read("session", sessionId);
+    const last = entries[entries.length - 1];
+    if (last && last.kind === "user") {
+      const baseName = meta.name ?? sessionId;
+      const origin = originFor(meta);
+      const displayName = origin ? `${baseName} (${origin})` : baseName;
+      store.append("session", sessionId, {
+        at: Date.now(),
+        kind: "assistant",
+        author: displayName,
+        text: LOST_REPLY_PLACEHOLDER,
+      });
+    }
+  }
+  for (const room of rooms.list()) {
+    const entries = store.read("room", room.roomId);
+    const last = entries[entries.length - 1];
+    if (last && last.kind === "user") {
+      store.append("room", room.roomId, {
+        at: Date.now(),
+        kind: "assistant",
+        author: room.name,
+        text: LOST_REPLY_PLACEHOLDER,
+      });
+    }
+  }
+}
+
+repairHistoryAtStartup();
+
 function persistState(): void {
   store.save({ sessions: [...sessionMetas.values()], rooms: rooms.list() });
 }
@@ -131,6 +210,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
       }
     },
     proc,
+    onTurnEnd,
   );
 
   agents.set(connection.id, a);
@@ -252,6 +332,30 @@ function isConductorMemberSession(sessionId: string): boolean {
   return isMember && !isConductor;
 }
 
+function onTurnEnd(sessionId: string, text: string): void {
+  const meta = sessionMetas.get(sessionId);
+  const baseName = meta?.name ?? sessionId;
+  const origin = originFor(meta);
+  const displayName = origin ? `${baseName} (${origin})` : baseName;
+  if (text.trim()) {
+    store.append("session", sessionId, {
+      at: Date.now(),
+      kind: "assistant",
+      author: displayName,
+      text,
+    });
+    for (const room of rooms.roomsFor(sessionId)) {
+      if (room.mode === "conductor" && room.conductorId !== sessionId) continue;
+      store.append("room", room.roomId, {
+        at: Date.now(),
+        kind: "assistant",
+        author: displayName,
+        text,
+      });
+    }
+  }
+}
+
 function onAgentEvent(event: HubEvent): void {
   let skipBroadcast = false;
   if (event.method === "prompt.done") {
@@ -262,21 +366,6 @@ function onAgentEvent(event: HubEvent): void {
     const displayName = origin ? `${baseName} (${origin})` : baseName;
     rooms.recordOutput(sessionId, displayName, output);
     if (output.trim()) {
-      store.append("session", sessionId, {
-        at: Date.now(),
-        kind: "assistant",
-        author: displayName,
-        text: output,
-      });
-      for (const room of rooms.roomsFor(sessionId)) {
-        if (room.mode === "conductor" && room.conductorId !== sessionId) continue;
-        store.append("room", room.roomId, {
-          at: Date.now(),
-          kind: "assistant",
-          author: displayName,
-          text: output,
-        });
-      }
       skipBroadcast = isConductorMemberSession(sessionId);
     }
     void conductor.onPromptDone(sessionId, output).catch((err) => {
@@ -844,6 +933,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         return handleRoomSlash(room, slash, text, quote);
       }
 
+      const roomNote = roomLostReplyNote(roomId);
+
       store.append("room", roomId, {
         at: Date.now(),
         kind: "user",
@@ -857,9 +948,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         if (conductor.hasActiveFlow(roomId)) {
           throw new Error("指挥家正在编排中，请等本轮完成");
         }
-        await conductor.start(room, quote
+        const cNote = room.conductorId ? sessionLostReplyNote(room.conductorId) : undefined;
+        const promptText = quote
           ? `${text}\n（用户引用了 ${quote.author} 的消息："${quote.text}"）`
-          : text);
+          : text;
+        const finalText = cNote ? `${cNote}\n\n${promptText}` : promptText;
+        await conductor.start(room, finalText);
         return { sent: [room.conductorId], mentioned: [], skipped: [] };
       }
       const sent: string[] = [];
@@ -869,10 +963,13 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           skipped.push(sid);
           continue;
         }
+        const sNote = sessionLostReplyNote(sid);
         const promptText = rooms.buildPrompt(roomId, text, sid, quote);
+        const combinedNote = roomNote || sNote;
+        const finalText = combinedNote ? `${combinedNote}\n\n${promptText}` : promptText;
         const promptContent = imageBlocks.length > 0
-          ? [{ type: "text", text: promptText }, ...imageBlocks]
-          : promptText;
+          ? [{ type: "text", text: finalText }, ...imageBlocks]
+          : finalText;
         await agentOps.prompt(sid, promptContent);
         sent.push(sid);
       }
@@ -910,12 +1007,25 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const historyText = promptContent
         .map((b) => (b.type === "text" ? String(b.text ?? "") : "[图片]"))
         .join("") || "（图片）";
+
+      const note = sessionLostReplyNote(sessionId);
+
       store.append("session", sessionId, {
         at: Date.now(),
         kind: "user",
         author: "我",
         text: historyText,
       });
+
+      if (note) {
+        const first = promptContent[0];
+        if (first?.type === "text") {
+          (first as Record<string, unknown>).text = `${note}\n\n${String(first.text ?? "")}`;
+        } else {
+          promptContent.unshift({ type: "text", text: note });
+        }
+      }
+
       await agentOps.prompt(sessionId, promptContent);
       return { accepted: true };
     }
@@ -1000,7 +1110,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   }
   console.log(`[hub] worker connected for ${connection.name} (${connectionId})`);
   const stream = webSocketStream(ws);
-  const a = new AcpAgent(connection.name, stream, onAgentEvent);
+  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd);
   agents.set(connectionId, a);
   a.ensureStarted().catch((err) => {
     console.warn(`[hub] worker ${connectionId} start failed:`, String(err));
