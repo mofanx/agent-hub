@@ -538,18 +538,33 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         hub.connect(url,
             onOpen = {
                 viewModelScope.launch {
+                    val firstConnect = connecting
                     connecting = false
+                    connectError = null
                     saveProfile(host, port, token, name)
                     startHubService()
-                    screen = Screen.Sessions
-                    refreshAll()
+                    agentStatus = "已连接"
+                    if (firstConnect) screen = Screen.Sessions
+                    syncRefreshAll()
+                    restoreCurrentScreen()
                 }
             },
             onFailure = { msg ->
-                connecting = false
-                connectError = msg
+                if (connecting) {
+                    connecting = false
+                    connectError = msg
+                } else {
+                    agentStatus = "连接已断开，正在重连…"
+                }
             })
-        hub.onClosed = { agentStatus = "连接已断开" }
+        hub.onClosed = {
+            if (connecting) {
+                connecting = false
+                connectError = "连接已断开"
+            } else {
+                agentStatus = "连接已断开，正在重连…"
+            }
+        }
         eventJob = viewModelScope.launch {
             hub.events.collect { handleEvent(it) }
         }
@@ -671,6 +686,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: Exception) {
             }
         }
+
+    private fun restoreCurrentScreen() {
+        val room = currentRoom
+        if (room != null) {
+            val latestRoom = rooms.find { it.roomId == room.roomId } ?: room
+            openRoom(latestRoom)
+            return
+        }
+        val session = currentSession
+        if (session != null) {
+            val latestSession = sessions.find { it.sessionId == session.sessionId } ?: session
+            if (latestSession.offline) {
+                resumeSession(latestSession, autoOpen = true)
+            } else {
+                openChat(latestSession)
+            }
+        }
+    }
 
     fun createSession(
         cwd: String,

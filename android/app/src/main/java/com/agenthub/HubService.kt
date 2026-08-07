@@ -32,8 +32,6 @@ class HubService : Service() {
     private var isConnected = false
     private var isDestroyed = false
     private val sessionNames = mutableMapOf<String, String>()
-    private var reconnectJob: Job? = null
-    private var retryCount = 0
 
     private val powerManager by lazy { getSystemService(Context.POWER_SERVICE) as PowerManager }
     private var wakeLock: PowerManager.WakeLock? = null
@@ -72,7 +70,6 @@ class HubService : Service() {
 
     override fun onDestroy() {
         isDestroyed = true
-        reconnectJob?.cancel()
         hub?.disconnect()
         try {
             (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
@@ -112,7 +109,8 @@ class HubService : Service() {
     }
 
     private fun connectIfNeeded() {
-        if (isDestroyed || isConnected) return
+        if (isDestroyed || hub?.isConnected == true) return
+        if (hub != null) return
         connect()
     }
 
@@ -128,16 +126,12 @@ class HubService : Service() {
         } else {
             "ws://$address:$port/?token=$token"
         }
-        val client = HubClient(scope)
-        hub?.disconnect()
-        hub = client
+        val client = hub ?: HubClient(scope).also { hub = it }
         client.onEvent = { raw -> handleEvent(raw) }
         client.onClosed = { onDisconnected() }
         client.connect(url,
             onOpen = {
                 isConnected = true
-                retryCount = 0
-                reconnectJob?.cancel()
                 updateForegroundNotification()
                 refreshSessionNames()
             },
@@ -148,20 +142,6 @@ class HubService : Service() {
         if (isDestroyed) return
         isConnected = false
         updateForegroundNotification()
-        scheduleReconnect()
-    }
-
-    private fun scheduleReconnect() {
-        if (isDestroyed) return
-        reconnectJob?.cancel()
-        reconnectJob = scope.launch {
-            val delayMs = (1000L * (1L shl minOf(retryCount, 6))).coerceAtMost(60_000L)
-            retryCount++
-            try { delay(delayMs) } catch (_: CancellationException) { return@launch }
-            if (isActive && !isDestroyed && !isConnected) {
-                connectIfNeeded()
-            }
-        }
     }
 
     private fun updateForegroundNotification() {

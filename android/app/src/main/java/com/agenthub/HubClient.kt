@@ -2,8 +2,11 @@ package com.agenthub
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -38,14 +41,39 @@ class HubClient(private val scope: CoroutineScope) {
     var onClosed: (() -> Unit)? = null
     var onEvent: ((String) -> Unit)? = null
 
+    private var url: String? = null
+    private var onOpenCallback: (() -> Unit)? = null
+    private var onFailureCallback: ((String) -> Unit)? = null
+    private var reconnectJob: Job? = null
+    private var shouldReconnect = false
+    private var reconnectAttempts = 0
+    private var reconnectDelayMs = 1000L
+    private val maxReconnectDelayMs = 30000L
+    private val maxReconnectAttempts = Int.MAX_VALUE
+
     fun connect(url: String, onOpen: () -> Unit, onFailure: (String) -> Unit) {
-        disconnect()
+        this.url = url
+        this.onOpenCallback = onOpen
+        this.onFailureCallback = onFailure
+        shouldReconnect = true
+        reconnectAttempts = 0
+        reconnectDelayMs = 1000L
+        reconnectJob?.cancel()
+        closeWebSocket()
+        doConnect()
+    }
+
+    private fun doConnect() {
+        if (!shouldReconnect) return
+        val url = this.url ?: return
         val request = Request.Builder().url(url).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (webSocket != ws) return
+                reconnectAttempts = 0
+                reconnectDelayMs = 1000L
                 isConnected = true
-                onOpen()
+                onOpenCallback?.invoke()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -65,23 +93,48 @@ class HubClient(private val scope: CoroutineScope) {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (webSocket == ws) {
-                    isConnected = false
-                    ws = null
-                    failPending(t)
-                }
-                onFailure(t.message ?: "connection failed")
+                if (webSocket != ws) return
+                isConnected = false
+                ws = null
+                failPending(t)
+                scheduleReconnect(t.message ?: "connection failed")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (webSocket == ws) {
-                    isConnected = false
-                    ws = null
-                    failPending(IllegalStateException("connection closed"))
-                }
+                if (webSocket != ws) return
+                isConnected = false
+                ws = null
+                failPending(IllegalStateException("connection closed"))
                 onClosed?.invoke()
+                scheduleReconnect("connection closed")
             }
         })
+    }
+
+    private fun scheduleReconnect(msg: String) {
+        if (!shouldReconnect) return
+        if (reconnectAttempts >= maxReconnectAttempts) {
+            onFailureCallback?.invoke("连接失败，请检查服务器或手动重连")
+            return
+        }
+        reconnectAttempts++
+        onFailureCallback?.invoke(msg)
+        val delay = reconnectDelayMs
+        reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(maxReconnectDelayMs)
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(delay)
+            if (isActive && shouldReconnect) {
+                doConnect()
+            }
+        }
+    }
+
+    private fun closeWebSocket() {
+        ws?.close(1000, "bye")
+        ws = null
+        isConnected = false
+        failPending(IllegalStateException("disconnected"))
     }
 
     suspend fun call(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject {
@@ -109,9 +162,10 @@ class HubClient(private val scope: CoroutineScope) {
     }
 
     fun disconnect() {
-        isConnected = false
-        ws?.close(1000, "bye")
-        ws = null
+        shouldReconnect = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        closeWebSocket()
     }
 
     private fun failPending(t: Throwable) {
