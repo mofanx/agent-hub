@@ -1,4 +1,5 @@
 import type { Room, RoomManager } from "./room.js";
+import { logError } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -158,7 +159,7 @@ export class ConductorOrchestrator {
             } 子任务中断（剩 ${pendingCount} 项待派发）`,
           });
           void this.scheduleTasks(flow, room).catch((err) => {
-            console.error("[conductor] schedule after error failed:", err);
+            logError("conductor schedule after error", err);
           });
           return true;
         }
@@ -568,7 +569,7 @@ export class ConductorOrchestrator {
       this.flows.set(roomId, flow);
       this.notice({ roomId, message: "🔄 已恢复指挥编排，继续执行待派发任务" });
       await this.scheduleTasks(flow, room).catch((err) => {
-        console.error("[conductor] import schedule failed:", roomId, err);
+        logError("conductor import schedule", err);
       });
     }
   }

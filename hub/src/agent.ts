@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Stream } from "@agentclientprotocol/sdk";
 import type { ChildProcess } from "node:child_process";
+import { logWarn } from "./logger.js";
 
 export type TokenUsage = {
   totalTokens?: number;
@@ -225,8 +226,9 @@ export class AcpAgent {
         "name" in params.toolCall
           ? String(params.toolCall.name)
           : "?";
-      console.warn(
-        `[permission] bypass=${permissionBypass}, auto-selecting "${chosen?.name ?? optionId}" for ${toolName} in session ${params.sessionId}`,
+      logWarn(
+        "permission",
+        `bypass=${permissionBypass}, auto-selecting "${chosen?.name ?? optionId}" for ${toolName} in session ${params.sessionId}`,
       );
       return Promise.resolve({
         outcome: { outcome: "selected", optionId },
@@ -252,7 +254,7 @@ export class AcpAgent {
           resolve({ outcome: { outcome: "selected", optionId: "" } });
           return;
         }
-        console.warn(`[agent] permission ${requestId} timed out -> ${fallback.optionId}`);
+        logWarn("agent", `permission ${requestId} timed out -> ${fallback.optionId}`);
         resolve({ outcome: { outcome: "selected", optionId: fallback.optionId } });
       }, PERMISSION_TIMEOUT_MS);
       this.pendingPermissions.set(requestId, (optionId) => {
@@ -317,7 +319,7 @@ export class AcpAgent {
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
-        console.warn(`[agent] resume ${sessionId} failed:`, String(err));
+        logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
         return false;
       }
     }

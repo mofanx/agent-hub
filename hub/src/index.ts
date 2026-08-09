@@ -13,13 +13,14 @@ import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
 import { AGENT_DEFS } from "./agent-defs.js";
 import { ModelManager } from "./model.js";
+import { logError, logWarn } from "./logger.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
 const WORKER_PATH = "/worker";
 
 if (TOKEN === "dev-token") {
-  console.warn("[hub] WARNING: using default token, set HUB_TOKEN in production");
+  logWarn("config", "using default token, set HUB_TOKEN in production");
 }
 
 const clients = new Set<WebSocket>();
@@ -235,7 +236,7 @@ async function cloneSessionWithName(
         `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
       agentOps
         .prompt(s.sessionId, personaPrompt)
-        .catch((err) => console.warn("[role] persona inject failed:", String(err)));
+        .catch((err) => logWarn("persona", `inject failed: ${String(err)}`));
     }
   }
   return s;
@@ -286,7 +287,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
   agents.set(connection.id, a);
 
   a.ensureStarted().catch((err) => {
-    console.warn(`[hub] local agent ${connection.id} failed:`, err);
+    logWarn("local agent", `${connection.id} failed: ${String(err)}`);
     agents.delete(connection.id);
     for (const [sid, cid] of [...owners.entries()]) {
       if (cid === connection.id) owners.delete(sid);
@@ -330,7 +331,7 @@ const roomModeManager = new RoomModeManager(agentOps, rooms, (method, params) =>
 if (savedRuntime) {
   roomModeManager
     .importRuntime(savedRuntime)
-    .catch((err) => console.error("[hub] import runtime failed:", err));
+    .catch((err) => logError("import runtime", err));
 }
 
 function ownerOf(sessionId: string): AcpAgent {
@@ -442,7 +443,7 @@ function onAgentEvent(event: HubEvent): void {
       .onPromptDone(sessionId!, output)
       .then(() => persistState())
       .catch((err) => {
-        console.error("[room-modes] error:", err);
+        logError("room-modes", err);
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
@@ -620,7 +621,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
         agentOps
           .prompt(s.sessionId, personaPrompt)
-          .catch((err) => console.warn("[role] persona inject failed:", String(err)));
+          .catch((err) => logWarn("persona", `inject failed: ${String(err)}`));
       }
       return { ...s, agent: connection.agent, connectionId: connection.id, roleId: finalRoleId };
     }
@@ -666,7 +667,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
             `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
           agentOps
             .prompt(s.sessionId, personaPrompt)
-            .catch((err) => console.warn("[role] persona inject failed:", String(err)));
+            .catch((err) => logWarn("persona", `inject failed: ${String(err)}`));
         }
       }
       return {
@@ -1154,7 +1155,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           raw === 1;
       }
       setPermissionBypass(enabled);
-      console.warn(`[hub] permission bypass set to ${enabled}`);
+      logWarn("config", `permission bypass set to ${enabled}`);
       return { bypass: enabled };
     }
     case "model.list": {
@@ -1190,13 +1191,14 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   const reportedAgent = url.searchParams.get("agent") ?? undefined;
   const connection = getConnectionByToken(token);
   if (!connection) {
-    console.warn("[hub] worker rejected: unknown token");
+    logWarn("worker", "rejected: unknown token");
     ws.close(4001, "unauthorized");
     return;
   }
   if (reportedAgent && reportedAgent !== connection.agent) {
-    console.warn(
-      `[hub] worker token=${token} reported agent=${reportedAgent} but expected ${connection.agent}`,
+    logWarn(
+      "worker",
+      `token=${token} reported agent=${reportedAgent} but expected ${connection.agent}`,
     );
   }
   const connectionId = connection.id;
@@ -1210,7 +1212,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd);
   agents.set(connectionId, a);
   a.ensureStarted().catch((err) => {
-    console.warn(`[hub] worker ${connectionId} start failed:`, String(err));
+    logWarn("worker", `${connectionId} start failed: ${String(err)}`);
     agents.delete(connectionId);
     ws.close();
   });
@@ -1250,6 +1252,7 @@ wss.on("connection", (ws, req) => {
       const result = await handleRequest(req2);
       send(ws, { id: req2.id, result });
     } catch (err) {
+      logError(`request ${req2.method}`, err);
       send(ws, { id: req2.id, error: String(err) });
     }
   });

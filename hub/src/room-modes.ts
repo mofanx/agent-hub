@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Room, RoomManager, RoomMode } from "./room.js";
 import { ConductorOrchestrator } from "./conductor.js";
+import { logError } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -558,7 +559,7 @@ export class RoomModeManager {
       }
       const prompt = this.buildPromptContent(room, text, sid, options);
       this.agent.prompt(sid, prompt).catch((err) => {
-        console.error("[room-modes] mention prompt failed:", sid, err);
+        logError("room-modes mention prompt", err);
       });
       sent.push(sid);
     }
@@ -601,7 +602,7 @@ export class RoomModeManager {
           .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[] }[]
       : undefined;
     this.conductor.start(room, task, initialTasks).catch((err) => {
-      console.error("[room-modes] conductor start failed:", room.conductorId, err);
+      logError("room-modes conductor start", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
   }
@@ -643,7 +644,7 @@ export class RoomModeManager {
     this.notice({ roomId: room.roomId, message: `🔄 轮询模式：由 @${this.nameFor(room.roomId, target)} 作答` });
     const prompt = this.buildPromptContent(room, text, target, options);
     this.agent.prompt(target, prompt).catch((err) => {
-      console.error("[room-modes] roundrobin prompt failed:", target, err);
+      logError("room-modes roundrobin prompt", err);
     });
     return { sent: [target], mentioned: [], skipped };
   }
@@ -692,7 +693,7 @@ export class RoomModeManager {
     for (const sid of sent) {
       const prompt = this.buildPromptContent(room, text, sid, options);
       this.agent.prompt(sid, prompt).catch((err) => {
-        console.error("[room-modes] parallel prompt failed:", sid, err);
+        logError("room-modes parallel prompt", err);
         const f = this.parallelFlows.get(room.roomId);
         if (!f) return;
         f.pending.delete(sid);
@@ -737,7 +738,7 @@ export class RoomModeManager {
     this.parallelFlows.delete(roomId);
     this.notice({ roomId, message: "并行回答完成，汇总者正在整理…" });
     this.agent.prompt(flow.summarizer, prompt).catch((err) => {
-      console.error("[room-modes] parallel summarize failed:", err);
+      logError("room-modes parallel summarize", err);
     });
   }
 
@@ -771,7 +772,7 @@ export class RoomModeManager {
     this.notice({ roomId: room.roomId, message: `🔄 流水线模式：${path}` });
     const prompt = this.buildPipelinePrompt(room, flow, 0);
     this.agent.prompt(first, prompt).catch((err) => {
-      console.error("[room-modes] pipeline prompt failed:", first, err);
+      logError("room-modes pipeline prompt", err);
     });
     return { sent: [first], mentioned: [], skipped: [] };
   }
@@ -799,7 +800,7 @@ export class RoomModeManager {
       this.notice({ roomId, message: `流水线第 ${nextStage + 1} 阶段 → @${this.nameFor(roomId, nextSid)}` });
       const prompt = this.buildPipelinePrompt(room, flow, nextStage, prevName, output);
       this.agent.prompt(nextSid, prompt).catch((err) => {
-        console.error("[room-modes] pipeline next stage failed:", nextSid, err);
+        logError("room-modes pipeline next stage", err);
       });
       return true;
     }
@@ -874,7 +875,7 @@ export class RoomModeManager {
     });
     const prompt = this.buildDebatePrompt(room, flow, 0, undefined);
     this.agent.prompt(sideA, prompt).catch((err) => {
-      console.error("[room-modes] debate prompt failed:", sideA, err);
+      logError("room-modes debate prompt", err);
     });
     return { sent: [sideA], mentioned: [], skipped: [] };
   }
@@ -896,7 +897,7 @@ export class RoomModeManager {
         this.setSubMode(roomId, "debate", nextSid, undefined);
         const prompt = this.buildDebatePrompt(room, flow, 1, output);
         this.agent.prompt(nextSid, prompt).catch((err) => {
-          console.error("[room-modes] debate next side failed:", nextSid, err);
+          logError("room-modes debate next side", err);
         });
         return true;
       }
@@ -908,7 +909,7 @@ export class RoomModeManager {
         this.setSubMode(roomId, "debate", nextSid, undefined);
         const prompt = this.buildDebatePrompt(room, flow, 0, output);
         this.agent.prompt(nextSid, prompt).catch((err) => {
-          console.error("[room-modes] debate next round failed:", nextSid, err);
+          logError("room-modes debate next round", err);
         });
         return true;
       }
@@ -919,7 +920,7 @@ export class RoomModeManager {
       this.notice({ roomId, message: "辩论结束，裁判总结中…" });
       const judgePrompt = this.buildJudgePrompt(room, flow);
       this.agent.prompt(flow.judge, judgePrompt).catch((err) => {
-        console.error("[room-modes] judge prompt failed:", flow.judge, err);
+        logError("room-modes judge prompt", err);
       });
       return true;
     }
@@ -968,7 +969,7 @@ export class RoomModeManager {
     this.notice({ roomId: room.roomId, message: `🎙️ 自动选择：主持人独立作答` });
     const prompt = this.buildPromptContent(room, text, room.conductorId, options);
     this.agent.prompt(room.conductorId, prompt).catch((err) => {
-      console.error("[room-modes] self prompt failed:", room.conductorId, err);
+      logError("room-modes self prompt", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
   }
@@ -998,7 +999,7 @@ export class RoomModeManager {
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
     this.agent.prompt(room.conductorId, prompt).catch((err) => {
-      console.error("[room-modes] auto decision failed:", room.conductorId, err);
+      logError("room-modes auto decision", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
   }

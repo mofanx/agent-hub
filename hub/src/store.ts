@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Room } from "./room.js";
+import { logWarn } from "./logger.js";
 
 export type Connection = {
   id: string;
@@ -206,7 +207,7 @@ export class Store {
         console.log(`[store] migrated ${imported} legacy history entries`);
       }
     } catch (err) {
-      console.warn("[store] legacy migration failed:", err);
+      logWarn("store", `legacy migration failed: ${String(err)}`);
     }
   }
 
@@ -328,7 +329,7 @@ export class Store {
         )
         .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
     } catch (err) {
-      console.warn("[store] append failed:", err);
+      logWarn("store", `append failed: ${String(err)}`);
     }
   }
 

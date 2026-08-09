@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { logError } from "./logger.js";
 
 export type ModelInfo = {
   uid: string;
@@ -102,7 +103,7 @@ export class ModelManager {
       console.log(`[model] loaded ${parsed.length} models`);
     } catch (err) {
       this.lastError = String(err);
-      console.error("[model] load failed:", err);
+      logError("model load", err);
     } finally {
       this.loading = null;
     }
