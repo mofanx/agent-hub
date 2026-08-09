@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.doOnLayout
 import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TablePlugin
 import java.util.regex.Pattern
 
 private const val TAG_MARKWON = "markwon"
@@ -35,7 +36,9 @@ fun MarkdownText(
     val keywordOffset = remember { object { var value: Float? = null } }
     AndroidView(
         factory = { ctx ->
-            val markwon = Markwon.create(ctx)
+            val markwon = Markwon.builder(ctx)
+                .usePlugin(TablePlugin.create(ctx))
+                .build()
             TextView(ctx).apply {
                 setTextColor(textColor.toArgb())
                 setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
