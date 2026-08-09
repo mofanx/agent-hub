@@ -3,12 +3,28 @@ import * as acp from "@agentclientprotocol/sdk";
 import type { Stream } from "@agentclientprotocol/sdk";
 import type { ChildProcess } from "node:child_process";
 
+export type TokenUsage = {
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  thoughtTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+};
+
+export type ContextUsage = {
+  used: number;
+  size: number;
+  cost?: { amount: number; currency: string } | null;
+};
+
 export type HubEvent =
   | { method: "session.update"; params: { sessionId: string; update: unknown } }
   | { method: "session.generating"; params: { sessionId: string; stoppable: boolean } }
+  | { method: "session.usage"; params: { sessionId: string; usage: ContextUsage } }
   | {
       method: "prompt.done";
-      params: { sessionId: string; stopReason: string; output: string };
+      params: { sessionId: string; stopReason: string; output: string; usage?: TokenUsage };
     }
   | { method: "prompt.error"; params: { sessionId: string; message: string } }
   | {
@@ -142,8 +158,23 @@ export class AcpAgent {
     const u = params.update as {
       sessionUpdate?: string;
       content?: { type: string; text?: string };
+      used?: number;
+      size?: number;
+      cost?: { amount: number; currency: string };
     };
-    if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
+    if (u.sessionUpdate === "usage_update") {
+      this.emit({
+        method: "session.usage",
+        params: {
+          sessionId: params.sessionId,
+          usage: {
+            used: u.used ?? 0,
+            size: u.size ?? 0,
+            cost: u.cost ?? null,
+          },
+        },
+      });
+    } else if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
       entry.turnText += u.content.text ?? "";
     } else if (u.sessionUpdate === "agent_message" && u.content?.type === "text") {
       entry.turnText = u.content.text ?? "";
@@ -154,7 +185,11 @@ export class AcpAgent {
     });
   }
 
-  private finishTurn(sessionId: string, stopReason: string): void {
+  private finishTurn(
+    sessionId: string,
+    stopReason: string,
+    usage?: TokenUsage,
+  ): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     const fullText = entry.turnText;
@@ -165,14 +200,10 @@ export class AcpAgent {
       method: "session.generating",
       params: { sessionId, stoppable: false },
     });
-    this.emit({
-      method: "prompt.done",
-      params: {
-        sessionId,
-        stopReason,
-        output: fullText.slice(-OUTPUT_CAPTURE_LEN),
-      },
-    });
+    const doneParams: { sessionId: string; stopReason: string; output: string; usage?: TokenUsage } =
+      { sessionId, stopReason, output: fullText.slice(-OUTPUT_CAPTURE_LEN) };
+    if (usage) doneParams.usage = usage;
+    this.emit({ method: "prompt.done", params: doneParams });
     entry.turnText = "";
   }
 
@@ -323,12 +354,13 @@ export class AcpAgent {
       sessionId,
       prompt,
     })
-      .then((resp) =>
+      .then((resp) => {
         this.finishTurn(
           sessionId,
           (resp as { stopReason?: unknown }).stopReason as string,
-        ),
-      )
+          (resp as { usage?: unknown }).usage as TokenUsage | undefined,
+        );
+      })
       .catch((err: unknown) => {
         entry.busy = false;
         entry.stoppable = false;

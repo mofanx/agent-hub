@@ -7,6 +7,7 @@ import android.net.Uri
 import android.util.Base64
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
@@ -65,7 +66,7 @@ sealed class ChatItem {
         override val text: String,
         override val author: String = "",
     ) : ChatItem()
-    data class Assistant(override val id: Long, override val text: String, override val author: String) : ChatItem()
+    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null) : ChatItem()
     data class Thought(override val id: Long, override val text: String, override val author: String) : ChatItem()
     data class Tool(
         override val id: Long,
@@ -172,6 +173,22 @@ data class RoomListFilter(
     val groupBy: RoomGroupBy = RoomGroupBy.None,
 )
 
+data class TokenUsage(
+    val totalTokens: Long = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val thoughtTokens: Long? = null,
+    val cachedReadTokens: Long? = null,
+    val cachedWriteTokens: Long? = null,
+)
+
+data class ContextUsage(
+    val used: Long = 0,
+    val size: Long = 0,
+    val costAmount: Double? = null,
+    val costCurrency: String? = null,
+)
+
 data class SessionListGroup(val title: String, val sessions: List<SessionInfo>)
 
 data class RoomListGroup(val title: String, val rooms: List<RoomInfo>)
@@ -272,6 +289,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
     val busyIds = mutableStateListOf<String>()
+    val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
 
@@ -400,6 +418,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentRoom?.members?.find { it.first == sessionId }?.second
             ?: sessions.find { it.sessionId == sessionId }?.let { displayName(it) }
             ?: sessionId
+
+    private fun parseTokenUsage(u: JsonObject?): TokenUsage? {
+        if (u == null) return null
+        return TokenUsage(
+            totalTokens = u["totalTokens"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            inputTokens = u["inputTokens"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            outputTokens = u["outputTokens"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            thoughtTokens = u["thoughtTokens"]?.jsonPrimitive?.content?.toLongOrNull(),
+            cachedReadTokens = u["cachedReadTokens"]?.jsonPrimitive?.content?.toLongOrNull(),
+            cachedWriteTokens = u["cachedWriteTokens"]?.jsonPrimitive?.content?.toLongOrNull(),
+        )
+    }
 
     fun sessionOrigin(s: SessionInfo): String {
         if (s.connectionId != null) {
@@ -1647,10 +1677,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (!inScope(sid)) return
                 if (shouldShowInRoom(sid)) applyUpdate(sid, p["update"]!!.jsonObject)
             }
+            "session.usage" -> {
+                val p = obj["params"]!!.jsonObject
+                val sid = p["sessionId"]!!.jsonPrimitive.content
+                val u = p["usage"] as? JsonObject ?: return
+                val cost = u["cost"] as? JsonObject
+                sessionUsage[sid] = ContextUsage(
+                    used = u["used"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                    size = u["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                    costAmount = cost?.get("amount")?.jsonPrimitive?.content?.toDoubleOrNull(),
+                    costCurrency = cost?.get("currency")?.jsonPrimitive?.content,
+                )
+            }
             "prompt.done" -> {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 busyIds.remove(sid)
+                val usage = parseTokenUsage(p["usage"] as? JsonObject)
+                if (usage != null) {
+                    val author = sessionName(sid)
+                    val idx = chatItems.indexOfLast { it is ChatItem.Assistant && it.author == author }
+                    if (idx >= 0) {
+                        chatItems[idx] = (chatItems[idx] as ChatItem.Assistant).copy(usage = usage)
+                    }
+                }
                 refreshAll()
             }
             "prompt.error" -> {

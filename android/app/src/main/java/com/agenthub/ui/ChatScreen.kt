@@ -2,7 +2,7 @@ package com.agenthub.ui
 
 import android.graphics.BitmapFactory
 import android.util.Base64
-import android.util.Log
+
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -119,6 +119,29 @@ import kotlinx.coroutines.launch
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
+import com.agenthub.ContextUsage
+import com.agenthub.TokenUsage
+
+private fun formatNumber(n: Long): String = when {
+    n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
+    n >= 1_000 -> String.format("%.1fk", n / 1_000.0)
+    else -> n.toString()
+}
+
+private fun TokenUsage.format(): String = buildString {
+    append("输入 ${formatNumber(inputTokens)} · 输出 ${formatNumber(outputTokens)}")
+    if (cachedReadTokens != null && cachedReadTokens > 0) append(" · 缓存 ${formatNumber(cachedReadTokens)}")
+    if (cachedWriteTokens != null && cachedWriteTokens > 0) append(" · 写缓存 ${formatNumber(cachedWriteTokens)}")
+    if (thoughtTokens != null && thoughtTokens > 0) append(" · 思考 ${formatNumber(thoughtTokens)}")
+    append(" · 总计 ${formatNumber(totalTokens)}")
+}
+
+private fun ContextUsage.format(): String = buildString {
+    append("上下文 ${formatNumber(used)} / ${formatNumber(size)}")
+    if (costAmount != null && costCurrency != null) {
+        append(" · ${costCurrency} ${String.format("%.4f", costAmount)}")
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -127,6 +150,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var input by remember { mutableStateOf("") }
     val sessionKey = vm.currentRoom?.roomId ?: vm.currentSession?.sessionId ?: ""
     val listState = remember(sessionKey) { LazyListState(0, 0) }
+    val activeSessionId = vm.currentRoom?.activeSpeaker ?: vm.currentSession?.sessionId
+    val contextUsage by remember { derivedStateOf { activeSessionId?.let { vm.sessionUsage[it] } } }
     val isAtBottom by produceState(false, listState, vm.chatItems.size) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .collect { (index, offset) ->
@@ -175,7 +200,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     LaunchedEffect(vm.chatSearchMatchIndex, matchPositions) {
         val idx = vm.chatSearchMatchIndex
         if (idx in matchPositions.indices) {
-            Log.d("SearchScroll", "scroll to match index=$idx, position=${matchPositions[idx]}")
             // drain stale measurements from previous matches / scrolls
             while (keywordChannel.tryReceive().isSuccess) { }
             listState.animateScrollToItem(matchPositions[idx], 0)
@@ -195,7 +219,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         y > bottomTarget -> bottomTarget - y
                         else -> 0f
                     }
-                    Log.d("SearchScroll", "step=$step y=$y target=$topTarget..$bottomTarget delta=$delta")
                     if (kotlin.math.abs(delta) < 2f || step >= 30) {
                         settled = true
                         return@collect
@@ -244,6 +267,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 "${modeLabel}${room.subMode?.let { " · $it" } ?: ""} | ${room.members.joinToString("  ") { "@${it.second}" }}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (contextUsage != null) {
+                            Text(
+                                contextUsage!!.format(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline,
                             )
                         }
                     }
@@ -835,7 +865,6 @@ fun HighlightText(
                 val y = textY
                 val lt = lineTop
                 if (y != null && lt != null) {
-                    Log.d("SearchScroll", "HighlightText keywordY=${y + lt}")
                     onMatchKeywordY(y + lt)
                 }
             }
@@ -964,6 +993,14 @@ fun ChatBubble(
                         onMatchKeywordY = keywordCallback,
                     )
                 }
+            }
+            if (item.usage != null) {
+                Text(
+                    item.usage.format(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 4.dp),
+                )
             }
         }
 

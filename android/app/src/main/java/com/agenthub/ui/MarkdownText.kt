@@ -81,7 +81,6 @@ fun MarkdownText(
                         val loc = IntArray(2)
                         view.getLocationInWindow(loc)
                         val y = (loc[1] + (keywordOffset.value ?: 0f)).toFloat()
-                        android.util.Log.d("SearchScroll", "MarkdownText keywordY=$y")
                         onMatchKeywordY(y)
                     }
                 } else {
@@ -95,7 +94,6 @@ fun MarkdownText(
             val offset = keywordOffset.value
             if (offset != null && onMatchKeywordY != null) {
                 val y = coordinates.positionInWindow().y + offset
-                android.util.Log.d("SearchScroll", "MarkdownText keywordY=$y")
                 onMatchKeywordY(y)
             }
         },
