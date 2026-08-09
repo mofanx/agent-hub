@@ -14,6 +14,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
@@ -49,10 +50,11 @@ data class ModelInfo(
 sealed class ChatItem {
     abstract val id: Long
     abstract val author: String
+    abstract val text: String
 
     data class User(
         override val id: Long,
-        val text: String,
+        override val text: String,
         val attachments: List<Attachment> = emptyList(),
         override val author: String = "我",
         val quoteAuthor: String? = null,
@@ -60,26 +62,30 @@ sealed class ChatItem {
     ) : ChatItem()
     data class System(
         override val id: Long,
-        val text: String,
+        override val text: String,
         override val author: String = "",
     ) : ChatItem()
-    data class Assistant(override val id: Long, val text: String, override val author: String) : ChatItem()
-    data class Thought(override val id: Long, val text: String, override val author: String) : ChatItem()
+    data class Assistant(override val id: Long, override val text: String, override val author: String) : ChatItem()
+    data class Thought(override val id: Long, override val text: String, override val author: String) : ChatItem()
     data class Tool(
         override val id: Long,
         val toolCallId: String,
         val title: String,
         val status: String,
         override val author: String,
-    ) : ChatItem()
+    ) : ChatItem() {
+        override val text: String get() = "[$title] $status"
+    }
     data class Plan(
         override val id: Long,
         val entries: List<String>,
         override val author: String,
-    ) : ChatItem()
+    ) : ChatItem() {
+        override val text: String get() = entries.joinToString("\n")
+    }
     data class Error(
         override val id: Long,
-        val text: String,
+        override val text: String,
         override val author: String = "",
     ) : ChatItem()
     data class Permission(
@@ -89,7 +95,9 @@ sealed class ChatItem {
         val options: List<Pair<String, String>>,
         val answered: String? = null,
         override val author: String,
-    ) : ChatItem()
+    ) : ChatItem() {
+        override val text: String get() = title
+    }
 }
 
 data class ConnectionInfo(
@@ -122,6 +130,15 @@ data class SearchHit(
     val scopeId: String,
     val author: String,
     val text: String,
+    val historyId: Long = 0,
+    val at: Long = 0,
+)
+
+data class SearchGroup(
+    val scope: String,
+    val scopeId: String,
+    val count: Int,
+    val previews: List<SearchHit>,
 )
 
 data class RoomInfo(
@@ -134,6 +151,30 @@ data class RoomInfo(
     val activeSpeaker: String? = null,
     val reason: String? = null,
 )
+
+enum class SessionGroupBy { None, Agent, Cwd }
+
+enum class RoomGroupBy { None, Mode }
+
+enum class SessionStatus { Online, Offline, Busy, Pinned, Archived }
+
+data class SessionListFilter(
+    val query: String = "",
+    val agents: Set<String> = emptySet(),
+    val cwds: Set<String> = emptySet(),
+    val statuses: Set<SessionStatus> = emptySet(),
+    val groupBy: SessionGroupBy = SessionGroupBy.None,
+)
+
+data class RoomListFilter(
+    val query: String = "",
+    val modes: Set<String> = emptySet(),
+    val groupBy: RoomGroupBy = RoomGroupBy.None,
+)
+
+data class SessionListGroup(val title: String, val sessions: List<SessionInfo>)
+
+data class RoomListGroup(val title: String, val rooms: List<RoomInfo>)
 
 data class RoleInfo(
     val id: String,
@@ -216,6 +257,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     var screen by mutableStateOf(Screen.Sessions)
     val listTab = mutableIntStateOf(0)
+    var sessionListFilter by mutableStateOf(SessionListFilter())
+    var roomListFilter by mutableStateOf(RoomListFilter())
     var connecting by mutableStateOf(false)
     var connectError by mutableStateOf<String?>(null)
     var agentStatus by mutableStateOf("未连接")
@@ -368,6 +411,63 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun displayName(s: SessionInfo): String {
         val origin = sessionOrigin(s)
         return if (origin.isNotBlank()) "${s.name} (${origin})" else s.name
+    }
+
+    fun sessionStatuses(s: SessionInfo): List<SessionStatus> = buildList {
+        if (s.archived) add(SessionStatus.Archived)
+        when {
+            s.offline -> add(SessionStatus.Offline)
+            s.busy || busyIds.contains(s.sessionId) -> add(SessionStatus.Busy)
+            !s.archived -> add(SessionStatus.Online)
+        }
+        if (pinnedIds.contains(s.sessionId)) add(SessionStatus.Pinned)
+    }
+
+    fun filteredSessionGroups(): List<SessionListGroup> {
+        val filter = sessionListFilter
+        val q = filter.query.trim().lowercase()
+        val filtered = sessions.filter { s ->
+            if (filter.agents.isNotEmpty() && s.agent !in filter.agents) return@filter false
+            if (filter.cwds.isNotEmpty() && s.cwd !in filter.cwds) return@filter false
+            val st = sessionStatuses(s)
+            if (filter.statuses.isNotEmpty() && !filter.statuses.any { it in st }) return@filter false
+            if (q.isNotEmpty()) {
+                val hay = "${s.name} ${s.cwd} ${s.agent} ${sessionOrigin(s)}".lowercase()
+                if (!hay.contains(q)) return@filter false
+            }
+            true
+        }.sortedWith(
+            compareByDescending<SessionInfo> { !it.archived }
+                .thenByDescending { pinnedIds.contains(it.sessionId) }
+                .thenBy { it.name.lowercase() }
+        )
+        return when (filter.groupBy) {
+            SessionGroupBy.None -> listOf(SessionListGroup("", filtered))
+            SessionGroupBy.Agent -> filtered.groupBy { it.agent }.toSortedMap().map { (k, v) -> SessionListGroup(k, v) }
+            SessionGroupBy.Cwd -> filtered.groupBy { it.cwd }.toSortedMap().map { (k, v) -> SessionListGroup(k, v) }
+        }
+    }
+
+    fun filteredRoomGroups(): List<RoomListGroup> {
+        val filter = roomListFilter
+        val q = filter.query.trim().lowercase()
+        val filtered = rooms.filter { r ->
+            if (filter.modes.isNotEmpty() && r.mode !in filter.modes) return@filter false
+            if (q.isNotEmpty()) {
+                val members = r.members.joinToString(" ") { it.second }.lowercase()
+                val modeLabel = r.mode.lowercase()
+                val hay = "${r.name} $modeLabel $members".lowercase()
+                if (!hay.contains(q)) return@filter false
+            }
+            true
+        }.sortedWith(
+            compareBy<RoomInfo> { it.name.lowercase() }
+        )
+        return when (filter.groupBy) {
+            RoomGroupBy.None -> listOf(RoomListGroup("", filtered))
+            RoomGroupBy.Mode -> filtered.groupBy { it.mode }.map { (k, v) -> RoomListGroup(k, v) }
+                .sortedBy { it.title }
+        }
     }
 
     fun refreshBusy() {
@@ -948,7 +1048,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         o["reason"]?.jsonPrimitive?.content,
     )
 
-    fun openChat(session: SessionInfo) {
+    fun openChat(session: SessionInfo, anchorAt: Long? = null) {
         if (session.offline) {
             resumeSession(session, autoOpen = true)
             return
@@ -958,11 +1058,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentRoom = null
         chatItems.clear()
         quote = null
+        if (anchorAt == null) {
+            inChatSearchQuery = ""
+            jumpToHistoryId = null
+        }
+        chatSearchMatchIndex = -1
+        chatSearchMatchCount = 0
         screen = Screen.Chat
-        loadHistory("session.history", "sessionId", session.sessionId)
+        loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
     }
 
-    fun openRoom(room: RoomInfo) {
+    fun openRoom(room: RoomInfo, anchorAt: Long? = null) {
         viewModelScope.launch {
             connectError = null
             try {
@@ -981,8 +1087,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 currentSession = null
                 chatItems.clear()
                 quote = null
+                if (anchorAt == null) {
+                    inChatSearchQuery = ""
+                    jumpToHistoryId = null
+                }
+                chatSearchMatchIndex = -1
+                chatSearchMatchCount = 0
                 screen = Screen.Room
-                loadHistory("room.history", "roomId", updatedRoom.roomId)
+                loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
             } catch (e: Exception) {
                 connectError = e.message
             }
@@ -1062,10 +1174,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun loadHistory(method: String, idKey: String, id: String) {
+    private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null) {
         viewModelScope.launch {
             try {
-                val result = hub.call(method, buildJsonObject { put(idKey, id) })
+                val params = buildJsonObject {
+                    put(idKey, id)
+                    if (anchorAt != null) put("anchorAt", anchorAt)
+                }
+                val result = hub.call(method, params)
                 val entries = result["entries"]?.jsonArray ?: return@launch
                 val items = mutableListOf<ChatItem>()
                 for (e in entries) {
@@ -1073,14 +1189,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val kind = o["kind"]!!.jsonPrimitive.content
                     val author = o["author"]!!.jsonPrimitive.content
                     val text = o["text"]!!.jsonPrimitive.content
+                    val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
+                    val itemId = if (historyId != null) -historyId else ++itemSeq
                     when (kind) {
-                        "user" -> items.add(ChatItem.User(++itemSeq, text))
+                        "user" -> items.add(ChatItem.User(itemId, text))
                         "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
-                            items.add(ChatItem.System(++itemSeq, "上一条回复在 Hub 重启中丢失"))
+                            items.add(ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失"))
                         } else {
-                            items.add(ChatItem.Assistant(++itemSeq, text, author))
+                            items.add(ChatItem.Assistant(itemId, text, author))
                         }
-                        "system" -> items.add(ChatItem.System(++itemSeq, text))
+                        "system" -> items.add(ChatItem.System(itemId, text))
                     }
                 }
                 chatItems.addAll(items)
@@ -1130,20 +1248,80 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    val searchGroups = mutableStateListOf<SearchGroup>()
     val searchResults = mutableStateListOf<SearchHit>()
+    var selectedSearchGroup by mutableStateOf<SearchGroup?>(null)
+    var searchQuery by mutableStateOf("")
+    var inChatSearchQuery by mutableStateOf("")
+    var jumpToHistoryId by mutableStateOf<Long?>(null)
+    var chatSearchMatchIndex by mutableIntStateOf(-1)
+    var chatSearchMatchCount by mutableIntStateOf(0)
+    private var searchJob: Job? = null
 
-    fun search(query: String) {
+    suspend fun search(query: String) {
+        try {
+            searchGroups.clear()
+            searchResults.clear()
+            selectedSearchGroup = null
+            if (query.isBlank()) return
+            val result = hub.call("history.searchGroups", buildJsonObject {
+                put("query", query)
+                put("limit", 30)
+                put("previewLimit", 1)
+            })
+            for (g in result["groups"]?.jsonArray ?: return) {
+                val o = g.jsonObject
+                val previews = o["previews"]?.jsonArray?.map { p ->
+                    val po = p.jsonObject
+                    SearchHit(
+                        scope = po["scope"]?.jsonPrimitive?.content ?: "session",
+                        scopeId = po["scopeId"]?.jsonPrimitive?.content ?: "",
+                        author = po["author"]?.jsonPrimitive?.content ?: "",
+                        text = po["text"]?.jsonPrimitive?.content ?: "",
+                        historyId = po["id"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        at = po["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                    )
+                } ?: emptyList()
+                searchGroups.add(SearchGroup(
+                    scope = o["scope"]?.jsonPrimitive?.content ?: "session",
+                    scopeId = o["scopeId"]?.jsonPrimitive?.content ?: "",
+                    count = o["count"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    previews = previews,
+                ))
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun scheduleSearch(query: String) {
+        searchQuery = query
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            delay(300)
+            search(query)
+        }
+    }
+
+    fun openSearchGroup(group: SearchGroup) {
         viewModelScope.launch {
             try {
-                val result = hub.call("history.search", buildJsonObject { put("query", query) })
+                selectedSearchGroup = group
                 searchResults.clear()
+                val result = hub.call("history.search", buildJsonObject {
+                    put("query", searchQuery)
+                    put("scope", group.scope)
+                    put("scopeId", group.scopeId)
+                    put("limit", 200)
+                })
                 for (r in result["results"]?.jsonArray ?: return@launch) {
                     val o = r.jsonObject
                     searchResults.add(SearchHit(
-                        o["scope"]!!.jsonPrimitive.content,
-                        o["scopeId"]!!.jsonPrimitive.content,
-                        o["author"]!!.jsonPrimitive.content,
-                        o["text"]!!.jsonPrimitive.content,
+                        scope = o["scope"]!!.jsonPrimitive.content,
+                        scopeId = o["scopeId"]!!.jsonPrimitive.content,
+                        author = o["author"]!!.jsonPrimitive.content,
+                        text = o["text"]!!.jsonPrimitive.content,
+                        historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                     ))
                 }
             } catch (_: Exception) {
@@ -1151,12 +1329,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun clearSearchScope() {
+        selectedSearchGroup = null
+        searchResults.clear()
+    }
+
     fun openSearchHit(hit: SearchHit) {
+        inChatSearchQuery = searchQuery
+        jumpToHistoryId = hit.historyId.takeIf { it != 0L }
+        chatSearchMatchIndex = -1
+        chatSearchMatchCount = 0
+        val anchorAt = hit.at.takeIf { it > 0 }
         if (hit.scope == "session") {
-            sessions.find { it.sessionId == hit.scopeId }?.let { openChat(it) }
+            sessions.find { it.sessionId == hit.scopeId }?.let { openChat(it, anchorAt) }
         } else {
-            rooms.find { it.roomId == hit.scopeId }?.let { openRoom(it) }
+            rooms.find { it.roomId == hit.scopeId }?.let { openRoom(it, anchorAt) }
         }
+    }
+
+    fun nextChatSearchMatch() {
+        if (chatSearchMatchCount <= 0) return
+        chatSearchMatchIndex = (chatSearchMatchIndex + 1).coerceAtMost(chatSearchMatchCount - 1)
+    }
+
+    fun prevChatSearchMatch() {
+        if (chatSearchMatchCount <= 0) return
+        chatSearchMatchIndex = (chatSearchMatchIndex - 1).coerceAtLeast(0)
     }
 
     fun archiveSession(session: SessionInfo, archived: Boolean) {
@@ -1235,6 +1433,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun backToList() {
         currentSession = null
         currentRoom = null
+        jumpToHistoryId = null
+        chatSearchMatchIndex = -1
+        chatSearchMatchCount = 0
         refreshAll()
         screen = Screen.Sessions
     }

@@ -32,6 +32,8 @@ export type HistoryEntry = {
   text: string;
 };
 
+type HistoryItem = HistoryEntry & { id: number; at: number };
+
 export type Role = {
   id: string;
   name: string;
@@ -326,15 +328,49 @@ export class Store {
     }
   }
 
-  read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryEntry[] {
+  read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryItem[] {
     const rows = this.db
       .prepare(
-        `SELECT at, kind, author, text FROM history
+        `SELECT id, at, kind, author, text FROM history
          WHERE scope = ? AND scope_id = ?
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(scope, id, limit) as HistoryEntry[];
+      .all(scope, id, limit) as HistoryItem[];
     return rows.reverse();
+  }
+
+  readAround(
+    scope: "session" | "room",
+    id: string,
+    at: number,
+    limit = 50,
+  ): HistoryItem[] {
+    const before = this.db
+      .prepare(
+        `SELECT id, at, kind, author, text FROM history
+         WHERE scope = ? AND scope_id = ? AND at <= ?
+         ORDER BY at DESC, id DESC LIMIT ?`,
+      )
+      .all(scope, id, at, limit) as HistoryItem[];
+    const after = this.db
+      .prepare(
+        `SELECT id, at, kind, author, text FROM history
+         WHERE scope = ? AND scope_id = ? AND at >= ?
+         ORDER BY at ASC, id ASC LIMIT ?`,
+      )
+      .all(scope, id, at, limit) as HistoryItem[];
+    const seen = new Set<number>();
+    const merged: HistoryItem[] = [];
+    for (const row of [...before, ...after]) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      merged.push(row);
+    }
+    merged.sort((a, b) => {
+      if (a.at !== b.at) return a.at - b.at;
+      return a.id - b.id;
+    });
+    return merged;
   }
 
   deleteHistory(scope: "session" | "room", id: string): void {
@@ -350,17 +386,78 @@ export class Store {
   search(
     query: string,
     limit = 50,
-  ): (HistoryEntry & { scope: string; scopeId: string })[] {
+  ): (HistoryItem & { scope: string; scopeId: string })[] {
     const escaped = query.replace(/[%_\\]/g, (c) => `\\${c}`);
     return this.db
       .prepare(
-        `SELECT scope, scope_id AS scopeId, at, kind, author, text FROM history
+        `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
          WHERE text LIKE ? ESCAPE '\\'
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(`%${escaped}%`, limit) as (HistoryEntry & {
+      .all(`%${escaped}%`, limit) as (HistoryItem & {
       scope: string;
       scopeId: string;
     })[];
+  }
+
+  searchByScope(
+    query: string,
+    scope: "session" | "room",
+    scopeId: string,
+    limit = 200,
+  ): (HistoryItem & { scope: string; scopeId: string })[] {
+    const escaped = query.replace(/[%_\\]/g, (c) => `\\${c}`);
+    return this.db
+      .prepare(
+        `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
+         WHERE scope = ? AND scope_id = ? AND text LIKE ? ESCAPE '\\'
+         ORDER BY at DESC, id DESC LIMIT ?`,
+      )
+      .all(scope, scopeId, `%${escaped}%`, limit) as (HistoryItem & {
+      scope: string;
+      scopeId: string;
+    })[];
+  }
+
+  searchGroups(
+    query: string,
+    groupLimit = 20,
+    previewLimit = 1,
+  ): {
+    scope: string;
+    scopeId: string;
+    count: number;
+    previews: (HistoryItem & { scope: string; scopeId: string })[];
+  }[] {
+    const escaped = query.replace(/[%_\\]/g, (c) => `\\${c}`);
+    const groups = this.db
+      .prepare(
+        `SELECT scope, scope_id AS scopeId, COUNT(*) AS count, MAX(at) AS latestAt
+         FROM history
+         WHERE text LIKE ? ESCAPE '\\'
+         GROUP BY scope, scope_id
+         ORDER BY latestAt DESC
+         LIMIT ?`,
+      )
+      .all(`%${escaped}%`, groupLimit) as {
+      scope: "session" | "room";
+      scopeId: string;
+      count: number;
+      latestAt: number;
+    }[];
+    return groups.map((g) => {
+      const previews = this.db
+        .prepare(
+          `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
+           WHERE scope = ? AND scope_id = ? AND text LIKE ? ESCAPE '\\'
+           ORDER BY at DESC, id DESC
+           LIMIT ?`,
+        )
+        .all(g.scope, g.scopeId, `%${escaped}%`, previewLimit) as (HistoryItem & {
+        scope: string;
+        scopeId: string;
+      })[];
+      return { scope: g.scope, scopeId: g.scopeId, count: g.count, previews };
+    });
   }
 }

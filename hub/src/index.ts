@@ -872,26 +872,45 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     case "history.search": {
       const query = String(req.params?.query ?? "").trim();
       if (!query) return { results: [] };
+      const scope = req.params?.scope;
+      const scopeId = req.params?.scopeId;
+      const limit = Number(req.params?.limit ?? 50);
+      if (typeof scope === "string" && typeof scopeId === "string" && (scope === "session" || scope === "room")) {
+        return { results: store.searchByScope(query, scope, scopeId, limit) };
+      }
+      return { results: store.search(query, limit) };
+    }
+    case "history.searchGroups": {
+      const query = String(req.params?.query ?? "").trim();
+      if (!query) return { groups: [] };
       return {
-        results: store.search(query, Number(req.params?.limit ?? 50)),
+        groups: store.searchGroups(
+          query,
+          Number(req.params?.limit ?? 20),
+          Number(req.params?.previewLimit ?? 1),
+        ),
       };
     }
-    case "session.history":
-      return {
-        entries: store.read(
-          "session",
-          String(req.params?.sessionId ?? ""),
-          Number(req.params?.limit ?? 200),
-        ),
-      };
-    case "room.history":
-      return {
-        entries: store.read(
-          "room",
-          String(req.params?.roomId ?? ""),
-          Number(req.params?.limit ?? 200),
-        ),
-      };
+    case "session.history": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const limit = Number(req.params?.limit ?? 200);
+      const anchorAt = req.params?.anchorAt;
+      const entries =
+        typeof anchorAt === "number" && Number.isFinite(anchorAt)
+          ? store.readAround("session", sessionId, anchorAt, limit)
+          : store.read("session", sessionId, limit);
+      return { entries };
+    }
+    case "room.history": {
+      const roomId = String(req.params?.roomId ?? "");
+      const limit = Number(req.params?.limit ?? 200);
+      const anchorAt = req.params?.anchorAt;
+      const entries =
+        typeof anchorAt === "number" && Number.isFinite(anchorAt)
+          ? store.readAround("room", roomId, anchorAt, limit)
+          : store.read("room", roomId, limit);
+      return { entries };
+    }
     case "room.create": {
       const name = String(req.params?.name ?? "群聊").trim() || "群聊";
       if (isRoomNameTaken(name)) throw new Error("room name already exists");

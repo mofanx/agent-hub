@@ -2,12 +2,14 @@ package com.agenthub.ui
 
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Box
@@ -16,6 +18,9 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -56,6 +61,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -90,15 +96,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
@@ -119,10 +135,80 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     }
     val scope = rememberCoroutineScope()
     val messages by remember { derivedStateOf { vm.chatItems.asReversed() } }
+    val matchPositions by remember(vm.chatItems, vm.inChatSearchQuery) {
+        derivedStateOf {
+            val q = vm.inChatSearchQuery
+            if (q.isBlank()) emptyList()
+            else messages.mapIndexedNotNull { i, item ->
+                if (item.text.contains(q, ignoreCase = true)) i else null
+            }
+        }
+    }
+    val keywordChannel = remember { Channel<Float>(Channel.CONFLATED) }
+    val onMatchKeywordY = remember(keywordChannel) {
+        { y: Float -> keywordChannel.trySend(y); Unit }
+    }
+    var listBounds by remember { mutableStateOf<Rect?>(null) }
     val isRoom = vm.currentRoom != null
     val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.addAttachment(it) }
+    }
+
+    LaunchedEffect(matchPositions) {
+        vm.chatSearchMatchCount = matchPositions.size
+        if (vm.chatSearchMatchIndex == -1 && matchPositions.isNotEmpty()) {
+            vm.chatSearchMatchIndex = 0
+        }
+    }
+
+    LaunchedEffect(vm.jumpToHistoryId, matchPositions) {
+        val targetId = vm.jumpToHistoryId ?: return@LaunchedEffect
+        val targetIndex = messages.indexOfFirst { it.id == -targetId }
+        if (targetIndex >= 0) {
+            val pos = matchPositions.indexOf(targetIndex).takeIf { it >= 0 } ?: 0
+            vm.chatSearchMatchIndex = if (matchPositions.isNotEmpty()) pos else -1
+            vm.jumpToHistoryId = null
+        }
+    }
+
+    LaunchedEffect(vm.chatSearchMatchIndex, matchPositions) {
+        val idx = vm.chatSearchMatchIndex
+        if (idx in matchPositions.indices) {
+            Log.d("SearchScroll", "scroll to match index=$idx, position=${matchPositions[idx]}")
+            // drain stale measurements from previous matches / scrolls
+            while (keywordChannel.tryReceive().isSuccess) { }
+            listState.animateScrollToItem(matchPositions[idx], 0)
+            val bounds = listBounds ?: return@LaunchedEffect
+            val topTarget = bounds.top + 160f
+            val bottomTarget = bounds.bottom - 160f
+            val maxStep = bounds.height
+            var step = 0
+            var settled = false
+            keywordChannel
+                .receiveAsFlow()
+                .filterNotNull()
+                .collect { y ->
+                    if (settled) return@collect
+                    val delta = when {
+                        y < topTarget -> topTarget - y
+                        y > bottomTarget -> bottomTarget - y
+                        else -> 0f
+                    }
+                    Log.d("SearchScroll", "step=$step y=$y target=$topTarget..$bottomTarget delta=$delta")
+                    if (kotlin.math.abs(delta) < 2f || step >= 30) {
+                        settled = true
+                        return@collect
+                    }
+                    val stepDelta = delta.coerceIn(-maxStep, maxStep)
+                    var consumed = 0f
+                    listState.scroll { consumed = scrollBy(stepDelta) }
+                    if (kotlin.math.abs(consumed) < kotlin.math.abs(stepDelta) * 0.5f) {
+                        settled = true
+                    }
+                    step++
+                }
+        }
     }
 
     LaunchedEffect(vm.currentRoom?.roomId, vm.currentSession?.sessionId) {
@@ -168,6 +254,27 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 },
                 actions = {
+                    if (vm.inChatSearchQuery.isNotBlank()) {
+                        Text(
+                            if (vm.chatSearchMatchCount > 0) "${vm.chatSearchMatchIndex + 1} / ${vm.chatSearchMatchCount}" else "0",
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        IconButton(onClick = { vm.nextChatSearchMatch() }) {
+                            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = S.previous)
+                        }
+                        IconButton(onClick = { vm.prevChatSearchMatch() }) {
+                            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = S.next)
+                        }
+                        IconButton(onClick = {
+                            vm.inChatSearchQuery = ""
+                            vm.jumpToHistoryId = null
+                            vm.chatSearchMatchIndex = -1
+                            vm.chatSearchMatchCount = 0
+                        }) {
+                            Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                        }
+                    }
                     IconButton(onClick = { vm.backToList() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
                     }
@@ -191,17 +298,27 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 LazyColumn(
                     reverseLayout = true,
                     state = listState,
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp)
+                        .onGloballyPositioned { coordinates ->
+                            val top = coordinates.positionInWindow().y
+                            listBounds = Rect(0f, top, 0f, top + coordinates.size.height)
+                        },
                 ) {
                     itemsIndexed(
                         messages,
                         key = { _, item -> item.id },
                     ) { index, item ->
                         val nextAuthor = messages.getOrNull(index + 1)?.author
+                        val currentMatchIndex = matchPositions.getOrNull(vm.chatSearchMatchIndex)
                         ChatBubble(
                             item,
                             vm,
                             showAuthor = isRoom && nextAuthor != item.author,
+                            highlight = vm.inChatSearchQuery,
+                            isCurrentMatch = currentMatchIndex == index,
+                            onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
                         )
                     }
                 }
@@ -657,26 +774,114 @@ fun Modifier.rightClickable(onRightClick: (Offset) -> Unit): Modifier = composed
 }
 
 @Composable
-fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
+fun HighlightText(
+    text: String,
+    highlight: String,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+    onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
+    if (highlight.isBlank()) {
+        Text(text, modifier = modifier, style = style, color = color, maxLines = maxLines, overflow = overflow)
+    } else {
+        val annotated = buildAnnotatedString {
+            val q = highlight.lowercase()
+            val t = text.lowercase()
+            var start = 0
+            val baseSpan = SpanStyle(color = color)
+            val highlightSpan = SpanStyle(
+                color = color,
+                background = Color(0xFFFFEB3B).copy(alpha = 0.7f),
+            )
+            while (true) {
+                val idx = t.indexOf(q, start)
+                if (idx == -1) {
+                    withStyle(baseSpan) { append(text.substring(start)) }
+                    break
+                }
+                withStyle(baseSpan) { append(text.substring(start, idx)) }
+                withStyle(highlightSpan) { append(text.substring(idx, idx + highlight.length)) }
+                start = idx + highlight.length
+            }
+        }
+        val q = highlight.lowercase()
+        val idx = text.lowercase().indexOf(q)
+        if (onMatchKeywordY == null) {
+            Text(annotated, modifier = modifier, style = style, color = Color.Unspecified, maxLines = maxLines, overflow = overflow)
+        } else {
+            var textY by remember(onMatchKeywordY, text, highlight) { mutableStateOf<Float?>(null) }
+            var lineTop by remember(onMatchKeywordY, text, highlight) { mutableStateOf<Float?>(null) }
+            val measureModifier = Modifier.onGloballyPositioned { coordinates ->
+                textY = coordinates.positionInWindow().y
+            }
+            Text(
+                annotated,
+                modifier = modifier.then(measureModifier),
+                style = style,
+                color = Color.Unspecified,
+                maxLines = maxLines,
+                overflow = overflow,
+                onTextLayout = { result: TextLayoutResult ->
+                    if (idx in 0..text.length - q.length) {
+                        val line = result.getLineForOffset(idx)
+                        lineTop = result.getLineTop(line)
+                    }
+                },
+            )
+            LaunchedEffect(textY, lineTop) {
+                val y = textY
+                val lt = lineTop
+                if (y != null && lt != null) {
+                    Log.d("SearchScroll", "HighlightText keywordY=${y + lt}")
+                    onMatchKeywordY(y + lt)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ChatBubble(
+    item: ChatItem,
+    vm: ChatViewModel,
+    showAuthor: Boolean,
+    highlight: String = "",
+    isCurrentMatch: Boolean = false,
+    onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
     val S = LocalStrings.current
+    val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
+    val bubbleModifier = if (isCurrentMatch) Modifier.border(
+        width = 2.dp,
+        color = MaterialTheme.colorScheme.tertiary,
+        shape = RoundedCornerShape(12.dp),
+    ) else Modifier
     when (item) {
         is ChatItem.System -> Box(
             Modifier.fillMaxWidth().padding(vertical = 6.dp),
             contentAlignment = Alignment.Center,
         ) {
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
                 quote = null,
                 vm = vm,
+                modifier = bubbleModifier,
             ) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    color = bgColor,
                 ) {
-                    Text(
-                        item.text,
+                    HighlightText(
+                        text = item.text,
+                        highlight = highlight,
+                        onMatchKeywordY = keywordCallback,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = textColor,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                     )
                 }
@@ -684,28 +889,37 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
         }
 
         is ChatItem.User -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer
+            val quoteColor = textColor.copy(alpha = 0.7f)
             MessageBubbleBox(
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
-                modifier = Modifier.padding(vertical = 4.dp),
+                modifier = bubbleModifier.padding(vertical = 4.dp),
             ) {
                 Surface(
                     shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
+                    color = bgColor,
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                         if (item.quoteAuthor != null) {
                             Text(
                                 "${S.quoting} @${item.quoteAuthor}: ${item.quoteText?.take(80).orEmpty()}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                color = quoteColor,
                                 maxLines = 2,
                             )
                             Spacer(Modifier.height(4.dp))
                         }
                         if (item.text.isNotBlank()) {
-                            Text(item.text, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                            HighlightText(
+                                item.text,
+                                highlight,
+                                onMatchKeywordY = keywordCallback,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = textColor,
+                            )
                         }
                         if (item.attachments.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
@@ -728,35 +942,39 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
 
         is ChatItem.Assistant -> Column(Modifier.padding(vertical = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = bubbleModifier.fillMaxWidth(),
             ) {
-                val assistantColor = MaterialTheme.colorScheme.onSurfaceVariant
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = bgColor,
                 ) {
                     MarkdownText(
                         text = item.text,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        textColor = assistantColor,
+                        textColor = textColor,
                         fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                        highlight = highlight,
+                        onMatchKeywordY = keywordCallback,
                     )
                 }
             }
         }
 
         is ChatItem.Thought -> {
-            var expanded by remember { mutableStateOf(false) }
+            var expanded by remember(isCurrentMatch) { mutableStateOf(isCurrentMatch) }
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
                 quote = null,
                 vm = vm,
-                modifier = Modifier.padding(vertical = 2.dp),
+                modifier = bubbleModifier.padding(vertical = 2.dp),
             ) {
                 Column {
                     TextButton(onClick = { expanded = !expanded }) {
@@ -765,14 +983,14 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                                 (if (showAuthor) S.thoughtOf.format(item.author) else S.thought),
                             fontStyle = FontStyle.Italic,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = textColor,
                         )
                     }
                     if (expanded) {
-                        val thoughtColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            color = bgColor,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         ) {
                             Column(
@@ -782,10 +1000,12 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
                                     .verticalScroll(rememberScrollState())
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                             ) {
-                                Text(
+                                HighlightText(
                                     item.text,
+                                    highlight,
+                                    onMatchKeywordY = keywordCallback,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = thoughtColor,
+                                    color = textColor,
                                 )
                             }
                         }
@@ -796,29 +1016,40 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
 
         is ChatItem.Tool -> Column(Modifier.padding(vertical = 3.dp)) {
             if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = "[${item.title}] ${item.status}",
                 quote = null,
                 vm = vm,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                    color = bgColor,
                 ) {
                     Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             Icons.Filled.Build,
                             contentDescription = null,
                             modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            tint = textColor,
                         )
                         Spacer(Modifier.size(8.dp))
-                        Text(item.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                        Text(
+                        HighlightText(
+                            item.title,
+                            highlight,
+                            onMatchKeywordY = keywordCallback,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = textColor,
+                            modifier = Modifier.weight(1f),
+                        )
+                        HighlightText(
                             item.status,
+                            highlight,
+                            onMatchKeywordY = keywordCallback,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = textColor,
                         )
                     }
                 }
@@ -827,22 +1058,36 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
 
         is ChatItem.Plan -> Column(Modifier.padding(vertical = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
             MessageBubbleBox(
                 copyText = "${S.plan}\n${item.entries.joinToString("\n")}",
                 quote = null,
                 vm = vm,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Card(
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f),
-                    ),
+                    colors = CardDefaults.cardColors(containerColor = bgColor),
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text(S.plan, style = MaterialTheme.typography.titleSmall)
+                        HighlightText(
+                            S.plan,
+                            highlight,
+                            onMatchKeywordY = keywordCallback,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = textColor,
+                        )
                         Spacer(Modifier.height(4.dp))
-                        item.entries.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                        item.entries.forEach {
+                            HighlightText(
+                                it,
+                                highlight,
+                                onMatchKeywordY = keywordCallback,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = textColor,
+                            )
+                        }
                     }
                 }
             }
@@ -851,46 +1096,62 @@ fun ChatBubble(item: ChatItem, vm: ChatViewModel, showAuthor: Boolean) {
         is ChatItem.Error -> {
             val text = (if (item.author.isNotBlank()) "[${item.author}] " else "") +
                 "${S.errorTag}: ${item.text}"
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.error
             MessageBubbleBox(
                 copyText = text,
                 quote = null,
                 vm = vm,
-                modifier = Modifier.padding(vertical = 4.dp),
+                modifier = bubbleModifier.padding(vertical = 4.dp),
             ) {
-                Text(
-                    text,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else Color.Transparent,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                ) {
+                    HighlightText(
+                        text,
+                        highlight,
+                        onMatchKeywordY = keywordCallback,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = textColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
             }
         }
 
         is ChatItem.Permission -> Column(Modifier.padding(vertical = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+            val answeredColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.title,
                 quote = null,
                 vm = vm,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Card(
                     Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
-                    ),
+                    colors = CardDefaults.cardColors(containerColor = bgColor),
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text(
+                        HighlightText(
                             "${S.permissionRequest}: ${item.title}",
+                            highlight,
+                            onMatchKeywordY = keywordCallback,
                             style = MaterialTheme.typography.titleSmall,
+                            color = textColor,
                         )
                         Spacer(Modifier.height(8.dp))
                         if (item.answered != null) {
-                            Text(
+                            HighlightText(
                                 S.chose.format(item.answered),
+                                highlight,
+                                onMatchKeywordY = keywordCallback,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = answeredColor,
                             )
                         } else {
                             Row {

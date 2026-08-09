@@ -1,7 +1,11 @@
 package com.agenthub.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +17,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.layout.Box
@@ -28,6 +33,8 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.activity.compose.BackHandler
@@ -36,12 +43,16 @@ import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.InputChip
+import androidx.compose.material3.InputChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,17 +69,31 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
+import java.text.DateFormat
+import java.util.Date
 import com.agenthub.ChatViewModel
+import com.agenthub.SearchGroup
+import com.agenthub.SearchHit
 import com.agenthub.Screen
+import com.agenthub.RoomGroupBy
 import com.agenthub.RoomInfo
+import com.agenthub.SessionGroupBy
 import com.agenthub.SessionInfo
+import com.agenthub.SessionStatus
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -76,7 +101,6 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
     var showCreate by remember { mutableStateOf(false) }
     var showCreateRoom by remember { mutableStateOf(false) }
-    var showArchived by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<SessionInfo?>(null) }
     var renameTarget by remember { mutableStateOf<SessionInfo?>(null) }
     var roomRenameTarget by remember { mutableStateOf<RoomInfo?>(null) }
@@ -88,17 +112,20 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var selectedTab by remember { vm.listTab }
     val selectedSessionIds = remember { mutableStateListOf<String>() }
     val selectedRoomIds = remember { mutableStateListOf<String>() }
-    var searchQuery by remember { mutableStateOf("") }
+    var showFilter by remember { mutableStateOf(false) }
+    var showSearchBox by remember { mutableStateOf(vm.searchQuery.isNotBlank()) }
+    val searchFocusRequester = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         vm.refreshAll()
     }
 
-    val context = LocalContext.current
-
-    LaunchedEffect(searchQuery) {
-        if (searchQuery.isNotBlank()) vm.search(searchQuery)
+    LaunchedEffect(vm.searchQuery) {
+        if (vm.searchQuery.isNotBlank()) showSearchBox = true
     }
+
+    val context = LocalContext.current
 
     LaunchedEffect(vm.connectError) {
         val msg = vm.connectError ?: return@LaunchedEffect
@@ -106,13 +133,35 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         vm.connectError = null
     }
 
-    BackHandler(enabled = inBatchMode) {
-        inBatchMode = false
-        selectedSessionIds.clear()
-        selectedRoomIds.clear()
+    LaunchedEffect(showSearchBox) {
+        if (showSearchBox) searchFocusRequester.requestFocus()
+    }
+
+    BackHandler(enabled = inBatchMode || vm.selectedSearchGroup != null || showSearchBox) {
+        if (inBatchMode) {
+            inBatchMode = false
+            selectedSessionIds.clear()
+            selectedRoomIds.clear()
+        } else if (vm.selectedSearchGroup != null) {
+            vm.clearSearchScope()
+        } else {
+            showSearchBox = false
+            vm.scheduleSearch("")
+        }
     }
 
     val selectedCount = selectedSessionIds.size + selectedRoomIds.size
+    val searchScopeName by remember(vm.selectedSearchGroup, vm.sessions.size, vm.rooms.size) {
+        derivedStateOf {
+            val group = vm.selectedSearchGroup
+            if (group == null) ""
+            else if (group.scope == "room") {
+                vm.rooms.find { it.roomId == group.scopeId }?.name ?: group.scopeId
+            } else {
+                vm.sessions.find { it.sessionId == group.scopeId }?.name ?: group.scopeId
+            }
+        }
+    }
 
     renameTarget?.let { s ->
         var name by remember(s) { mutableStateOf(s.name) }
@@ -180,7 +229,13 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(if (inBatchMode) S.selectedCount.format(selectedCount) else S.appName)
+                    Text(
+                        when {
+                            inBatchMode -> S.selectedCount.format(selectedCount)
+                            vm.selectedSearchGroup != null -> searchScopeName
+                            else -> S.appName
+                        }
+                    )
                 },
                 navigationIcon = {
                     if (inBatchMode) {
@@ -191,6 +246,10 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }) {
                             Icon(Icons.Filled.Close, contentDescription = S.cancel)
                         }
+                    } else if (vm.selectedSearchGroup != null) {
+                        IconButton(onClick = { vm.clearSearchScope() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
+                        }
                     } else {
                         IconButton(onClick = onMenuClick) {
                             Icon(Icons.Filled.Menu, contentDescription = "Menu")
@@ -198,6 +257,18 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        if (showSearchBox) {
+                            vm.scheduleSearch("")
+                        }
+                        showSearchBox = !showSearchBox
+                    }) {
+                        Icon(
+                            if (showSearchBox) Icons.Filled.Close else Icons.Filled.Search,
+                            contentDescription = if (showSearchBox) S.cancel else S.searchHistory,
+                        )
+                    }
+                    IconButton(onClick = { showFilter = true }) { Icon(Icons.Filled.FilterList, contentDescription = S.filter) }
                 },
             )
         },
@@ -254,66 +325,102 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text(S.searchHistory) },
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                shape = RoundedCornerShape(24.dp),
-                singleLine = true,
-            )
-            if (searchQuery.isNotBlank()) {
+            if (showSearchBox) {
+                OutlinedTextField(
+                    value = vm.searchQuery,
+                    onValueChange = { q -> vm.scheduleSearch(q) },
+                    placeholder = { Text(S.searchHistory) },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (vm.searchQuery.isNotBlank()) {
+                            IconButton(onClick = { vm.scheduleSearch("") }) {
+                                Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .focusRequester(searchFocusRequester),
+                    shape = RoundedCornerShape(24.dp),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = {
+                        if (vm.searchQuery.isNotBlank()) scope.launch { vm.search(vm.searchQuery) }
+                    }),
+                )
+            }
+
+            if (vm.searchQuery.isBlank()) {
+                ActiveFilterChips(vm = vm, selectedTab = selectedTab)
+            }
+
+            val sessionGroups by remember(vm.sessions, vm.sessionListFilter, vm.pinnedIds, vm.busyIds) {
+                derivedStateOf { vm.filteredSessionGroups() }
+            }
+            val roomGroups by remember(vm.rooms, vm.roomListFilter) {
+                derivedStateOf { vm.filteredRoomGroups() }
+            }
+            val flatSessions by remember(sessionGroups) { derivedStateOf { sessionGroups.flatMap { it.sessions } } }
+            val flatRooms by remember(roomGroups) { derivedStateOf { roomGroups.flatMap { it.rooms } } }
+
+            if (vm.searchQuery.isNotBlank()) {
                 LazyColumn(
-                Modifier.weight(1f).padding(horizontal = 12.dp),
-                contentPadding = PaddingValues(bottom = 88.dp),
-            ) {
-                    items(vm.searchResults.size) { i ->
-                        val hit = vm.searchResults[i]
-                        Card(
-                            onClick = {
-                                searchQuery = ""
-                                vm.openSearchHit(hit)
-                            },
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                            ),
+                    Modifier.weight(1f).padding(horizontal = 12.dp),
+                    contentPadding = PaddingValues(bottom = 88.dp),
+                ) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Column(Modifier.padding(12.dp)) {
+                            Text(
+                                if (vm.selectedSearchGroup != null) S.searchHistory else S.searchConversations,
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                            IconButton(onClick = { vm.scheduleSearch("") }) {
+                                Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                            }
+                        }
+                    }
+                    if (vm.selectedSearchGroup == null) {
+                        items(vm.searchGroups.size) { i ->
+                            val group = vm.searchGroups[i]
+                            SearchGroupCard(group, vm)
+                        }
+                        if (vm.searchGroups.isEmpty()) {
+                            item {
                                 Text(
-                                    "${hit.author.ifBlank { S.systemTag }} · " +
-                                        if (hit.scope == "room") S.roomTag else S.singleChat,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                                Text(
-                                    hit.text.take(120),
+                                    S.noResults,
+                                    Modifier.padding(16.dp),
                                     style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 2,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else {
+                        items(vm.searchResults.size) { i ->
+                            val hit = vm.searchResults[i]
+                            SearchHitCard(hit, vm.searchQuery, onClick = { vm.openSearchHit(hit) })
+                        }
+                        if (vm.searchResults.isEmpty()) {
+                            item {
+                                Text(
+                                    S.noResults,
+                                    Modifier.padding(16.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
                     }
-                    if (vm.searchResults.isEmpty()) {
-                        item {
-                            Text(
-                                S.noResults,
-                                Modifier.padding(16.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
                 }
-                return@Column
-            }
-
-            LazyColumn(
-                Modifier.weight(1f).padding(horizontal = 12.dp),
-                contentPadding = PaddingValues(bottom = 88.dp),
-            ) {
+            } else {
+                LazyColumn(
+                    Modifier.weight(1f).padding(horizontal = 12.dp),
+                    contentPadding = PaddingValues(bottom = 88.dp),
+                ) {
                 if (inBatchMode && vm.currentProfile == null) {
                     item {
                         Card(
@@ -374,47 +481,9 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
                 if (selectedTab == 0 || inBatchMode) {
-                val visible = vm.sessions.filter { !it.archived }
-                    .sortedByDescending { vm.pinnedIds.contains(it.sessionId) }
-                items(visible.size) { i ->
-                    val s = visible[i]
-                    SessionCard(
-                        s = s,
-                        vm = vm,
-                        S = S,
-                        inBatchMode = inBatchMode,
-                        selected = selectedSessionIds.contains(s.sessionId),
-                        onClick = {
-                            if (inBatchMode) {
-                                if (selectedSessionIds.contains(s.sessionId)) selectedSessionIds.remove(s.sessionId)
-                                else selectedSessionIds.add(s.sessionId)
-                            } else {
-                                vm.openChat(s)
-                            }
-                        },
-                        onLongClick = {
-                            if (!inBatchMode) {
-                                inBatchMode = true
-                                selectedSessionIds.clear()
-                                selectedRoomIds.clear()
-                            }
-                            selectedSessionIds.add(s.sessionId)
-                        },
-                        onEdit = { renameTarget = s },
-                        onClone = { vm.cloneSession(s) { renameTarget = it } },
-                        onDelete = { confirmDelete = s },
-                    )
-                }
-                val archived = vm.sessions.filter { it.archived }
-                if (archived.isNotEmpty()) {
-                    item {
-                        TextButton(onClick = { showArchived = !showArchived }) {
-                            Text("${S.archived} (${archived.size}) ${if (showArchived) "▲" else "▼"}")
-                        }
-                    }
-                    if (showArchived) {
-                        items(archived.size) { i ->
-                            val s = archived[i]
+                    if (inBatchMode) {
+                        items(flatSessions.size) { i ->
+                            val s = flatSessions[i]
                             SessionCard(
                                 s = s,
                                 vm = vm,
@@ -442,8 +511,51 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 onDelete = { confirmDelete = s },
                             )
                         }
+                    } else {
+                        for (group in sessionGroups) {
+                            if (group.title.isNotBlank()) {
+                                item {
+                                    GroupHeader(
+                                        title = if (vm.sessionListFilter.groupBy == SessionGroupBy.Cwd) {
+                                            truncatePath(group.title)
+                                        } else {
+                                            group.title
+                                        },
+                                        count = group.sessions.size,
+                                    )
+                                }
+                            }
+                            items(group.sessions.size) { i ->
+                                val s = group.sessions[i]
+                                SessionCard(
+                                    s = s,
+                                    vm = vm,
+                                    S = S,
+                                    inBatchMode = inBatchMode,
+                                    selected = selectedSessionIds.contains(s.sessionId),
+                                    onClick = {
+                                        if (inBatchMode) {
+                                            if (selectedSessionIds.contains(s.sessionId)) selectedSessionIds.remove(s.sessionId)
+                                            else selectedSessionIds.add(s.sessionId)
+                                        } else {
+                                            vm.openChat(s)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        if (!inBatchMode) {
+                                            inBatchMode = true
+                                            selectedSessionIds.clear()
+                                            selectedRoomIds.clear()
+                                        }
+                                        selectedSessionIds.add(s.sessionId)
+                                    },
+                                    onEdit = { renameTarget = s },
+                                    onClone = { vm.cloneSession(s) { renameTarget = it } },
+                                    onDelete = { confirmDelete = s },
+                                )
+                            }
+                        }
                     }
-                }
                 }
                 if (inBatchMode) {
                     item {
@@ -466,36 +578,79 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
                 if (selectedTab == 1 || inBatchMode) {
-                items(vm.rooms.size) { i ->
-                    val r = vm.rooms[i]
-                    RoomCard(
-                        r = r,
-                        vm = vm,
-                        S = S,
-                        inBatchMode = inBatchMode,
-                        selected = selectedRoomIds.contains(r.roomId),
-                        onClick = {
-                            if (inBatchMode) {
-                                if (selectedRoomIds.contains(r.roomId)) selectedRoomIds.remove(r.roomId)
-                                else selectedRoomIds.add(r.roomId)
-                            } else {
-                                vm.openRoom(r)
+                    if (inBatchMode) {
+                        items(flatRooms.size) { i ->
+                            val r = flatRooms[i]
+                            RoomCard(
+                                r = r,
+                                vm = vm,
+                                S = S,
+                                inBatchMode = inBatchMode,
+                                selected = selectedRoomIds.contains(r.roomId),
+                                onClick = {
+                                    if (inBatchMode) {
+                                        if (selectedRoomIds.contains(r.roomId)) selectedRoomIds.remove(r.roomId)
+                                        else selectedRoomIds.add(r.roomId)
+                                    } else {
+                                        vm.openRoom(r)
+                                    }
+                                },
+                                onLongClick = {
+                                    if (!inBatchMode) {
+                                        inBatchMode = true
+                                        selectedSessionIds.clear()
+                                        selectedRoomIds.clear()
+                                    }
+                                    selectedRoomIds.add(r.roomId)
+                                },
+                                onRename = { roomRenameTarget = r },
+                                onEdit = { roomEditTarget = r },
+                                onClone = { roomCloneTarget = r },
+                                onDelete = { roomDeleteTarget = r },
+                            )
+                        }
+                    } else {
+                        for (group in roomGroups) {
+                            if (group.title.isNotBlank()) {
+                                item {
+                                    GroupHeader(
+                                        title = modeName(group.title, S),
+                                        count = group.rooms.size,
+                                    )
+                                }
                             }
-                        },
-                        onLongClick = {
-                            if (!inBatchMode) {
-                                inBatchMode = true
-                                selectedSessionIds.clear()
-                                selectedRoomIds.clear()
+                            items(group.rooms.size) { i ->
+                                val r = group.rooms[i]
+                                RoomCard(
+                                    r = r,
+                                    vm = vm,
+                                    S = S,
+                                    inBatchMode = inBatchMode,
+                                    selected = selectedRoomIds.contains(r.roomId),
+                                    onClick = {
+                                        if (inBatchMode) {
+                                            if (selectedRoomIds.contains(r.roomId)) selectedRoomIds.remove(r.roomId)
+                                            else selectedRoomIds.add(r.roomId)
+                                        } else {
+                                            vm.openRoom(r)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        if (!inBatchMode) {
+                                            inBatchMode = true
+                                            selectedSessionIds.clear()
+                                            selectedRoomIds.clear()
+                                        }
+                                        selectedRoomIds.add(r.roomId)
+                                    },
+                                    onRename = { roomRenameTarget = r },
+                                    onEdit = { roomEditTarget = r },
+                                    onClone = { roomCloneTarget = r },
+                                    onDelete = { roomDeleteTarget = r },
+                                )
                             }
-                            selectedRoomIds.add(r.roomId)
-                        },
-                        onRename = { roomRenameTarget = r },
-                        onEdit = { roomEditTarget = r },
-                        onClone = { roomCloneTarget = r },
-                        onDelete = { roomDeleteTarget = r },
-                    )
-                }
+                        }
+                    }
                 }
             }
         }
@@ -932,7 +1087,97 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 },
             )
         }
+
+        if (showFilter) {
+            FilterBottomSheet(vm, selectedTab) { showFilter = false }
+        }
     }
+}
+}
+
+private data class FilterChipData(val label: String, val onRemove: () -> Unit)
+
+@Composable
+private fun ActiveFilterChips(vm: ChatViewModel, selectedTab: Int) {
+    val S = LocalStrings.current
+    val filter = if (selectedTab == 0) vm.sessionListFilter else null
+    val roomFilter = if (selectedTab == 1) vm.roomListFilter else null
+    val chips = buildList {
+        if (filter != null) {
+            for (a in filter.agents) add(FilterChipData(a) { vm.sessionListFilter = filter.copy(agents = filter.agents - a) })
+            for (c in filter.cwds) add(FilterChipData(truncatePath(c)) { vm.sessionListFilter = filter.copy(cwds = filter.cwds - c) })
+            for (st in filter.statuses) add(FilterChipData(sessionStatusName(st, S)) { vm.sessionListFilter = filter.copy(statuses = filter.statuses - st) })
+            if (filter.groupBy != SessionGroupBy.None) add(FilterChipData(groupName(filter.groupBy, S)) { vm.sessionListFilter = filter.copy(groupBy = SessionGroupBy.None) })
+        } else if (roomFilter != null) {
+            for (m in roomFilter.modes) add(FilterChipData(modeName(m, S)) { vm.roomListFilter = roomFilter.copy(modes = roomFilter.modes - m) })
+            if (roomFilter.groupBy != RoomGroupBy.None) add(FilterChipData(roomGroupName(roomFilter.groupBy, S)) { vm.roomListFilter = roomFilter.copy(groupBy = RoomGroupBy.None) })
+        }
+    }
+    if (chips.isEmpty()) return
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(chips.size) { i ->
+            val c = chips[i]
+            InputChip(
+                selected = true,
+                onClick = c.onRemove,
+                label = { Text(c.label) },
+                trailingIcon = { Icon(Icons.Filled.Close, contentDescription = S.cancel, modifier = Modifier.size(18.dp)) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun GroupHeader(title: String, count: Int) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                title,
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "($count)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    }
+}
+
+private fun sessionStatusName(status: SessionStatus, S: Strings): String = when (status) {
+    SessionStatus.Online -> S.statusOnline
+    SessionStatus.Offline -> S.statusOffline
+    SessionStatus.Busy -> S.statusBusy
+    SessionStatus.Pinned -> S.statusPinned
+    SessionStatus.Archived -> S.statusArchived
+}
+
+private fun groupName(groupBy: SessionGroupBy, S: Strings): String = when (groupBy) {
+    SessionGroupBy.None -> S.noGroup
+    SessionGroupBy.Agent -> S.byAgent
+    SessionGroupBy.Cwd -> S.byCwd
+}
+
+private fun roomGroupName(groupBy: RoomGroupBy, S: Strings): String = when (groupBy) {
+    RoomGroupBy.None -> S.noGroup
+    RoomGroupBy.Mode -> S.byMode
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1306,6 +1551,118 @@ private fun RoomCard(
                     }
                 }
             }
+        }
+    }
+}
+
+private fun formatAt(at: Long): String =
+    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(at))
+
+private fun searchExcerpt(
+    text: String,
+    query: String,
+    before: Int = 12,
+    after: Int = 24,
+): String {
+    val singleLine = text.replace(Regex("\\s+"), " ").trim()
+    if (query.isBlank() || singleLine.isBlank()) {
+        return singleLine.take(before + query.length + after)
+    }
+    val q = query.trim().lowercase()
+    val t = singleLine.lowercase()
+    val idx = t.indexOf(q)
+    if (idx == -1) return singleLine.take(before + query.length + after)
+    val start = (idx - before).coerceAtLeast(0)
+    val end = (idx + q.length + after).coerceAtMost(singleLine.length)
+    val prefix = if (start > 0) "…" else ""
+    val suffix = if (end < singleLine.length) "…" else ""
+    return "$prefix${singleLine.substring(start, end)}$suffix"
+}
+
+@Composable
+private fun SearchGroupCard(group: SearchGroup, vm: ChatViewModel) {
+    val name by remember(group, vm.sessions.size, vm.rooms.size) {
+        derivedStateOf {
+            if (group.scope == "room") {
+                vm.rooms.find { it.roomId == group.scopeId }?.name ?: group.scopeId
+            } else {
+                vm.sessions.find { it.sessionId == group.scopeId }?.name ?: group.scopeId
+            }
+        }
+    }
+    val preview = group.previews.firstOrNull()
+    Card(
+        onClick = { vm.openSearchGroup(group) },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        ),
+    ) {
+        Row(
+            Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    name,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (preview != null) {
+                    Spacer(Modifier.height(2.dp))
+                    val q = vm.searchQuery.trim()
+                    val excerpt = remember(preview, q) {
+                        searchExcerpt(preview.text, q)
+                    }
+                    HighlightText(
+                        text = excerpt,
+                        highlight = q,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Text(
+                "共 ${group.count} 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchHitCard(hit: SearchHit, query: String, onClick: () -> Unit) {
+    val q = query.trim()
+    val excerpt = remember(hit, q) { searchExcerpt(hit.text, q) }
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        ),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(
+                formatAt(hit.at),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(2.dp))
+            HighlightText(
+                text = excerpt,
+                highlight = q,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

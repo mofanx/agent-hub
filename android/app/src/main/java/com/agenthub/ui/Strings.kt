@@ -13,6 +13,7 @@ interface Strings {
     val tokenLabel: String
     val connect: String
     val searchHistory: String
+    val searchConversations: String
     val sessions: String
     val newSession: String
     val rooms: String
@@ -68,6 +69,8 @@ interface Strings {
     val modeAuto: String
     val conductorTag: String
     val back: String
+    val previous: String
+    val next: String
     val generating: String
     val stop: String
     val quoting: String
@@ -100,6 +103,18 @@ interface Strings {
     val deleteRoleTitle: String
     val pin: String
     val unpin: String
+    val filter: String
+    val filterBy: String
+    val groupBy: String
+    val noGroup: String
+    val byAgent: String
+    val byCwd: String
+    val byMode: String
+    val statusOnline: String
+    val statusOffline: String
+    val statusBusy: String
+    val statusPinned: String
+    val statusArchived: String
     val quickCommands: String
     val saveCommand: String
     val bypassEnabled: String
@@ -156,6 +171,7 @@ object ZhStrings : Strings {
     override val tokenLabel = "Token"
     override val connect = "连接"
     override val searchHistory = "搜索历史…"
+    override val searchConversations = "搜索结果"
     override val sessions = "会话"
     override val newSession = "新建会话"
     override val rooms = "群聊"
@@ -211,6 +227,8 @@ object ZhStrings : Strings {
     override val modeAuto = "自动"
     override val conductorTag = "指挥"
     override val back = "返回"
+    override val previous = "上一个"
+    override val next = "下一个"
     override val generating = "执行中…"
     override val stop = "停止"
     override val quoting = "引用"
@@ -243,6 +261,18 @@ object ZhStrings : Strings {
     override val deleteRoleTitle = "删除角色「%s」？"
     override val pin = "置顶"
     override val unpin = "取消置顶"
+    override val filter = "筛选"
+    override val filterBy = "筛选条件"
+    override val groupBy = "分组"
+    override val noGroup = "无分组"
+    override val byAgent = "按 Agent"
+    override val byCwd = "按工作目录"
+    override val byMode = "按模式"
+    override val statusOnline = "在线"
+    override val statusOffline = "离线"
+    override val statusBusy = "忙碌"
+    override val statusPinned = "置顶"
+    override val statusArchived = "归档"
     override val quickCommands = "快捷指令"
     override val saveCommand = "保存当前输入为指令"
     override val bypassEnabled = "已开启工具审批自动通过"
@@ -299,6 +329,7 @@ object EnStrings : Strings {
     override val tokenLabel = "Token"
     override val connect = "Connect"
     override val searchHistory = "Search history…"
+    override val searchConversations = "Search results"
     override val sessions = "Sessions"
     override val newSession = "New session"
     override val rooms = "Rooms"
@@ -354,6 +385,8 @@ object EnStrings : Strings {
     override val modeAuto = "Auto"
     override val conductorTag = "Conductor"
     override val back = "Back"
+    override val previous = "Previous"
+    override val next = "Next"
     override val generating = "Running…"
     override val stop = "Stop"
     override val quoting = "Quote"
@@ -386,6 +419,18 @@ object EnStrings : Strings {
     override val deleteRoleTitle = "Delete role \"%s\"?"
     override val pin = "Pin"
     override val unpin = "Unpin"
+    override val filter = "Filter"
+    override val filterBy = "Filter by"
+    override val groupBy = "Group by"
+    override val noGroup = "None"
+    override val byAgent = "By Agent"
+    override val byCwd = "By Working Dir"
+    override val byMode = "By Mode"
+    override val statusOnline = "Online"
+    override val statusOffline = "Offline"
+    override val statusBusy = "Busy"
+    override val statusPinned = "Pinned"
+    override val statusArchived = "Archived"
     override val quickCommands = "Quick commands"
     override val saveCommand = "Save current input as command"
     override val bypassEnabled = "Tool approval auto-allow enabled"
