@@ -29,6 +29,8 @@ const owners = new Map<string, string>();
 const localStarts = new Map<string, Promise<void>>();
 const store = new Store();
 const modelManager = new ModelManager();
+
+rooms.setRoleResolver((roleId) => store.listRoles().find((r) => r.id === roleId)?.persona);
 ensureDefaultLocalConnections();
 const savedState = store.load();
 const savedRuntime = savedState.runtime;

@@ -49,6 +49,11 @@ const BLACKBOARD_OUTPUT_LEN = 400;
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private blackboards = new Map<string, BlackboardEntry[]>();
+  private getPersona?: (roleId: string) => string | undefined;
+
+  setRoleResolver(getPersona: (roleId: string) => string | undefined): void {
+    this.getPersona = getPersona;
+  }
 
   create(
     name: string,
@@ -219,6 +224,8 @@ export class RoomManager {
     persona?: string,
   ): string {
     const room = this.rooms.get(roomId)!;
+    const roleId = room.memberRoles?.[excludeSessionId];
+    const resolved = persona ?? (roleId ? this.getPersona?.(roleId) : undefined) ?? roleId;
     const board = (this.blackboards.get(roomId) ?? [])
       .filter((e) => e.from !== excludeSessionId)
       .slice(-BLACKBOARD_LIMIT);
@@ -229,8 +236,8 @@ export class RoomManager {
     const lines = [
       `[群聊「${room.name}」| 其他成员: ${others || "无"}]`,
     ];
-    if (persona) {
-      lines.push(`你的角色设定：${persona}`);
+    if (resolved) {
+      lines.push(`你的角色设定：${resolved}`);
     } else {
       lines.push("你在一个多 agent 协作群聊中。用户和其他 agent 的最近结论如下：");
     }

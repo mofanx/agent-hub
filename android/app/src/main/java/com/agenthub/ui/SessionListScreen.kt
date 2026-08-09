@@ -1475,7 +1475,7 @@ private fun RoomEditorDialog(
                                     Box {
                                         TextButton(onClick = { roleExpanded.value = true }) {
                                             Text(
-                                                vm.roles.find { it.persona == currentRole }?.name
+                                                vm.roles.find { it.id == currentRole }?.name
                                                     ?: "默认（无角色卡）",
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
@@ -1495,7 +1495,7 @@ private fun RoomEditorDialog(
                                                 DropdownMenuItem(
                                                     text = { Text(role.name) },
                                                     onClick = {
-                                                        memberRoles = memberRoles + (s.sessionId to role.persona)
+                                                        memberRoles = memberRoles + (s.sessionId to role.id)
                                                         roleExpanded.value = false
                                                     },
                                                 )

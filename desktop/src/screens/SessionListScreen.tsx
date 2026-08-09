@@ -729,7 +729,7 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
                 >
                   <option value="">默认（无角色卡）</option>
                   {store.roles.map((r) => (
-                    <option key={r.id} value={r.persona}>
+                    <option key={r.id} value={r.id}>
                       {r.name}
                     </option>
                   ))}
