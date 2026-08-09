@@ -860,6 +860,8 @@ html[data-theme="dark"] .drawer-item:hover {
   margin-bottom: 0.5rem;
   font-size: 0.9rem;
   font-weight: 600;
+  cursor: pointer;
+  user-select: none;
 }
 
 .flow-progress {

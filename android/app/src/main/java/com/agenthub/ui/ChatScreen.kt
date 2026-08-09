@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
@@ -329,8 +330,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         WindowInsets.ime.exclude(WindowInsets.navigationBars),
                     ),
             ) {
-                if (isRoom) {
-                    FlowPanel(vm.flow)
+                if (isRoom && vm.currentRoom?.mode in listOf("conductor", "parallel", "pipeline", "debate", "auto")) {
+                    FlowPanel(vm.flow, vm.currentRoom!!.mode)
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
@@ -1217,9 +1218,11 @@ fun ChatBubble(
 }
 
 @Composable
-private fun FlowPanel(flow: FlowInfo?) {
+private fun FlowPanel(flow: FlowInfo?, roomMode: String) {
     if (flow == null || flow.tasks.isEmpty()) return
+    var collapsed by remember { mutableStateOf(false) }
     val progress = flow.progress
+    val title = if (roomMode == "conductor") "指挥编排" else "编排进度"
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1228,12 +1231,14 @@ private fun FlowPanel(flow: FlowInfo?) {
     ) {
         Column(Modifier.padding(10.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { collapsed = !collapsed },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "编排进度",
+                    "${if (collapsed) "▸" else "▾"} $title",
                     style = MaterialTheme.typography.titleSmall,
                 )
                 Text(
@@ -1242,9 +1247,11 @@ private fun FlowPanel(flow: FlowInfo?) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Spacer(Modifier.height(6.dp))
-            flow.tasks.forEach { task ->
-                FlowTaskRow(task)
+            if (!collapsed) {
+                Spacer(Modifier.height(6.dp))
+                flow.tasks.forEach { task ->
+                    FlowTaskRow(task)
+                }
             }
         }
     }

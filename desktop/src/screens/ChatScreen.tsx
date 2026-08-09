@@ -109,7 +109,9 @@ export function ChatScreen() {
         )}
       </div>
 
-      {isRoom && <FlowPanel flow={store.flow} />}
+      {isRoom && store.currentRoom && ["conductor", "parallel", "pipeline", "debate", "auto"].includes(store.currentRoom.mode) && (
+        <FlowPanel flow={store.flow} roomMode={store.currentRoom.mode} />
+      )}
 
       <div className="chat-messages">
         {store.chatItems.map((item, i) => (
@@ -361,23 +363,32 @@ function ChatMessage({
   }
 }
 
-function FlowPanel({ flow }: { flow: FlowInfo | null }) {
+function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string }) {
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("flowPanelCollapsed") === "1");
+  useEffect(() => {
+    localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
   if (!flow) return null;
   const { progress, tasks } = flow;
   if (tasks.length === 0) return null;
+  const title = roomMode === "conductor" ? "指挥编排" : "编排进度";
   return (
     <div className="flow-panel">
-      <div className="flow-header">
-        <span className="flow-title">编排进度</span>
+      <div className="flow-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
+        <span className="flow-title">
+          {collapsed ? "▸ " : "▾ "}{title}
+        </span>
         <span className="flow-progress">
           {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
         </span>
       </div>
-      <div className="flow-tasks">
-        {tasks.map((t) => (
-          <FlowTaskItem key={t.id} task={t} />
-        ))}
-      </div>
+      {!collapsed && (
+        <div className="flow-tasks">
+          {tasks.map((t) => (
+            <FlowTaskItem key={t.id} task={t} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
