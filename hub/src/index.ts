@@ -841,6 +841,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       persistState();
       return { room };
     }
+    case "room.archive": {
+      const roomId = String(req.params?.roomId ?? "");
+      const archived = req.params?.archived === true;
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      rooms.archive(roomId, archived);
+      persistState();
+      return { room };
+    }
     case "room.update": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);

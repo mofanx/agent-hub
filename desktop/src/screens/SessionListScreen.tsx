@@ -44,6 +44,16 @@ export function SessionListScreen() {
     [store.sessions],
   );
 
+  const visibleRooms = useMemo(
+    () => store.rooms.filter((r) => (showArchived ? true : !r.archived)),
+    [store.rooms, showArchived],
+  );
+
+  const archivedRooms = useMemo(
+    () => store.rooms.filter((r) => r.archived),
+    [store.rooms],
+  );
+
   const inSearch = query.trim() !== "";
 
   const selectAll = () => {
@@ -137,9 +147,19 @@ export function SessionListScreen() {
           </section>
 
           <section>
-            <h2>群聊 ({store.rooms.length})</h2>
+            <h2>
+              群聊 ({visibleRooms.length})
+              {archivedRooms.length > 0 && (
+                <button
+                  className="secondary archived-toggle"
+                  onClick={() => setShowArchived(!showArchived)}
+                >
+                  {showArchived ? "隐藏归档" : `归档 (${archivedRooms.length})`}
+                </button>
+              )}
+            </h2>
             <div className="list">
-              {store.rooms.map((r) => (
+              {visibleRooms.map((r) => (
                 <RoomCard key={r.roomId} r={r} batch={batch} />
               ))}
             </div>
@@ -270,6 +290,9 @@ function RoomCard({ r, batch }: { r: RoomInfo; batch: boolean }) {
       </div>
       {!batch && (
         <div className="actions" onClick={(e) => e.stopPropagation()}>
+          <button onClick={() => void store.archiveRoom(r, !r.archived)}>
+            {r.archived ? "取消归档" : "归档"}
+          </button>
           <button className="danger" onClick={() => void store.deleteRooms([r.roomId])}>
             删除
           </button>

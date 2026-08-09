@@ -607,10 +607,37 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 onRename = { roomRenameTarget = r },
                                 onEdit = { roomEditTarget = r },
                                 onClone = { roomCloneTarget = r },
+                                onArchive = { vm.archiveRoom(r, !r.archived) },
                                 onDelete = { roomDeleteTarget = r },
                             )
                         }
                     } else {
+                        item {
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                val archivedCount = vm.rooms.count { it.archived }
+                                Text(
+                                    "${S.rooms} (${vm.filteredRoomGroups().sumOf { it.rooms.size }})",
+                                    Modifier.weight(1f),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                if (archivedCount > 0) {
+                                    TextButton(
+                                        onClick = { vm.roomListFilter = vm.roomListFilter.copy(showArchived = !vm.roomListFilter.showArchived) },
+                                    ) {
+                                        Text(if (vm.roomListFilter.showArchived) "隐藏归档" else "归档 ($archivedCount)")
+                                    }
+                                }
+                                IconButton(
+                                    onClick = { showCreateRoom = true },
+                                    enabled = vm.sessions.count { !it.archived } >= 2,
+                                ) {
+                                    Icon(Icons.Filled.GroupAdd, contentDescription = S.createRoom)
+                                }
+                            }
+                        }
                         for (group in roomGroups) {
                             if (group.title.isNotBlank()) {
                                 item {
@@ -647,6 +674,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     onRename = { roomRenameTarget = r },
                                     onEdit = { roomEditTarget = r },
                                     onClone = { roomCloneTarget = r },
+                                    onArchive = { vm.archiveRoom(r, !r.archived) },
                                     onDelete = { roomDeleteTarget = r },
                                 )
                             }
@@ -1712,6 +1740,7 @@ private fun RoomCard(
     onRename: () -> Unit,
     onEdit: () -> Unit,
     onClone: () -> Unit,
+    onArchive: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val showMenu = remember { mutableStateOf(false) }
@@ -1781,6 +1810,10 @@ private fun RoomCard(
                         DropdownMenuItem(
                             text = { Text(S.clone) },
                             onClick = { onClone(); showMenu.value = false },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (r.archived) "取消归档" else "归档") },
+                            onClick = { onArchive(); showMenu.value = false },
                         )
                         DropdownMenuItem(
                             text = { Text(S.delete) },

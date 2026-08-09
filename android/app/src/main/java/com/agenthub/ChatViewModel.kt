@@ -157,6 +157,7 @@ data class RoomInfo(
     val mode: String,
     val conductorId: String?,
     val members: List<Pair<String, String>>,
+    val archived: Boolean = false,
     val subMode: String? = null,
     val activeSpeaker: String? = null,
     val reason: String? = null,
@@ -216,6 +217,7 @@ data class RoomListFilter(
     val query: String = "",
     val modes: Set<String> = emptySet(),
     val groupBy: RoomGroupBy = RoomGroupBy.None,
+    val showArchived: Boolean = false,
 )
 
 data class TokenUsage(
@@ -527,7 +529,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun filteredRoomGroups(): List<RoomListGroup> {
         val filter = roomListFilter
         val q = filter.query.trim().lowercase()
+        val archivedCount = rooms.count { it.archived }
         val filtered = rooms.filter { r ->
+            if (r.archived && !filter.showArchived) return@filter false
             if (filter.modes.isNotEmpty() && r.mode !in filter.modes) return@filter false
             if (q.isNotEmpty()) {
                 val members = r.members.joinToString(" ") { it.second }.lowercase()
@@ -1143,6 +1147,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun archiveRoom(room: RoomInfo, archived: Boolean) {
+        viewModelScope.launch {
+            try {
+                hub.call("room.archive", buildJsonObject {
+                    put("roomId", room.roomId)
+                    put("archived", archived)
+                })
+                refreshAll()
+            } catch (e: Exception) {
+                connectError = e.message
+            }
+        }
+    }
+
     private fun parseRoom(o: JsonObject): RoomInfo {
         val members = o["members"]!!.jsonArray.map {
             val m = it.jsonObject
@@ -1159,6 +1177,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             mode = o["mode"]?.jsonPrimitive?.content ?: "mention",
             conductorId = o["conductorId"]?.jsonPrimitive?.content,
             members = members,
+            archived = o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
             subMode = o["subMode"]?.jsonPrimitive?.content,
             activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.content,
             reason = o["reason"]?.jsonPrimitive?.content,

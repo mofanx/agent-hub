@@ -76,6 +76,7 @@ export interface RoomInfo {
   mode: string;
   conductorId: string | null;
   members: [string, string][];
+  archived: boolean;
   /** 成员角色卡：sessionId -> persona */
   memberRoles?: Record<string, string> | null;
   /** 并行/集思广益：汇总者 sessionId */

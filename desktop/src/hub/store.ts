@@ -114,6 +114,7 @@ interface Actions {
   openRoom(room: RoomInfo): void;
   resumeSession(session: SessionInfo): Promise<void>;
   archiveSession(session: SessionInfo, archived: boolean): Promise<void>;
+  archiveRoom(room: RoomInfo, archived: boolean): Promise<void>;
   deleteSession(session: SessionInfo): Promise<void>;
   deleteSessions(sessionIds: string[]): Promise<void>;
   deleteRooms(roomIds: string[]): Promise<void>;
@@ -383,6 +384,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       mode: String(o.mode ?? "mention"),
       conductorId: stringOrNull(o.conductorId),
       members,
+      archived: o.archived === true,
       memberRoles: parseMemberRoles(o.memberRoles),
       parallelSummarizerId: stringOrNull(o.parallelSummarizerId),
       pipelineOrder: parsePipelineOrder(o.pipelineOrder),
@@ -778,6 +780,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
     archiveSession: async (session, archived) => {
       try {
         await getOrCall("session.archive", { sessionId: session.sessionId, archived });
+        await get().refreshAll();
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    archiveRoom: async (room, archived) => {
+      try {
+        await getOrCall("room.archive", { roomId: room.roomId, archived });
         await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });

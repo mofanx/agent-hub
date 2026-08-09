@@ -29,6 +29,7 @@ export type Room = {
   debateRounds?: number | undefined;
   /** 并发模式：汇总者 sessionId */
   parallelSummarizerId?: string | undefined;
+  archived?: boolean | undefined;
 };
 
 export type RoomModeConfig = {
@@ -144,6 +145,13 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) throw new Error(`unknown room: ${roomId}`);
     room.name = name;
+    return room;
+  }
+
+  archive(roomId: string, archived: boolean): Room {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error(`unknown room: ${roomId}`);
+    room.archived = archived;
     return room;
   }
 
