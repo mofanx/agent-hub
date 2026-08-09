@@ -136,17 +136,25 @@ export function ChatScreen() {
         {store.historyLoading && (
           <div className="history-loading">加载更多历史…</div>
         )}
-        {store.chatItems.map((item, i) => (
-          <ChatMessage
-            key={i}
-            item={item}
-            showAuthor={isRoom}
-            expanded={showThought[i] ?? false}
-            onToggleThought={() =>
-              setShowThought({ ...showThought, [i]: !showThought[i] })
-            }
-          />
-        ))}
+        {store.chatItems.map((item, i) => {
+          const isQuoted = store.quote
+            ? store.quote[0] === (item.author || "我") &&
+              "text" in item &&
+              item.text.startsWith(store.quote[1])
+            : false;
+          return (
+            <ChatMessage
+              key={i}
+              item={item}
+              showAuthor={isRoom}
+              expanded={showThought[i] ?? false}
+              isQuoted={isQuoted}
+              onToggleThought={() =>
+                setShowThought({ ...showThought, [i]: !showThought[i] })
+              }
+            />
+          );
+        })}
         <div ref={bottomRef} />
       </div>
 
@@ -260,11 +268,13 @@ function ChatMessage({
   item,
   showAuthor,
   expanded,
+  isQuoted,
   onToggleThought,
 }: {
   item: ChatItem;
   showAuthor: boolean;
   expanded: boolean;
+  isQuoted: boolean;
   onToggleThought: () => void;
 }) {
   const store = useHubStore();
@@ -284,7 +294,7 @@ function ChatMessage({
 
     case "user":
       return (
-        <div className="message user">
+        <div className={`message user ${isQuoted ? "quoted" : ""}`}>
           <div className="text">
             {item.quoteAuthor && (
               <div className="quote-preview">
@@ -301,8 +311,13 @@ function ChatMessage({
 
     case "assistant":
       return (
-        <div className="message assistant">
+        <div className={`message assistant ${isQuoted ? "quoted" : ""}`}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
+          {item.quoteAuthor && (
+            <div className="quote-preview">
+              引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+            </div>
+          )}
           <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }} />
           <button className="msg-action" onClick={setQuote}>
             引用
@@ -312,8 +327,13 @@ function ChatMessage({
 
     case "thought":
       return (
-        <div className="message thought">
+        <div className={`message thought ${isQuoted ? "quoted" : ""}`}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
+          {item.quoteAuthor && (
+            <div className="quote-preview">
+              引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+            </div>
+          )}
           <button className="thought-toggle" onClick={onToggleThought}>
             {expanded ? "▾ " : "▸ "}思考过程
           </button>

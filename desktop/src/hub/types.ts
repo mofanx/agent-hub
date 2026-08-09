@@ -112,8 +112,8 @@ export interface SearchHit {
 export type ChatItem =
   | { kind: "user"; at?: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
   | { kind: "system"; at?: number; text: string; author: string }
-  | { kind: "assistant"; at?: number; id: number; text: string; author: string }
-  | { kind: "thought"; at?: number; id: number; text: string; author: string }
+  | { kind: "assistant"; at?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
+  | { kind: "thought"; at?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
   | { kind: "tool"; at?: number; toolCallId: string; title: string; status: string; author: string }
   | { kind: "plan"; at?: number; entries: string[]; author: string }
   | { kind: "error"; at?: number; text: string; author: string }

@@ -386,6 +386,11 @@ html[data-theme="dark"] .list-item:hover {
   background: var(--primary-10);
 }
 
+.message.quoted {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .message.assistant,
 .message.thought,
 .message.tool,

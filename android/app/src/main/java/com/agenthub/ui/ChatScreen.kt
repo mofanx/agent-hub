@@ -358,12 +358,16 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     ) { index, item ->
                         val nextAuthor = messages.getOrNull(index + 1)?.author
                         val currentMatchIndex = matchPositions.getOrNull(vm.chatSearchMatchIndex)
+                        val isQuoted = vm.quote?.let { (author, text) ->
+                            author == item.author && item.text.startsWith(text)
+                        } ?: false
                         ChatBubble(
                             item,
                             vm,
                             showAuthor = isRoom && nextAuthor != item.author,
                             highlight = vm.inChatSearchQuery,
                             isCurrentMatch = currentMatchIndex == index,
+                            isQuoted = isQuoted,
                             onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
                         )
                     }
@@ -909,6 +913,7 @@ fun ChatBubble(
     showAuthor: Boolean,
     highlight: String = "",
     isCurrentMatch: Boolean = false,
+    isQuoted: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
 ) {
     val S = LocalStrings.current
@@ -916,6 +921,10 @@ fun ChatBubble(
     val bubbleModifier = if (isCurrentMatch) Modifier.border(
         width = 2.dp,
         color = MaterialTheme.colorScheme.tertiary,
+        shape = RoundedCornerShape(12.dp),
+    ) else if (isQuoted) Modifier.border(
+        width = 2.dp,
+        color = MaterialTheme.colorScheme.primary,
         shape = RoundedCornerShape(12.dp),
     ) else Modifier
     when (item) {
