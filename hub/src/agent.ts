@@ -137,7 +137,7 @@ export class AcpAgent {
     const init = await this.ctx.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: {},
-      clientInfo: { name: "agent-hub", version: "0.1.0" },
+      clientInfo: { name: "agent-hub", version: "0.2.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
     this.emit({
