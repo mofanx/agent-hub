@@ -899,6 +899,14 @@ html[data-theme="dark"] .drawer-item:hover {
   border-left: 3px solid var(--border);
 }
 
+.flow-task-failed {
+  border-left: 3px solid #ef4444;
+}
+
+.flow-status-failed {
+  color: #ef4444;
+}
+
 .flow-task-status {
   width: 1.2rem;
   text-align: center;

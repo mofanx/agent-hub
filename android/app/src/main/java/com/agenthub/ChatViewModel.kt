@@ -189,6 +189,7 @@ data class FlowProgress(
     val done: Int = 0,
     val running: Int = 0,
     val pending: Int = 0,
+    val failed: Int = 0,
     val total: Int = 0,
 )
 
@@ -1277,6 +1278,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 done = progress?.get("done")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 running = progress?.get("running")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 pending = progress?.get("pending")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                failed = progress?.get("failed")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 total = progress?.get("total")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
             ),
             tasks = tasks?.map { parseFlowTask(it.jsonObject) } ?: emptyList(),

@@ -1263,7 +1263,8 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String) {
                     style = MaterialTheme.typography.titleSmall,
                 )
                 Text(
-                    "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行",
+                    "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行" +
+                        if (progress.failed > 0) " · ${progress.failed} 失败" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1283,11 +1284,13 @@ private fun FlowTaskRow(task: FlowTask) {
     val icon = when (task.status) {
         "done" -> "✓"
         "running" -> "▶"
+        "failed" -> "✗"
         else -> "○"
     }
     val iconColor = when (task.status) {
         "done" -> MaterialTheme.colorScheme.primary
         "running" -> MaterialTheme.colorScheme.tertiary
+        "failed" -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.outline
     }
     val clipboard = LocalClipboardManager.current

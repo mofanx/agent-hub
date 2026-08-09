@@ -23,7 +23,9 @@ type FlowTask = {
   sessionId: string;
   task: string;
   dependsOn: string[];
-  status: "pending" | "running" | "done";
+  status: "pending" | "running" | "done" | "failed";
+  failureMessage?: string;
+  retries?: number;
 };
 
 type Flow = {
@@ -87,10 +89,11 @@ export class ConductorOrchestrator {
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
     const pending = tasks.filter((t) => t.status === "pending").length;
+    const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId: flow.roomId,
       phase: flow.phase,
-      progress: { done, running, pending, total: tasks.length },
+      progress: { done, running, pending, failed, total: tasks.length },
       tasks,
     };
   }
@@ -386,7 +389,7 @@ export class ConductorOrchestrator {
   private runnableTasks(flow: Flow): FlowTask[] {
     const doneIds = new Set<string>();
     for (const [id, t] of flow.tasks) {
-      if (t.status === "done") doneIds.add(id);
+      if (t.status === "done" || t.status === "failed") doneIds.add(id);
     }
     const runningSessions = new Set<string>();
     for (const t of flow.tasks.values()) {
@@ -406,9 +409,18 @@ export class ConductorOrchestrator {
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
     const tasks = this.runnableTasks(flow);
     if (tasks.length === 0) {
-      const allDone = [...flow.tasks.values()].every((t) => t.status === "done");
+      const values = [...flow.tasks.values()];
+      const allDone = values.every((t) => t.status === "done");
+      const hasFailed = values.some((t) => t.status === "failed");
       if (allDone) {
         await this.summarize(flow, room);
+      } else if (hasFailed) {
+        const failedTasks = values.filter((t) => t.status === "failed");
+        const names = failedTasks.map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId);
+        this.notice({
+          roomId: flow.roomId,
+          message: `以下子任务执行失败：${names.join("、")}，指挥家无法进行汇总`,
+        });
       }
       return;
     }
@@ -434,10 +446,17 @@ export class ConductorOrchestrator {
         t.sessionId,
       );
       this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
-        t.status = "pending";
+        t.retries = (t.retries ?? 0) + 1;
+        const msg = String(err);
+        if (t.retries >= 3) {
+          t.status = "failed";
+          t.failureMessage = msg;
+        } else {
+          t.status = "pending";
+        }
         this.notice({
           roomId: flow.roomId,
-          message: `子任务派发失败：${String(err)}`,
+          message: `子任务派发失败（重试 ${t.retries}/3）：${msg}`,
         });
       });
     }

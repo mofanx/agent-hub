@@ -187,7 +187,7 @@ export class RoomModeManager {
     return {
       roomId,
       phase: running > 0 ? "working" : done === tasks.length ? "summarizing" : "working",
-      progress: { done, running, pending, total: tasks.length },
+      progress: { done, running, pending, failed: 0, total: tasks.length },
       tasks,
     };
   }
@@ -215,7 +215,7 @@ export class RoomModeManager {
     return {
       roomId,
       phase: flow.stage >= flow.order.length ? "summarizing" : "working",
-      progress: { done, running, pending, total: tasks.length },
+      progress: { done, running, pending, failed: 0, total: tasks.length },
       tasks,
     };
   }
@@ -259,7 +259,7 @@ export class RoomModeManager {
     return {
       roomId,
       phase: completed >= total ? "summarizing" : "working",
-      progress: { done, running, pending, total: tasks.length },
+      progress: { done, running, pending, failed: 0, total: tasks.length },
       tasks,
     };
   }

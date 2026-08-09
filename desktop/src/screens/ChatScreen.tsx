@@ -402,6 +402,7 @@ function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string
         </span>
         <span className="flow-progress">
           {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
+          {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
         </span>
       </div>
       {!collapsed && (
@@ -424,7 +425,8 @@ function renderMarkdown(text: string): string {
 }
 
 function FlowTaskItem({ task }: { task: FlowTask }) {
-  const statusIcon = task.status === "done" ? "✓" : task.status === "running" ? "▶" : "○";
+  const statusIcon =
+    task.status === "done" ? "✓" : task.status === "running" ? "▶" : task.status === "failed" ? "✗" : "○";
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
