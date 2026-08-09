@@ -147,6 +147,123 @@ export class RoomModeManager {
     this.broadcast("room.modeSelected", e as unknown as Record<string, unknown>);
   }
 
+  private emitFlowUpdate(roomId: string): void {
+    const flow = this.getFlow(roomId);
+    if (!flow) return;
+    this.broadcast("room.flowUpdate", { roomId, flow });
+  }
+
+  private emitFlowUpdateForSession(sessionId: string): void {
+    for (const roomId of this.rooms.list().map((r) => r.roomId)) {
+      const flow = this.getFlow(roomId);
+      if (!flow) continue;
+      const tasks = (flow.tasks as { sessionId: string }[] | undefined) ?? [];
+      if (tasks.some((t) => t.sessionId === sessionId)) {
+        this.broadcast("room.flowUpdate", { roomId, flow });
+      }
+    }
+  }
+
+  getFlow(roomId: string): Record<string, unknown> | undefined {
+    return this.conductor.getFlow(roomId) ?? this.parallelFlowView(roomId) ?? this.pipelineFlowView(roomId) ?? this.debateFlowView(roomId);
+  }
+
+  private parallelFlowView(roomId: string): Record<string, unknown> | undefined {
+    const flow = this.parallelFlows.get(roomId);
+    if (!flow) return undefined;
+    const room = this.rooms.get(roomId);
+    const tasks = [...flow.pending].map((sid) => ({
+      id: sid,
+      sessionId: sid,
+      name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
+      status: flow.results.has(sid) ? "done" : this.agent.isBusy(sid) ? "running" : "pending",
+      task: flow.topic,
+      dependsOn: [] as string[],
+      artifacts: [] as { type: string; path?: string; summary: string }[],
+    }));
+    const done = tasks.filter((t) => t.status === "done").length;
+    const running = tasks.filter((t) => t.status === "running").length;
+    const pending = tasks.filter((t) => t.status === "pending").length;
+    return {
+      roomId,
+      phase: running > 0 ? "working" : done === tasks.length ? "summarizing" : "working",
+      progress: { done, running, pending, total: tasks.length },
+      tasks,
+    };
+  }
+
+  private pipelineFlowView(roomId: string): Record<string, unknown> | undefined {
+    const flow = this.pipelineFlows.get(roomId);
+    if (!flow) return undefined;
+    const room = this.rooms.get(roomId);
+    const tasks = flow.order.map((sid, i) => {
+      const isDone = i < flow.stage;
+      const isCurrent = i === flow.stage;
+      return {
+        id: `p${i + 1}`,
+        sessionId: sid,
+        name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
+        status: isDone ? "done" : isCurrent ? (this.agent.isBusy(sid) ? "running" : "pending") : "pending",
+        task: isCurrent ? flow.topic : (isDone ? `已完成：${flow.outputs[i]?.slice(0, 80) ?? ""}` : `等待前序完成`),
+        dependsOn: i > 0 ? [`p${i}`] : [],
+        artifacts: [] as { type: string; path?: string; summary: string }[],
+      };
+    });
+    const done = tasks.filter((t) => t.status === "done").length;
+    const running = tasks.filter((t) => t.status === "running").length;
+    const pending = tasks.filter((t) => t.status === "pending").length;
+    return {
+      roomId,
+      phase: flow.stage >= flow.order.length ? "summarizing" : "working",
+      progress: { done, running, pending, total: tasks.length },
+      tasks,
+    };
+  }
+
+  private debateFlowView(roomId: string): Record<string, unknown> | undefined {
+    const flow = this.debateFlows.get(roomId);
+    if (!flow) return undefined;
+    const room = this.rooms.get(roomId);
+    const total = flow.rounds * flow.sides.length;
+    const completed = flow.outputs.length;
+    const tasks: Record<string, unknown>[] = [];
+    for (let i = 0; i < total; i++) {
+      const round = Math.floor(i / 2) + 1;
+      const side = i % 2;
+      const sid = flow.sides[side];
+      if (!sid) continue;
+      const output = flow.outputs.find((o) => o.round === round && o.side === side);
+      const isCurrent = i === completed;
+      tasks.push({
+        id: `r${round}s${side + 1}`,
+        sessionId: sid,
+        name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
+        status: output ? "done" : isCurrent ? (this.agent.isBusy(sid) ? "running" : "pending") : "pending",
+        task: `${flow.topic}（第 ${round}/${flow.rounds} 轮 · ${side === 0 ? "正方" : "反方"}）`,
+        dependsOn: [] as string[],
+        artifacts: [] as { type: string; path?: string; summary: string }[],
+      });
+    }
+    tasks.push({
+      id: "judge",
+      sessionId: flow.judge,
+      name: room?.members.find((m) => m.sessionId === flow.judge)?.name ?? flow.judge,
+      status: completed >= total ? (this.agent.isBusy(flow.judge) ? "running" : "pending") : "pending",
+      task: `裁判总结：${flow.topic}`,
+      dependsOn: flow.sides.map((_, i) => `r${flow.rounds}s${i + 1}`),
+      artifacts: [] as { type: string; path?: string; summary: string }[],
+    });
+    const done = tasks.filter((t) => t.status === "done").length;
+    const running = tasks.filter((t) => t.status === "running").length;
+    const pending = tasks.filter((t) => t.status === "pending").length;
+    return {
+      roomId,
+      phase: completed >= total ? "summarizing" : "working",
+      progress: { done, running, pending, total: tasks.length },
+      tasks,
+    };
+  }
+
   /** 当前房间是否有进行中的编排流 */
   hasActiveFlow(roomId: string): boolean {
     if (this.conductor.hasActiveFlow(roomId)) return true;
@@ -193,6 +310,7 @@ export class RoomModeManager {
         }
       }
     }
+    this.emitFlowUpdate(roomId);
   }
 
   /** 处理一条新的房间消息 */
@@ -204,11 +322,15 @@ export class RoomModeManager {
     await this.cancelActive(room.roomId, "收到新消息，当前流程已取消");
 
     if (room.mode === "auto") {
-      return this.handleAuto(room, text, options);
+      const result = await this.handleAuto(room, text, options);
+      this.emitFlowUpdate(room.roomId);
+      return result;
     }
 
     this.setSubMode(room.roomId, room.mode, undefined, undefined);
-    return this.executeMode(room, room.mode, text, options);
+    const result = await this.executeMode(room, room.mode, text, options);
+    this.emitFlowUpdate(room.roomId);
+    return result;
   }
 
   /** prompt 完成时的回调 */
@@ -233,16 +355,29 @@ export class RoomModeManager {
         sessionNote: autoCtx.sessionNote,
         params: decision.params,
       });
+      this.emitFlowUpdate(room.roomId);
       return true;
     }
 
     // conductor 编排
-    if (await this.conductor.onPromptDone(sessionId, output)) return true;
+    if (await this.conductor.onPromptDone(sessionId, output)) {
+      this.emitFlowUpdateForSession(sessionId);
+      return true;
+    }
 
     // 其他流程
-    if (this.onParallelDone(sessionId, output)) return true;
-    if (this.onPipelineDone(sessionId, output)) return true;
-    if (this.onDebateDone(sessionId, output)) return true;
+    if (this.onParallelDone(sessionId, output)) {
+      this.emitFlowUpdateForSession(sessionId);
+      return true;
+    }
+    if (this.onPipelineDone(sessionId, output)) {
+      this.emitFlowUpdateForSession(sessionId);
+      return true;
+    }
+    if (this.onDebateDone(sessionId, output)) {
+      this.emitFlowUpdateForSession(sessionId);
+      return true;
+    }
 
     return false;
   }
@@ -263,10 +398,14 @@ export class RoomModeManager {
           sessionNote: autoCtx.sessionNote,
         });
       }
+      this.emitFlowUpdate(autoCtx.roomId);
       return true;
     }
 
-    if (this.conductor.onPromptError(sessionId)) return true;
+    if (this.conductor.onPromptError(sessionId)) {
+      this.emitFlowUpdateForSession(sessionId);
+      return true;
+    }
 
     for (const [roomId, flow] of this.parallelFlows) {
       if (flow.pending.has(sessionId)) {
@@ -276,6 +415,7 @@ export class RoomModeManager {
           message: `@${this.nameFor(roomId, sessionId)} 并行回答中断`,
         });
         if (flow.pending.size === 0) this.summarizeParallel(roomId, flow);
+        this.emitFlowUpdate(roomId);
         return true;
       }
     }
@@ -285,6 +425,7 @@ export class RoomModeManager {
         this.pipelineFlows.delete(roomId);
         this.setSubMode(roomId, "pipeline", undefined, undefined);
         this.notice({ roomId, message: `流水线第 ${flow.stage + 1} 阶段中断` });
+        this.emitFlowUpdate(roomId);
         return true;
       }
     }
@@ -294,6 +435,7 @@ export class RoomModeManager {
         this.debateFlows.delete(roomId);
         this.setSubMode(roomId, "debate", undefined, undefined);
         this.notice({ roomId, message: "辩论流程中断" });
+        this.emitFlowUpdate(roomId);
         return true;
       }
     }
@@ -960,7 +1102,8 @@ export class RoomModeManager {
     let baseText = text;
     const note = options?.note ?? options?.sessionNote?.(sessionId);
     if (note) baseText = `${note}\n\n${baseText}`;
-    const promptText = this.rooms.buildPrompt(room.roomId, baseText, sessionId, options?.quote);
+    const persona = room.memberRoles?.[sessionId];
+    const promptText = this.rooms.buildPrompt(room.roomId, baseText, sessionId, options?.quote, persona);
     const content = options?.content;
     if (!content) return promptText;
     const imageBlocks = content.filter((b) => b.type !== "text");

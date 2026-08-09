@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useHubStore } from "../hub/store";
-import type { ChatItem } from "../hub/types";
+import type { ChatItem, FlowInfo, FlowTask } from "../hub/types";
 
 export function ChatScreen() {
   const store = useHubStore();
@@ -95,6 +95,8 @@ export function ChatScreen() {
           </button>
         )}
       </div>
+
+      {isRoom && <FlowPanel flow={store.flow} />}
 
       <div className="chat-messages">
         {store.chatItems.map((item, i) => (
@@ -342,4 +344,49 @@ function ChatMessage({
     default:
       return null;
   }
+}
+
+function FlowPanel({ flow }: { flow: FlowInfo | null }) {
+  if (!flow) return null;
+  const { progress, tasks } = flow;
+  if (tasks.length === 0) return null;
+  return (
+    <div className="flow-panel">
+      <div className="flow-header">
+        <span className="flow-title">编排进度</span>
+        <span className="flow-progress">
+          {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
+        </span>
+      </div>
+      <div className="flow-tasks">
+        {tasks.map((t) => (
+          <FlowTaskItem key={t.id} task={t} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FlowTaskItem({ task }: { task: FlowTask }) {
+  const statusIcon = task.status === "done" ? "✓" : task.status === "running" ? "▶" : "○";
+  return (
+    <div className={`flow-task flow-task-${task.status}`}>
+      <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
+      <div className="flow-task-body">
+        <div className="flow-task-line">
+          <span className="flow-task-name">@{task.name}</span>
+          <span className="flow-task-desc" title={task.task}>{task.task}</span>
+        </div>
+        {task.artifacts.length > 0 && (
+          <div className="flow-artifacts">
+            {task.artifacts.map((a, i) => (
+              <span key={i} className="flow-artifact">
+                [{a.type}] {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

@@ -4,6 +4,7 @@ import type {
   ChatItem,
   ConnProfile,
   ConnectionInfo,
+  FlowInfo,
   RoomInfo,
   RoomModeConfig,
   RoleInfo,
@@ -52,6 +53,7 @@ interface State {
   itemSeq: number;
   drawerOpen: boolean;
   currentProfile: ConnProfile | null;
+  flow: FlowInfo | null;
 }
 
 interface Actions {
@@ -103,6 +105,7 @@ interface Actions {
     memberIds: string[],
     mode: string,
     config?: RoomModeConfig,
+    memberRoles?: Record<string, string>,
   ): Promise<void>;
 
   openChat(session: SessionInfo): void;
@@ -144,6 +147,8 @@ interface Actions {
   syncBusyIds(): Promise<void>;
   handleSlashCommand(text: string): boolean;
   saveProfileAndConnect(address: string, port: string, token: string, name?: string): void;
+  refreshFlow(roomId: string): Promise<void>;
+  setFlow(flow: FlowInfo | null): void;
 }
 
 const defaultConfig: AppConfig = {
@@ -278,6 +283,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
         }
         break;
       }
+      case "room.flowUpdate": {
+        const roomId = String(params.roomId ?? "");
+        const room = get().currentRoom;
+        if (room && room.roomId === roomId) {
+          set({ flow: (params.flow as FlowInfo) ?? null });
+        }
+        break;
+      }
       case "permission.request": {
         const sid = String(params.sessionId ?? "");
         if (!get().inScope(sid)) return;
@@ -353,12 +366,21 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!Array.isArray(v) || v.length < 2) return null;
       return [String(v[0]), String(v[1])] as [string, string];
     };
+    const parseMemberRoles = (v: unknown): Record<string, string> | null => {
+      if (typeof v !== "object" || !v) return null;
+      const out: Record<string, string> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof val === "string" && val.trim()) out[k] = val.trim();
+      }
+      return Object.keys(out).length > 0 ? out : null;
+    };
     return {
       roomId: String(o.roomId ?? ""),
       name: String(o.name ?? ""),
       mode: String(o.mode ?? "mention"),
       conductorId: stringOrNull(o.conductorId),
       members,
+      memberRoles: parseMemberRoles(o.memberRoles),
       parallelSummarizerId: stringOrNull(o.parallelSummarizerId),
       pipelineOrder: parsePipelineOrder(o.pipelineOrder),
       debateSides: parseDebateSides(o.debateSides),
@@ -409,6 +431,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     itemSeq: 0,
     drawerOpen: false,
     currentProfile: null,
+    flow: null,
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -545,6 +568,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         agentStatus: stringsFor(get().lang).notConnected,
         selectedIds: { sessions: [], rooms: [] },
         currentProfile: null,
+        flow: null,
       });
       updateTray();
     },
@@ -678,7 +702,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    createRoom: async (name, memberIds, mode, config) => {
+    createRoom: async (name, memberIds, mode, config, memberRoles) => {
       try {
         const params: Record<string, unknown> = { name, sessionIds: memberIds, mode };
         if (config?.conductorId) params.conductorId = config.conductorId;
@@ -687,6 +711,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (config?.debateSides?.length === 2) params.debateSides = config.debateSides;
         if (config?.debateJudge) params.debateJudge = config.debateJudge;
         if (config?.debateRounds != null) params.debateRounds = config.debateRounds;
+        if (memberRoles && Object.keys(memberRoles).length > 0) params.memberRoles = memberRoles;
         const result = (await getOrCall("room.create", params)) as Record<string, unknown>;
         const room = parseRoom((result.room as Record<string, unknown>) ?? {});
         set({ rooms: [...get().rooms, room] });
@@ -714,8 +739,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         chatItems: [],
         quote: null,
         screen: "room",
+        flow: null,
       });
       get().loadHistory("room.history", "roomId", room.roomId);
+      get().refreshFlow(room.roomId);
     },
 
     resumeSession: async (session: SessionInfo) => {
@@ -1172,6 +1199,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
           return true;
         }
       }
+    },
+
+    refreshFlow: async (roomId: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        const result = (await client.call("room.flow", { roomId })) as Record<string, unknown>;
+        const flow = result.flow as FlowInfo | undefined;
+        set({ flow: flow ?? null });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    setFlow: (flow: FlowInfo | null) => {
+      set({ flow });
     },
 
     saveProfileAndConnect: (address: string, port: string, token: string, name?: string) => {

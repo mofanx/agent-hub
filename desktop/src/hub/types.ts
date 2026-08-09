@@ -47,12 +47,37 @@ export interface RoomModeConfig {
   debateRounds?: number | null;
 }
 
+export interface FlowArtifact {
+  type: "file" | "command" | "test";
+  path?: string;
+  summary: string;
+}
+
+export interface FlowTask {
+  id: string;
+  sessionId: string;
+  name: string;
+  status: "pending" | "running" | "done";
+  task: string;
+  dependsOn: string[];
+  artifacts: FlowArtifact[];
+}
+
+export interface FlowInfo {
+  roomId: string;
+  phase: string;
+  progress: { done: number; running: number; pending: number; total: number };
+  tasks: FlowTask[];
+}
+
 export interface RoomInfo {
   roomId: string;
   name: string;
   mode: string;
   conductorId: string | null;
   members: [string, string][];
+  /** 成员角色卡：sessionId -> persona */
+  memberRoles?: Record<string, string> | null;
   /** 并行/集思广益：汇总者 sessionId */
   parallelSummarizerId?: string | null;
   /** 流水线：成员执行顺序 */

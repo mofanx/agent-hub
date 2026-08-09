@@ -1228,6 +1228,7 @@ private fun RoomEditorDialog(
     var debateSideB by remember(room) { mutableStateOf<String?>(editing?.debateSides?.second) }
     var debateRounds by remember(room) { mutableIntStateOf(editing?.debateRounds ?: 2) }
     var pipelineOrder by remember(room) { mutableStateOf(initialPipelineOrder()) }
+    var memberRoles by remember(room) { mutableStateOf<Map<String, String>>(editing?.memberRoles ?: emptyMap()) }
 
     fun onModeChanged(newMode: String) {
         modeManuallyChanged = true
@@ -1253,6 +1254,7 @@ private fun RoomEditorDialog(
             if (debateSideA == id) debateSideA = null
             if (debateSideB == id) debateSideB = null
             pipelineOrder = pipelineOrder.filter { it != id }
+            memberRoles = memberRoles - id
         }
     }
 
@@ -1279,15 +1281,25 @@ private fun RoomEditorDialog(
     }
 
     fun buildConfig(): ChatViewModel.RoomModeConfig = when (mode) {
-        "conductor", "auto", "roundrobin" -> ChatViewModel.RoomModeConfig(conductorId = specialId)
-        "parallel" -> ChatViewModel.RoomModeConfig(parallelSummarizerId = parallelSummarizerId)
-        "pipeline" -> ChatViewModel.RoomModeConfig(pipelineOrder = pipelineOrder)
+        "conductor", "auto", "roundrobin" -> ChatViewModel.RoomModeConfig(
+            conductorId = specialId,
+            memberRoles = memberRoles.filter { it.value.isNotBlank() },
+        )
+        "parallel" -> ChatViewModel.RoomModeConfig(
+            parallelSummarizerId = parallelSummarizerId,
+            memberRoles = memberRoles.filter { it.value.isNotBlank() },
+        )
+        "pipeline" -> ChatViewModel.RoomModeConfig(
+            pipelineOrder = pipelineOrder,
+            memberRoles = memberRoles.filter { it.value.isNotBlank() },
+        )
         "debate" -> ChatViewModel.RoomModeConfig(
             debateSides = if (debateSideA != null && debateSideB != null) debateSideA!! to debateSideB!! else null,
             debateJudge = debateJudge,
             debateRounds = debateRounds.coerceIn(1, 5),
+            memberRoles = memberRoles.filter { it.value.isNotBlank() },
         )
-        else -> ChatViewModel.RoomModeConfig()
+        else -> ChatViewModel.RoomModeConfig(memberRoles = memberRoles.filter { it.value.isNotBlank() })
     }
 
     val modes = remember { listOf("mention", "conductor", "roundrobin", "parallel", "pipeline", "debate", "auto") }
@@ -1381,69 +1393,112 @@ private fun RoomEditorDialog(
                         val s = sessions[i]
                         val isSelected = selected.contains(s.sessionId)
                         val inPipeline = pipelineOrder.indexOf(s.sessionId).takeIf { it >= 0 }
+                        val roleExpanded = remember { mutableStateOf(false) }
+                        val currentRole = memberRoles[s.sessionId] ?: ""
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Checkbox(
-                                checked = isSelected,
-                                onCheckedChange = { onToggleSelected(s.sessionId, it) },
-                            )
-                            Text(vm.displayName(s), modifier = Modifier.weight(1f))
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Checkbox(
+                                    checked = isSelected,
+                                    onCheckedChange = { onToggleSelected(s.sessionId, it) },
+                                )
+                                Text(vm.displayName(s), modifier = Modifier.weight(1f))
+
+                                if (isSelected) {
+                                    when (mode) {
+                                        "conductor", "auto", "roundrobin" -> {
+                                            TextButton(onClick = { specialId = s.sessionId }) {
+                                                Text(
+                                                    if (specialId == s.sessionId) "◉ ${S.conductorTag}"
+                                                    else "○ ${S.conductorTag}"
+                                                )
+                                            }
+                                        }
+                                        "parallel" -> {
+                                            TextButton(onClick = { parallelSummarizerId = s.sessionId }) {
+                                                Text(
+                                                    if (parallelSummarizerId == s.sessionId) "◉ ${S.summarizerTag}"
+                                                    else "○ ${S.summarizerTag}"
+                                                )
+                                            }
+                                        }
+                                        "debate" -> {
+                                            TextButton(onClick = { debateJudge = s.sessionId }) {
+                                                Text(
+                                                    if (debateJudge == s.sessionId) "◉ ${S.judgeTag}"
+                                                    else "○ ${S.judgeTag}"
+                                                )
+                                            }
+                                            TextButton(onClick = { debateSideA = s.sessionId }) {
+                                                Text(
+                                                    if (debateSideA == s.sessionId) "◉ ${S.sideProTag}"
+                                                    else "○ ${S.sideProTag}"
+                                                )
+                                            }
+                                            TextButton(onClick = { debateSideB = s.sessionId }) {
+                                                Text(
+                                                    if (debateSideB == s.sessionId) "◉ ${S.sideConTag}"
+                                                    else "○ ${S.sideConTag}"
+                                                )
+                                            }
+                                        }
+                                        "pipeline" -> {
+                                            if (inPipeline != null) {
+                                                Text("${inPipeline + 1}", modifier = Modifier.padding(horizontal = 8.dp))
+                                                IconButton(
+                                                    onClick = { movePipeline(s.sessionId, -1) },
+                                                    enabled = inPipeline > 0,
+                                                ) {
+                                                    Text("↑")
+                                                }
+                                                IconButton(
+                                                    onClick = { movePipeline(s.sessionId, 1) },
+                                                    enabled = inPipeline < pipelineOrder.size - 1,
+                                                ) {
+                                                    Text("↓")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             if (isSelected) {
-                                when (mode) {
-                                    "conductor", "auto", "roundrobin" -> {
-                                        TextButton(onClick = { specialId = s.sessionId }) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(start = 48.dp, end = 4.dp, bottom = 4.dp),
+                                ) {
+                                    Text("角色：", style = MaterialTheme.typography.bodySmall)
+                                    Box {
+                                        TextButton(onClick = { roleExpanded.value = true }) {
                                             Text(
-                                                if (specialId == s.sessionId) "◉ ${S.conductorTag}"
-                                                else "○ ${S.conductorTag}"
+                                                vm.roles.find { it.persona == currentRole }?.name
+                                                    ?: "默认（无角色卡）",
+                                                style = MaterialTheme.typography.bodySmall,
                                             )
                                         }
-                                    }
-                                    "parallel" -> {
-                                        TextButton(onClick = { parallelSummarizerId = s.sessionId }) {
-                                            Text(
-                                                if (parallelSummarizerId == s.sessionId) "◉ ${S.summarizerTag}"
-                                                else "○ ${S.summarizerTag}"
+                                        DropdownMenu(
+                                            expanded = roleExpanded.value,
+                                            onDismissRequest = { roleExpanded.value = false },
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text("默认（无角色卡）") },
+                                                onClick = {
+                                                    memberRoles = memberRoles - s.sessionId
+                                                    roleExpanded.value = false
+                                                },
                                             )
-                                        }
-                                    }
-                                    "debate" -> {
-                                        TextButton(onClick = { debateJudge = s.sessionId }) {
-                                            Text(
-                                                if (debateJudge == s.sessionId) "◉ ${S.judgeTag}"
-                                                else "○ ${S.judgeTag}"
-                                            )
-                                        }
-                                        TextButton(onClick = { debateSideA = s.sessionId }) {
-                                            Text(
-                                                if (debateSideA == s.sessionId) "◉ ${S.sideProTag}"
-                                                else "○ ${S.sideProTag}"
-                                            )
-                                        }
-                                        TextButton(onClick = { debateSideB = s.sessionId }) {
-                                            Text(
-                                                if (debateSideB == s.sessionId) "◉ ${S.sideConTag}"
-                                                else "○ ${S.sideConTag}"
-                                            )
-                                        }
-                                    }
-                                    "pipeline" -> {
-                                        if (inPipeline != null) {
-                                            Text("${inPipeline + 1}", modifier = Modifier.padding(horizontal = 8.dp))
-                                            IconButton(
-                                                onClick = { movePipeline(s.sessionId, -1) },
-                                                enabled = inPipeline > 0,
-                                            ) {
-                                                Text("↑")
-                                            }
-                                            IconButton(
-                                                onClick = { movePipeline(s.sessionId, 1) },
-                                                enabled = inPipeline < pipelineOrder.size - 1,
-                                            ) {
-                                                Text("↓")
+                                            vm.roles.forEach { role ->
+                                                DropdownMenuItem(
+                                                    text = { Text(role.name) },
+                                                    onClick = {
+                                                        memberRoles = memberRoles + (s.sessionId to role.persona)
+                                                        roleExpanded.value = false
+                                                    },
+                                                )
                                             }
                                         }
                                     }

@@ -163,6 +163,21 @@ button.tiny {
   min-width: 0;
 }
 
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+}
+
+.member-row .role-select {
+  min-width: 140px;
+  max-width: 220px;
+  font-size: 0.85rem;
+  padding: 0.2rem 0.4rem;
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -742,6 +757,115 @@ html[data-theme="dark"] .drawer-item:hover {
   font-size: 0.85rem;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.flow-panel {
+  margin: 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.flow-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.flow-progress {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.flow-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.flow-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 0.85rem;
+}
+
+.flow-task-running {
+  border-left: 3px solid var(--primary);
+}
+
+.flow-task-done {
+  opacity: 0.85;
+  border-left: 3px solid #22c55e;
+}
+
+.flow-task-pending {
+  border-left: 3px solid var(--border);
+}
+
+.flow-task-status {
+  width: 1.2rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.flow-status-running {
+  color: var(--primary);
+}
+
+.flow-status-done {
+  color: #22c55e;
+}
+
+.flow-task-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.flow-task-line {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.flow-task-name {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.flow-task-desc {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.flow-artifact {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.35rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
 }
 
 /* Profile card in config screen */

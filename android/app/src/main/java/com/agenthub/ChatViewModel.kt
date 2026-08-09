@@ -152,11 +152,42 @@ data class RoomInfo(
     val subMode: String? = null,
     val activeSpeaker: String? = null,
     val reason: String? = null,
+    val memberRoles: Map<String, String>? = null,
     val parallelSummarizerId: String? = null,
     val pipelineOrder: List<String>? = null,
     val debateSides: Pair<String, String>? = null,
     val debateJudge: String? = null,
     val debateRounds: Int? = null,
+)
+
+data class FlowArtifact(
+    val type: String,
+    val path: String? = null,
+    val summary: String = "",
+)
+
+data class FlowTask(
+    val id: String,
+    val sessionId: String,
+    val name: String,
+    val status: String,
+    val task: String,
+    val dependsOn: List<String> = emptyList(),
+    val artifacts: List<FlowArtifact> = emptyList(),
+)
+
+data class FlowProgress(
+    val done: Int = 0,
+    val running: Int = 0,
+    val pending: Int = 0,
+    val total: Int = 0,
+)
+
+data class FlowInfo(
+    val roomId: String,
+    val phase: String,
+    val progress: FlowProgress,
+    val tasks: List<FlowTask>,
 )
 
 enum class SessionGroupBy { None, Agent, Cwd }
@@ -293,6 +324,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val connections = mutableStateListOf<ConnectionInfo>()
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
+    var flow by mutableStateOf<FlowInfo?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
     val busyIds = mutableStateListOf<String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
@@ -978,6 +1010,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val debateSides: Pair<String, String>? = null,
         val debateJudge: String? = null,
         val debateRounds: Int? = null,
+        val memberRoles: Map<String, String>? = null,
     )
 
     fun createRoom(name: String, memberIds: List<String>, mode: String, config: RoomModeConfig) {
@@ -993,6 +1026,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     config.debateSides?.let { put("debateSides", buildJsonArray { add(it.first); add(it.second) }) }
                     config.debateJudge?.let { put("debateJudge", it) }
                     config.debateRounds?.let { put("debateRounds", it) }
+                    if (!config.memberRoles.isNullOrEmpty()) {
+                        put("memberRoles", buildJsonObject {
+                            config.memberRoles.forEach { (sid, persona) ->
+                                if (persona.isNotBlank()) put(sid, persona)
+                            }
+                        })
+                    }
                 })
                 val o = result["room"]!!.jsonObject
                 val room = parseRoom(o)
@@ -1042,6 +1082,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     config.debateSides?.let { put("debateSides", buildJsonArray { add(it.first); add(it.second) }) }
                     config.debateJudge?.let { put("debateJudge", it) }
                     config.debateRounds?.let { put("debateRounds", it) }
+                    if (!config.memberRoles.isNullOrEmpty()) {
+                        put("memberRoles", buildJsonObject {
+                            config.memberRoles.forEach { (sid, persona) ->
+                                if (persona.isNotBlank()) put(sid, persona)
+                            }
+                        })
+                    }
                 })
                 val o = result["room"]!!.jsonObject
                 val updated = parseRoom(o)
@@ -1107,6 +1154,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             subMode = o["subMode"]?.jsonPrimitive?.content,
             activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.content,
             reason = o["reason"]?.jsonPrimitive?.content,
+            memberRoles = o["memberRoles"]?.jsonObject?.let { obj ->
+                obj.entries.mapNotNull { (k, v) ->
+                    val persona = v.jsonPrimitive.content
+                    if (persona.isNotBlank()) k to persona else null
+                }.toMap()
+            },
             parallelSummarizerId = o["parallelSummarizerId"]?.jsonPrimitive?.content,
             pipelineOrder = o["pipelineOrder"]?.jsonArray?.map { it.jsonPrimitive.content },
             debateSides = debateSides,
@@ -1154,6 +1207,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 currentSession = null
                 chatItems.clear()
                 quote = null
+                flow = null
                 if (anchorAt == null) {
                     inChatSearchQuery = ""
                     jumpToHistoryId = null
@@ -1162,10 +1216,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatSearchMatchCount = 0
                 screen = Screen.Room
                 loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
+                refreshFlow(updatedRoom.roomId)
             } catch (e: Exception) {
                 connectError = e.message
             }
         }
+    }
+
+    private suspend fun refreshFlow(roomId: String) {
+        try {
+            val result = hub.call("room.flow", buildJsonObject { put("roomId", roomId) })
+            val flowObj = result["flow"]?.jsonObject
+            flow = parseFlow(flowObj)
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    private fun parseFlow(obj: JsonObject?): FlowInfo? {
+        if (obj == null) return null
+        val roomId = obj["roomId"]?.jsonPrimitive?.content ?: return null
+        val phase = obj["phase"]?.jsonPrimitive?.content ?: return null
+        val progress = obj["progress"]?.jsonObject
+        val tasks = obj["tasks"]?.jsonArray
+        return FlowInfo(
+            roomId = roomId,
+            phase = phase,
+            progress = FlowProgress(
+                done = progress?.get("done")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                running = progress?.get("running")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                pending = progress?.get("pending")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                total = progress?.get("total")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+            ),
+            tasks = tasks?.map { parseFlowTask(it.jsonObject) } ?: emptyList(),
+        )
+    }
+
+    private fun parseFlowTask(obj: JsonObject): FlowTask {
+        val artifacts = obj["artifacts"]?.jsonArray?.map { parseFlowArtifact(it.jsonObject) } ?: emptyList()
+        return FlowTask(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
+            sessionId = obj["sessionId"]?.jsonPrimitive?.content ?: "",
+            name = obj["name"]?.jsonPrimitive?.content ?: "",
+            status = obj["status"]?.jsonPrimitive?.content ?: "pending",
+            task = obj["task"]?.jsonPrimitive?.content ?: "",
+            dependsOn = obj["dependsOn"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+            artifacts = artifacts,
+        )
+    }
+
+    private fun parseFlowArtifact(obj: JsonObject): FlowArtifact {
+        return FlowArtifact(
+            type = obj["type"]?.jsonPrimitive?.content ?: "",
+            path = obj["path"]?.jsonPrimitive?.content,
+            summary = obj["summary"]?.jsonPrimitive?.content ?: "",
+        )
     }
 
     private suspend fun resumeOne(session: SessionInfo): SessionInfo? {
@@ -1768,6 +1873,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     val idx = rooms.indexOfFirst { it.roomId == roomId }
                     if (idx >= 0) rooms[idx] = currentRoom!!
+                }
+            }
+            "room.flowUpdate" -> {
+                val p = obj["params"]!!.jsonObject
+                val roomId = p["roomId"]!!.jsonPrimitive.content
+                if (currentRoom?.roomId == roomId) {
+                    flow = parseFlow(p["flow"]?.jsonObject)
                 }
             }
             "permission.request" -> {

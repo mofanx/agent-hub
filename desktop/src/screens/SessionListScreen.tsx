@@ -439,6 +439,7 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
     debateSides: ["", ""] as [string, string],
     debateJudge: "",
     debateRounds: 2,
+    memberRoles: {} as Record<string, string>,
   });
   const [modeManuallyChanged, setModeManuallyChanged] = useState(false);
 
@@ -469,6 +470,9 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
     for (const sid of next) {
       if (!nextOrder.includes(sid)) nextOrder.push(sid);
     }
+    const nextRoles = Object.fromEntries(
+      Object.entries(form.memberRoles).filter(([sid]) => next.includes(sid)),
+    );
     setForm({
       ...form,
       selected: next,
@@ -476,6 +480,7 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
       pipelineOrder: nextOrder,
       debateSides: ensureDebateDefaults(next),
       debateJudge: next.includes(form.debateJudge) ? form.debateJudge : "",
+      memberRoles: nextRoles,
     });
   };
 
@@ -524,7 +529,10 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
       }
       config.debateRounds = Math.max(1, Math.min(5, form.debateRounds));
     }
-    void store.createRoom(form.name, form.selected, form.mode, config);
+    const memberRoles = Object.fromEntries(
+      Object.entries(form.memberRoles).filter(([, v]) => v.trim()),
+    );
+    void store.createRoom(form.name, form.selected, form.mode, config, memberRoles);
     onClose();
   };
 
@@ -693,17 +701,41 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
         {renderConfig()}
         {renderDebateConfig()}
 
-        <div className="card" style={{ maxHeight: 200, overflow: "auto" }}>
-          <h4>选择成员</h4>
+        <div className="card" style={{ maxHeight: 280, overflow: "auto" }}>
+          <h4>选择成员与角色</h4>
           {available.map((s) => (
-            <label key={s.sessionId} className="member-check">
-              <input
-                type="checkbox"
-                checked={form.selected.includes(s.sessionId)}
-                onChange={() => toggle(s.sessionId)}
-              />
-              {store.displayName(s)}
-            </label>
+            <div key={s.sessionId} className="member-row">
+              <label className="member-check">
+                <input
+                  type="checkbox"
+                  checked={form.selected.includes(s.sessionId)}
+                  onChange={() => toggle(s.sessionId)}
+                />
+                {store.displayName(s)}
+              </label>
+              {form.selected.includes(s.sessionId) && (
+                <select
+                  className="role-select"
+                  value={form.memberRoles[s.sessionId] ?? ""}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      memberRoles: {
+                        ...form.memberRoles,
+                        [s.sessionId]: e.currentTarget.value,
+                      },
+                    })
+                  }
+                >
+                  <option value="">默认（无角色卡）</option>
+                  {store.roles.map((r) => (
+                    <option key={r.id} value={r.persona}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           ))}
         </div>
 

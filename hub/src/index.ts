@@ -161,6 +161,15 @@ function parseRoomModeConfig(
     const n = Number(params.debateRounds);
     if (Number.isFinite(n) && n > 0) config.debateRounds = Math.max(1, Math.min(5, Math.floor(n)));
   }
+  if (params?.memberRoles != null && typeof params.memberRoles === "object") {
+    const roles: Record<string, string> = {};
+    for (const [sid, v] of Object.entries(params.memberRoles as Record<string, unknown>)) {
+      if (all.has(sid) && typeof v === "string" && v.trim()) {
+        roles[sid] = v.trim();
+      }
+    }
+    if (Object.keys(roles).length > 0) config.memberRoles = roles;
+  }
   return config;
 }
 
@@ -879,6 +888,13 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           : undefined,
         debateJudge: remap(source.debateJudge),
         debateRounds: source.debateRounds,
+        memberRoles: source.memberRoles
+          ? Object.fromEntries(
+              Object.entries(source.memberRoles)
+                .map(([sid, persona]) => [idMap.get(sid), persona])
+                .filter(([sid]) => !!sid),
+            )
+          : undefined,
       };
       const room = rooms.create(newName, newMembers, source.mode, config);
       persistState();
@@ -983,6 +999,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "room.list":
       return { rooms: rooms.list().map(enrichRoom) };
+    case "room.flow": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      return { flow: roomModeManager.getFlow(roomId) };
+    }
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");
       const text = String(req.params?.text ?? "");

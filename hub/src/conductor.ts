@@ -67,6 +67,34 @@ export class ConductorOrchestrator {
     return [...touched];
   }
 
+  /** 获取可用于前端展示的 flow 状态 */
+  getFlow(roomId: string): Record<string, unknown> | undefined {
+    const flow = this.flows.get(roomId);
+    if (!flow) return undefined;
+    const room = this.rooms.get(roomId);
+    const tasks = [...flow.tasks.values()].map((t) => {
+      const result = flow.results.get(t.id);
+      return {
+        id: t.id,
+        sessionId: t.sessionId,
+        name: room?.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId,
+        status: t.status,
+        task: t.task,
+        dependsOn: t.dependsOn,
+        artifacts: result?.artifacts ?? [],
+      };
+    });
+    const done = tasks.filter((t) => t.status === "done").length;
+    const running = tasks.filter((t) => t.status === "running").length;
+    const pending = tasks.filter((t) => t.status === "pending").length;
+    return {
+      roomId: flow.roomId,
+      phase: flow.phase,
+      progress: { done, running, pending, total: tasks.length },
+      tasks,
+    };
+  }
+
   /** 判断某 session 是否是指挥家且正在指挥编排中 */
   isConductorSession(sessionId: string): boolean {
     for (const flow of this.flows.values()) {
@@ -562,24 +590,65 @@ function extractTaskResult(output: string): TaskResult {
     }
   }
 
-  // 2. 没有合法 artifact JSON 时，尝试用简单正则扫描常见文件路径
+  // 2. 没有合法 artifact JSON 时，自动扫描常见文件/命令/diff
+  const autoArtifacts: TaskArtifact[] = [];
   const filePaths = new Set<string>();
+
+  // 2.1 扫描 ```bash / ```shell 代码块作为命令 artifact
+  const shellRe = /```(?:bash|shell|sh)\s*([\s\S]*?)```/g;
+  let sm: RegExpExecArray | null;
+  while ((sm = shellRe.exec(output)) !== null) {
+    const cmd = sm[1]?.trim();
+    if (cmd) {
+      autoArtifacts.push({ type: "command", summary: cmd.slice(0, 200) });
+      // 同时提取命令中的文件路径
+      const pathRe = /(?:[\s=]|^)([A-Za-z0-9_\-/.]+\.[a-zA-Z0-9]+)(?:\s|$)/g;
+      let pm: RegExpExecArray | null;
+      while ((pm = pathRe.exec(cmd)) !== null) {
+        if (pm[1]) filePaths.add(pm[1]);
+      }
+    }
+  }
+
+  // 2.2 扫描 diff 输出块
+  const diffRe = /(diff --git[\s\S]*?(?=\n```|\n\n\n|$))/g;
+  let dm: RegExpExecArray | null;
+  while ((dm = diffRe.exec(output)) !== null) {
+    const diff = dm[1]?.trim();
+    if (diff && diff.length > 20) {
+      autoArtifacts.push({ type: "file", path: extractDiffPath(diff), summary: "代码 diff" });
+    }
+  }
+
+  // 2.3 扫描显式文件声明：文件：xxx / File: xxx / Path: xxx
+  const explicitRe = /(?:文件|File|Path|路径)[：:]\s*(`|'|\"|)([A-Za-z0-9_\-/.]+)\1/gi;
+  let em: RegExpExecArray | null;
+  while ((em = explicitRe.exec(output)) !== null) {
+    if (em[2]) filePaths.add(em[2]);
+  }
+
+  // 2.4 扫描常见源码文件路径
   const fileRe = /(?:`|'|\"|\b)([A-Za-z0-9_\-/.]+\.(?:ts|tsx|js|jsx|py|kt|java|md|json|yaml|yml|toml|rs|go|css|scss|html|sql|sh))(?:`|'|\"|\b)/g;
   let fm: RegExpExecArray | null;
   while ((fm = fileRe.exec(output)) !== null) {
     if (fm[1]) filePaths.add(fm[1]);
   }
-  const artifacts: TaskArtifact[] = [...filePaths].slice(0, 10).map((p) => ({
-    type: "file",
-    path: p,
-    summary: "子任务输出中提到的文件路径",
-  }));
+  for (const p of [...filePaths].slice(0, 10)) {
+    autoArtifacts.push({ type: "file", path: p, summary: "子任务输出中提到的文件路径" });
+  }
+
+  const artifacts: TaskArtifact[] = autoArtifacts.slice(0, 15);
 
   // 3. 兜底：返回截断文本
   return {
     text: output.trim().replace(/\s+/g, " ").slice(0, PLAN_RESULT_LEN),
     artifacts,
   };
+}
+
+function extractDiffPath(diff: string): string | undefined {
+  const m = diff.match(/diff --git a\/(\S+)/);
+  return m?.[1];
 }
 
 function parseTasks(output: string, room: Room): { id?: string; to: string; task: string; dependsOn?: string[] }[] | null {
@@ -667,3 +736,6 @@ function resolveMemberByString(
   if (byPrefix) return byPrefix;
   return room.members.find((m) => m.name.toLowerCase().includes(to.toLowerCase()));
 }
+
+export { parseTasks, extractTaskResult };
+export type { TaskArtifact, TaskResult };

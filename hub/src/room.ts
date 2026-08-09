@@ -15,6 +15,8 @@ export type Room = {
   mode: RoomMode;
   conductorId?: string | undefined;
   members: { sessionId: string; name: string }[];
+  /** 成员角色卡：sessionId -> roleId 或自定义 persona */
+  memberRoles?: Record<string, string> | undefined;
   /** 轮询模式：当前轮到第几个成员 */
   roundRobinIndex?: number | undefined;
   /** 流水线模式：成员执行顺序，未设置则按 members 顺序 */
@@ -36,6 +38,7 @@ export type RoomModeConfig = {
   debateSides?: [string, string] | undefined;
   debateJudge?: string | undefined;
   debateRounds?: number | undefined;
+  memberRoles?: Record<string, string> | undefined;
 };
 
 type BlackboardEntry = { from: string; text: string; at: number };
@@ -68,6 +71,7 @@ export class RoomManager {
       mode,
       conductorId,
       members,
+      memberRoles: config?.memberRoles,
       roundRobinIndex: 0,
       parallelSummarizerId: config?.parallelSummarizerId,
       pipelineOrder: config?.pipelineOrder,
@@ -160,6 +164,7 @@ export class RoomManager {
     room.name = name;
     room.mode = mode;
     room.members = members;
+    room.memberRoles = config?.memberRoles;
     room.conductorId = conductorId;
     room.parallelSummarizerId = config?.parallelSummarizerId;
     room.pipelineOrder = config?.pipelineOrder;
@@ -211,6 +216,7 @@ export class RoomManager {
     text: string,
     excludeSessionId: string,
     quote?: { author: string; text: string },
+    persona?: string,
   ): string {
     const room = this.rooms.get(roomId)!;
     const board = (this.blackboards.get(roomId) ?? [])
@@ -222,8 +228,12 @@ export class RoomManager {
       .join(" ");
     const lines = [
       `[群聊「${room.name}」| 其他成员: ${others || "无"}]`,
-      "你在一个多 agent 协作群聊中。用户和其他 agent 的最近结论如下：",
     ];
+    if (persona) {
+      lines.push(`你的角色设定：${persona}`);
+    } else {
+      lines.push("你在一个多 agent 协作群聊中。用户和其他 agent 的最近结论如下：");
+    }
     if (board.length === 0) {
       lines.push("（暂无）");
     } else {

@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.composed
 import androidx.compose.ui.input.pointer.*
@@ -106,6 +107,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -120,6 +122,9 @@ import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
 import com.agenthub.ContextUsage
+import com.agenthub.FlowArtifact
+import com.agenthub.FlowInfo
+import com.agenthub.FlowTask
 import com.agenthub.TokenUsage
 
 private fun formatNumber(n: Long): String = when {
@@ -324,6 +329,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         WindowInsets.ime.exclude(WindowInsets.navigationBars),
                     ),
             ) {
+                if (isRoom) {
+                    FlowPanel(vm.flow)
+                }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
                     reverseLayout = true,
@@ -1201,6 +1209,88 @@ fun ChatBubble(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlowPanel(flow: FlowInfo?) {
+    if (flow == null || flow.tasks.isEmpty()) return
+    val progress = flow.progress
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "编排进度",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            flow.tasks.forEach { task ->
+                FlowTaskRow(task)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlowTaskRow(task: FlowTask) {
+    val icon = when (task.status) {
+        "done" -> "✓"
+        "running" -> "▶"
+        else -> "○"
+    }
+    val iconColor = when (task.status) {
+        "done" -> MaterialTheme.colorScheme.primary
+        "running" -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Column(Modifier.padding(vertical = 3.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(icon, color = iconColor, modifier = Modifier.width(20.dp))
+            Text("@${task.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                task.task,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (task.artifacts.isNotEmpty()) {
+            Row(
+                modifier = Modifier.padding(start = 20.dp, top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                task.artifacts.forEach { artifact ->
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface,
+                        shape = RoundedCornerShape(4.dp),
+                    ) {
+                        Text(
+                            "[${artifact.type}] ${artifact.path ?: ""} ${artifact.summary.take(60)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
                     }
                 }
             }
