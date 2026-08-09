@@ -43,8 +43,13 @@ function waitDone(sessionId: string): Promise<void> {
 
 ws.on("open", async () => {
   try {
-    const a = await call("session.create", { cwd: "/tmp", name: "阿明" });
-    const b = await call("session.create", { cwd: "/tmp", name: "小红" });
+    const { connections } = await call("connection.list");
+    const conn = connections.find((c: any) => c.online || c.local);
+    if (!conn) throw new Error("no online or local connection");
+    const connectionId = conn.id;
+
+    const a = await call("session.create", { cwd: "/tmp", name: "阿明", connectionId });
+    const b = await call("session.create", { cwd: "/tmp", name: "小红", connectionId });
     console.log("[room] sessions:", a.sessionId, b.sessionId);
 
     const { room } = await call("room.create", {

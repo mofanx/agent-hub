@@ -5,6 +5,7 @@ import type {
   ConnProfile,
   ConnectionInfo,
   RoomInfo,
+  RoomModeConfig,
   RoleInfo,
   Screen,
   SearchHit,
@@ -101,7 +102,7 @@ interface Actions {
     name: string,
     memberIds: string[],
     mode: string,
-    conductorId?: string,
+    config?: RoomModeConfig,
   ): Promise<void>;
 
   openChat(session: SessionInfo): void;
@@ -342,12 +343,27 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const m = it as Record<string, unknown>;
       return [String(m.sessionId ?? ""), String(m.name ?? "")] as [string, string];
     });
+    const stringOrNull = (v: unknown) => (v ? String(v) : null);
+    const numberOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const parsePipelineOrder = (v: unknown): string[] | null => {
+      if (!Array.isArray(v)) return null;
+      return v.map((s) => String(s)).filter(Boolean);
+    };
+    const parseDebateSides = (v: unknown): [string, string] | null => {
+      if (!Array.isArray(v) || v.length < 2) return null;
+      return [String(v[0]), String(v[1])] as [string, string];
+    };
     return {
       roomId: String(o.roomId ?? ""),
       name: String(o.name ?? ""),
       mode: String(o.mode ?? "mention"),
-      conductorId: o.conductorId ? String(o.conductorId) : null,
+      conductorId: stringOrNull(o.conductorId),
       members,
+      parallelSummarizerId: stringOrNull(o.parallelSummarizerId),
+      pipelineOrder: parsePipelineOrder(o.pipelineOrder),
+      debateSides: parseDebateSides(o.debateSides),
+      debateJudge: stringOrNull(o.debateJudge),
+      debateRounds: numberOrNull(o.debateRounds),
     };
   };
 
@@ -662,14 +678,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    createRoom: async (name, memberIds, mode, conductorId) => {
+    createRoom: async (name, memberIds, mode, config) => {
       try {
-        const result = (await getOrCall("room.create", {
-          name,
-          sessionIds: memberIds,
-          mode,
-          ...(conductorId ? { conductorId } : {}),
-        })) as Record<string, unknown>;
+        const params: Record<string, unknown> = { name, sessionIds: memberIds, mode };
+        if (config?.conductorId) params.conductorId = config.conductorId;
+        if (config?.parallelSummarizerId) params.parallelSummarizerId = config.parallelSummarizerId;
+        if (config?.pipelineOrder?.length) params.pipelineOrder = config.pipelineOrder;
+        if (config?.debateSides?.length === 2) params.debateSides = config.debateSides;
+        if (config?.debateJudge) params.debateJudge = config.debateJudge;
+        if (config?.debateRounds != null) params.debateRounds = config.debateRounds;
+        const result = (await getOrCall("room.create", params)) as Record<string, unknown>;
         const room = parseRoom((result.room as Record<string, unknown>) ?? {});
         set({ rooms: [...get().rooms, room] });
         get().openRoom(room);

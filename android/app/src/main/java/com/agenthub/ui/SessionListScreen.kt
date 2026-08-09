@@ -67,6 +67,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.derivedStateOf
@@ -1194,13 +1195,98 @@ private fun RoomEditorDialog(
     val roomNameTaken = roomName.isNotBlank() &&
         vm.rooms.any { it.roomId != editing?.roomId && it.name == roomName.trim() }
     var mode by remember(room) { mutableStateOf(editing?.mode ?: "mention") }
-    var conductorId by remember(room) { mutableStateOf<String?>(editing?.conductorId) }
+
     val selected = remember(room) {
         mutableStateListOf<String>().apply {
             addAll(editing?.members?.map { it.first } ?: emptyList())
         }
     }
-    val minMembers = if (isCreate) 2 else 1
+
+    fun initialPipelineOrder(): List<String> {
+        val base = editing?.pipelineOrder ?: editing?.members?.map { it.first } ?: emptyList()
+        return base.filter { selected.contains(it) }
+    }
+
+    var specialId by remember(room) { mutableStateOf<String?>(editing?.conductorId) }
+    var parallelSummarizerId by remember(room) { mutableStateOf<String?>(editing?.parallelSummarizerId) }
+    var debateJudge by remember(room) { mutableStateOf<String?>(editing?.debateJudge) }
+    var debateSideA by remember(room) { mutableStateOf<String?>(editing?.debateSides?.first) }
+    var debateSideB by remember(room) { mutableStateOf<String?>(editing?.debateSides?.second) }
+    var debateRounds by remember(room) { mutableIntStateOf(editing?.debateRounds ?: 2) }
+    var pipelineOrder by remember(room) { mutableStateOf(initialPipelineOrder()) }
+
+    fun onModeChanged(newMode: String) {
+        mode = newMode
+        specialId = null
+        parallelSummarizerId = null
+        debateJudge = null
+        debateSideA = null
+        debateSideB = null
+        debateRounds = 2
+        pipelineOrder = selected.toList()
+    }
+
+    fun onToggleSelected(id: String, checked: Boolean) {
+        if (checked) {
+            selected.add(id)
+            if (!pipelineOrder.contains(id)) pipelineOrder = pipelineOrder + id
+        } else {
+            selected.remove(id)
+            if (specialId == id) specialId = null
+            if (parallelSummarizerId == id) parallelSummarizerId = null
+            if (debateJudge == id) debateJudge = null
+            if (debateSideA == id) debateSideA = null
+            if (debateSideB == id) debateSideB = null
+            pipelineOrder = pipelineOrder.filter { it != id }
+        }
+    }
+
+    fun movePipeline(id: String, dir: Int) {
+        val idx = pipelineOrder.indexOf(id)
+        if (idx < 0) return
+        val target = idx + dir
+        if (target < 0 || target >= pipelineOrder.size) return
+        val list = pipelineOrder.toMutableList()
+        list[idx] = list[target]
+        list[target] = id
+        pipelineOrder = list
+    }
+
+    fun isValid(): Boolean {
+        if (roomName.isBlank() || roomNameTaken || selected.size < (if (isCreate) 2 else 1)) return false
+        return when (mode) {
+            "conductor", "auto", "roundrobin" -> specialId != null
+            "parallel" -> parallelSummarizerId != null
+            "pipeline" -> pipelineOrder.isNotEmpty()
+            "debate" -> debateSideA != null && debateSideB != null && debateJudge != null
+            else -> true
+        }
+    }
+
+    fun buildConfig(): ChatViewModel.RoomModeConfig = when (mode) {
+        "conductor", "auto", "roundrobin" -> ChatViewModel.RoomModeConfig(conductorId = specialId)
+        "parallel" -> ChatViewModel.RoomModeConfig(parallelSummarizerId = parallelSummarizerId)
+        "pipeline" -> ChatViewModel.RoomModeConfig(pipelineOrder = pipelineOrder)
+        "debate" -> ChatViewModel.RoomModeConfig(
+            debateSides = if (debateSideA != null && debateSideB != null) debateSideA!! to debateSideB!! else null,
+            debateJudge = debateJudge,
+            debateRounds = debateRounds.coerceIn(1, 5),
+        )
+        else -> ChatViewModel.RoomModeConfig()
+    }
+
+    val modes = remember { listOf("mention", "conductor", "roundrobin", "parallel", "pipeline", "debate", "auto") }
+    fun modeLabel(m: String) = when (m) {
+        "mention" -> S.modeMention
+        "conductor" -> S.modeConductor
+        "roundrobin" -> S.modeRoundRobin
+        "parallel" -> S.modeParallel
+        "pipeline" -> S.modePipeline
+        "debate" -> S.modeDebate
+        "auto" -> S.modeAuto
+        else -> m
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (isCreate) S.createRoom else S.editRoom) },
@@ -1217,17 +1303,7 @@ private fun RoomEditorDialog(
                     },
                 )
                 Spacer(Modifier.height(8.dp))
-                val modes = remember { listOf("mention", "conductor", "roundrobin", "parallel", "pipeline", "debate", "auto") }
-                fun modeLabel(m: String) = when (m) {
-                    "mention" -> S.modeMention
-                    "conductor" -> S.modeConductor
-                    "roundrobin" -> S.modeRoundRobin
-                    "parallel" -> S.modeParallel
-                    "pipeline" -> S.modePipeline
-                    "debate" -> S.modeDebate
-                    "auto" -> S.modeAuto
-                    else -> m
-                }
+
                 var expanded by remember { mutableStateOf(false) }
                 Box {
                     TextButton(onClick = { expanded = true }) {
@@ -1241,44 +1317,106 @@ private fun RoomEditorDialog(
                             DropdownMenuItem(
                                 text = { Text(modeLabel(m)) },
                                 onClick = {
-                                    mode = m
-                                    if (m != "conductor" && m != "auto") conductorId = null
+                                    onModeChanged(m)
                                     expanded = false
                                 },
                             )
                         }
                     }
                 }
-                val needsConductor = mode in listOf("conductor", "auto", "parallel", "debate")
+
                 val sessions = remember(vm.sessions) { vm.sessions.filter { !it.archived } }
                 LazyColumn(
                     Modifier
-                        .heightIn(max = 360.dp)
+                        .heightIn(max = 320.dp)
                         .fillMaxWidth(),
                 ) {
                     items(sessions.size) { i ->
                         val s = sessions[i]
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        val isSelected = selected.contains(s.sessionId)
+                        val inPipeline = pipelineOrder.indexOf(s.sessionId).takeIf { it >= 0 }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
                             Checkbox(
-                                checked = selected.contains(s.sessionId),
-                                onCheckedChange = {
-                                    if (it) {
-                                        selected.add(s.sessionId)
-                                    } else {
-                                        selected.remove(s.sessionId)
-                                        if (conductorId == s.sessionId) conductorId = null
-                                    }
-                                },
+                                checked = isSelected,
+                                onCheckedChange = { onToggleSelected(s.sessionId, it) },
                             )
                             Text(vm.displayName(s), modifier = Modifier.weight(1f))
-                            if (needsConductor && selected.contains(s.sessionId)) {
-                                TextButton(onClick = { conductorId = s.sessionId }) {
-                                    Text(
-                                        if (conductorId == s.sessionId) "◉ ${S.conductorTag}"
-                                        else "○ ${S.conductorTag}"
-                                    )
+
+                            if (isSelected) {
+                                when (mode) {
+                                    "conductor", "auto", "roundrobin" -> {
+                                        TextButton(onClick = { specialId = s.sessionId }) {
+                                            Text(
+                                                if (specialId == s.sessionId) "◉ ${S.conductorTag}"
+                                                else "○ ${S.conductorTag}"
+                                            )
+                                        }
+                                    }
+                                    "parallel" -> {
+                                        TextButton(onClick = { parallelSummarizerId = s.sessionId }) {
+                                            Text(
+                                                if (parallelSummarizerId == s.sessionId) "◉ 汇总"
+                                                else "○ 汇总"
+                                            )
+                                        }
+                                    }
+                                    "debate" -> {
+                                        TextButton(onClick = { debateJudge = s.sessionId }) {
+                                            Text(
+                                                if (debateJudge == s.sessionId) "◉ 裁判"
+                                                else "○ 裁判"
+                                            )
+                                        }
+                                        TextButton(onClick = { debateSideA = s.sessionId }) {
+                                            Text(
+                                                if (debateSideA == s.sessionId) "◉ 正方"
+                                                else "○ 正方"
+                                            )
+                                        }
+                                        TextButton(onClick = { debateSideB = s.sessionId }) {
+                                            Text(
+                                                if (debateSideB == s.sessionId) "◉ 反方"
+                                                else "○ 反方"
+                                            )
+                                        }
+                                    }
+                                    "pipeline" -> {
+                                        if (inPipeline != null) {
+                                            Text("${inPipeline + 1}", modifier = Modifier.padding(horizontal = 8.dp))
+                                            IconButton(
+                                                onClick = { movePipeline(s.sessionId, -1) },
+                                                enabled = inPipeline > 0,
+                                            ) {
+                                                Text("↑")
+                                            }
+                                            IconButton(
+                                                onClick = { movePipeline(s.sessionId, 1) },
+                                                enabled = inPipeline < pipelineOrder.size - 1,
+                                            ) {
+                                                Text("↓")
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                        }
+                    }
+                }
+
+                if (mode == "debate") {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${S.modeDebate} 轮数：")
+                        IconButton(onClick = { if (debateRounds > 1) debateRounds-- }) {
+                            Text("−")
+                        }
+                        Text(debateRounds.toString(), modifier = Modifier.padding(horizontal = 8.dp))
+                        IconButton(onClick = { if (debateRounds < 5) debateRounds++ }) {
+                            Text("+")
                         }
                     }
                 }
@@ -1293,7 +1431,7 @@ private fun RoomEditorDialog(
                             roomName.trim().ifBlank { S.rooms },
                             selected.toList(),
                             mode,
-                            conductorId,
+                            buildConfig(),
                         )
                     } else {
                         vm.updateRoom(
@@ -1301,12 +1439,11 @@ private fun RoomEditorDialog(
                             roomName.trim().ifBlank { editing.name },
                             selected.toList(),
                             mode,
-                            conductorId,
+                            buildConfig(),
                         )
                     }
                 },
-                enabled = roomName.isNotBlank() && !roomNameTaken && selected.size >= minMembers &&
-                    (mode !in listOf("conductor", "auto") || conductorId != null),
+                enabled = isValid(),
             ) { Text(if (isCreate) S.create else S.ok) }
         },
         dismissButton = {

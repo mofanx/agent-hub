@@ -55,7 +55,11 @@ ws.on("message", async (raw) => {
 
 ws.on("open", async () => {
   try {
-    const { sessionId } = await call("session.create", { cwd });
+    const { connections } = await call("connection.list");
+    const conn = connections.find((c: any) => c.online || c.local);
+    if (!conn) throw new Error("no online or local connection");
+
+    const { sessionId } = await call("session.create", { cwd, connectionId: conn.id });
     console.log(`[m1] session created: ${sessionId}`);
     console.log(`[m1] prompt: ${promptText}`);
     await call("prompt.send", { sessionId, text: promptText });

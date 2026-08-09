@@ -43,8 +43,13 @@ ws.on("message", (raw) => {
 
 ws.on("open", async () => {
   try {
-    const boss = await call("session.create", { cwd: "/tmp", name: "指挥" });
-    const a = await call("session.create", { cwd: "/tmp", name: "小甲" });
+    const { connections } = await call("connection.list");
+    const conn = connections.find((c: any) => c.online || c.local);
+    if (!conn) throw new Error("no online or local connection");
+    const connectionId = conn.id;
+
+    const boss = await call("session.create", { cwd: "/tmp", name: "指挥", connectionId });
+    const a = await call("session.create", { cwd: "/tmp", name: "小甲", connectionId });
     const { room } = await call("room.create", {
       name: "绕过测试群",
       sessionIds: [boss.sessionId, a.sessionId],

@@ -103,7 +103,6 @@ const MODE_LABELS: Record<RuntimeMode, string> = {
 export class RoomModeManager {
   private conductor: ConductorOrchestrator;
   private autoDecisions = new Map<string, AutoDecisionContext>();
-  private roundRobinIndices = new Map<string, number>();
   private parallelFlows = new Map<string, ParallelFlow>();
   private pipelineFlows = new Map<string, PipelineFlow>();
   private debateFlows = new Map<string, DebateFlow>();
@@ -434,7 +433,7 @@ export class RoomModeManager {
     const members = room.members;
     if (members.length === 0) return { sent: [], mentioned: [], skipped: [] };
     const preferred = typeof options?.params?.speaker === "string" ? (options.params.speaker as string) : undefined;
-    let idx = this.roundRobinIndices.get(room.roomId) ?? 0;
+    let idx = room.roundRobinIndex ?? 0;
     let target: string | undefined;
     const skipped: string[] = [];
     if (preferred && members.some((m) => m.sessionId === preferred) && !this.agent.isBusy(preferred)) {
@@ -458,7 +457,7 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: "轮询模式：所有成员均忙碌" });
       return { sent: [], mentioned: [], skipped: members.map((m) => m.sessionId) };
     }
-    this.roundRobinIndices.set(room.roomId, idx);
+    room.roundRobinIndex = idx;
     this.setSubMode(room.roomId, "roundrobin", target, undefined);
     this.notice({ roomId: room.roomId, message: `🔄 轮询模式：由 @${this.nameFor(room.roomId, target)} 作答` });
     const prompt = this.buildPromptContent(room, text, target, options);

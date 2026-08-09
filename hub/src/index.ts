@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAgent, getPermissionBypass, setPermissionBypass, type HubEvent } from "./agent.js";
-import { RoomManager, type Room, type RoomMode } from "./room.js";
+import { RoomManager, type Room, type RoomMode, type RoomModeConfig } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, type SessionMeta, type Connection } from "./store.js";
@@ -128,6 +128,39 @@ function parseRoomMode(raw: unknown): RoomMode {
   const m = String(raw ?? "").toLowerCase();
   if (modes.includes(m as RoomMode)) return m as RoomMode;
   return "mention";
+}
+
+function parseRoomModeConfig(
+  params: Record<string, unknown> | undefined,
+  members: { sessionId: string; name: string }[],
+): RoomModeConfig {
+  const all = new Set(members.map((m) => m.sessionId));
+  const config: RoomModeConfig = {};
+  if (params?.conductorId != null) config.conductorId = String(params.conductorId);
+  if (params?.parallelSummarizerId != null) {
+    const s = String(params.parallelSummarizerId);
+    if (all.has(s)) config.parallelSummarizerId = s;
+  }
+  if (Array.isArray(params?.pipelineOrder)) {
+    config.pipelineOrder = (params.pipelineOrder as unknown[])
+      .map((s) => String(s))
+      .filter((sid) => all.has(sid));
+  }
+  if (Array.isArray(params?.debateSides) && (params.debateSides as unknown[]).length >= 2) {
+    const raw = (params.debateSides as unknown[])
+      .map((s) => String(s))
+      .filter((sid) => all.has(sid));
+    if (raw.length >= 2) config.debateSides = [raw[0], raw[1]] as [string, string];
+  }
+  if (params?.debateJudge != null) {
+    const s = String(params.debateJudge);
+    if (all.has(s)) config.debateJudge = s;
+  }
+  if (params?.debateRounds != null) {
+    const n = Number(params.debateRounds);
+    if (Number.isFinite(n) && n > 0) config.debateRounds = Math.max(1, Math.min(5, Math.floor(n)));
+  }
+  return config;
 }
 
 function enrichRoom(room: Room): Record<string, unknown> {
@@ -787,15 +820,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const name = String(req.params?.name ?? "").trim() || room.name;
       const ids = (req.params?.sessionIds as string[]) ?? [];
       const mode = parseRoomMode(req.params?.mode);
-      const conductorId =
-        req.params?.conductorId != null ? String(req.params.conductorId) : undefined;
       const all = listAllSessions();
       const members = ids.map((id) => {
         const s = all.find((x) => x.sessionId === id);
         if (!s) throw new Error(`unknown session: ${id}`);
         return { sessionId: s.sessionId, name: s.name };
       });
-      rooms.update(roomId, name, members, mode, conductorId);
+      const config = parseRoomModeConfig(req.params, members);
+      rooms.update(roomId, name, members, mode, config);
       persistState();
       return { room: enrichRoom(rooms.get(roomId)!) };
     }
@@ -818,15 +850,20 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         newMembers.push({ sessionId: s.sessionId, name: m.name });
       }
 
-      const newConductorId = source.conductorId
-        ? idMap.get(source.conductorId)
-        : undefined;
-      const room = rooms.create(
-        newName,
-        newMembers,
-        source.mode,
-        newConductorId,
-      );
+      const remap = (sid?: string) => (sid ? idMap.get(sid) : undefined);
+      const config: RoomModeConfig = {
+        conductorId: remap(source.conductorId),
+        parallelSummarizerId: remap(source.parallelSummarizerId),
+        pipelineOrder: source.pipelineOrder
+          ?.map(remap)
+          .filter((sid): sid is string => !!sid),
+        debateSides: source.debateSides
+          ? (source.debateSides.map(remap).filter((sid): sid is string => !!sid) as [string, string])
+          : undefined,
+        debateJudge: remap(source.debateJudge),
+        debateRounds: source.debateRounds,
+      };
+      const room = rooms.create(newName, newMembers, source.mode, config);
       persistState();
       return { room };
     }
@@ -916,15 +953,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (isRoomNameTaken(name)) throw new Error("room name already exists");
       const ids = (req.params?.sessionIds as string[]) ?? [];
       const mode = parseRoomMode(req.params?.mode);
-      const conductorId =
-        req.params?.conductorId != null ? String(req.params.conductorId) : undefined;
       const all = listAllSessions();
       const members = ids.map((id) => {
         const s = all.find((x) => x.sessionId === id);
         if (!s) throw new Error(`unknown session: ${id}`);
         return { sessionId: s.sessionId, name: s.name };
       });
-      const room = rooms.create(name, members, mode, conductorId);
+      const config = parseRoomModeConfig(req.params, members);
+      const room = rooms.create(name, members, mode, config);
       persistState();
       return { room: enrichRoom(room) };
     }

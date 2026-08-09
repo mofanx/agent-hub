@@ -699,6 +699,40 @@ html[data-theme="dark"] .drawer-item:hover {
   width: 100%;
 }
 
+.pipeline-order {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.pipeline-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.pipeline-name {
+  font-size: 0.9rem;
+}
+
+.pipeline-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.pipeline-actions button.tiny {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.85rem;
+  min-width: auto;
+}
+
 /* Profile card in config screen */
 .profile-card {
   align-items: flex-start;

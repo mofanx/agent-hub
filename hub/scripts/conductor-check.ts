@@ -48,9 +48,14 @@ function nameOf(sid: string): string {
 
 ws.on("open", async () => {
   try {
-    const boss = await call("session.create", { cwd: "/tmp", name: "指挥" });
-    const a = await call("session.create", { cwd: "/tmp", name: "小甲" });
-    const b = await call("session.create", { cwd: "/tmp", name: "小乙" });
+    const { connections } = await call("connection.list");
+    const conn = connections.find((c: any) => c.online || c.local);
+    if (!conn) throw new Error("no online or local connection");
+    const connectionId = conn.id;
+
+    const boss = await call("session.create", { cwd: "/tmp", name: "指挥", connectionId });
+    const a = await call("session.create", { cwd: "/tmp", name: "小甲", connectionId });
+    const b = await call("session.create", { cwd: "/tmp", name: "小乙", connectionId });
     names.set(boss.sessionId, "指挥");
     names.set(a.sessionId, "小甲");
     names.set(b.sessionId, "小乙");

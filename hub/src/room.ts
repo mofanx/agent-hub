@@ -16,17 +16,26 @@ export type Room = {
   conductorId?: string | undefined;
   members: { sessionId: string; name: string }[];
   /** 轮询模式：当前轮到第几个成员 */
-  roundRobinIndex?: number;
+  roundRobinIndex?: number | undefined;
   /** 流水线模式：成员执行顺序，未设置则按 members 顺序 */
-  pipelineOrder?: string[];
+  pipelineOrder?: string[] | undefined;
   /** 辩论模式：正方/反方 sessionId */
-  debateSides?: [string, string];
+  debateSides?: [string, string] | undefined;
   /** 辩论模式：裁判 sessionId */
-  debateJudge?: string;
+  debateJudge?: string | undefined;
   /** 辩论模式：轮数 */
-  debateRounds?: number;
+  debateRounds?: number | undefined;
   /** 并发模式：汇总者 sessionId */
-  parallelSummarizerId?: string;
+  parallelSummarizerId?: string | undefined;
+};
+
+export type RoomModeConfig = {
+  conductorId?: string | undefined;
+  parallelSummarizerId?: string | undefined;
+  pipelineOrder?: string[] | undefined;
+  debateSides?: [string, string] | undefined;
+  debateJudge?: string | undefined;
+  debateRounds?: number | undefined;
 };
 
 type BlackboardEntry = { from: string; text: string; at: number };
@@ -42,8 +51,9 @@ export class RoomManager {
     name: string,
     members: { sessionId: string; name: string }[],
     mode: RoomMode = "mention",
-    conductorId?: string,
+    config?: RoomModeConfig,
   ): Room {
+    const conductorId = config?.conductorId;
     if (mode === "conductor" || mode === "auto") {
       if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
         throw new Error(`${mode} room needs a valid conductorId`);
@@ -59,6 +69,11 @@ export class RoomManager {
       conductorId,
       members,
       roundRobinIndex: 0,
+      parallelSummarizerId: config?.parallelSummarizerId,
+      pipelineOrder: config?.pipelineOrder,
+      debateSides: config?.debateSides,
+      debateJudge: config?.debateJudge,
+      debateRounds: config?.debateRounds,
     };
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
@@ -128,11 +143,12 @@ export class RoomManager {
     name: string,
     members: { sessionId: string; name: string }[],
     mode: RoomMode,
-    conductorId?: string,
+    config?: RoomModeConfig,
   ): Room {
     const room = this.rooms.get(roomId);
     if (!room) throw new Error(`unknown room: ${roomId}`);
     if (members.length === 0) throw new Error("room needs at least 1 member");
+    const conductorId = config?.conductorId;
     if (mode === "conductor" || mode === "auto") {
       if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
         throw new Error(`${mode} room needs a valid conductorId`);
@@ -145,6 +161,11 @@ export class RoomManager {
     room.mode = mode;
     room.members = members;
     room.conductorId = conductorId;
+    room.parallelSummarizerId = config?.parallelSummarizerId;
+    room.pipelineOrder = config?.pipelineOrder;
+    room.debateSides = config?.debateSides;
+    room.debateJudge = config?.debateJudge;
+    room.debateRounds = config?.debateRounds;
     this.dedupMemberNames(room.roomId);
     return room;
   }

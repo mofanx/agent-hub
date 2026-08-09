@@ -44,6 +44,9 @@ ws.on("message", (raw) => {
 
 ws.on("open", async () => {
   try {
+    const { connections } = await call("connection.list");
+    const conn = connections.find((c: any) => c.online || c.local);
+
     const { sessions } = await call("session.list");
     const offline = sessions.filter((s: any) => s.offline);
     console.log(`[persist] hub sees ${sessions.length} sessions, ${offline.length} offline`);
@@ -52,6 +55,11 @@ ws.on("open", async () => {
     console.log(`[persist] history entries: ${entries.length}`);
     for (const e of entries) console.log(`  [${e.kind}] ${e.author}: ${e.text.slice(0, 60)}`);
     if (entries.length === 0) throw new Error("history empty");
+
+    if (!conn) {
+      console.log("[persist] no online connection, skipping resume/prompt (partial pass)");
+      process.exit(0);
+    }
 
     const { resumed } = await call("session.resume", { sessionId: lastSession.sessionId });
     console.log(`[persist] resume: ${resumed}`);

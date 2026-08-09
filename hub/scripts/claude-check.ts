@@ -38,7 +38,12 @@ ws.on("message", (raw) => {
 
 ws.on("open", async () => {
   try {
-    const s = await call("session.create", { cwd: "/tmp", name: "小克", agent: "claude" });
+    const { connections } = await call("connection.list");
+    const conn = connections.find((c: any) => c.agent === "claude" && (c.online || c.local)) ??
+      connections.find((c: any) => c.online || c.local);
+    if (!conn) throw new Error("no online or local connection");
+
+    const s = await call("session.create", { cwd: "/tmp", name: "小克", connectionId: conn.id });
     console.log("[claude] session:", s.sessionId, "agent:", s.agent);
     await call("prompt.send", { sessionId: s.sessionId, text: "只回复两个字：收到" });
   } catch (err) {

@@ -25,6 +25,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import com.agenthub.ui.Strings
@@ -151,6 +152,11 @@ data class RoomInfo(
     val subMode: String? = null,
     val activeSpeaker: String? = null,
     val reason: String? = null,
+    val parallelSummarizerId: String? = null,
+    val pipelineOrder: List<String>? = null,
+    val debateSides: Pair<String, String>? = null,
+    val debateJudge: String? = null,
+    val debateRounds: Int? = null,
 )
 
 enum class SessionGroupBy { None, Agent, Cwd }
@@ -965,14 +971,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createRoom(name: String, memberIds: List<String>, mode: String, conductorId: String?) {
+    data class RoomModeConfig(
+        val conductorId: String? = null,
+        val parallelSummarizerId: String? = null,
+        val pipelineOrder: List<String>? = null,
+        val debateSides: Pair<String, String>? = null,
+        val debateJudge: String? = null,
+        val debateRounds: Int? = null,
+    )
+
+    fun createRoom(name: String, memberIds: List<String>, mode: String, config: RoomModeConfig) {
         viewModelScope.launch {
             try {
                 val result = hub.call("room.create", buildJsonObject {
                     put("name", name)
                     put("sessionIds", buildJsonArray { memberIds.forEach { add(it) } })
                     put("mode", mode)
-                    if (conductorId != null) put("conductorId", conductorId)
+                    config.conductorId?.let { put("conductorId", it) }
+                    config.parallelSummarizerId?.let { put("parallelSummarizerId", it) }
+                    config.pipelineOrder?.let { put("pipelineOrder", buildJsonArray { it.forEach { id -> add(id) } }) }
+                    config.debateSides?.let { put("debateSides", buildJsonArray { add(it.first); add(it.second) }) }
+                    config.debateJudge?.let { put("debateJudge", it) }
+                    config.debateRounds?.let { put("debateRounds", it) }
                 })
                 val o = result["room"]!!.jsonObject
                 val room = parseRoom(o)
@@ -1005,7 +1025,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun updateRoom(room: RoomInfo, name: String, memberIds: List<String>, mode: String, conductorId: String?) {
+    fun updateRoom(room: RoomInfo, name: String, memberIds: List<String>, mode: String, config: RoomModeConfig) {
         viewModelScope.launch {
             connectError = null
             val trimmed = name.trim()
@@ -1016,7 +1036,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("name", trimmed)
                     put("sessionIds", buildJsonArray { memberIds.forEach { add(it) } })
                     put("mode", mode)
-                    if (conductorId != null) put("conductorId", conductorId)
+                    config.conductorId?.let { put("conductorId", it) }
+                    config.parallelSummarizerId?.let { put("parallelSummarizerId", it) }
+                    config.pipelineOrder?.let { put("pipelineOrder", buildJsonArray { it.forEach { id -> add(id) } }) }
+                    config.debateSides?.let { put("debateSides", buildJsonArray { add(it.first); add(it.second) }) }
+                    config.debateJudge?.let { put("debateJudge", it) }
+                    config.debateRounds?.let { put("debateRounds", it) }
                 })
                 val o = result["room"]!!.jsonObject
                 val updated = parseRoom(o)
@@ -1063,20 +1088,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun parseRoom(o: JsonObject): RoomInfo = RoomInfo(
-        o["roomId"]!!.jsonPrimitive.content,
-        o["name"]!!.jsonPrimitive.content,
-        o["mode"]?.jsonPrimitive?.content ?: "mention",
-        o["conductorId"]?.jsonPrimitive?.content,
-        o["members"]!!.jsonArray.map {
+    private fun parseRoom(o: JsonObject): RoomInfo {
+        val members = o["members"]!!.jsonArray.map {
             val m = it.jsonObject
             m["sessionId"]!!.jsonPrimitive.content to
                 m["name"]!!.jsonPrimitive.content
-        },
-        o["subMode"]?.jsonPrimitive?.content,
-        o["activeSpeaker"]?.jsonPrimitive?.content,
-        o["reason"]?.jsonPrimitive?.content,
-    )
+        }
+        val debateSidesArr = o["debateSides"]?.jsonArray
+        val debateSides = if (debateSidesArr != null && debateSidesArr.size >= 2) {
+            debateSidesArr[0].jsonPrimitive.content to debateSidesArr[1].jsonPrimitive.content
+        } else null
+        return RoomInfo(
+            roomId = o["roomId"]!!.jsonPrimitive.content,
+            name = o["name"]!!.jsonPrimitive.content,
+            mode = o["mode"]?.jsonPrimitive?.content ?: "mention",
+            conductorId = o["conductorId"]?.jsonPrimitive?.content,
+            members = members,
+            subMode = o["subMode"]?.jsonPrimitive?.content,
+            activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.content,
+            reason = o["reason"]?.jsonPrimitive?.content,
+            parallelSummarizerId = o["parallelSummarizerId"]?.jsonPrimitive?.content,
+            pipelineOrder = o["pipelineOrder"]?.jsonArray?.map { it.jsonPrimitive.content },
+            debateSides = debateSides,
+            debateJudge = o["debateJudge"]?.jsonPrimitive?.content,
+            debateRounds = o["debateRounds"]?.jsonPrimitive?.intOrNull,
+        )
+    }
 
     fun openChat(session: SessionInfo, anchorAt: Long? = null) {
         if (session.offline) {

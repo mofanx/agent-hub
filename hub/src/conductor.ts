@@ -7,17 +7,37 @@ export interface AgentOps {
   isBusy(sessionId: string): boolean;
 }
 
+type TaskArtifact = {
+  type: "file" | "command" | "test";
+  path?: string | undefined;
+  summary: string;
+};
+
+type TaskResult = {
+  text: string;
+  artifacts: TaskArtifact[];
+};
+
+type FlowTask = {
+  id: string;
+  sessionId: string;
+  task: string;
+  dependsOn: string[];
+  status: "pending" | "running" | "done";
+};
+
 type Flow = {
   roomId: string;
   phase: "planning" | "working" | "summarizing";
-  pending: Map<string, string>;
-  /** 结果以 sessionId 为 key，避免重名覆盖 */
-  results: Map<string, string>;
+  /** 任务以 taskId 为 key */
+  tasks: Map<string, FlowTask>;
+  /** 结果以 taskId 为 key */
+  results: Map<string, TaskResult>;
 };
 
 export type ConductorNotice = { roomId: string; message: string };
 
-const PLAN_RESULT_LEN = 500;
+const PLAN_RESULT_LEN = 4000;
 
 export class ConductorOrchestrator {
   private flows = new Map<string, Flow>();
@@ -36,13 +56,15 @@ export class ConductorOrchestrator {
   cancel(roomId: string, reason?: string): string[] {
     const flow = this.flows.get(roomId);
     if (!flow) return [];
-    const touched = [...flow.pending.keys()];
-    if (flow.phase !== "planning" && flow.phase !== "summarizing") {
-      // working 阶段成员也算在活跃中
+    const touched = new Set<string>();
+    for (const t of flow.tasks.values()) {
+      if (t.status === "pending" || t.status === "running") {
+        touched.add(t.sessionId);
+      }
     }
     this.flows.delete(roomId);
     if (reason) this.notice({ roomId, message: reason });
-    return touched;
+    return [...touched];
   }
 
   /** 判断某 session 是否是指挥家且正在指挥编排中 */
@@ -66,8 +88,13 @@ export class ConductorOrchestrator {
       if (room.conductorId === sessionId) {
         return { roomId: flow.roomId, role: "conductor", phase: flow.phase };
       }
-      if (flow.phase === "working" && (flow.pending.has(sessionId) || flow.results.has(sessionId))) {
-        return { roomId: flow.roomId, role: "worker", phase: flow.phase };
+      if (flow.phase === "working") {
+        const hasTask = [...flow.tasks.values()].some(
+          (t) => t.sessionId === sessionId && (t.status === "pending" || t.status === "running"),
+        );
+        if (hasTask) {
+          return { roomId: flow.roomId, role: "worker", phase: flow.phase };
+        }
       }
     }
     return undefined;
@@ -86,20 +113,24 @@ export class ConductorOrchestrator {
         this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
         return true;
       }
-      if (flow.phase === "working" && flow.pending.has(sessionId)) {
-        flow.pending.delete(sessionId);
-        this.notice({
-          roomId,
-          message: `@${
-            room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId
-          } 子任务中断（剩 ${flow.pending.size} 项）`,
-        });
-        if (flow.pending.size === 0) {
-          void this.summarize(flow, room).catch((err) => {
-            console.error("[conductor] summarize after error failed:", err);
+      if (flow.phase === "working") {
+        const running = [...flow.tasks.values()].find(
+          (t) => t.sessionId === sessionId && t.status === "running",
+        );
+        if (running) {
+          running.status = "pending";
+          const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
+          this.notice({
+            roomId,
+            message: `@${
+              room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId
+            } 子任务中断（剩 ${pendingCount} 项待派发）`,
           });
+          void this.scheduleTasks(flow, room).catch((err) => {
+            console.error("[conductor] schedule after error failed:", err);
+          });
+          return true;
         }
-        return true;
       }
     }
     return false;
@@ -132,21 +163,29 @@ export class ConductorOrchestrator {
       "",
       "请把任务拆解并派发给成员。",
       "",
-      "要求：",
-      "- 输出必须且仅包含一个 JSON code block。",
-      "- `to` 字段必须是上面列出的成员 ID（括号中的 `id:...` 部分），不能写占位符或说明文字。",
-      "- `to` 字段也可以写 `@成员名` 作为兼容写法，但当成员名字重复时请用成员 ID。",
-      "- 如果任务简单、无需分工，输出 `{\"tasks\":[]}` 并直接给出你的回答。",
+      "输出格式要求（必须严格遵守）：",
+      "1. 仅输出一个 JSON code block，不要有任何解释、前言、总结或 markdown 列表。",
+      "2. JSON 顶层字段必须是 `tasks`，值为数组。",
+      "3. 每个任务对象包含 `to`（接收成员）、`task`（具体子任务描述），可选 `id`（任务标识）和 `dependsOn`（依赖的 id 数组）。",
+      "4. `to` 可以是：成员 ID（括号里的 `id:...`）、`@成员名` 或成员名。",
+      "5. `task` 必须具体、可执行，不要写占位符。",
+      "6. 如果任务有依赖关系，请用 `dependsOn` 指定前置任务 `id`。",
+      "7. 如果任务简单、无需分工，输出 `{\"tasks\":[]}` 并在 code block 之前直接写出你的最终回答。",
       "",
-      "示例（请用实际成员 ID 替换，不要原样复制说明文字）：",
+      "正确示例（请用实际成员 ID 替换）：",
       "```json",
       example,
       "```",
+      "",
+      "错误示例（不要这样做）：",
+      '- to: "成员A"（不存在该成员）',
+      '- task: "处理一下"（不够具体）',
+      '- 输出多个 code block 或在 JSON 外加解释文字',
     ].join("\n");
     this.flows.set(room.roomId, {
       roomId: room.roomId,
       phase: "planning",
-      pending: new Map(),
+      tasks: new Map(),
       results: new Map(),
     });
     this.notice({ roomId: room.roomId, message: "指挥家拆解任务中…" });
@@ -171,22 +210,26 @@ export class ConductorOrchestrator {
           return true;
         }
       }
-      if (flow.phase === "working" && flow.pending.has(sessionId)) {
-        const name =
-          room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
-        flow.pending.delete(sessionId);
-        flow.results.set(
-          sessionId,
-          output.trim().replace(/\s+/g, " ").slice(0, PLAN_RESULT_LEN),
+      if (flow.phase === "working") {
+        const running = [...flow.tasks.values()].find(
+          (t) => t.sessionId === sessionId && t.status === "running",
         );
-        this.notice({
-          roomId: flow.roomId,
-          message: `@${name} 已完成子任务（剩 ${flow.pending.size} 项）`,
-        });
-        if (flow.pending.size === 0) {
-          await this.summarize(flow, room);
+        if (running) {
+          const name =
+            room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+          running.status = "done";
+          const result = extractTaskResult(output);
+          flow.results.set(running.id, result);
+          const artifactCount = result.artifacts.length;
+          const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
+          const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
+          this.notice({
+            roomId: flow.roomId,
+            message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
+          });
+          await this.scheduleTasks(flow, room);
+          return true;
         }
-        return true;
       }
     }
     return false;
@@ -196,24 +239,12 @@ export class ConductorOrchestrator {
     room: Room,
     rawTo: string,
   ): { sessionId: string; name: string } | undefined {
-    const to = rawTo.replace(/^@/, "").trim();
-    // 优先按 sessionId 匹配，支持从 "name (id: xxx)" 中提取 ID
-    const idMatch = to.match(/id:\s*([^\s)]+)/);
-    const id = idMatch?.[1] ?? to;
-    let member = room.members.find((m) => m.sessionId === id);
-    if (member) return member;
-    // 回退按名字匹配
-    member = room.members.find((m) => m.name === to);
-    return member;
+    return resolveMemberByString(room, rawTo);
   }
 
   private async dispatch(flow: Flow, room: Room, conductorOutput: string): Promise<void> {
-    const tasks = parseTasks(conductorOutput);
+    const tasks = parseTasks(conductorOutput, room);
     if (tasks === null) {
-      this.notice({
-        roomId: flow.roomId,
-        message: "指挥家未给出有效派工单，本轮按指挥家直接回复结束",
-      });
       this.flows.delete(flow.roomId);
       return;
     }
@@ -222,9 +253,10 @@ export class ConductorOrchestrator {
       return;
     }
     flow.phase = "working";
-    const assignments: string[] = [];
-    const assigned = new Set<string>();
-    for (const t of tasks) {
+
+    const idMap = new Map<string, string>();
+    for (let i = 0; i < tasks.length; i++) {
+      const t = tasks[i]!;
       if (!t.task.trim()) continue;
       const member = this.resolveMember(room, t.to);
       if (!member) {
@@ -235,87 +267,299 @@ export class ConductorOrchestrator {
         this.notice({ roomId: flow.roomId, message: `派工跳过：${member.name} 是指挥家` });
         continue;
       }
-      if (assigned.has(member.sessionId)) {
-        this.notice({
-          roomId: flow.roomId,
-          message: `派工跳过：${member.name} 已被派发过，请拆分进同一条任务`,
-        });
-        continue;
-      }
-      if (this.agent.isBusy(member.sessionId)) {
-        this.notice({ roomId: flow.roomId, message: `派工跳过：@${member.name} 忙碌中` });
-        continue;
-      }
-      flow.pending.set(member.sessionId, t.task);
-      assigned.add(member.sessionId);
-      assignments.push(`@${member.name}：${t.task}`);
+      const taskId = t.id?.trim() || `t${i + 1}`;
+      idMap.set(String(i), taskId);
+      flow.tasks.set(taskId, {
+        id: taskId,
+        sessionId: member.sessionId,
+        task: t.task.trim(),
+        dependsOn: this.normalizeDependsOn(t.dependsOn, tasks, i, idMap, room),
+        status: "pending",
+      });
     }
-    if (flow.pending.size === 0) {
+
+    if (flow.tasks.size === 0) {
       this.flows.delete(flow.roomId);
       return;
     }
-    this.notice({ roomId: flow.roomId, message: `指挥家派工：${assignments.join("；")}` });
-    for (const [sid, task] of flow.pending) {
+
+    await this.scheduleTasks(flow, room);
+  }
+
+  private normalizeDependsOn(
+    raw: string[] | undefined,
+    tasks: { id?: string; to: string }[],
+    currentIndex: number,
+    idMap: Map<string, string>,
+    room: Room,
+  ): string[] {
+    if (!raw || raw.length === 0) return [];
+    const result = new Set<string>();
+    for (const d of raw) {
+      const dep = d.trim();
+      if (!dep) continue;
+      // 1. 直接是某个 task 的 id
+      const byId = tasks.find((t, idx) => (t.id?.trim() || `t${idx + 1}`) === dep);
+      if (byId) {
+        result.add(dep);
+        continue;
+      }
+      // 2. 通过索引引用，如 "t1" 或 "1"（历史索引）
+      const prevIdx = Number(dep);
+      if (!Number.isNaN(prevIdx) && prevIdx > 0 && prevIdx <= tasks.length) {
+        const mapped = idMap.get(String(prevIdx - 1)) ?? `t${prevIdx}`;
+        result.add(mapped);
+        continue;
+      }
+      // 3. 按成员名/id 引用
+      const member = resolveMemberByString(room, dep.replace(/^@/, ""));
+      if (member) {
+        // 找到分配给该成员的前一个任务
+        const prev = tasks.findIndex((t, idx) => {
+          const m = resolveMemberByString(room, t.to);
+          return m?.sessionId === member.sessionId && idx < currentIndex;
+        });
+        if (prev >= 0) {
+          result.add(idMap.get(String(prev)) ?? `t${prev + 1}`);
+        }
+      }
+    }
+    return [...result];
+  }
+
+  private runnableTasks(flow: Flow): FlowTask[] {
+    const doneIds = new Set<string>();
+    for (const [id, t] of flow.tasks) {
+      if (t.status === "done") doneIds.add(id);
+    }
+    const runningSessions = new Set<string>();
+    for (const t of flow.tasks.values()) {
+      if (t.status === "running") runningSessions.add(t.sessionId);
+    }
+    const out: FlowTask[] = [];
+    for (const t of flow.tasks.values()) {
+      if (t.status !== "pending") continue;
+      const depsDone = t.dependsOn.every((d) => doneIds.has(d));
+      if (!depsDone) continue;
+      if (runningSessions.has(t.sessionId)) continue;
+      out.push(t);
+    }
+    return out;
+  }
+
+  private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
+    const tasks = this.runnableTasks(flow);
+    if (tasks.length === 0) {
+      const allDone = [...flow.tasks.values()].every((t) => t.status === "done");
+      if (allDone) {
+        await this.summarize(flow, room);
+      }
+      return;
+    }
+
+    const assignments: string[] = [];
+    for (const t of tasks) {
+      if (this.agent.isBusy(t.sessionId)) continue;
+      t.status = "running";
+      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      assignments.push(`@${name}：${t.task}`);
       const prompt = this.rooms.buildPrompt(
         room.roomId,
-        `指挥家派发给你的子任务：${task}`,
-        sid,
+        [
+          `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
+          "",
+          "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试等）：",
+          '```json',
+          '{"text":"你的总结","artifacts":[{"type":"file","path":"/path/to/file","summary":"改动摘要"},{"type":"command","summary":"运行的命令和结果"},{"type":"test","summary":"测试结果"}]}',
+          '```',
+          "",
+          "如果没有 artifact，可以只输出文本，不必输出 JSON。",
+        ].join("\n"),
+        t.sessionId,
       );
-      this.agent.prompt(sid, prompt).catch((err: unknown) => {
-        flow.pending.delete(sid);
+      this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
+        t.status = "pending";
         this.notice({
           roomId: flow.roomId,
           message: `子任务派发失败：${String(err)}`,
         });
       });
     }
+
+    if (assignments.length > 0) {
+      this.notice({ roomId: flow.roomId, message: `指挥家派工：${assignments.join("；")}` });
+    }
   }
 
   private async summarize(flow: Flow, room: Room): Promise<void> {
     flow.phase = "summarizing";
-    const lines = [...flow.results.entries()].map(([sessionId, r]) => {
-      const name = room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
-      return `- @${name}: ${r}`;
-    });
+    // 按照 task 在 tasks Map 中的创建顺序（即指挥家给出的顺序）生成汇总
+    const lines: string[] = [];
+    for (const t of flow.tasks.values()) {
+      const result = flow.results.get(t.id);
+      if (!result) continue;
+      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      const artifacts = result.artifacts
+        .map((a) => {
+          const parts = [`[${a.type}]`];
+          if (a.path) parts.push(a.path);
+          parts.push(a.summary);
+          return `    - ${parts.join(" ")}`;
+        })
+        .join("\n");
+      lines.push([
+        `- [${t.id}] @${name}: ${result.text}`,
+        ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
+      ].join("\n"));
+    }
     const prompt = [
-      `你是群聊「${room.name}」的指挥家。你之前派发的子任务已全部完成，结果：`,
+      `你是群聊「${room.name}」的指挥家。你之前派发的子任务已全部完成，结果如下：`,
       ...lines,
       "",
-      "请汇总这些结果，向用户给出最终答复。",
+      "请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复。如果涉及文件修改，请引用文件路径。",
     ].join("\n");
     this.notice({ roomId: flow.roomId, message: "子任务全部完成，指挥家汇总中…" });
     await this.agent.prompt(room.conductorId!, prompt);
   }
 }
 
-function parseTasks(output: string): { to: string; task: string }[] | null {
-  const fence = output.match(/```(?:json)?\s*([\s\S]*?)```/);
-  let raw = fence?.[1]?.trim();
-  if (!raw) {
-    // 没有 code fence 时，尝试找出包含 "tasks" 的最大 JSON 对象
-    const match = output.match(/\{[\s\S]*"tasks"[\s\S]*\}/);
-    if (match) {
-      raw = match[0];
-      // 简单尝试从第一个 '{' 到最后一个 '}'
-      const first = raw.indexOf("{");
-      const last = raw.lastIndexOf("}");
-      if (first >= 0 && last > first) raw = raw.slice(first, last + 1);
+function extractTaskResult(output: string): TaskResult {
+  // 1. 尝试提取 `text` 与 `artifacts` JSON code fence
+  const fenceRe = /```(?:json)?\s*([\s\S]*?)```/g;
+  const candidates: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(output)) !== null) {
+    if (m[1]) candidates.push(m[1].trim());
+  }
+  for (const raw of candidates) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const text = typeof obj.text === "string" ? obj.text.trim() : "";
+      const artifacts: TaskArtifact[] = [];
+      if (Array.isArray(obj.artifacts)) {
+        for (const a of obj.artifacts) {
+          const o = a as Record<string, unknown>;
+          const type = String(o.type ?? "");
+          if (type !== "file" && type !== "command" && type !== "test") continue;
+          const path = typeof o.path === "string" ? o.path : undefined;
+          const summary = typeof o.summary === "string" ? o.summary : "";
+          if (path || summary) {
+            artifacts.push({ type, path, summary });
+          }
+        }
+      }
+      if (text || artifacts.length > 0) {
+        // 去掉 JSON code fence 后的内容作为额外文本
+        const plain = output.replace(fenceRe, "").trim().replace(/\s+/g, " ");
+        return { text: text || plain.slice(0, PLAN_RESULT_LEN), artifacts };
+      }
+    } catch {
+      // 继续尝试下一个候选
     }
   }
-  if (!raw) return null;
-  try {
-    const obj = JSON.parse(raw);
-    if (!Array.isArray(obj.tasks)) return null;
-    return obj.tasks
-      .filter((t: unknown): t is { to: string; task: string } => {
-        const o = t as Record<string, unknown>;
-        return typeof o?.to === "string" && typeof o?.task === "string";
-      })
-      .map((t: { to: string; task: string }) => ({
-        to: t.to.replace(/^@/, "").trim(),
-        task: t.task.trim(),
-      }));
-  } catch {
-    return null;
+
+  // 2. 没有合法 artifact JSON 时，尝试用简单正则扫描常见文件路径
+  const filePaths = new Set<string>();
+  const fileRe = /(?:`|'|\"|\b)([A-Za-z0-9_\-/.]+\.(?:ts|tsx|js|jsx|py|kt|java|md|json|yaml|yml|toml|rs|go|css|scss|html|sql|sh))(?:`|'|\"|\b)/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = fileRe.exec(output)) !== null) {
+    if (fm[1]) filePaths.add(fm[1]);
   }
+  const artifacts: TaskArtifact[] = [...filePaths].slice(0, 10).map((p) => ({
+    type: "file",
+    path: p,
+    summary: "子任务输出中提到的文件路径",
+  }));
+
+  // 3. 兜底：返回截断文本
+  return {
+    text: output.trim().replace(/\s+/g, " ").slice(0, PLAN_RESULT_LEN),
+    artifacts,
+  };
+}
+
+function parseTasks(output: string, room: Room): { id?: string; to: string; task: string; dependsOn?: string[] }[] | null {
+  const candidates: string[] = [];
+
+  // 1. 提取所有 ```json / ``` code fence 里的内容
+  const fenceRe = /```(?:json)?\s*([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(output)) !== null) {
+    if (m[1]) candidates.push(m[1].trim());
+  }
+
+  // 2. 没有 code fence 时，尝试扫描所有平衡的 JSON 对象
+  if (candidates.length === 0) {
+    let depth = 0;
+    let start = -1;
+    for (let i = 0; i < output.length; i++) {
+      const ch = output[i];
+      if (ch === "{") {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (ch === "}") {
+        if (depth > 0) depth--;
+        if (depth === 0 && start >= 0) {
+          const raw = output.slice(start, i + 1);
+          if (raw.includes('"tasks"')) candidates.push(raw);
+          start = -1;
+        }
+      }
+    }
+  }
+
+  // 3. 逐个尝试解析，找包含 tasks 数组的那个
+  for (const raw of candidates) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      if (!Array.isArray(obj.tasks)) continue;
+      const tasks = obj.tasks
+        .map((t: unknown) => {
+          const o = t as Record<string, unknown>;
+          if (typeof o?.to !== "string" || typeof o?.task !== "string") return null;
+          const toRaw = o.to.replace(/^@/, "").trim();
+          const taskRaw = String(o.task).trim();
+          // 允许 to 使用成员名、name (id: xxx) 或 sessionId
+          const member = resolveMemberByString(room, toRaw);
+          if (!member) return null;
+          const id = typeof o.id === "string" ? o.id : undefined;
+          const dependsOn = Array.isArray(o.dependsOn)
+            ? o.dependsOn.map((s) => String(s)).filter(Boolean)
+            : undefined;
+          return { id, to: member.sessionId, task: taskRaw, dependsOn };
+        })
+        .filter((t) => t !== null);
+      return tasks as { id?: string; to: string; task: string; dependsOn?: string[] }[];
+    } catch {
+      // 继续尝试下一个候选
+    }
+  }
+
+  return null;
+}
+
+function resolveMemberByString(
+  room: Room,
+  raw: string,
+): { sessionId: string; name: string } | undefined {
+  const to = raw.replace(/^@/, "").trim();
+  if (!to) return undefined;
+  // 优先从 "name (id: xxx)" 中提取 id
+  const idMatch = to.match(/id:\s*([^\s)]+)/);
+  if (idMatch) {
+    const member = room.members.find((m) => m.sessionId === idMatch[1]);
+    if (member) return member;
+  }
+  // 精确 sessionId
+  const byId = room.members.find((m) => m.sessionId === to);
+  if (byId) return byId;
+  // 精确名字（去重后）
+  const byName = room.members.find((m) => m.name === to);
+  if (byName) return byName;
+  // 前缀/子串匹配，用于 agent 只写了名字一部分的场景
+  const byPrefix = room.members.find(
+    (m) => m.name.toLowerCase().startsWith(to.toLowerCase()),
+  );
+  if (byPrefix) return byPrefix;
+  return room.members.find((m) => m.name.toLowerCase().includes(to.toLowerCase()));
 }

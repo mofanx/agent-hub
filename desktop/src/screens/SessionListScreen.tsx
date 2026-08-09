@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHubStore } from "../hub/store";
-import type { RoomInfo, SessionInfo } from "../hub/types";
+import type { RoomInfo, RoomModeConfig, SessionInfo } from "../hub/types";
 
 type Dialog =
   | { type: "session" }
@@ -230,6 +230,16 @@ function SessionCard({ s, batch }: { s: SessionInfo; batch: boolean }) {
   );
 }
 
+const MODE_LABELS: Record<string, string> = {
+  mention: "普通群",
+  conductor: "指挥家",
+  roundrobin: "轮询",
+  parallel: "并行",
+  pipeline: "流水线",
+  debate: "辩论",
+  auto: "自动",
+};
+
 function RoomCard({ r, batch }: { r: RoomInfo; batch: boolean }) {
   const store = useHubStore();
   const selected = store.selectedIds.rooms.includes(r.roomId);
@@ -254,7 +264,7 @@ function RoomCard({ r, batch }: { r: RoomInfo; batch: boolean }) {
       )}
       <div className="title-wrap">
         <span className="title">
-          {r.name} {r.mode === "conductor" ? "· 指挥家" : ""}
+          {r.name} · {MODE_LABELS[r.mode] ?? r.mode}
         </span>
         <span className="subtitle">{r.members.map((m) => m[1]).join("、")}</span>
       </div>
@@ -360,32 +370,235 @@ function SessionDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+const MODES = [
+  { value: "mention", label: "普通群 (@mention / 广播)" },
+  { value: "conductor", label: "指挥家（拆解派工汇总）" },
+  { value: "roundrobin", label: "轮询（轮流作答）" },
+  { value: "parallel", label: "并行（集思广益 + 汇总）" },
+  { value: "pipeline", label: "流水线（按成员顺序串行）" },
+  { value: "debate", label: "辩论（正反方 + 裁判）" },
+  { value: "auto", label: "自动（由主持人选择模式）" },
+];
+
 function RoomDialog({ onClose }: { onClose: () => void }) {
   const store = useHubStore();
   const [form, setForm] = useState({
     name: "",
     mode: "mention",
-    conductorId: "",
     selected: [] as string[],
+    specialId: "",
+    pipelineOrder: [] as string[],
+    debateSides: ["", ""] as [string, string],
+    debateJudge: "",
+    debateRounds: 2,
   });
 
+  const available = store.sessions.filter((s) => !s.archived);
+
+  const selectedSessions = form.selected
+    .map((id) => store.sessions.find((s) => s.sessionId === id))
+    .filter((s): s is SessionInfo => !!s);
+
+  const selectedOptions = selectedSessions.map((s) => (
+    <option key={s.sessionId} value={s.sessionId}>
+      {s.name}
+    </option>
+  ));
+
+  const ensureDebateDefaults = (selected: string[]) => {
+    const sides: [string, string] = [...form.debateSides];
+    if (!sides[0] && selected[0]) sides[0] = selected[0];
+    if (!sides[1] && selected[1]) sides[1] = selected[1];
+    return sides;
+  };
+
   const toggle = (id: string) => {
+    const next = form.selected.includes(id)
+      ? form.selected.filter((x) => x !== id)
+      : [...form.selected, id];
+    const nextOrder = form.pipelineOrder.filter((sid) => next.includes(sid));
+    for (const sid of next) {
+      if (!nextOrder.includes(sid)) nextOrder.push(sid);
+    }
     setForm({
       ...form,
-      selected: form.selected.includes(id)
-        ? form.selected.filter((x) => x !== id)
-        : [...form.selected, id],
+      selected: next,
+      specialId: next.includes(form.specialId) ? form.specialId : "",
+      pipelineOrder: nextOrder,
+      debateSides: ensureDebateDefaults(next),
+      debateJudge: next.includes(form.debateJudge) ? form.debateJudge : "",
     });
   };
 
+  const movePipeline = (index: number, dir: -1 | 1) => {
+    const order = [...form.pipelineOrder];
+    const target = index + dir;
+    if (target < 0 || target >= order.length) return;
+    [order[index], order[target]] = [order[target], order[index]];
+    setForm({ ...form, pipelineOrder: order });
+  };
+
+  const isValid = (): boolean => {
+    if (form.selected.length < 2 || !form.name.trim()) return false;
+    switch (form.mode) {
+      case "conductor":
+      case "auto":
+      case "roundrobin":
+      case "parallel":
+      case "debate":
+        return !!form.specialId;
+      case "pipeline":
+        return form.pipelineOrder.length > 0;
+      default:
+        return true;
+    }
+  };
+
   const submit = () => {
-    if (form.selected.length < 2 || !form.name) return;
-    if (form.mode === "conductor" && !form.conductorId) return;
-    void store.createRoom(form.name, form.selected, form.mode, form.conductorId || undefined);
+    if (!isValid()) return;
+    const config: RoomModeConfig = {};
+    if (form.specialId) {
+      if (form.mode === "conductor" || form.mode === "auto" || form.mode === "roundrobin") {
+        config.conductorId = form.specialId;
+      } else if (form.mode === "parallel") {
+        config.parallelSummarizerId = form.specialId;
+      } else if (form.mode === "debate") {
+        config.debateJudge = form.specialId;
+      }
+    }
+    if (form.mode === "pipeline" && form.pipelineOrder.length > 0) {
+      config.pipelineOrder = form.pipelineOrder;
+    }
+    if (form.mode === "debate") {
+      if (form.debateSides[0] && form.debateSides[1]) {
+        config.debateSides = form.debateSides;
+      }
+      config.debateRounds = Math.max(1, Math.min(5, form.debateRounds));
+    }
+    void store.createRoom(form.name, form.selected, form.mode, config);
     onClose();
   };
 
-  const available = store.sessions.filter((s) => !s.archived);
+  const onModeChange = (mode: string) => {
+    setForm({
+      ...form,
+      mode,
+      specialId: "",
+      debateSides: ensureDebateDefaults(form.selected),
+    });
+  };
+
+  const renderConfig = () => {
+    switch (form.mode) {
+      case "conductor":
+      case "auto":
+      case "roundrobin":
+      case "parallel":
+      case "debate":
+        const label =
+          form.mode === "conductor"
+            ? "指挥家"
+            : form.mode === "auto"
+              ? "主持人"
+              : form.mode === "roundrobin"
+                ? "起始发言人"
+                : form.mode === "parallel"
+                  ? "汇总者"
+                  : "裁判";
+        return (
+          <FormRow label={label}>
+            <select
+              value={form.specialId}
+              onChange={(e) => setForm({ ...form, specialId: e.currentTarget.value })}
+            >
+              <option value="">请选择</option>
+              {selectedOptions}
+            </select>
+          </FormRow>
+        );
+      case "pipeline":
+        return (
+          <FormRow label="执行顺序">
+            <div className="pipeline-order">
+              {form.pipelineOrder.map((sid, i) => {
+                const s = store.sessions.find((x) => x.sessionId === sid);
+                if (!s) return null;
+                return (
+                  <div key={sid} className="pipeline-item">
+                    <span className="pipeline-name">{i + 1}. {s.name}</span>
+                    <div className="pipeline-actions">
+                      <button
+                        className="secondary tiny"
+                        disabled={i === 0}
+                        onClick={() => movePipeline(i, -1)}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        className="secondary tiny"
+                        disabled={i === form.pipelineOrder.length - 1}
+                        onClick={() => movePipeline(i, 1)}
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </FormRow>
+        );
+      default:
+        return null;
+    }
+  };
+
+  const renderDebateConfig = () => {
+    if (form.mode !== "debate") return null;
+    return (
+      <>
+        <FormRow label="正方">
+          <select
+            value={form.debateSides[0]}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                debateSides: [e.currentTarget.value, form.debateSides[1]] as [string, string],
+              })
+            }
+          >
+            <option value="">请选择</option>
+            {selectedOptions}
+          </select>
+        </FormRow>
+        <FormRow label="反方">
+          <select
+            value={form.debateSides[1]}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                debateSides: [form.debateSides[0], e.currentTarget.value] as [string, string],
+              })
+            }
+          >
+            <option value="">请选择</option>
+            {selectedOptions}
+          </select>
+        </FormRow>
+        <FormRow label="轮数">
+          <input
+            type="number"
+            min={1}
+            max={5}
+            value={form.debateRounds}
+            onChange={(e) =>
+              setForm({ ...form, debateRounds: Math.max(1, Math.min(5, Number(e.currentTarget.value) || 1)) })
+            }
+          />
+        </FormRow>
+      </>
+    );
+  };
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -398,34 +611,17 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
           />
         </FormRow>
         <FormRow label="模式">
-          <select
-            value={form.mode}
-            onChange={(e) => setForm({ ...form, mode: e.currentTarget.value, conductorId: "" })}
-          >
-            <option value="mention">普通群 (@mention / 广播)</option>
-            <option value="conductor">指挥家</option>
+          <select value={form.mode} onChange={(e) => onModeChange(e.currentTarget.value)}>
+            {MODES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
           </select>
         </FormRow>
 
-        {form.mode === "conductor" && (
-          <FormRow label="指挥家">
-            <select
-              value={form.conductorId}
-              onChange={(e) => setForm({ ...form, conductorId: e.currentTarget.value })}
-            >
-              <option value="">请选择</option>
-              {form.selected.map((id) => {
-                const s = store.sessions.find((x) => x.sessionId === id);
-                if (!s) return null;
-                return (
-                  <option key={id} value={id}>
-                    {s.name}
-                  </option>
-                );
-              })}
-            </select>
-          </FormRow>
-        )}
+        {renderConfig()}
+        {renderDebateConfig()}
 
         <div className="card" style={{ maxHeight: 200, overflow: "auto" }}>
           <h4>选择成员</h4>
@@ -445,14 +641,7 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
           <button className="secondary" onClick={onClose}>
             取消
           </button>
-          <button
-            onClick={submit}
-            disabled={
-              form.selected.length < 2 ||
-              !form.name ||
-              (form.mode === "conductor" && !form.conductorId)
-            }
-          >
+          <button onClick={submit} disabled={!isValid()}>
             创建
           </button>
         </div>

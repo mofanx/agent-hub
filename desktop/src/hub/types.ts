@@ -38,12 +38,31 @@ export interface SessionInfo {
   archived: boolean;
 }
 
+export interface RoomModeConfig {
+  conductorId?: string | null;
+  parallelSummarizerId?: string | null;
+  pipelineOrder?: string[] | null;
+  debateSides?: [string, string] | null;
+  debateJudge?: string | null;
+  debateRounds?: number | null;
+}
+
 export interface RoomInfo {
   roomId: string;
   name: string;
   mode: string;
   conductorId: string | null;
   members: [string, string][];
+  /** 并行/集思广益：汇总者 sessionId */
+  parallelSummarizerId?: string | null;
+  /** 流水线：成员执行顺序 */
+  pipelineOrder?: string[] | null;
+  /** 辩论：正方/反方 sessionId */
+  debateSides?: [string, string] | null;
+  /** 辩论：裁判 sessionId */
+  debateJudge?: string | null;
+  /** 辩论：轮数 */
+  debateRounds?: number | null;
 }
 
 export interface RoleInfo {
