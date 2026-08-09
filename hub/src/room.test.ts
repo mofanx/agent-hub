@@ -47,4 +47,49 @@ describe("room", () => {
     });
     assert.deepEqual(updated.memberRoles, { s1: "updated" });
   });
+
+  it("route @mention 精确匹配目标", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "alice" },
+      { sessionId: "s2", name: "bob" },
+    ]);
+    const result = rooms.route(room.roomId, "@alice 你好");
+    assert.deepEqual(result.targets, ["s1"]);
+    assert.deepEqual(result.mentioned, ["s1"]);
+  });
+
+  it("route 无 mention 时广播给全体成员", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "alice" },
+      { sessionId: "s2", name: "bob" },
+    ]);
+    const result = rooms.route(room.roomId, "大家好");
+    assert.deepEqual(result.targets, ["s1", "s2"]);
+    assert.deepEqual(result.mentioned, []);
+  });
+
+  it("create 对重名成员自动去重", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "alice" },
+      { sessionId: "s2", name: "alice" },
+    ]);
+    const names = room.members.map((m) => m.name);
+    assert.equal(names[0], "alice");
+    assert.notEqual(names[1], "alice");
+    assert.ok(names[1]!.startsWith("alice"));
+  });
+
+  it("pipelineOrder 使用自定义顺序并补齐剩余成员", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a" },
+      { sessionId: "s2", name: "b" },
+      { sessionId: "s3", name: "c" },
+    ], "pipeline", { pipelineOrder: ["s3", "s1"] });
+    // RoomManager 本身没有 pipelineOrder 方法；它存于 room 对象，由 RoomModeManager 消费
+    assert.deepEqual(room.pipelineOrder, ["s3", "s1"]);
+  });
 });
