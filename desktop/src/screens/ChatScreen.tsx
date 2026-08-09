@@ -266,7 +266,7 @@ function ChatMessage({
       return (
         <div className="message assistant">
           {showAuthor && item.author && <div className="author">{item.author}</div>}
-          <div className="text">{item.text}</div>
+          <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdownTables(item.text) }} />
           <button className="msg-action" onClick={setQuote}>
             引用
           </button>
@@ -280,7 +280,9 @@ function ChatMessage({
           <button className="thought-toggle" onClick={onToggleThought}>
             {expanded ? "▾ " : "▸ "}思考过程
           </button>
-          {expanded && <div className="text">{item.text}</div>}
+          {expanded && (
+            <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdownTables(item.text) }} />
+          )}
         </div>
       );
 
@@ -365,6 +367,64 @@ function FlowPanel({ flow }: { flow: FlowInfo | null }) {
       </div>
     </div>
   );
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function renderMarkdownTables(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim().startsWith("|") && line.trim().endsWith("|")) {
+      const block: string[] = [line];
+      let j = i + 1;
+      while (
+        j < lines.length &&
+        lines[j].trim().startsWith("|") &&
+        lines[j].trim().endsWith("|")
+      ) {
+        block.push(lines[j]);
+        j++;
+      }
+      // 表格第二行应为分隔符，包含 --- 且非空
+      if (block.length >= 2 && /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(block[1])) {
+        out.push(parseMarkdownTable(block));
+        i = j;
+        continue;
+      }
+    }
+    out.push(escapeHtml(line));
+    i++;
+  }
+  return out
+    .map((l) => (l.startsWith("<table") ? l : l ? l.replace(/ /g, "&nbsp;") : "<br>"))
+    .join("<br>");
+}
+
+function parseMarkdownTable(block: string[]): string {
+  const rows = block.map((line) =>
+    line
+      .trim()
+      .split("|")
+      .slice(1, -1)
+      .map((c) => c.trim()),
+  );
+  const header = rows[0];
+  const body = rows.slice(2);
+  let html = '<table class="md-table"><thead><tr>';
+  for (const h of header) html += `<th>${escapeHtml(h)}</th>`;
+  html += "</tr></thead><tbody>";
+  for (const row of body) {
+    html += "<tr>";
+    for (const cell of row) html += `<td>${escapeHtml(cell)}</td>`;
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  return html;
 }
 
 function FlowTaskItem({ task }: { task: FlowTask }) {

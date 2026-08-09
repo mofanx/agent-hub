@@ -420,6 +420,29 @@ html[data-theme="dark"] .list-item:hover {
   line-height: 1.4;
 }
 
+.md-table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.md-table th {
+  background: var(--card);
+  font-weight: 600;
+}
+
+.md-table tr:nth-child(even) {
+  background: var(--bg);
+}
+
 .thought-toggle {
   background: transparent;
   color: var(--muted);
