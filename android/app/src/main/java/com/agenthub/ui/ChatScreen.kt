@@ -166,6 +166,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     }
     val scope = rememberCoroutineScope()
     val messages by remember { derivedStateOf { vm.chatItems.asReversed() } }
+    val isAtTop by remember { derivedStateOf { messages.isNotEmpty() && listState.firstVisibleItemIndex >= messages.lastIndex - 2 } }
+
+    LaunchedEffect(isAtTop, vm.historyHasMore, vm.historyLoading) {
+        if (isAtTop && vm.historyHasMore && !vm.historyLoading) {
+            vm.loadMoreHistory()
+        }
+    }
     val matchPositions by remember(vm.chatItems, vm.inChatSearchQuery) {
         derivedStateOf {
             val q = vm.inChatSearchQuery
@@ -359,6 +366,20 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             isCurrentMatch = currentMatchIndex == index,
                             onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
                         )
+                    }
+                    if (vm.historyLoading) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "加载更多历史…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
                 if (!isAtBottom && vm.chatItems.isNotEmpty()) {
@@ -1269,6 +1290,8 @@ private fun FlowTaskRow(task: FlowTask) {
         "running" -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.outline
     }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     Column(Modifier.padding(vertical = 3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(icon, color = iconColor, modifier = Modifier.width(20.dp))
@@ -1289,9 +1312,14 @@ private fun FlowTaskRow(task: FlowTask) {
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 task.artifacts.forEach { artifact ->
+                    val copyText = artifact.path?.let { "$it\n${artifact.summary}" } ?: artifact.summary
                     Surface(
                         color = MaterialTheme.colorScheme.surface,
                         shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.clickable {
+                            clipboard.setText(AnnotatedString(copyText))
+                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                        },
                     ) {
                         Text(
                             "[${artifact.type}] ${artifact.path ?: ""} ${artifact.summary.take(60)}",

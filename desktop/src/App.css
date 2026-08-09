@@ -952,6 +952,21 @@ html[data-theme="dark"] .drawer-item:hover {
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  line-height: inherit;
+  text-align: left;
+}
+
+.flow-artifact:hover {
+  background: var(--bg);
+}
+
+.history-loading {
+  text-align: center;
+  padding: 0.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 /* Profile card in config screen */

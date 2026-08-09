@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
-import type { ChatItem, FlowInfo, FlowTask } from "../hub/types";
+import type { ChatItem, FlowArtifact, FlowInfo, FlowTask } from "../hub/types";
 
 const safeRenderer = {
   html(text: string) {
@@ -21,6 +21,7 @@ export function ChatScreen() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [showThought, setShowThought] = useState<Record<number, boolean>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const isRoom = !!store.currentRoom;
@@ -38,6 +39,24 @@ export function ChatScreen() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [store.chatItems.length, store.chatItems[store.chatItems.length - 1]?.kind]);
+
+  const onMessagesScroll = useMemo(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    return () => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const el = messagesRef.current;
+        if (!el || !store.historyHasMore || store.historyLoading) return;
+        if (el.scrollTop <= 40) {
+          const method = store.currentRoom ? "room.history" : "session.history";
+          const idKey = store.currentRoom ? "roomId" : "sessionId";
+          const id = store.currentRoom?.roomId ?? store.currentSession?.sessionId;
+          if (id) store.loadMoreHistory(method, idKey, id);
+        }
+      }, 200);
+    };
+  }, [store.historyHasMore, store.historyLoading, store.currentRoom, store.currentSession]);
 
   const mention = useMemo(() => {
     const at = input.lastIndexOf("@");
@@ -113,7 +132,10 @@ export function ChatScreen() {
         <FlowPanel flow={store.flow} roomMode={store.currentRoom.mode} />
       )}
 
-      <div className="chat-messages">
+      <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
+        {store.historyLoading && (
+          <div className="history-loading">加载更多历史…</div>
+        )}
         {store.chatItems.map((item, i) => (
           <ChatMessage
             key={i}
@@ -414,13 +436,26 @@ function FlowTaskItem({ task }: { task: FlowTask }) {
         {task.artifacts.length > 0 && (
           <div className="flow-artifacts">
             {task.artifacts.map((a, i) => (
-              <span key={i} className="flow-artifact">
+              <button
+                key={i}
+                className="flow-artifact"
+                onClick={() => copyArtifact(a)}
+                title={a.path ? `点击复制路径：${a.path}` : "点击复制摘要"}
+              >
                 [{a.type}] {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)}
-              </span>
+              </button>
             ))}
           </div>
         )}
       </div>
     </div>
   );
+}
+
+function copyArtifact(a: FlowArtifact) {
+  const text = a.path ? `${a.path}\n${a.summary}` : a.summary;
+  navigator.clipboard
+    .writeText(text)
+    .then(() => alert(`已复制：${a.path || a.summary.slice(0, 40)}`))
+    .catch(() => {});
 }

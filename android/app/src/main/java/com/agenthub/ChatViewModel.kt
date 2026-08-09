@@ -28,6 +28,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonPrimitive
 import com.agenthub.ui.Strings
 import com.agenthub.ui.stringsFor
 
@@ -53,6 +54,7 @@ sealed class ChatItem {
     abstract val id: Long
     abstract val author: String
     abstract val text: String
+    abstract val at: Long
 
     data class User(
         override val id: Long,
@@ -61,20 +63,23 @@ sealed class ChatItem {
         override val author: String = "我",
         val quoteAuthor: String? = null,
         val quoteText: String? = null,
+        override val at: Long = 0,
     ) : ChatItem()
     data class System(
         override val id: Long,
         override val text: String,
         override val author: String = "",
+        override val at: Long = 0,
     ) : ChatItem()
-    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null) : ChatItem()
-    data class Thought(override val id: Long, override val text: String, override val author: String) : ChatItem()
+    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = 0) : ChatItem()
+    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = 0) : ChatItem()
     data class Tool(
         override val id: Long,
         val toolCallId: String,
         val title: String,
         val status: String,
         override val author: String,
+        override val at: Long = 0,
     ) : ChatItem() {
         override val text: String get() = "[$title] $status"
     }
@@ -82,6 +87,7 @@ sealed class ChatItem {
         override val id: Long,
         val entries: List<String>,
         override val author: String,
+        override val at: Long = 0,
     ) : ChatItem() {
         override val text: String get() = entries.joinToString("\n")
     }
@@ -89,6 +95,7 @@ sealed class ChatItem {
         override val id: Long,
         override val text: String,
         override val author: String = "",
+        override val at: Long = 0,
     ) : ChatItem()
     data class Permission(
         override val id: Long,
@@ -97,6 +104,7 @@ sealed class ChatItem {
         val options: List<Pair<String, String>>,
         val answered: String? = null,
         override val author: String,
+        override val at: Long = 0,
     ) : ChatItem() {
         override val text: String get() = title
     }
@@ -1178,6 +1186,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentRoom = null
         chatItems.clear()
         quote = null
+        historyHasMore = false
+        historyLoading = false
         if (anchorAt == null) {
             inChatSearchQuery = ""
             jumpToHistoryId = null
@@ -1208,6 +1218,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatItems.clear()
                 quote = null
                 flow = null
+                historyHasMore = false
+                historyLoading = false
                 if (anchorAt == null) {
                     inChatSearchQuery = ""
                     jumpToHistoryId = null
@@ -1355,6 +1367,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val result = hub.call(method, params)
                 val entries = result["entries"]?.jsonArray ?: return@launch
+                historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
                 val items = mutableListOf<ChatItem>()
                 for (e in entries) {
                     val o = e.jsonObject
@@ -1362,20 +1375,72 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val author = o["author"]!!.jsonPrimitive.content
                     val text = o["text"]!!.jsonPrimitive.content
                     val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
+                    val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
                     val itemId = if (historyId != null) -historyId else ++itemSeq
                     when (kind) {
-                        "user" -> items.add(ChatItem.User(itemId, text))
+                        "user" -> items.add(ChatItem.User(itemId, text, at = at))
                         "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
-                            items.add(ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失"))
+                            items.add(ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失", at = at))
                         } else {
-                            items.add(ChatItem.Assistant(itemId, text, author))
+                            items.add(ChatItem.Assistant(itemId, text, author, at = at))
                         }
-                        "system" -> items.add(ChatItem.System(itemId, text))
+                        "system" -> items.add(ChatItem.System(itemId, text, at = at))
                     }
                 }
-                chatItems.addAll(items)
+                if (anchorAt != null) {
+                    chatItems.addAll(items)
+                } else {
+                    chatItems.clear()
+                    chatItems.addAll(items)
+                }
                 syncBusyIds()
             } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun loadMoreHistory() {
+        if (historyLoading || !historyHasMore) return
+        val oldestAt = chatItems.firstOrNull()?.at
+        if (oldestAt == null || oldestAt == 0L) return
+        historyLoading = true
+        viewModelScope.launch {
+            try {
+                val (method, idKey, id) = when {
+                    currentRoom != null -> Triple("room.history", "roomId", currentRoom!!.roomId)
+                    currentSession != null -> Triple("session.history", "sessionId", currentSession!!.sessionId)
+                    else -> return@launch
+                }
+                val result = hub.call(method, buildJsonObject {
+                    put(idKey, id)
+                    put("before", JsonPrimitive(oldestAt))
+                    put("limit", 50)
+                })
+                val entries = result["entries"]?.jsonArray ?: return@launch
+                historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
+                val items = mutableListOf<ChatItem>()
+                for (e in entries) {
+                    val o = e.jsonObject
+                    val kind = o["kind"]!!.jsonPrimitive.content
+                    val author = o["author"]!!.jsonPrimitive.content
+                    val text = o["text"]!!.jsonPrimitive.content
+                    val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
+                    val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                    val itemId = if (historyId != null) -historyId else ++itemSeq
+                    when (kind) {
+                        "user" -> items.add(ChatItem.User(itemId, text, at = at))
+                        "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
+                            items.add(ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失", at = at))
+                        } else {
+                            items.add(ChatItem.Assistant(itemId, text, author, at = at))
+                        }
+                        "system" -> items.add(ChatItem.System(itemId, text, at = at))
+                    }
+                }
+                chatItems.addAll(0, items)
+            } catch (_: Exception) {
+            } finally {
+                historyLoading = false
             }
         }
     }
@@ -1427,6 +1492,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var inChatSearchQuery by mutableStateOf("")
     var jumpToHistoryId by mutableStateOf<Long?>(null)
     var chatSearchMatchIndex by mutableIntStateOf(-1)
+    var historyHasMore by mutableStateOf(false)
+    var historyLoading by mutableStateOf(false)
     var chatSearchMatchCount by mutableIntStateOf(0)
     private var searchJob: Job? = null
 

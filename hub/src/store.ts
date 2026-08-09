@@ -377,6 +377,33 @@ export class Store {
     return merged;
   }
 
+  readBefore(
+    scope: "session" | "room",
+    id: string,
+    at: number,
+    limit = 50,
+  ): HistoryItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, at, kind, author, text FROM history
+         WHERE scope = ? AND scope_id = ? AND at < ?
+         ORDER BY at DESC, id DESC LIMIT ?`,
+      )
+      .all(scope, id, at, limit) as HistoryItem[];
+    return rows.reverse();
+  }
+
+  hasMoreBefore(scope: "session" | "room", id: string, at: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM history
+         WHERE scope = ? AND scope_id = ? AND at < ?
+         LIMIT 1`,
+      )
+      .get(scope, id, at);
+    return row != null;
+  }
+
   deleteHistory(scope: "session" | "room", id: string): void {
     this.db.prepare("DELETE FROM history WHERE scope = ? AND scope_id = ?").run(scope, id);
   }

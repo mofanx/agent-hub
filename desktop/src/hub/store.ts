@@ -54,6 +54,8 @@ interface State {
   drawerOpen: boolean;
   currentProfile: ConnProfile | null;
   flow: FlowInfo | null;
+  historyHasMore: boolean;
+  historyLoading: boolean;
 }
 
 interface Actions {
@@ -143,6 +145,7 @@ interface Actions {
   shouldShowInRoom(sessionId: string): boolean;
   applyUpdate(sessionId: string, u: Record<string, unknown>): void;
   loadHistory(method: string, idKey: string, id: string): Promise<void>;
+  loadMoreHistory(method: string, idKey: string, id: string): Promise<void>;
   syncBusyIdsFromList(list: SessionInfo[]): void;
   syncBusyIds(): Promise<void>;
   handleSlashCommand(text: string): boolean;
@@ -432,6 +435,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     drawerOpen: false,
     currentProfile: null,
     flow: null,
+    historyHasMore: false,
+    historyLoading: false,
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -728,6 +733,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         chatItems: [],
         quote: null,
         screen: "chat",
+        historyHasMore: false,
+        historyLoading: false,
       });
       get().loadHistory("session.history", "sessionId", session.sessionId);
     },
@@ -740,6 +747,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quote: null,
         screen: "room",
         flow: null,
+        historyHasMore: false,
+        historyLoading: false,
       });
       get().loadHistory("room.history", "roomId", room.roomId);
       get().refreshFlow(room.roomId);
@@ -1124,25 +1133,63 @@ export const useHubStore = create<State & Actions>((set, get) => {
             kind: String(o.kind ?? ""),
             author: String(o.author ?? ""),
             text: String(o.text ?? ""),
+            at: typeof o.at === "number" ? o.at : undefined,
           };
         });
         const chat: ChatItem[] = [];
         for (const e of entries) {
           switch (e.kind) {
             case "user":
-              chat.push({ kind: "user", text: e.text, author: e.author });
+              chat.push({ kind: "user", at: e.at, text: e.text, author: e.author });
               break;
             case "assistant":
-              chat.push({ kind: "assistant", id: 0, text: e.text, author: e.author });
+              chat.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author });
               break;
             case "system":
-              chat.push({ kind: "system", text: e.text, author: e.author });
+              chat.push({ kind: "system", at: e.at, text: e.text, author: e.author });
               break;
           }
         }
-        set({ chatItems: chat, itemSeq: chat.length });
+        set({ chatItems: chat, itemSeq: chat.length, historyHasMore: result.hasMore === true });
         get().syncBusyIds().catch(() => {});
       } catch {}
+    },
+
+    loadMoreHistory: async (method, idKey, id) => {
+      if (get().historyLoading || !get().historyHasMore) return;
+      const items = get().chatItems;
+      const oldestAt = items[0]?.at;
+      if (oldestAt == null) return;
+      set({ historyLoading: true });
+      try {
+        const result = (await getOrCall(method, { [idKey]: id, before: oldestAt, limit: 50 })) as Record<string, unknown>;
+        const entries = ((result.entries as unknown[] | undefined) ?? []).map((it) => {
+          const o = it as Record<string, unknown>;
+          return {
+            kind: String(o.kind ?? ""),
+            author: String(o.author ?? ""),
+            text: String(o.text ?? ""),
+            at: typeof o.at === "number" ? o.at : undefined,
+          };
+        });
+        const more: ChatItem[] = [];
+        for (const e of entries) {
+          switch (e.kind) {
+            case "user":
+              more.push({ kind: "user", at: e.at, text: e.text, author: e.author });
+              break;
+            case "assistant":
+              more.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author });
+              break;
+            case "system":
+              more.push({ kind: "system", at: e.at, text: e.text, author: e.author });
+              break;
+          }
+        }
+        set({ chatItems: [...more, ...items], historyHasMore: result.hasMore === true, historyLoading: false });
+      } catch {
+        set({ historyLoading: false });
+      }
     },
 
     syncBusyIdsFromList: (list: SessionInfo[]) => {

@@ -967,21 +967,33 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const sessionId = String(req.params?.sessionId ?? "");
       const limit = Number(req.params?.limit ?? 200);
       const anchorAt = req.params?.anchorAt;
-      const entries =
-        typeof anchorAt === "number" && Number.isFinite(anchorAt)
-          ? store.readAround("session", sessionId, anchorAt, limit)
-          : store.read("session", sessionId, limit);
-      return { entries };
+      const beforeAt = req.params?.before;
+      let entries;
+      if (typeof beforeAt === "number" && Number.isFinite(beforeAt)) {
+        entries = store.readBefore("session", sessionId, beforeAt, limit);
+      } else if (typeof anchorAt === "number" && Number.isFinite(anchorAt)) {
+        entries = store.readAround("session", sessionId, anchorAt, limit);
+      } else {
+        entries = store.read("session", sessionId, limit);
+      }
+      const hasMore = entries.length > 0 ? store.hasMoreBefore("session", sessionId, entries[0]!.at) : false;
+      return { entries, hasMore };
     }
     case "room.history": {
       const roomId = String(req.params?.roomId ?? "");
       const limit = Number(req.params?.limit ?? 200);
       const anchorAt = req.params?.anchorAt;
-      const entries =
-        typeof anchorAt === "number" && Number.isFinite(anchorAt)
-          ? store.readAround("room", roomId, anchorAt, limit)
-          : store.read("room", roomId, limit);
-      return { entries };
+      const beforeAt = req.params?.before;
+      let entries;
+      if (typeof beforeAt === "number" && Number.isFinite(beforeAt)) {
+        entries = store.readBefore("room", roomId, beforeAt, limit);
+      } else if (typeof anchorAt === "number" && Number.isFinite(anchorAt)) {
+        entries = store.readAround("room", roomId, anchorAt, limit);
+      } else {
+        entries = store.read("room", roomId, limit);
+      }
+      const hasMore = entries.length > 0 ? store.hasMoreBefore("room", roomId, entries[0]!.at) : false;
+      return { entries, hasMore };
     }
     case "room.create": {
       const name = String(req.params?.name ?? "群聊").trim() || "群聊";
