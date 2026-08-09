@@ -31,6 +31,7 @@ const store = new Store();
 const modelManager = new ModelManager();
 ensureDefaultLocalConnections();
 const savedState = store.load();
+const savedRuntime = savedState.runtime;
 const sessionMetas = new Map<string, SessionMeta>(
   savedState.sessions.map((s) => [s.sessionId, s]),
 );
@@ -169,7 +170,11 @@ function enrichRoom(room: Room): Record<string, unknown> {
 }
 
 function persistState(): void {
-  store.save({ sessions: [...sessionMetas.values()], rooms: rooms.list() });
+  store.save({
+    sessions: [...sessionMetas.values()],
+    rooms: rooms.list(),
+    runtime: roomModeManager.exportRuntime(),
+  });
 }
 
 function isSessionNameTaken(name: string, excludeSessionId?: string): boolean {
@@ -310,6 +315,13 @@ const roomModeManager = new RoomModeManager(agentOps, rooms, (method, params) =>
   broadcast({ method, params } as HubEvent),
 );
 
+// 恢复运行时编排状态（必须在 roomModeManager 创建后，但 agents 可能尚未连接）
+if (savedRuntime) {
+  roomModeManager
+    .importRuntime(savedRuntime)
+    .catch((err) => console.error("[hub] import runtime failed:", err));
+}
+
 function ownerOf(sessionId: string): AcpAgent {
   const connectionId = owners.get(sessionId);
   if (!connectionId) throw new Error(`unknown session: ${sessionId}`);
@@ -415,12 +427,16 @@ function onAgentEvent(event: HubEvent): void {
     if (!roomModeManager.isHiddenSession(sessionId!)) {
       rooms.recordOutput(sessionId!, displayName, output);
     }
-    void roomModeManager.onPromptDone(sessionId!, output).catch((err) => {
-      console.error("[room-modes] error:", err);
-    });
+    void roomModeManager
+      .onPromptDone(sessionId!, output)
+      .then(() => persistState())
+      .catch((err) => {
+        console.error("[room-modes] error:", err);
+      });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
       roomModeManager.onPromptError(sessionId);
+      persistState();
     }
   } else if (event.method === "room.notice") {
     store.append("room", event.params.roomId, {
@@ -524,6 +540,7 @@ async function handleRoomSlash(
   if (hadFlow) {
     await roomModeManager.cancelActive(room.roomId, "用户停止");
   }
+  persistState();
 
   const stoppedNames = stopped.map(
     (sid) => room.members.find((m) => m.sessionId === sid)?.name ?? sid,
@@ -1007,6 +1024,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         content,
         sessionNote: (sid) => sessionLostReplyNote(sid),
       });
+      persistState();
       if (result.skipped.length > 0) {
         broadcast({
           method: "prompt.error",

@@ -370,15 +370,63 @@ function SessionDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-const MODES = [
-  { value: "mention", label: "普通群 (@mention / 广播)" },
-  { value: "conductor", label: "指挥家（拆解派工汇总）" },
-  { value: "roundrobin", label: "轮询（轮流作答）" },
-  { value: "parallel", label: "并行（集思广益 + 汇总）" },
-  { value: "pipeline", label: "流水线（按成员顺序串行）" },
-  { value: "debate", label: "辩论（正反方 + 裁判）" },
-  { value: "auto", label: "自动（由主持人选择模式）" },
+type RoomModeOption = { value: string; label: string; description: string; suggestWhen?: string };
+
+const MODES: RoomModeOption[] = [
+  {
+    value: "mention",
+    label: "普通群 (@mention / 广播)",
+    description: "成员自由发言，@某个成员时该成员单独回答。适合闲聊、快速提问。",
+    suggestWhen: "闲聊、单点提问",
+  },
+  {
+    value: "conductor",
+    label: "指挥家（拆解派工汇总）",
+    description: "指挥家自动拆解任务，派发给不同成员并行执行，最后汇总结果。适合复杂任务。",
+    suggestWhen: "复杂任务、需要分工",
+  },
+  {
+    value: "roundrobin",
+    label: "轮询（轮流作答）",
+    description: "每个问题按顺序由一个成员回答，可设置起始发言人。适合多角色依次表态。",
+    suggestWhen: "依次表态、轮流负责",
+  },
+  {
+    value: "parallel",
+    label: "并行（集思广益 + 汇总）",
+    description: "所有成员同时回答同一个问题，最后由汇总者综合出一致结论。适合头脑风暴。",
+    suggestWhen: "头脑风暴、收集多观点",
+  },
+  {
+    value: "pipeline",
+    label: "流水线（按成员顺序串行）",
+    description: "成员按指定顺序串行处理，后一个成员基于前一个的结果继续。适合多步骤流程。",
+    suggestWhen: "多步骤、前后依赖",
+  },
+  {
+    value: "debate",
+    label: "辩论（正反方 + 裁判）",
+    description: "正方与反方交替辩论若干轮，最后由裁判给出公正总结。适合观点碰撞。",
+    suggestWhen: "观点辩论、利弊分析",
+  },
+  {
+    value: "auto",
+    label: "自动（由主持人选择模式）",
+    description: "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。",
+    suggestWhen: "不确定适合哪种模式",
+  },
 ];
+
+function recommendMode(name: string): string | null {
+  const n = name.toLowerCase();
+  if (/bug|fix|测试|test|review|审查|重构|refactor|实现|implement|添加功能|feature|任务|分工|拆解/.test(n)) return "conductor";
+  if (/brainstorm|头脑风暴|想法|方案|收集|调研|优缺点|分析|集思广益|多观点/.test(n)) return "parallel";
+  if (/辩论|debate|正反|利弊|争论|对比|vs|观点碰撞/.test(n)) return "debate";
+  if (/流程|流水线|pipeline|步骤|step|顺序|sequence|链路|串联|串行/.test(n)) return "pipeline";
+  if (/轮流|轮询|round|依次|每人|顺序发言/.test(n)) return "roundrobin";
+  if (/闲聊|讨论|提问|@|广播|通知/.test(n)) return "mention";
+  return null;
+}
 
 function RoomDialog({ onClose }: { onClose: () => void }) {
   const store = useHubStore();
@@ -392,6 +440,7 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
     debateJudge: "",
     debateRounds: 2,
   });
+  const [modeManuallyChanged, setModeManuallyChanged] = useState(false);
 
   const available = store.sessions.filter((s) => !s.archived);
 
@@ -480,6 +529,7 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
   };
 
   const onModeChange = (mode: string) => {
+    setModeManuallyChanged(true);
     setForm({
       ...form,
       mode,
@@ -607,7 +657,18 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
         <FormRow label="名称">
           <input
             value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.currentTarget.value })}
+            onChange={(e) => {
+              const name = e.currentTarget.value;
+              const next: typeof form = { ...form, name };
+              if (!modeManuallyChanged) {
+                const recommended = recommendMode(name);
+                if (recommended && recommended !== form.mode) {
+                  next.mode = recommended;
+                  next.specialId = "";
+                }
+              }
+              setForm(next);
+            }}
           />
         </FormRow>
         <FormRow label="模式">
@@ -619,6 +680,15 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
             ))}
           </select>
         </FormRow>
+        {(() => {
+          const modeInfo = MODES.find((m) => m.value === form.mode);
+          if (!modeInfo) return null;
+          return (
+            <div className="form-row mode-description">
+              <span className="subtitle">{modeInfo.description}</span>
+            </div>
+          );
+        })()}
 
         {renderConfig()}
         {renderDebateConfig()}

@@ -733,6 +733,17 @@ html[data-theme="dark"] .drawer-item:hover {
   min-width: auto;
 }
 
+.mode-description {
+  align-items: flex-start;
+  padding: 0.4rem 0.6rem;
+  background: var(--card);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 /* Profile card in config screen */
 .profile-card {
   align-items: flex-start;

@@ -68,6 +68,12 @@ interface Strings {
     val modeDebate: String
     val modeAuto: String
     val conductorTag: String
+    val summarizerTag: String
+    val judgeTag: String
+    val sideProTag: String
+    val sideConTag: String
+    val hostTag: String
+    val speakerTag: String
     val back: String
     val previous: String
     val next: String
@@ -225,7 +231,13 @@ object ZhStrings : Strings {
     override val modePipeline = "流水线"
     override val modeDebate = "辩论"
     override val modeAuto = "自动"
-    override val conductorTag = "指挥"
+    override val conductorTag = "指挥家"
+    override val summarizerTag = "汇总者"
+    override val judgeTag = "裁判"
+    override val sideProTag = "正方"
+    override val sideConTag = "反方"
+    override val hostTag = "主持人"
+    override val speakerTag = "起始发言人"
     override val back = "返回"
     override val previous = "上一个"
     override val next = "下一个"
@@ -384,6 +396,12 @@ object EnStrings : Strings {
     override val modeDebate = "Debate"
     override val modeAuto = "Auto"
     override val conductorTag = "Conductor"
+    override val summarizerTag = "Summarizer"
+    override val judgeTag = "Judge"
+    override val sideProTag = "Pro"
+    override val sideConTag = "Con"
+    override val hostTag = "Host"
+    override val speakerTag = "First Speaker"
     override val back = "Back"
     override val previous = "Previous"
     override val next = "Next"

@@ -152,8 +152,20 @@ export class ConductorOrchestrator {
     return `{"tasks":[${sample.join(",")}]}`;
   }
 
-  async start(room: Room, text: string): Promise<void> {
+  async start(room: Room, text: string, initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[]): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
+    if (initialTasks && initialTasks.length > 0) {
+      // 由 auto 模式推荐的初始派工单，直接 dispatch
+      this.flows.set(room.roomId, {
+        roomId: room.roomId,
+        phase: "planning",
+        tasks: new Map(),
+        results: new Map(),
+      });
+      const flow = this.flows.get(room.roomId)!;
+      await this.dispatchFromTasks(flow, room, initialTasks, text);
+      return;
+    }
     const example = this.buildExample(room);
     const prompt = [
       `你是群聊「${room.name}」的指挥家（Conductor）。`,
@@ -248,6 +260,15 @@ export class ConductorOrchestrator {
       this.flows.delete(flow.roomId);
       return;
     }
+    await this.dispatchFromTasks(flow, room, tasks);
+  }
+
+  private async dispatchFromTasks(
+    flow: Flow,
+    room: Room,
+    tasks: { id?: string; to: string; task: string; dependsOn?: string[] }[],
+    originalText?: string,
+  ): Promise<void> {
     if (tasks.length === 0) {
       this.flows.delete(flow.roomId);
       return;
@@ -281,6 +302,13 @@ export class ConductorOrchestrator {
     if (flow.tasks.size === 0) {
       this.flows.delete(flow.roomId);
       return;
+    }
+
+    if (originalText) {
+      this.notice({
+        roomId: flow.roomId,
+        message: `指挥家根据推荐直接派工：${originalText.slice(0, 80)}`,
+      });
     }
 
     await this.scheduleTasks(flow, room);
@@ -420,6 +448,82 @@ export class ConductorOrchestrator {
     ].join("\n");
     this.notice({ roomId: flow.roomId, message: "子任务全部完成，指挥家汇总中…" });
     await this.agent.prompt(room.conductorId!, prompt);
+  }
+
+  export(): Record<string, unknown> {
+    return {
+      flows: [...this.flows.values()].map((flow) => ({
+        roomId: flow.roomId,
+        phase: flow.phase,
+        tasks: [...flow.tasks.values()].map((t) => ({
+          id: t.id,
+          sessionId: t.sessionId,
+          task: t.task,
+          dependsOn: t.dependsOn,
+          status: t.status,
+        })),
+        results: Object.fromEntries(
+          [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
+        ),
+      })),
+    };
+  }
+
+  async import(state: Record<string, unknown>): Promise<void> {
+    const flows = state.flows;
+    if (!Array.isArray(flows)) return;
+    for (const raw of flows) {
+      const f = raw as Record<string, unknown>;
+      const roomId = String(f.roomId ?? "");
+      const room = this.rooms.get(roomId);
+      if (!room || !room.conductorId) continue;
+      const flow: Flow = {
+        roomId,
+        phase: (f.phase as Flow["phase"]) ?? "working",
+        tasks: new Map(),
+        results: new Map(),
+      };
+      for (const t of (f.tasks as unknown[]) ?? []) {
+        const o = t as Record<string, unknown>;
+        const taskId = String(o.id ?? "");
+        if (!taskId) continue;
+        const sessionId = String(o.sessionId ?? "");
+        if (!room.members.some((m) => m.sessionId === sessionId)) continue;
+        flow.tasks.set(taskId, {
+          id: taskId,
+          sessionId,
+          task: String(o.task ?? ""),
+          dependsOn: Array.isArray(o.dependsOn)
+            ? o.dependsOn.map((s) => String(s)).filter(Boolean)
+            : [],
+          status: (o.status as FlowTask["status"]) === "running" ? "pending" : (o.status as FlowTask["status"]) ?? "pending",
+        });
+      }
+      const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;
+      if (results) {
+        for (const [id, r] of Object.entries(results)) {
+          if (typeof r.text !== "string") continue;
+          flow.results.set(id, {
+            text: r.text,
+            artifacts: Array.isArray(r.artifacts)
+              ? r.artifacts
+                  .map((a) => {
+                    const o = a as Record<string, unknown>;
+                    const type = String(o.type ?? "");
+                    if (type !== "file" && type !== "command" && type !== "test") return null;
+                    return { type, path: typeof o.path === "string" ? o.path : undefined, summary: String(o.summary ?? "") };
+                  })
+                  .filter((a) => a !== null) as TaskArtifact[]
+              : [],
+          });
+        }
+      }
+      this.flows.set(roomId, flow);
+      this.notice({ roomId, message: "🔄 已恢复指挥编排，继续执行待派发任务" });
+      await this.scheduleTasks(flow, room).catch((err) => {
+        console.error("[conductor] import schedule failed:", roomId, err);
+      });
+    }
   }
 }
 

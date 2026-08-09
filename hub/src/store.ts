@@ -90,7 +90,7 @@ const BUILTIN_ROLES: Role[] = [
   },
 ];
 
-type State = { sessions: SessionMeta[]; rooms: Room[] };
+type State = { sessions: SessionMeta[]; rooms: Room[]; runtime?: Record<string, unknown> | undefined };
 
 const HISTORY_LIMIT = 200;
 
@@ -302,7 +302,11 @@ export class Store {
         .get() as { value: string } | undefined;
       if (!row) return { sessions: [], rooms: [] };
       const obj = JSON.parse(row.value);
-      return { sessions: obj.sessions ?? [], rooms: obj.rooms ?? [] };
+      return {
+        sessions: obj.sessions ?? [],
+        rooms: obj.rooms ?? [],
+        runtime: typeof obj.runtime === "object" ? obj.runtime : undefined,
+      };
     } catch {
       return { sessions: [], rooms: [] };
     }

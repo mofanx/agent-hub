@@ -116,6 +116,29 @@ export class RoomModeManager {
     this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n));
   }
 
+  exportRuntime(): Record<string, unknown> {
+    return {
+      conductor: this.conductor.export(),
+      subModes: Object.fromEntries(this.roomSubMode),
+    };
+  }
+
+  async importRuntime(state: Record<string, unknown> | undefined): Promise<void> {
+    if (!state) return;
+    const conductorState = typeof state.conductor === "object" && state.conductor !== null
+      ? (state.conductor as Record<string, unknown>)
+      : undefined;
+    if (conductorState) await this.conductor.import(conductorState);
+    const subModes = typeof state.subModes === "object" && state.subModes !== null
+      ? (state.subModes as Record<string, { mode: RuntimeMode; activeSpeaker?: string; reason?: string }>)
+      : undefined;
+    if (subModes) {
+      for (const [roomId, sm] of Object.entries(subModes)) {
+        this.roomSubMode.set(roomId, { mode: sm.mode, activeSpeaker: sm.activeSpeaker, reason: sm.reason });
+      }
+    }
+  }
+
   private notice(n: ConductorNotice): void {
     this.broadcast("room.notice", n as unknown as Record<string, unknown>);
   }
@@ -419,7 +442,23 @@ export class RoomModeManager {
     if (options?.quote) {
       task = `${task}\n（用户引用了 ${options.quote.author} 的消息："${options.quote.text}"）`;
     }
-    this.conductor.start(room, task).catch((err) => {
+    const initialTasks = Array.isArray(options?.params?.tasks)
+      ? (options.params.tasks as unknown[])
+          .map((t) => {
+            const o = t as Record<string, unknown>;
+            if (typeof o.to !== "string" || typeof o.task !== "string") return null;
+            return {
+              to: o.to,
+              task: o.task,
+              id: typeof o.id === "string" ? o.id : undefined,
+              dependsOn: Array.isArray(o.dependsOn)
+                ? o.dependsOn.map((s) => String(s)).filter(Boolean)
+                : undefined,
+            };
+          })
+          .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[] }[]
+      : undefined;
+    this.conductor.start(room, task, initialTasks).catch((err) => {
       console.error("[room-modes] conductor start failed:", room.conductorId, err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
@@ -860,15 +899,16 @@ export class RoomModeManager {
       "- 不要调用任何工具，仅做选择",
       "- JSON 格式：",
       "```json",
-      '{ "mode": "conductor", "reason": "任务需要拆解派工", "params": { } }',
+      '{ "mode": "conductor", "reason": "任务需要拆解派工", "params": { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1"}] } }',
       "```",
       "",
       "params 说明：",
       '- mention: { "targets": ["sessionId", ...] }，未指定则发给全部',
-      '- roundrobin: { }',
+      '- roundrobin: { "speaker": "sessionId" }，可指定起始发言人，默认按成员顺序',
       '- parallel: { "summarizer": "sessionId" }，默认使用主持人',
       '- pipeline: { "order": ["sessionId", ...] }，默认按成员顺序',
       '- debate: { "sides": ["sessionId", "sessionId"], "judge": "sessionId", "rounds": 2 }，默认前两位成员作正反方、主持人作裁判',
+      '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":["t1"]}] }，可选初始派工单，如无需则 omit',
       '- self: { }',
       "",
       "最近上下文：",
