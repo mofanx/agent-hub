@@ -420,27 +420,88 @@ html[data-theme="dark"] .list-item:hover {
   line-height: 1.4;
 }
 
-.md-table {
+.message .text table {
   border-collapse: collapse;
   margin: 0.5rem 0;
   width: 100%;
   font-size: 0.85rem;
 }
 
-.md-table th,
-.md-table td {
+.message .text th,
+.message .text td {
   border: 1px solid var(--border);
   padding: 0.35rem 0.5rem;
   text-align: left;
 }
 
-.md-table th {
+.message .text th {
   background: var(--card);
   font-weight: 600;
 }
 
-.md-table tr:nth-child(even) {
+.message .text tr:nth-child(even) {
   background: var(--bg);
+}
+
+.message .text p {
+  margin: 0 0 0.5rem;
+}
+
+.message .text p:last-child {
+  margin-bottom: 0;
+}
+
+.message .text pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+
+.message .text code {
+  background: var(--bg);
+  padding: 0.1rem 0.25rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.message .text pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.message .text blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.message .text ul,
+.message .text ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.message .text li {
+  margin: 0.15rem 0;
+}
+
+.message .text a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.message .text h1,
+.message .text h2,
+.message .text h3,
+.message .text h4,
+.message .text h5,
+.message .text h6 {
+  margin: 0.75rem 0 0.5rem;
+  font-weight: 600;
 }
 
 .thought-toggle {
