@@ -16,6 +16,7 @@ android/.idea/
 *.jar
 *.war
 *.ear
+!android/gradle/wrapper/gradle-wrapper.jar
 
 # OS
 .DS_Store

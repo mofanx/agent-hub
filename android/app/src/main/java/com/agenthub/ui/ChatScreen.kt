@@ -11,11 +11,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.ui.composed
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -91,13 +89,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -727,17 +723,64 @@ private fun MessageBubbleBox(
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     Box(
         modifier = modifier
-            .rightClickable {
-                menuOffset = IntOffset(it.x.toInt(), it.y.toInt())
-                expanded = true
-            }
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onLongPress = { offset ->
-                        menuOffset = IntOffset(offset.x.toInt(), offset.y.toInt())
-                        expanded = true
-                    },
-                )
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val down = event.changes.firstOrNull {
+                            it.pressed && !it.previousPressed && !it.isConsumed
+                        } ?: continue
+
+                        if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                            menuOffset = IntOffset(
+                                down.position.x.toInt(),
+                                down.position.y.toInt(),
+                            )
+                            expanded = true
+                            event.changes.forEach { it.consume() }
+                            continue
+                        }
+
+                        val longPress = withTimeoutOrNull(
+                            viewConfiguration.longPressTimeoutMillis,
+                        ) {
+                            var canceled = false
+                            while (!canceled) {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = ev.changes.firstOrNull { it.id == down.id }
+                                if (change == null || change.isConsumed) {
+                                    canceled = true
+                                } else if (!change.pressed && change.previousPressed) {
+                                    canceled = true
+                                } else if (change.pressed && change.previousPressed) {
+                                    val dx = change.position.x - down.position.x
+                                    val dy = change.position.y - down.position.y
+                                    if (dx * dx + dy * dy > viewConfiguration.touchSlop * viewConfiguration.touchSlop) {
+                                        canceled = true
+                                    }
+                                }
+                            }
+                            false
+                        } == null
+
+                        if (longPress) {
+                            menuOffset = IntOffset(
+                                down.position.x.toInt(),
+                                down.position.y.toInt(),
+                            )
+                            expanded = true
+                            down.consume()
+                            while (true) {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = ev.changes.firstOrNull { it.id == down.id }
+                                if (change != null) {
+                                    change.consume()
+                                    if (!change.pressed) break
+                                }
+                            }
+                        }
+                    }
+                }
             },
     ) {
         content()
@@ -815,22 +858,6 @@ private fun MessageBubbleBox(
                             Text(S.ok)
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-fun Modifier.rightClickable(onRightClick: (Offset) -> Unit): Modifier = composed {
-    val updated by rememberUpdatedState(onRightClick)
-    pointerInput(Unit) {
-        awaitPointerEventScope {
-            while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
-                    val pos = event.changes.firstOrNull()?.position ?: Offset.Zero
-                    event.changes.forEach { it.consume() }
-                    updated(pos)
                 }
             }
         }
