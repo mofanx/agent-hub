@@ -366,6 +366,7 @@ function SessionDialog({ onClose }: { onClose: () => void }) {
                 </option>
               ))}
           </select>
+          {selectedConn?.error && <div className="error" style={{ marginTop: "0.25rem" }}>{selectedConn.error}</div>}
         </FormRow>
         <FormRow label="角色">
           <select value={form.roleId} onChange={(e) => selectRole(e.currentTarget.value)}>

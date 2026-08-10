@@ -341,6 +341,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     cwd: String(o.cwd ?? ""),
     online: o.online === true,
     local: o.local === true,
+    error: o.error ? String(o.error) : undefined,
   });
 
   const parseSession = (o: Record<string, unknown>): SessionInfo => ({

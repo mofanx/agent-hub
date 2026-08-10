@@ -236,6 +236,18 @@ html[data-theme="dark"] .list-item:hover {
   margin: 0.25rem 0;
 }
 
+.error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--danger-10);
+  color: var(--danger);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
 /* Session list */
 .session-list section {
   margin-bottom: 1.5rem;

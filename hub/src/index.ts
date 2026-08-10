@@ -1,8 +1,9 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { networkInterfaces } from "node:os";
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAgent, getPermissionBypass, setPermissionBypass, type HubEvent } from "./agent.js";
 import { RoomManager, type Room, type RoomMode, type RoomModeConfig } from "./room.js";
@@ -28,6 +29,7 @@ const rooms = new RoomManager();
 const agents = new Map<string, AcpAgent>();
 const owners = new Map<string, string>();
 const localStarts = new Map<string, Promise<void>>();
+const localAgentErrors = new Map<string, string>();
 const store = new Store();
 const modelManager = new ModelManager();
 
@@ -259,11 +261,29 @@ function ensureDefaultLocalConnections(): void {
   store.setMeta("default-connections-seeded", "1");
 }
 
+function cleanupLocalAgent(connectionId: string): void {
+  agents.delete(connectionId);
+  for (const [sid, cid] of [...owners.entries()]) {
+    if (cid === connectionId) owners.delete(sid);
+  }
+}
+
+function spawnAgent(bin: string, args: string[]): ChildProcess {
+  return spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+}
+
 async function startLocalAgent(connection: Connection): Promise<void> {
   const def = AGENT_DEFS[connection.agent];
   if (!def) throw new Error(`unknown agent type: ${connection.agent}`);
+  localAgentErrors.delete(connection.id);
 
-  const proc = spawn(def.bin, def.args, { stdio: ["pipe", "pipe", "inherit"] });
+  const proc = spawnAgent(def.bin, def.args);
+  const stderrChunks: Buffer[] = [];
+  proc.stderr!.on("data", (chunk: Buffer) => {
+    stderrChunks.push(chunk);
+    process.stderr.write(chunk);
+  });
+
   const localStream = acp.ndJsonStream(
     Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>,
     Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>,
@@ -275,10 +295,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     onAgentEvent,
     () => {
       console.log(`[hub] local agent ${connection.id} removed`);
-      agents.delete(connection.id);
-      for (const [sid, cid] of [...owners.entries()]) {
-        if (cid === connection.id) owners.delete(sid);
-      }
+      cleanupLocalAgent(connection.id);
     },
     proc,
     onTurnEnd,
@@ -286,15 +303,59 @@ async function startLocalAgent(connection: Connection): Promise<void> {
 
   agents.set(connection.id, a);
 
-  a.ensureStarted().catch((err) => {
-    logWarn("local agent", `${connection.id} failed: ${String(err)}`);
-    agents.delete(connection.id);
-    for (const [sid, cid] of [...owners.entries()]) {
-      if (cid === connection.id) owners.delete(sid);
-    }
-    try {
-      proc.kill();
-    } catch {}
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
+    const fail = (reason: string) => {
+      settle(() => {
+        try {
+          proc.kill();
+        } catch {}
+        cleanupLocalAgent(connection.id);
+        localAgentErrors.set(connection.id, reason);
+        logWarn("local agent", `${connection.id} failed: ${reason}`);
+        broadcast({ method: "agent.status", params: { status: "error", detail: reason } });
+        reject(new Error(reason));
+      });
+    };
+
+    proc.on("error", (err) =>
+      fail(
+        `无法启动本地 Agent 进程: ${err.message}。请检查 PATH 是否包含 Node/npm，或在环境变量中设置 CLAUDE_ACP_BIN/CODEX_ACP_BIN 为完整可执行文件路径。`,
+      ),
+    );
+
+    proc.on("close", (code, signal) => {
+      if (!settled) {
+        const lastErr = Buffer.concat(stderrChunks)
+          .toString("utf-8")
+          .trim()
+          .split(/\r?\n/)
+          .pop();
+        let detail = `本地 Agent 进程意外退出 (code=${code ?? "?"}, signal=${signal ?? "?"})`;
+        if (lastErr) detail += `；${lastErr}`;
+        if (process.platform === "win32") {
+          detail +=
+            "。Windows 下请确认 PATH 中包含 node/npm，若使用 pm2 启动 Hub 请设置完整路径的 CLAUDE_ACP_BIN。";
+        }
+        fail(detail);
+      }
+    });
+
+    a.ensureStarted()
+      .then(() => {
+        settle(() => {
+          localAgentErrors.delete(connection.id);
+          console.log(`[hub] local agent ${connection.id} started`);
+          resolve();
+        });
+      })
+      .catch((err) => fail(`本地 Agent 初始化失败: ${String(err)}`));
   });
 }
 
@@ -918,6 +979,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           ...c,
           online: agents.has(c.id),
           local: c.local ?? false,
+          error: localAgentErrors.get(c.id),
         })),
       };
     case "connection.create": {
@@ -947,6 +1009,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         existing.close();
         agents.delete(id);
       }
+      localAgentErrors.delete(id);
       const ok = store.deleteConnection(id);
       if (!ok) throw new Error("connection not found");
       return { deleted: true };

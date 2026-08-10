@@ -22,8 +22,18 @@ function App() {
     root.dataset.theme = effective;
   }, [store.themeMode]);
 
+  const clearError = () => useHubStore.setState({ connectError: null });
+
   return (
     <div className="app">
+      {store.connectError && (
+        <div className="error-banner">
+          <span>{store.connectError}</span>
+          <button className="tiny secondary" onClick={clearError}>
+            ✕
+          </button>
+        </div>
+      )}
       <div className="toolbar">
         <button className="secondary menu-btn" onClick={store.toggleDrawer}>
           ☰

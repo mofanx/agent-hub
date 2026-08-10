@@ -88,6 +88,7 @@ export class AcpAgent {
   private sessions = new Map<string, SessionEntry>();
   private pendingPermissions = new Map<string, (optionId: string) => void>();
   private starting: Promise<void> | null = null;
+  private ready = false;
 
   constructor(
     private readonly name: string,
@@ -140,6 +141,7 @@ export class AcpAgent {
       clientInfo: { name: "agent-hub", version: "0.2.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
+    this.ready = true;
     this.emit({
       method: "agent.status",
       params: { status: "ready", detail: `protocol v${init.protocolVersion}` },
@@ -149,7 +151,14 @@ export class AcpAgent {
   private onDisconnected(): void {
     this.ctx = null;
     this.conn = null;
-    this.emit({ method: "agent.status", params: { status: "exited" } });
+    if (!this.ready && this.onClose) {
+      this.onClose();
+      return;
+    }
+    this.emit({
+      method: "agent.status",
+      params: { status: this.ready ? "exited" : "error" },
+    });
     this.onClose?.();
   }
 

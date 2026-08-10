@@ -24,6 +24,7 @@ export interface ConnectionInfo {
   cwd: string;
   online: boolean;
   local: boolean;
+  error?: string;
 }
 
 export interface SessionInfo {

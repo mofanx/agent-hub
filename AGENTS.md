@@ -68,6 +68,16 @@ cd android
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## 本地 Agent 启动问题排查
+
+- Windows 下 `npx`/`npm` 等入口是 `.cmd` 脚本，Hub 使用 `cross-spawn` 自动解析 `PATHEXT` 和 `.cmd` 后缀。
+- 若使用 pm2 启动 Hub，请确保 pm2 进程的 `PATH` 包含 Node 和 npm，否则 `npx` 仍会找不到。
+- 此时可通过环境变量指定完整可执行路径绕过 PATH 问题：
+  - `CLAUDE_ACP_BIN`：`claude` 本地 Agent 的入口
+  - `CODEX_ACP_BIN`：`codex` 本地 Agent 的入口
+  - `OPENCODE_BIN` / `DEVIN_BIN`：其他本地 Agent 的入口
+- 启动失败的具体原因会通过 `agent.status` 事件推送到桌面端，并在顶部错误条中显示。
+
 ## 当前架构要点
 
 - **群聊编排**：支持 mention、conductor、roundrobin、parallel、pipeline、debate、auto 七种模式。

@@ -169,6 +169,7 @@ function ConnectionCard({ c }: { c: ConnectionInfo }) {
         {c.address && ` · ${c.address}`}
         {c.cwd && ` · ${c.cwd}`}
       </div>
+      {c.error && <div className="error">启动失败: {c.error}</div>}
       {!c.local && (
         <button className="secondary" onClick={() => void navigator.clipboard.writeText(c.token)}>
           复制 Token
