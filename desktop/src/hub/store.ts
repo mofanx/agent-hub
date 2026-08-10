@@ -4,7 +4,10 @@ import type {
   ChatItem,
   ConnProfile,
   ConnectionInfo,
+  ContextUsage,
   FlowInfo,
+  ModelInfo,
+  Attachment,
   RoomInfo,
   RoomModeConfig,
   RoleInfo,
@@ -56,6 +59,12 @@ interface State {
   flow: FlowInfo | null;
   historyHasMore: boolean;
   historyLoading: boolean;
+  sessionUsage: Record<string, ContextUsage>;
+  modelList: ModelInfo[];
+  modelCurrent: string;
+  modelFilter: string;
+  showModelPicker: boolean;
+  pendingAttachments: Attachment[];
 }
 
 interface Actions {
@@ -153,6 +162,15 @@ interface Actions {
   saveProfileAndConnect(address: string, port: string, token: string, name?: string): void;
   refreshFlow(roomId: string): Promise<void>;
   setFlow(flow: FlowInfo | null): void;
+
+  showModelPickerDialog(): Promise<void>;
+  refreshModelList(): Promise<void>;
+  switchModel(model: ModelInfo): Promise<void>;
+  closeModelPicker(): void;
+
+  addAttachment(attachment: Attachment): void;
+  removeAttachment(attachment: Attachment): void;
+  clearAttachments(): void;
 }
 
 const defaultConfig: AppConfig = {
@@ -259,10 +277,32 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const sid = String(params.sessionId ?? "");
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
+        if (params.usage) {
+          const usage = params.usage as Record<string, unknown>;
+          const items = [...get().chatItems];
+          for (let i = items.length - 1; i >= 0; i--) {
+            const it = items[i];
+            if (it.kind === "assistant" && it.author === get().sessionName(sid)) {
+              items[i] = { ...it, usage: parseTokenUsage(usage) };
+              break;
+            }
+          }
+          set({ chatItems: items });
+        }
         if (params.output) {
           const title = get().sessionName(sid);
           const body = String(params.output).slice(0, 300);
           showNotification(title, body).catch(() => {});
+        }
+        break;
+      }
+      case "session.usage": {
+        const sid = String(params.sessionId ?? "");
+        const raw = params.usage as Record<string, unknown> | undefined;
+        if (raw) {
+          set({
+            sessionUsage: { ...get().sessionUsage, [sid]: parseContextUsage(raw) },
+          });
         }
         break;
       }
@@ -383,6 +423,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       roomId: String(o.roomId ?? ""),
       name: String(o.name ?? ""),
       mode: String(o.mode ?? "mention"),
+      activeSpeaker: stringOrNull(o.activeSpeaker),
       conductorId: stringOrNull(o.conductorId),
       members,
       archived: o.archived === true,
@@ -404,6 +445,46 @@ export const useHubStore = create<State & Actions>((set, get) => {
     address: o.address ? String(o.address) : null,
     connectionId: o.connectionId ? String(o.connectionId) : null,
     builtin: o.builtin === true,
+  });
+
+  const numberOrZero = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+  const parseTokenUsage = (u: Record<string, unknown>) => ({
+    inputTokens: numberOrZero(u.inputTokens),
+    outputTokens: numberOrZero(u.outputTokens),
+    totalTokens: numberOrZero(u.totalTokens),
+    cachedReadTokens: typeof u.cachedReadTokens === "number" ? u.cachedReadTokens : undefined,
+    cachedWriteTokens: typeof u.cachedWriteTokens === "number" ? u.cachedWriteTokens : undefined,
+    thoughtTokens: typeof u.thoughtTokens === "number" ? u.thoughtTokens : undefined,
+  });
+
+  const parseContextUsage = (u: Record<string, unknown>): ContextUsage => {
+    const cost =
+      u.cost && typeof u.cost === "object" ? (u.cost as Record<string, unknown>) : undefined;
+    return {
+      used: numberOrZero(u.used),
+      size: numberOrZero(u.size),
+      costAmount: typeof cost?.amount === "number" ? cost.amount : undefined,
+      costCurrency: typeof cost?.currency === "string" ? cost.currency : undefined,
+    };
+  };
+
+  const parseAttachment = (o: Record<string, unknown>): Attachment => ({
+    mimeType: String(o.mimeType ?? "image/png"),
+    base64: String(o.base64 ?? ""),
+    name: String(o.name ?? ""),
+  });
+
+  const parseModelInfo = (o: Record<string, unknown>): ModelInfo => ({
+    uid: String(o.uid ?? ""),
+    label: String(o.label ?? ""),
+    family: String(o.family ?? ""),
+    vendor: String(o.vendor ?? ""),
+    slug: String(o.slug ?? ""),
+    aliases: ((o.aliases as unknown[] | undefined) ?? []).map((it) => String(it)).filter(Boolean),
+    costTier: String(o.costTier ?? ""),
+    costSummary: typeof o.costSummary === "string" ? o.costSummary : undefined,
+    isCurrent: o.isCurrent === true,
   });
 
   const store: State & Actions = {
@@ -440,6 +521,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
     flow: null,
     historyHasMore: false,
     historyLoading: false,
+    sessionUsage: {},
+    modelList: [],
+    modelCurrent: "",
+    modelFilter: "",
+    showModelPicker: false,
+    pendingAttachments: [],
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -577,6 +664,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
         selectedIds: { sessions: [], rooms: [] },
         currentProfile: null,
         flow: null,
+        sessionUsage: {},
+        modelList: [],
+        modelCurrent: "",
+        modelFilter: "",
+        showModelPicker: false,
+        pendingAttachments: [],
       });
       updateTray();
     },
@@ -839,20 +932,28 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!session) return;
       if (get().handleSlashCommand(text)) return;
       const q = get().quote;
+      const atts = get().pendingAttachments;
       const userItem: ChatItem = {
         kind: "user",
         text,
         author: "我",
+        attachments: atts.length ? atts : undefined,
         quoteAuthor: q?.[0],
         quoteText: q?.[1],
       };
-      set({ chatItems: [...get().chatItems, userItem], quote: null });
-      const fullText = q
-        ? `（引用 ${q[0]} 的消息："${q[1].slice(0, 300)}"）\n${text}`
-        : text;
+      set({ chatItems: [...get().chatItems, userItem], quote: null, pendingAttachments: [] });
+      const content: Record<string, unknown>[] = [];
+      if (text) content.push({ type: "text", text: q ? `（引用 ${q[0]} 的消息："${q[1].slice(0, 300)}"）\n${text}` : text });
+      for (const a of atts) {
+        content.push({
+          type: "image",
+          source: { type: "base64", media_type: a.mimeType, data: a.base64 },
+        });
+      }
+      if (!content.length) return;
       set({ busyIds: [...get().busyIds, session.sessionId] });
 
-      getOrCall("prompt.send", { sessionId: session.sessionId, text: fullText }).catch((e) => {
+      getOrCall("prompt.send", { sessionId: session.sessionId, content }).catch((e) => {
         set({
           busyIds: get().busyIds.filter((id) => id !== session.sessionId),
           chatItems: [...get().chatItems, { kind: "error", text: String(e), author: "" }],
@@ -865,16 +966,27 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!room) return;
       if (get().handleSlashCommand(text)) return;
       const q = get().quote;
+      const atts = get().pendingAttachments;
       const userItem: ChatItem = {
         kind: "user",
         text,
         author: "我",
+        attachments: atts.length ? atts : undefined,
         quoteAuthor: q?.[0],
         quoteText: q?.[1],
       };
-      set({ chatItems: [...get().chatItems, userItem], quote: null });
+      set({ chatItems: [...get().chatItems, userItem], quote: null, pendingAttachments: [] });
 
-      const params: Record<string, unknown> = { roomId: room.roomId, text };
+      const content: Record<string, unknown>[] = [];
+      if (text) content.push({ type: "text", text });
+      for (const a of atts) {
+        content.push({
+          type: "image",
+          source: { type: "base64", media_type: a.mimeType, data: a.base64 },
+        });
+      }
+
+      const params: Record<string, unknown> = { roomId: room.roomId, text: text || "（图片）", content };
       if (q) {
         params.quote = { author: q[0], text: q[1] };
       }
@@ -1150,13 +1262,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
         });
         const chat: ChatItem[] = [];
         for (const e of entries) {
+          const attachments = ((e as Record<string, unknown>).attachments as unknown[] | undefined)
+            ?.map((it) => parseAttachment(it as Record<string, unknown>));
           switch (e.kind) {
             case "user":
-              chat.push({ kind: "user", at: e.at, text: e.text, author: e.author });
+              chat.push({ kind: "user", at: e.at, text: e.text, author: e.author, attachments });
               break;
-            case "assistant":
-              chat.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author });
+            case "assistant": {
+              const usage = (e as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+              chat.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
               break;
+            }
             case "system":
               chat.push({ kind: "system", at: e.at, text: e.text, author: e.author });
               break;
@@ -1186,13 +1302,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
         });
         const more: ChatItem[] = [];
         for (const e of entries) {
+          const attachments = ((e as Record<string, unknown>).attachments as unknown[] | undefined)
+            ?.map((it) => parseAttachment(it as Record<string, unknown>));
           switch (e.kind) {
             case "user":
-              more.push({ kind: "user", at: e.at, text: e.text, author: e.author });
+              more.push({ kind: "user", at: e.at, text: e.text, author: e.author, attachments });
               break;
-            case "assistant":
-              more.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author });
+            case "assistant": {
+              const usage = (e as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+              more.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
               break;
+            }
             case "system":
               more.push({ kind: "system", at: e.at, text: e.text, author: e.author });
               break;
@@ -1238,7 +1358,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const S = stringsFor(get().lang);
       switch (command) {
         case "help": {
-          const msg = `${S.slashHelpTitle}\n${S.slashHelpHelp}\n${S.slashHelpStop}\n${S.slashHelpBypass}`;
+          const msg = `${S.slashHelpTitle}\n${S.slashHelpHelp}\n${S.slashHelpStop}\n${S.slashHelpBypass}\n${S.slashHelpModel}`;
           set({ chatItems: [...get().chatItems, { kind: "system", text: msg, author: "" }] });
           return true;
         }
@@ -1247,6 +1367,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
           return true;
         case "stop":
           get().stopCurrent();
+          return true;
+        case "model":
+        case "models":
+          if (arg) {
+            void getOrCall("model.set", { model: arg })
+              .then((res) => {
+                const model = (res as Record<string, unknown>).model as Record<string, unknown> | undefined;
+                if (model) {
+                  const uid = String(model.uid ?? arg);
+                  const label = String(model.label ?? "");
+                  const S = stringsFor(get().lang);
+                  const costTier = String(model.costTier ?? "");
+                  const costSummary = typeof model.costSummary === "string" ? model.costSummary : "";
+                  const cost = [costTier, costSummary].filter(Boolean).join(" · ");
+                  set({
+                    chatItems: [...get().chatItems, { kind: "system", text: S.modelSwitched.replace("%s", uid).replace("%s", `${label} ${cost}`.trim()), author: "" }],
+                    modelCurrent: uid,
+                  });
+                } else {
+                  set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelUnknown.replace("%s", arg), author: "" }] });
+                }
+              })
+              .catch((e) => {
+                set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelListError.replace("%s", String(e.message ?? e)), author: "" }] });
+              });
+          } else {
+            void get().showModelPickerDialog();
+          }
           return true;
         default: {
           set({
@@ -1290,6 +1438,51 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ screen: "sessions" });
       get().refreshAll();
     },
+
+    showModelPickerDialog: async () => {
+      await get().refreshModelList();
+      set({ showModelPicker: true });
+    },
+
+    refreshModelList: async () => {
+      try {
+        const result = await getOrCall<Record<string, unknown>>("model.list");
+        const current = String(result.current ?? "");
+        const list = ((result.models as unknown[] | undefined) ?? []).map((it) =>
+          parseModelInfo({ ...(it as Record<string, unknown>), isCurrent: (it as Record<string, unknown>).uid === current }),
+        );
+        set({ modelList: list, modelCurrent: current, modelFilter: "" });
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    switchModel: async (model: ModelInfo) => {
+      try {
+        await getOrCall("model.set", { model: model.uid });
+        set({
+          showModelPicker: false,
+          modelCurrent: model.uid,
+          modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === model.uid })),
+        });
+        const S = stringsFor(get().lang);
+        set({ chatItems: [...get().chatItems, { kind: "system", text: S.modelSwitched.replace("%s", model.label).replace("%s", model.uid), author: "" }] });
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    closeModelPicker: () => set({ showModelPicker: false, modelFilter: "" }),
+
+    addAttachment: (attachment: Attachment) => {
+      set({ pendingAttachments: [...get().pendingAttachments, attachment] });
+    },
+
+    removeAttachment: (attachment: Attachment) => {
+      set({ pendingAttachments: get().pendingAttachments.filter((a) => a.base64 !== attachment.base64) });
+    },
+
+    clearAttachments: () => set({ pendingAttachments: [] }),
   };
 
   // derived slashCommands after store is created
@@ -1300,6 +1493,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         { name: "help", description: S.slashHelpHelp },
         { name: "stop", description: S.slashHelpStop },
         { name: "bypass", description: S.slashHelpBypass },
+        { name: "model", description: S.slashHelpModel },
       ];
     },
   });

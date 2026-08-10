@@ -154,11 +154,14 @@ function ConnectionsSettings() {
 
 function ConnectionCard({ c }: { c: ConnectionInfo }) {
   const store = useHubStore();
+  const statusColor = c.error ? "#ef4444" : c.local ? "#3b82f6" : c.online ? "#22c55e" : "#9ca3af";
+  const statusLabel = c.error ? "启动失败" : c.local ? "本机" : c.online ? "在线" : "离线";
   return (
-    <div className="card connection-card">
+    <div className="card connection-card" style={{ borderLeft: `4px solid ${statusColor}` }}>
       <div className="form-row" style={{ justifyContent: "space-between" }}>
-        <span className="title">
-          {c.name} · {c.agent} · {c.local ? "本机" : c.online ? "在线" : "离线"}
+        <span className="title" style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <span className="dot" style={{ color: statusColor }}>●</span>
+          {c.name} · {c.agent} · {statusLabel}
         </span>
         <button className="danger" onClick={() => void store.deleteConnection(c.id)}>
           删除

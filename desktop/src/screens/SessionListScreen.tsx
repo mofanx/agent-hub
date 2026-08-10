@@ -124,7 +124,7 @@ export function SessionListScreen() {
       )}
 
       {inSearch ? (
-        <SearchResults />
+        <SearchResults query={query} />
       ) : (
         <>
           <section>
@@ -173,11 +173,25 @@ export function SessionListScreen() {
   );
 }
 
-function SearchResults() {
+function highlightText(text: string, q: string): React.ReactNode {
+  if (!q) return text;
+  const i = text.toLowerCase().indexOf(q);
+  if (i < 0) return text;
+  return (
+    <>
+      {text.slice(0, i)}
+      <span className="search-highlight">{text.slice(i, i + q.length)}</span>
+      {highlightText(text.slice(i + q.length), q)}
+    </>
+  );
+}
+
+function SearchResults({ query }: { query: string }) {
   const store = useHubStore();
   if (!store.searchResults.length) {
     return <div className="empty">无结果</div>;
   }
+  const q = query.trim().toLowerCase();
   return (
     <div className="list">
       {store.searchResults.map((h, i) => (
@@ -191,7 +205,7 @@ function SearchResults() {
           <span className="title">
             {h.author || "系统"} · {h.scope === "room" ? "群聊" : "单聊"}
           </span>
-          <span className="subtitle">{h.text.slice(0, 120)}</span>
+          <span className="subtitle">{highlightText(h.text.slice(0, 120), q)}</span>
         </div>
       ))}
     </div>

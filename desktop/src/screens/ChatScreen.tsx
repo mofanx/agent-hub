@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
-import type { ChatItem, FlowArtifact, FlowInfo, FlowTask } from "../hub/types";
+import { stringsFor } from "../hub/strings";
+import type { ChatItem, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
 
 const safeRenderer = {
   html(text: string) {
@@ -15,6 +16,37 @@ const safeRenderer = {
 
 marked.use({ renderer: safeRenderer as Record<string, unknown> });
 
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function formatTokenUsage(u: TokenUsage): string {
+  const parts = [`输入 ${formatNumber(u.inputTokens)} · 输出 ${formatNumber(u.outputTokens)}`];
+  if (u.cachedReadTokens) parts.push(`缓存 ${formatNumber(u.cachedReadTokens)}`);
+  if (u.cachedWriteTokens) parts.push(`写缓存 ${formatNumber(u.cachedWriteTokens)}`);
+  if (u.thoughtTokens) parts.push(`思考 ${formatNumber(u.thoughtTokens)}`);
+  parts.push(`总计 ${formatNumber(u.totalTokens)}`);
+  return parts.join(" · ");
+}
+
+function formatContextUsage(u: ContextUsage): string {
+  const parts = [`上下文 ${formatNumber(u.used)} / ${formatNumber(u.size)}`];
+  if (u.costAmount != null && u.costCurrency) {
+    parts.push(`${u.costCurrency} ${u.costAmount.toFixed(4)}`);
+  }
+  return parts.join(" · ");
+}
+
+function costTierClass(tier: string): string {
+  if (tier === "Free") return "tier-free";
+  if (tier === "Low cost") return "tier-low";
+  if (tier === "Med cost") return "tier-med";
+  if (tier === "High cost") return "tier-high";
+  return "";
+}
+
 export function ChatScreen() {
   const store = useHubStore();
   const [input, setInput] = useState("");
@@ -23,14 +55,20 @@ export function ChatScreen() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isRoom = !!store.currentRoom;
   const title = store.currentRoom?.name || store.currentSession?.name || "聊天";
+  const modeLabel = store.currentRoom
+    ? { mention: "普通群", conductor: "指挥家", roundrobin: "轮询", parallel: "并行", pipeline: "流水线", debate: "辩论", auto: "自动" }[store.currentRoom.mode]
+    : undefined;
   const subtitle = store.currentRoom
-    ? store.currentRoom.members.map((m) => `@${m[1]}`).join("  ")
+    ? `${modeLabel ?? store.currentRoom.mode} · ${store.currentRoom.members.map((m) => `@${m[1]}`).join("  ")}`
     : store.currentSession
       ? store.displayName(store.currentSession)
       : "";
+  const activeSessionId = store.currentRoom?.activeSpeaker || store.currentSession?.sessionId || "";
+  const contextUsage = activeSessionId ? store.sessionUsage[activeSessionId] : undefined;
 
   useEffect(() => {
     store.refreshBusy();
@@ -95,10 +133,27 @@ export function ChatScreen() {
 
   const send = () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text && !store.pendingAttachments.length) return;
     if (isRoom) store.sendRoomMessage(text);
     else store.sendPrompt(text);
     setInput("");
+  };
+
+  const onPickImage = () => fileInputRef.current?.click();
+
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    for (const f of files) {
+      if (!f.type.startsWith("image/")) continue;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = String(reader.result ?? "").split(",")[1] ?? "";
+        if (base64) store.addAttachment({ mimeType: f.type, base64, name: f.name });
+      };
+      reader.readAsDataURL(f);
+    }
+    e.target.value = "";
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -114,13 +169,17 @@ export function ChatScreen() {
   return (
     <div className="chat-screen">
       <div className="chat-header">
-        <button className="secondary" onClick={store.backToList}>
-          返回
+        <button className="secondary icon" onClick={store.backToList}>
+          ←
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="chat-title">{title}</div>
           {subtitle && <div className="chat-subtitle">{subtitle}</div>}
+          {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage)}</div>}
         </div>
+        <button className="secondary" onClick={() => void store.showModelPickerDialog()}>
+          模型
+        </button>
         {store.isGenerating() && (
           <button className="danger" onClick={store.stopCurrent}>
             停止
@@ -178,52 +237,83 @@ export function ChatScreen() {
         </div>
       )}
 
+      {contextUsage && (
+        <div className="usage-bar">
+          <span className="pill">{formatContextUsage(contextUsage)}</span>
+        </div>
+      )}
+
       <div className="compose">
-        <div className="compose-row">
-          <div className="cmd-wrap">
-            <button
-              className="secondary"
-              onClick={() => setCmdOpen(!cmdOpen)}
-              title="快捷指令"
-            >
-              ⚡
-            </button>
-            {cmdOpen && (
-              <div className="dropdown-menu">
-                {store.defaultCommands.map((c) => (
-                  <div key={c} className="dropdown-item" onClick={() => insertCommand(c)}>
-                    {c}
-                  </div>
-                ))}
-                {store.customCommands.map((c) => (
-                  <div key={c} className="dropdown-item with-del">
-                    <span onClick={() => insertCommand(c)}>{c}</span>
-                    <button
-                      className="danger tiny"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        store.removeCommand(c);
-                      }}
-                    >
-                      删除
-                    </button>
-                  </div>
-                ))}
-                <div
-                  className="dropdown-item"
-                  onClick={() => {
-                    if (input.trim()) {
-                      store.addCommand(input.trim());
-                      setCmdOpen(false);
-                    }
+        {store.pendingAttachments.length > 0 && (
+          <div className="attachments-bar">
+            {store.pendingAttachments.map((a, i) => (
+              <span key={i} className="attachment-chip">
+                <img src={`data:${a.mimeType};base64,${a.base64}`} alt="" />
+                {a.name}
+                <button className="tiny secondary" onClick={() => store.removeAttachment(a)}>
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="compose-toolbar">
+          <button className="secondary" onClick={() => setCmdOpen(!cmdOpen)} title="快捷指令">
+            指令
+          </button>
+          <button className="secondary" onClick={onPickImage} title="添加图片">
+            图片
+          </button>
+          <button className="secondary" onClick={() => store.showModelPickerDialog()} title="切换模型">
+            模型 {store.modelCurrent}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={onFileChange}
+          />
+        </div>
+
+        {cmdOpen && (
+          <div className="dropdown-menu" style={{ position: "relative", bottom: "auto", top: "0.25rem" }}>
+            {store.defaultCommands.map((c) => (
+              <div key={c} className="dropdown-item" onClick={() => insertCommand(c)}>
+                {c}
+              </div>
+            ))}
+            {store.customCommands.map((c) => (
+              <div key={c} className="dropdown-item with-del">
+                <span onClick={() => insertCommand(c)}>{c}</span>
+                <button
+                  className="danger tiny"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    store.removeCommand(c);
                   }}
                 >
-                  ＋ 保存当前输入为指令
-                </div>
+                  删除
+                </button>
               </div>
-            )}
+            ))}
+            <div
+              className="dropdown-item"
+              onClick={() => {
+                if (input.trim()) {
+                  store.addCommand(input.trim());
+                  setCmdOpen(false);
+                }
+              }}
+            >
+              ＋ 保存当前输入为指令
+            </div>
           </div>
+        )}
 
+        <div className="compose-row">
           <div className="input-wrap">
             <textarea
               ref={inputRef}
@@ -255,13 +345,23 @@ export function ChatScreen() {
             )}
           </div>
 
-          <button onClick={send} disabled={!input.trim() || store.isGenerating()}>
+          <button onClick={send} disabled={(!input.trim() && !store.pendingAttachments.length) || store.isGenerating()}>
             发送
           </button>
         </div>
       </div>
+
+      {store.showModelPicker && <ModelPicker />}
     </div>
   );
+}
+
+function getItemText(item: ChatItem): string {
+  if ("text" in item) return item.text;
+  if (item.kind === "plan") return item.entries.join("\n");
+  if (item.kind === "tool") return `[${item.title}] ${item.status}`;
+  if (item.kind === "permission") return `审批请求: ${item.title}`;
+  return "";
 }
 
 function ChatMessage({
@@ -278,23 +378,97 @@ function ChatMessage({
   onToggleThought: () => void;
 }) {
   const store = useHubStore();
-  const setQuote = () => {
-    if (item.kind === "user" || item.kind === "assistant" || item.kind === "thought") {
-      store.setQuote([item.author || "我", item.text]);
-    }
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [selectOpen, setSelectOpen] = useState(false);
+
+  const canQuote = item.kind === "user" || item.kind === "assistant" || item.kind === "thought";
+
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY });
   };
+
+  const doCopy = () => {
+    navigator.clipboard.writeText(getItemText(item)).catch(() => {});
+    setMenu(null);
+  };
+
+  const doSelect = () => {
+    setSelectOpen(true);
+    setMenu(null);
+  };
+
+  const doQuote = () => {
+    if (canQuote) store.setQuote([item.author || "我", getItemText(item)]);
+    setMenu(null);
+  };
+
+  const menuEl = menu ? (
+    <div
+      className="message-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="message-menu-item" onClick={doCopy}>
+        复制
+      </div>
+      <div className="message-menu-item" onClick={doSelect}>
+        选取
+      </div>
+      {canQuote && (
+        <div className="message-menu-item" onClick={doQuote}>
+          引用
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  const selectModal = selectOpen ? (
+    <div className="dialog-backdrop" onClick={() => setSelectOpen(false)}>
+      <div className="dialog selection-modal" onClick={(e) => e.stopPropagation()}>
+        <h4>选取文字</h4>
+        <pre>{getItemText(item)}</pre>
+        <div className="form-row" style={{ justifyContent: "flex-end" }}>
+          <button onClick={() => setSelectOpen(false)}>关闭</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const usageText =
+    item.kind === "assistant" && item.usage ? (
+      <div className="usage-bar" style={{ padding: 0 }}>
+        <span className="pill">{formatTokenUsage(item.usage)}</span>
+      </div>
+    ) : null;
+
+  const attachmentsEl =
+    item.kind === "user" && item.attachments?.length ? (
+      <div className="message-attachments">
+        {item.attachments.map((a, i) => (
+          <img
+            key={i}
+            className="message-image"
+            src={`data:${a.mimeType};base64,${a.base64}`}
+            alt={a.name}
+          />
+        ))}
+      </div>
+    ) : null;
 
   switch (item.kind) {
     case "system":
       return (
-        <div className="message system">
+        <div className="message system" onContextMenu={onContextMenu}>
           <div className="text">{item.text}</div>
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "user":
       return (
-        <div className={`message user ${isQuoted ? "quoted" : ""}`}>
+        <div className={`message user ${isQuoted ? "quoted" : ""}`} onContextMenu={onContextMenu}>
           <div className="text">
             {item.quoteAuthor && (
               <div className="quote-preview">
@@ -303,15 +477,15 @@ function ChatMessage({
             )}
             {item.text}
           </div>
-          <button className="msg-action" onClick={setQuote}>
-            引用
-          </button>
+          {attachmentsEl}
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "assistant":
       return (
-        <div className={`message assistant ${isQuoted ? "quoted" : ""}`}>
+        <div className={`message assistant ${isQuoted ? "quoted" : ""}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           {item.quoteAuthor && (
             <div className="quote-preview">
@@ -319,15 +493,15 @@ function ChatMessage({
             </div>
           )}
           <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }} />
-          <button className="msg-action" onClick={setQuote}>
-            引用
-          </button>
+          {usageText}
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "thought":
       return (
-        <div className={`message thought ${isQuoted ? "quoted" : ""}`}>
+        <div className={`message thought ${isQuoted ? "quoted" : ""}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           {item.quoteAuthor && (
             <div className="quote-preview">
@@ -340,23 +514,27 @@ function ChatMessage({
           {expanded && (
             <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }} />
           )}
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "tool":
       return (
-        <div className="message tool">
+        <div className="message tool" onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           <div className="tool-row">
             <span>🔧 {item.title}</span>
             <span className="subtitle">{item.status}</span>
           </div>
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "plan":
       return (
-        <div className="message plan">
+        <div className="message plan" onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           <div className="text" style={{ fontWeight: 600 }}>计划</div>
           {item.entries.map((e, i) => (
@@ -364,21 +542,25 @@ function ChatMessage({
               {e}
             </div>
           ))}
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "error":
       return (
-        <div className="message error">
+        <div className="message error" onContextMenu={onContextMenu}>
           <div className="text">
             {item.author ? `[${item.author}] ` : ""}错误: {item.text}
           </div>
+          {menuEl}
+          {selectModal}
         </div>
       );
 
     case "permission":
       return (
-        <div className="message permission">
+        <div className="message permission" onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           <div className="text">
             审批请求: {item.title}
@@ -397,6 +579,8 @@ function ChatMessage({
               </div>
             )}
           </div>
+          {menuEl}
+          {selectModal}
         </div>
       );
 
@@ -480,4 +664,64 @@ function copyArtifact(a: FlowArtifact) {
     .writeText(text)
     .then(() => alert(`已复制：${a.path || a.summary.slice(0, 40)}`))
     .catch(() => {});
+}
+
+function ModelPicker() {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [filter, setFilter] = useState(store.modelFilter);
+
+  useEffect(() => {
+    setFilter(store.modelFilter);
+  }, [store.modelFilter]);
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return store.modelList;
+    return store.modelList.filter(
+      (m) =>
+        m.uid.toLowerCase().includes(q) ||
+        m.label.toLowerCase().includes(q) ||
+        m.family.toLowerCase().includes(q) ||
+        m.aliases.some((a) => a.toLowerCase().includes(q)),
+    );
+  }, [filter, store.modelList]);
+
+  return (
+    <div className="model-picker-backdrop" onClick={store.closeModelPicker}>
+      <div className="model-picker" onClick={(e) => e.stopPropagation()}>
+        <div className="model-picker-header">
+          {S.modelListTitle} · {store.modelCurrent}
+        </div>
+        <div className="model-picker-search">
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.currentTarget.value)}
+            placeholder={S.modelFilterHint}
+          />
+        </div>
+        <div className="model-picker-list">
+          {filtered.length === 0 && <div className="empty">{S.modelNoResults}</div>}
+          {filtered.map((m) => (
+            <div
+              key={m.uid}
+              className={`model-option ${m.isCurrent ? "active" : ""}`}
+              onClick={() => store.switchModel(m)}
+            >
+              <div className="model-option-title">
+                <span>
+                  {m.label || m.uid} {m.isCurrent ? ` · ${S.modelCurrentLabel}` : ""}
+                </span>
+                <span className={`subtitle ${costTierClass(m.costTier)}`}>{m.costTier}</span>
+              </div>
+              <div className="model-option-subtitle">
+                {m.uid} · {m.family} · {m.aliases.join(", ")}
+              </div>
+              {m.costSummary && <div className="model-option-subtitle">{m.costSummary}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }

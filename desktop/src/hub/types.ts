@@ -78,6 +78,8 @@ export interface RoomInfo {
   conductorId: string | null;
   members: [string, string][];
   archived: boolean;
+  /** 当前房间中正在发言的 sessionId */
+  activeSpeaker?: string | null;
   /** 成员角色卡：sessionId -> persona */
   memberRoles?: Record<string, string> | null;
   /** 并行/集思广益：汇总者 sessionId */
@@ -110,10 +112,44 @@ export interface SearchHit {
   text: string;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedReadTokens?: number;
+  cachedWriteTokens?: number;
+  thoughtTokens?: number;
+}
+
+export interface ContextUsage {
+  used: number;
+  size: number;
+  costAmount?: number;
+  costCurrency?: string;
+}
+
+export interface Attachment {
+  mimeType: string;
+  base64: string;
+  name: string;
+}
+
+export interface ModelInfo {
+  uid: string;
+  label: string;
+  family: string;
+  vendor: string;
+  slug: string;
+  aliases: string[];
+  costTier: string;
+  costSummary?: string;
+  isCurrent?: boolean;
+}
+
 export type ChatItem =
-  | { kind: "user"; at?: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
+  | { kind: "user"; at?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string }
   | { kind: "system"; at?: number; text: string; author: string }
-  | { kind: "assistant"; at?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
+  | { kind: "assistant"; at?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string }
   | { kind: "thought"; at?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
   | { kind: "tool"; at?: number; toolCallId: string; title: string; status: string; author: string }
   | { kind: "plan"; at?: number; entries: string[]; author: string }
