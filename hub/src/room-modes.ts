@@ -1038,20 +1038,20 @@ export class RoomModeManager {
       "- self：你自己就能直接回答，不需要其他成员",
       "",
       "输出要求：",
-      "- 仅输出一个 JSON code block，不要有任何解释文字",
+      "- 仅输出一个 JSON 对象，不要有任何解释文字、markdown 标题或代码块外的内容",
       "- 不要调用任何工具，仅做选择",
-      "- JSON 格式：",
+      "- JSON 格式（params 可省略）：",
       "```json",
-      '{ "mode": "conductor", "reason": "任务需要拆解派工", "params": { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1"}] } }',
+      '{ "mode": "conductor", "reason": "任务复杂，需要拆解成子任务" }',
       "```",
       "",
-      "params 说明：",
-      '- mention: { "targets": ["sessionId", ...] }，未指定则发给全部',
-      '- roundrobin: { "speaker": "sessionId" }，可指定起始发言人，默认按成员顺序',
-      '- parallel: { "summarizer": "sessionId" }，默认使用主持人',
-      '- pipeline: { "order": ["sessionId", ...] }，默认按成员顺序',
-      '- debate: { "sides": ["sessionId", "sessionId"], "judge": "sessionId", "rounds": 2 }，默认前两位成员作正反方、主持人作裁判',
-      '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":["t1"]}] }，可选初始派工单，如无需则 omit',
+      "params 说明（可选）：",
+      '- mention: { "targets": ["sessionId", ...] }',
+      '- roundrobin: { "speaker": "sessionId" }',
+      '- parallel: { "summarizer": "sessionId" }',
+      '- pipeline: { "order": ["sessionId", ...] }',
+      '- debate: { "sides": ["sessionId", "sessionId"], "judge": "sessionId", "rounds": 2 }',
+      '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":["t1"]}] }',
       '- self: { }',
       "",
       "最近上下文：",
@@ -1085,6 +1085,12 @@ export class RoomModeManager {
       if (parsed) return parsed;
     }
 
+    const loose = this.extractModeFromText(text);
+    if (loose) {
+      logWarn("room-modes auto", `决策未输出严格 JSON，通过文本识别 mode：${loose.mode}`);
+      return loose;
+    }
+
     logWarn("room-modes auto", `决策输出无法解析，原始内容：\n${text.slice(0, 800)}`);
     return fallback;
   }
@@ -1098,15 +1104,34 @@ export class RoomModeManager {
         logWarn("room-modes auto", `决策 JSON mode 无效或不可选（${source}）：mode=${mode}`);
         return null;
       }
-      return {
-        mode,
-        reason: String(obj.reason ?? ""),
-        params: (obj.params as Record<string, unknown>) ?? {},
-      };
+      const params =
+        typeof obj.params === "object" && obj.params !== null ? (obj.params as Record<string, unknown>) : {};
+      return { mode, reason: String(obj.reason ?? ""), params };
     } catch (err) {
       logWarn("room-modes auto", `决策 JSON 解析失败（${source}）：${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
+  }
+
+  private extractModeFromText(text: string): AutoDecision | null {
+    const enMatch = text.match(/(?:"|')?mode(?:"|')?\s*[:=]\s*(?:"|')?(mention|conductor|roundrobin|parallel|pipeline|debate|self)(?:"|')?/i);
+    if (enMatch) return { mode: enMatch[1]!.toLowerCase() as AutoDecisionMode, reason: "从非 JSON 文本中识别到 mode 字段" };
+    const zhMap: Record<string, AutoDecisionMode> = {
+      点名应答: "mention",
+      指挥家: "conductor",
+      轮询: "roundrobin",
+      并行: "parallel",
+      流水线: "pipeline",
+      辩论: "debate",
+      自己: "self",
+    };
+    const zhPattern = new RegExp(`(选择|模式|mode)[是为：:\\s]+(${Object.keys(zhMap).join("|")})`, "i");
+    const zhMatch = text.match(zhPattern);
+    if (zhMatch?.[2]) {
+      const mode = zhMap[zhMatch[2]!]!;
+      return { mode, reason: "从中文回答中识别到模式名称" };
+    }
+    return null;
   }
 
   private extractJsonObject(text: string): string | null {
