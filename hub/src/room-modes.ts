@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Room, RoomManager, RoomMode } from "./room.js";
 import { ConductorOrchestrator } from "./conductor.js";
-import { logError } from "./logger.js";
+import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -1060,26 +1060,85 @@ export class RoomModeManager {
       `${quoteText}用户消息：${text}`,
       noteText,
       sessionNoteText,
+      "",
+      "注意：你必须且只能输出一个上面格式的 JSON code block，不要加任何解释、前缀或后缀。",
     ].join("\n");
   }
 
   private parseAutoDecision(output: string): AutoDecision {
     const fallback: AutoDecision = { mode: "mention", reason: "决策输出无法解析，兜底为点名应答" };
-    const fence = output.match(/```(?:json)?\s*([\s\S]*?)```/);
-    let raw = fence?.[1]?.trim() ?? output.trim();
-    if (!raw) return fallback;
+    const text = output.trim();
+    if (!text) {
+      logWarn("room-modes auto", "决策输出为空");
+      return { ...fallback, reason: "决策输出为空" };
+    }
+
+    const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch?.[1]) {
+      const parsed = this.tryParseAutoJson(fenceMatch[1].trim(), "code fence");
+      if (parsed) return parsed;
+    }
+
+    const objectText = this.extractJsonObject(text);
+    if (objectText) {
+      const parsed = this.tryParseAutoJson(objectText, "raw json object");
+      if (parsed) return parsed;
+    }
+
+    logWarn("room-modes auto", `决策输出无法解析，原始内容：\n${text.slice(0, 800)}`);
+    return fallback;
+  }
+
+  private tryParseAutoJson(raw: string, source: string): AutoDecision | null {
+    if (!raw) return null;
     try {
       const obj = JSON.parse(raw) as Record<string, unknown>;
       const mode = String(obj.mode ?? "").toLowerCase() as RoomMode;
-      if (!mode || mode === "auto" || !this.isValidMode(mode)) return fallback;
+      if (!mode || mode === "auto" || !this.isValidMode(mode)) {
+        logWarn("room-modes auto", `决策 JSON mode 无效或不可选（${source}）：mode=${mode}`);
+        return null;
+      }
       return {
         mode,
         reason: String(obj.reason ?? ""),
         params: (obj.params as Record<string, unknown>) ?? {},
       };
-    } catch {
-      return fallback;
+    } catch (err) {
+      logWarn("room-modes auto", `决策 JSON 解析失败（${source}）：${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
+  }
+
+  private extractJsonObject(text: string): string | null {
+    const start = text.indexOf("{");
+    if (start < 0) return null;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch === "\\") {
+          escape = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+      } else {
+        if (ch === '"') {
+          inString = true;
+        } else if (ch === "{") {
+          depth++;
+        } else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            return text.slice(start, i + 1);
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private isValidMode(mode: string): mode is RuntimeMode {
