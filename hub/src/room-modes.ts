@@ -1116,19 +1116,34 @@ export class RoomModeManager {
   private extractModeFromText(text: string): AutoDecision | null {
     const enMatch = text.match(/(?:"|')?mode(?:"|')?\s*[:=]\s*(?:"|')?(mention|conductor|roundrobin|parallel|pipeline|debate|self)(?:"|')?/i);
     if (enMatch) return { mode: enMatch[1]!.toLowerCase() as AutoDecisionMode, reason: "从非 JSON 文本中识别到 mode 字段" };
-    const zhMap: Record<string, AutoDecisionMode> = {
+    const aliases: Record<string, AutoDecisionMode> = {
+      mention: "mention",
+      点名: "mention",
       点名应答: "mention",
+      全部成员: "mention",
+      conductor: "conductor",
       指挥家: "conductor",
+      指挥家编排: "conductor",
+      roundrobin: "roundrobin",
       轮询: "roundrobin",
+      parallel: "parallel",
       并行: "parallel",
+      集思广益: "parallel",
+      并行集思广益: "parallel",
+      pipeline: "pipeline",
       流水线: "pipeline",
+      debate: "debate",
       辩论: "debate",
+      辩论评审: "debate",
+      self: "self",
       自己: "self",
+      主持人独立作答: "self",
     };
-    const zhPattern = new RegExp(`(选择|模式|mode)[是为：:\\s]+(${Object.keys(zhMap).join("|")})`, "i");
-    const zhMatch = text.match(zhPattern);
-    if (zhMatch?.[2]) {
-      const mode = zhMap[zhMatch[2]!]!;
+    const keys = Object.keys(aliases).sort((a, b) => b.length - a.length);
+    const pattern = new RegExp(`(?:选择|模式|mode)[是为：:\\s]*(${keys.join("|")})`, "i");
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      const mode = aliases[match[1]!]!;
       return { mode, reason: "从中文回答中识别到模式名称" };
     }
     return null;
