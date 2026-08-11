@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useHubStore } from "../hub/store";
 import type { RoomInfo, RoomModeConfig, SessionInfo } from "../hub/types";
 
@@ -8,12 +8,121 @@ type Dialog =
   | { type: "room-members"; name: string; mode: string; conductorId?: string }
   | null;
 
+type SessionStatus = "online" | "offline" | "busy" | "pinned" | "archived";
+type SessionGroupBy = "none" | "agent" | "cwd";
+type RoomGroupBy = "none" | "mode";
+
+interface SessionListFilter {
+  query: string;
+  agents: Set<string>;
+  cwds: Set<string>;
+  statuses: Set<SessionStatus>;
+  groupBy: SessionGroupBy;
+}
+
+interface RoomListFilter {
+  query: string;
+  modes: Set<string>;
+  groupBy: RoomGroupBy;
+  showArchived: boolean;
+}
+
+const SESSION_STATUS_LABELS: Record<SessionStatus, string> = {
+  online: "在线",
+  offline: "离线",
+  busy: "忙碌",
+  pinned: "置顶",
+  archived: "归档",
+};
+
+const GROUP_BY_LABELS: Record<SessionGroupBy | RoomGroupBy, string> = {
+  none: "不分组",
+  agent: "按 Agent",
+  cwd: "按目录",
+  mode: "按模式",
+};
+
+const MODE_LABELS: Record<string, string> = {
+  mention: "普通群",
+  conductor: "指挥家",
+  roundrobin: "轮询",
+  parallel: "并行",
+  pipeline: "流水线",
+  debate: "辩论",
+  auto: "自动",
+};
+
+function truncatePath(path: string, maxLen = 40): string {
+  if (path.length <= maxLen) return path;
+  const tail = path.slice(-(maxLen - 3));
+  const idx = tail.indexOf("/");
+  return idx > 0 ? `...${tail.slice(idx)}` : `...${tail}`;
+}
+
+function toggleSet<T extends string>(set: Set<T>, value: T): Set<T> {
+  const next = new Set(set);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+
+function sessionStatuses(s: SessionInfo, pinnedIds: string[]): SessionStatus[] {
+  const st: SessionStatus[] = [];
+  if (s.archived) st.push("archived");
+  if (s.offline) st.push("offline");
+  else if (s.busy) st.push("busy");
+  else if (!s.archived) st.push("online");
+  if (pinnedIds.includes(s.sessionId)) st.push("pinned");
+  return st;
+}
+
+function isSessionStatus(s: string): s is SessionStatus {
+  return ["online", "offline", "busy", "pinned", "archived"].includes(s);
+}
+
+interface ActiveChip {
+  kind: "session" | "room";
+  key: string;
+  label: string;
+}
+
+function buildActiveSessionChips(filter: SessionListFilter, agents: string[], cwds: string[]): ActiveChip[] {
+  const chips: ActiveChip[] = [];
+  if (filter.query.trim()) chips.push({ kind: "session", key: "query", label: `搜索: ${filter.query.trim()}` });
+  if (filter.groupBy !== "none") chips.push({ kind: "session", key: "groupBy", label: `分组: ${GROUP_BY_LABELS[filter.groupBy]}` });
+  for (const a of agents) if (filter.agents.has(a)) chips.push({ kind: "session", key: a, label: a });
+  for (const c of cwds) if (filter.cwds.has(c)) chips.push({ kind: "session", key: c, label: truncatePath(c) });
+  for (const st of Array.from(filter.statuses)) chips.push({ kind: "session", key: st, label: SESSION_STATUS_LABELS[st] });
+  return chips;
+}
+
+function buildActiveRoomChips(filter: RoomListFilter, modes: string[], archivedCount: number): ActiveChip[] {
+  const chips: ActiveChip[] = [];
+  if (filter.query.trim()) chips.push({ kind: "room", key: "query", label: `搜索: ${filter.query.trim()}` });
+  if (filter.groupBy !== "none") chips.push({ kind: "room", key: "groupBy", label: `分组: ${GROUP_BY_LABELS[filter.groupBy]}` });
+  if (filter.showArchived && archivedCount > 0) chips.push({ kind: "room", key: "showArchived", label: `归档 (${archivedCount})` });
+  for (const m of modes) if (filter.modes.has(m)) chips.push({ kind: "room", key: m, label: MODE_LABELS[m] ?? m });
+  return chips;
+}
+
 export function SessionListScreen() {
   const store = useHubStore();
   const [query, setQuery] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
   const [batch, setBatch] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [sessionFilter, setSessionFilter] = useState<SessionListFilter>({
+    query: "",
+    agents: new Set(),
+    cwds: new Set(),
+    statuses: new Set(),
+    groupBy: "none",
+  });
+  const [roomFilter, setRoomFilter] = useState<RoomListFilter>({
+    query: "",
+    modes: new Set(),
+    groupBy: "none",
+    showArchived: false,
+  });
 
   useEffect(() => {
     if (query.trim()) {
@@ -22,39 +131,120 @@ export function SessionListScreen() {
     } else {
       store.search("");
     }
-  }, [query]);
+  }, [query, store]);
 
   useEffect(() => {
     if (!batch) store.clearSelection();
-  }, [batch]);
+  }, [batch, store]);
 
-  const visibleSessions = useMemo(() => {
-    const pinned = new Set(store.pinnedIds);
-    const list = store.sessions.filter((s) => (showArchived ? true : !s.archived));
-    return list.sort((a, b) => {
-      const pa = pinned.has(a.sessionId) ? 1 : 0;
-      const pb = pinned.has(b.sessionId) ? 1 : 0;
-      if (pa !== pb) return pb - pa;
-      return a.name.localeCompare(b.name);
-    });
-  }, [store.sessions, store.pinnedIds, showArchived]);
+  const availableAgents = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of store.sessions) if (s.agent) set.add(s.agent);
+    return Array.from(set).sort();
+  }, [store.sessions]);
 
-  const archived = useMemo(
-    () => store.sessions.filter((s) => s.archived),
-    [store.sessions],
-  );
+  const availableCwds = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of store.sessions) if (s.cwd) set.add(s.cwd);
+    return Array.from(set).sort();
+  }, [store.sessions]);
 
-  const visibleRooms = useMemo(
-    () => store.rooms.filter((r) => (showArchived ? true : !r.archived)),
-    [store.rooms, showArchived],
-  );
+  const availableModes = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of store.rooms) if (r.mode) set.add(r.mode);
+    return Array.from(set).sort();
+  }, [store.rooms]);
 
-  const archivedRooms = useMemo(
-    () => store.rooms.filter((r) => r.archived),
-    [store.rooms],
-  );
+  const sessionGroups = useMemo(() => {
+    const q = sessionFilter.query.trim().toLowerCase();
+    const list = store.sessions
+      .filter((s) => {
+        if (sessionFilter.agents.size && !sessionFilter.agents.has(s.agent)) return false;
+        if (sessionFilter.cwds.size && !sessionFilter.cwds.has(s.cwd)) return false;
+        const st = sessionStatuses(s, store.pinnedIds);
+        if (sessionFilter.statuses.size && !Array.from(sessionFilter.statuses).some((status) => st.includes(status))) return false;
+        if (q) {
+          const hay = `${s.name} ${s.cwd} ${s.agent} ${store.sessionOrigin(s)}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.archived !== b.archived) return a.archived ? 1 : -1;
+        const pa = store.pinnedIds.includes(a.sessionId) ? 1 : 0;
+        const pb = store.pinnedIds.includes(b.sessionId) ? 1 : 0;
+        if (pa !== pb) return pb - pa;
+        return a.name.localeCompare(b.name);
+      });
+    if (sessionFilter.groupBy === "none") return [{ title: "", sessions: list }];
+    const map = new Map<string, SessionInfo[]>();
+    for (const s of list) {
+      const key = sessionFilter.groupBy === "agent" ? s.agent : s.cwd;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(s);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([title, sessions]) => ({ title, sessions }));
+  }, [store.sessions, store.pinnedIds, store.connections, sessionFilter, store.sessionOrigin]);
+
+  const roomGroups = useMemo(() => {
+    const q = roomFilter.query.trim().toLowerCase();
+    const list = store.rooms
+      .filter((r) => {
+        if (r.archived && !roomFilter.showArchived) return false;
+        if (roomFilter.modes.size && !roomFilter.modes.has(r.mode)) return false;
+        if (q) {
+          const members = r.members.map((m) => m[1]).join(" ").toLowerCase();
+          const modeLabel = r.mode.toLowerCase();
+          const hay = `${r.name} ${modeLabel} ${members}`;
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (roomFilter.groupBy === "none") return [{ title: "", rooms: list }];
+    const map = new Map<string, RoomInfo[]>();
+    for (const r of list) {
+      const key = r.mode;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(r);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([title, rooms]) => ({ title, rooms }));
+  }, [store.rooms, roomFilter]);
 
   const inSearch = query.trim() !== "";
+  const archivedRoomCount = useMemo(() => store.rooms.filter((r) => r.archived).length, [store.rooms]);
+  const [showFilter, setShowFilter] = useState(false);
+
+  const activeSessionChips = useMemo(
+    () => buildActiveSessionChips(sessionFilter, availableAgents, availableCwds),
+    [sessionFilter, availableAgents, availableCwds],
+  );
+  const activeRoomChips = useMemo(
+    () => buildActiveRoomChips(roomFilter, availableModes, archivedRoomCount),
+    [roomFilter, availableModes, archivedRoomCount],
+  );
+  const activeChips = [...activeSessionChips, ...activeRoomChips];
+
+  const onRemoveChip = (kind: "session" | "room", key: string) => {
+    if (kind === "session") {
+      const f = sessionFilter;
+      if (key === "query") setSessionFilter({ ...f, query: "" });
+      else if (key === "groupBy") setSessionFilter({ ...f, groupBy: "none" });
+      else if (f.agents.has(key)) setSessionFilter({ ...f, agents: toggleSet(f.agents, key) });
+      else if (f.cwds.has(key)) setSessionFilter({ ...f, cwds: toggleSet(f.cwds, key) });
+      else if (isSessionStatus(key)) setSessionFilter({ ...f, statuses: toggleSet(f.statuses, key) });
+    } else {
+      const f = roomFilter;
+      if (key === "query") setRoomFilter({ ...f, query: "" });
+      else if (key === "groupBy") setRoomFilter({ ...f, groupBy: "none" });
+      else if (key === "showArchived") setRoomFilter({ ...f, showArchived: false });
+      else if (f.modes.has(key)) setRoomFilter({ ...f, modes: toggleSet(f.modes, key) });
+    }
+  };
 
   const selectAll = () => {
     const allS = store.sessions.map((s) => s.sessionId);
@@ -83,10 +273,7 @@ export function SessionListScreen() {
   const onBatchDelete = () => {
     const { sessions, rooms } = store.selectedIds;
     if (!sessions.length && !rooms.length) return;
-    if (
-      !confirm(`确认删除选中的 ${sessions.length} 个会话和 ${rooms.length} 个群？此操作不可撤销。`)
-    )
-      return;
+    if (!confirm(`确认删除选中的 ${sessions.length} 个会话和 ${rooms.length} 个群？此操作不可撤销。`)) return;
     void store.batchDelete(sessions, rooms);
   };
 
@@ -103,8 +290,26 @@ export function SessionListScreen() {
         <button onClick={() => setBatch(!batch)}>{batch ? "退出批量" : "批量"}</button>
         <button onClick={() => setDialog({ type: "session" })}>＋会话</button>
         <button onClick={() => setDialog({ type: "room" })}>＋群聊</button>
+        <button onClick={() => setShowFilter(true)}>筛选</button>
         <button onClick={() => useHubStore.setState({ screen: "settings" })}>设置</button>
       </div>
+
+      {activeChips.length > 0 && (
+        <div className="active-filters">
+          {activeChips.map((c) => (
+            <FilterChip
+              key={c.kind + c.key}
+              selected
+              onClick={() => onRemoveChip(c.kind, c.key)}
+              label={
+                <>
+                  {c.label} <span className="close">×</span>
+                </>
+              }
+            />
+          ))}
+        </div>
+      )}
 
       {batch && (
         <div className="batch-bar">
@@ -129,38 +334,40 @@ export function SessionListScreen() {
         <>
           <section>
             <h2>
-              会话 ({visibleSessions.length})
-              {archived.length > 0 && (
-                <button
-                  className="secondary archived-toggle"
-                  onClick={() => setShowArchived(!showArchived)}
-                >
-                  {showArchived ? "隐藏归档" : `归档 (${archived.length})`}
-                </button>
-              )}
+              会话 ({sessionGroups.reduce((sum, g) => sum + g.sessions.length, 0)})
             </h2>
             <div className="list">
-              {visibleSessions.map((s) => (
-                <SessionCard key={s.sessionId} s={s} batch={batch} />
+              {sessionGroups.map((g) => (
+                <div key={g.title || "_"}>
+                  {g.title && (
+                    <div className="group-header">
+                      {sessionFilter.groupBy === "cwd" ? truncatePath(g.title) : g.title} ({g.sessions.length})
+                    </div>
+                  )}
+                  {g.sessions.map((s) => (
+                    <SessionCard key={s.sessionId} s={s} batch={batch} />
+                  ))}
+                </div>
               ))}
             </div>
           </section>
 
           <section>
             <h2>
-              群聊 ({visibleRooms.length})
-              {archivedRooms.length > 0 && (
-                <button
-                  className="secondary archived-toggle"
-                  onClick={() => setShowArchived(!showArchived)}
-                >
-                  {showArchived ? "隐藏归档" : `归档 (${archivedRooms.length})`}
-                </button>
-              )}
+              群聊 ({roomGroups.reduce((sum, g) => sum + g.rooms.length, 0)})
             </h2>
             <div className="list">
-              {visibleRooms.map((r) => (
-                <RoomCard key={r.roomId} r={r} batch={batch} />
+              {roomGroups.map((g) => (
+                <div key={g.title || "_"}>
+                  {g.title && (
+                    <div className="group-header">
+                      {MODE_LABELS[g.title] ?? g.title} ({g.rooms.length})
+                    </div>
+                  )}
+                  {g.rooms.map((r) => (
+                    <RoomCard key={r.roomId} r={r} batch={batch} />
+                  ))}
+                </div>
               ))}
             </div>
           </section>
@@ -169,6 +376,19 @@ export function SessionListScreen() {
 
       {dialog?.type === "session" && <SessionDialog onClose={() => setDialog(null)} />}
       {dialog?.type === "room" && <RoomDialog onClose={() => setDialog(null)} />}
+      {showFilter && (
+        <FilterSheet
+          sessionFilter={sessionFilter}
+          roomFilter={roomFilter}
+          onSessionChange={setSessionFilter}
+          onRoomChange={setRoomFilter}
+          agents={availableAgents}
+          cwds={availableCwds}
+          modes={availableModes}
+          archivedRoomCount={archivedRoomCount}
+          onClose={() => setShowFilter(false)}
+        />
+      )}
     </div>
   );
 }
@@ -208,6 +428,280 @@ function SearchResults({ query }: { query: string }) {
           <span className="subtitle">{highlightText(h.text.slice(0, 120), q)}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function FilterChip({
+  label,
+  selected,
+  onClick,
+  title,
+}: {
+  label: ReactNode;
+  selected: boolean;
+  onClick: () => void;
+  title?: string;
+}) {
+  return (
+    <button className={`chip ${selected ? "active" : ""}`} onClick={onClick} title={title} type="button">
+      {label}
+    </button>
+  );
+}
+
+function FilterSheet({
+  sessionFilter,
+  roomFilter,
+  onSessionChange,
+  onRoomChange,
+  agents,
+  cwds,
+  modes,
+  archivedRoomCount,
+  onClose,
+}: {
+  sessionFilter: SessionListFilter;
+  roomFilter: RoomListFilter;
+  onSessionChange: (f: SessionListFilter) => void;
+  onRoomChange: (f: RoomListFilter) => void;
+  agents: string[];
+  cwds: string[];
+  modes: string[];
+  archivedRoomCount: number;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<"session" | "room">("session");
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <div className="dialog filter-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="filter-sheet-tabs">
+          <button className={tab === "session" ? "active" : ""} onClick={() => setTab("session")}>
+            会话
+          </button>
+          <button className={tab === "room" ? "active" : ""} onClick={() => setTab("room")}>
+            群聊
+          </button>
+          <button className="secondary" onClick={onClose} style={{ marginLeft: "auto" }}>
+            关闭
+          </button>
+        </div>
+
+        {tab === "session" ? (
+          <FilterSheetSession
+            filter={sessionFilter}
+            onChange={onSessionChange}
+            agents={agents}
+            cwds={cwds}
+          />
+        ) : (
+          <FilterSheetRoom
+            filter={roomFilter}
+            onChange={onRoomChange}
+            modes={modes}
+            archivedCount={archivedRoomCount}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilterSheetSession({
+  filter,
+  onChange,
+  agents,
+  cwds,
+}: {
+  filter: SessionListFilter;
+  onChange: (f: SessionListFilter) => void;
+  agents: string[];
+  cwds: string[];
+}) {
+  const isFiltered =
+    filter.query.trim() ||
+    filter.groupBy !== "none" ||
+    filter.statuses.size > 0 ||
+    filter.agents.size > 0 ||
+    filter.cwds.size > 0;
+
+  return (
+    <div className="filter-sheet-body">
+      <input
+        className="filter-query"
+        placeholder="按名称、目录或 Agent 过滤…"
+        value={filter.query}
+        onChange={(e) => onChange({ ...filter, query: e.currentTarget.value })}
+      />
+
+      <div className="filter-section">
+        <span className="chip-label">分组</span>
+        <div className="chips">
+          {(["none", "agent", "cwd"] as SessionGroupBy[]).map((g) => (
+            <FilterChip
+              key={g}
+              label={GROUP_BY_LABELS[g]}
+              selected={filter.groupBy === g}
+              onClick={() => onChange({ ...filter, groupBy: g })}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="filter-section">
+        <span className="chip-label">状态</span>
+        <div className="chips">
+          {(["online", "offline", "busy", "pinned", "archived"] as SessionStatus[]).map((st) => (
+            <FilterChip
+              key={st}
+              label={SESSION_STATUS_LABELS[st]}
+              selected={filter.statuses.has(st)}
+              onClick={() => onChange({ ...filter, statuses: toggleSet(filter.statuses, st) })}
+            />
+          ))}
+        </div>
+      </div>
+
+      {agents.length > 0 && (
+        <div className="filter-section">
+          <span className="chip-label">Agent</span>
+          <div className="chips">
+            {agents.map((a) => (
+              <FilterChip
+                key={a}
+                label={a}
+                selected={filter.agents.has(a)}
+                onClick={() => onChange({ ...filter, agents: toggleSet(filter.agents, a) })}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {cwds.length > 0 && (
+        <div className="filter-section">
+          <span className="chip-label">工作目录</span>
+          <div className="chips">
+            {cwds.map((c) => (
+              <FilterChip
+                key={c}
+                label={truncatePath(c)}
+                title={c}
+                selected={filter.cwds.has(c)}
+                onClick={() => onChange({ ...filter, cwds: toggleSet(filter.cwds, c) })}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isFiltered && (
+        <div className="filter-section">
+          <button
+            className="secondary tiny"
+            onClick={() =>
+              onChange({
+                ...filter,
+                query: "",
+                agents: new Set(),
+                cwds: new Set(),
+                statuses: new Set(),
+                groupBy: "none",
+              })
+            }
+          >
+            重置
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterSheetRoom({
+  filter,
+  onChange,
+  modes,
+  archivedCount,
+}: {
+  filter: RoomListFilter;
+  onChange: (f: RoomListFilter) => void;
+  modes: string[];
+  archivedCount: number;
+}) {
+  const isFiltered =
+    filter.query.trim() ||
+    filter.groupBy !== "none" ||
+    filter.modes.size > 0 ||
+    filter.showArchived;
+
+  return (
+    <div className="filter-sheet-body">
+      <input
+        className="filter-query"
+        placeholder="按名称、成员或模式过滤…"
+        value={filter.query}
+        onChange={(e) => onChange({ ...filter, query: e.currentTarget.value })}
+      />
+
+      <div className="filter-section">
+        <span className="chip-label">分组</span>
+        <div className="chips">
+          {(["none", "mode"] as RoomGroupBy[]).map((g) => (
+            <FilterChip
+              key={g}
+              label={GROUP_BY_LABELS[g]}
+              selected={filter.groupBy === g}
+              onClick={() => onChange({ ...filter, groupBy: g })}
+            />
+          ))}
+        </div>
+      </div>
+
+      {archivedCount > 0 && (
+        <div className="filter-section">
+          <FilterChip
+            label={`归档 (${archivedCount})`}
+            selected={filter.showArchived}
+            onClick={() => onChange({ ...filter, showArchived: !filter.showArchived })}
+          />
+        </div>
+      )}
+
+      {modes.length > 0 && (
+        <div className="filter-section">
+          <span className="chip-label">模式</span>
+          <div className="chips">
+            {modes.map((m) => (
+              <FilterChip
+                key={m}
+                label={MODE_LABELS[m] ?? m}
+                selected={filter.modes.has(m)}
+                onClick={() => onChange({ ...filter, modes: toggleSet(filter.modes, m) })}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isFiltered && (
+        <div className="filter-section">
+          <button
+            className="secondary tiny"
+            onClick={() =>
+              onChange({
+                ...filter,
+                query: "",
+                modes: new Set(),
+                groupBy: "none",
+                showArchived: false,
+              })
+            }
+          >
+            重置
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -263,16 +757,6 @@ function SessionCard({ s, batch }: { s: SessionInfo; batch: boolean }) {
     </div>
   );
 }
-
-const MODE_LABELS: Record<string, string> = {
-  mention: "普通群",
-  conductor: "指挥家",
-  roundrobin: "轮询",
-  parallel: "并行",
-  pipeline: "流水线",
-  debate: "辩论",
-  auto: "自动",
-};
 
 function RoomCard({ r, batch }: { r: RoomInfo; batch: boolean }) {
   const store = useHubStore();
@@ -355,22 +839,13 @@ function SessionDialog({ onClose }: { onClose: () => void }) {
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
         <h3>新建会话</h3>
         <FormRow label="工作目录">
-          <input
-            value={form.cwd}
-            onChange={(e) => setForm({ ...form, cwd: e.currentTarget.value })}
-          />
+          <input value={form.cwd} onChange={(e) => setForm({ ...form, cwd: e.currentTarget.value })} />
         </FormRow>
         <FormRow label="名称">
-          <input
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.currentTarget.value })}
-          />
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.currentTarget.value })} />
         </FormRow>
         <FormRow label="连接">
-          <select
-            value={form.connectionId}
-            onChange={(e) => setForm({ ...form, connectionId: e.currentTarget.value })}
-          >
+          <select value={form.connectionId} onChange={(e) => setForm({ ...form, connectionId: e.currentTarget.value })}>
             <option value="">请选择</option>
             {store.connections
               .filter((c) => c.online || c.local)
@@ -396,10 +871,7 @@ function SessionDialog({ onClose }: { onClose: () => void }) {
           <button className="secondary" onClick={onClose}>
             取消
           </button>
-          <button
-            onClick={submit}
-            disabled={!form.cwd || !form.name || !form.connectionId || !selectedConn}
-          >
+          <button onClick={submit} disabled={!form.cwd || !form.name || !form.connectionId || !selectedConn}>
             创建
           </button>
         </div>
@@ -621,7 +1093,9 @@ function RoomDialog({ onClose }: { onClose: () => void }) {
                 if (!s) return null;
                 return (
                   <div key={sid} className="pipeline-item">
-                    <span className="pipeline-name">{i + 1}. {s.name}</span>
+                    <span className="pipeline-name">
+                      {i + 1}. {s.name}
+                    </span>
                     <div className="pipeline-actions">
                       <button
                         className="secondary tiny"

@@ -1377,3 +1377,94 @@ html[data-theme="dark"] .search-highlight {
 .tier-low { color: var(--primary); }
 .tier-med { color: var(--warn); }
 .tier-high { color: var(--danger); }
+
+/* Active filter chips */
+.active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  margin: 0 0 0.75rem;
+  background: var(--surface-container-low);
+  border-radius: var(--radius-md);
+}
+
+.active-filters .chip .close {
+  font-weight: 700;
+  margin-left: 0.2rem;
+}
+
+/* Filter sheet dialog */
+.filter-sheet {
+  width: 560px;
+  max-width: 92vw;
+  padding: 0;
+  overflow: hidden;
+}
+
+.filter-sheet-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-container);
+}
+
+.filter-sheet-tabs button {
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--radius-md);
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.filter-sheet-tabs button.active {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+
+.filter-sheet-body {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.filter-query {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.filter-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.filter-section .chip-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* Group header */
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  margin: 0.35rem 0;
+  background: var(--surface-variant);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
