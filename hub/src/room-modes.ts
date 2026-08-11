@@ -341,21 +341,26 @@ export class RoomModeManager {
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
-      if (!room) return true;
+      if (!room) {
+        logWarn("room-modes auto", `auto 决策完成但房间不存在：${autoCtx.roomId}`);
+        return true;
+      }
       const decision = this.parseAutoDecision(output);
       const label = MODE_LABELS[decision.mode] ?? decision.mode;
+      logWarn("room-modes auto", `解析决策：mode=${decision.mode}，reason=${decision.reason}`);
       this.setSubMode(room.roomId, decision.mode, this.activeSpeakerFor(room, decision.mode, decision.params), decision.reason);
       this.notice({
         roomId: room.roomId,
         message: `🎛️ 本轮自动选择：${label}${decision.reason ? ` —— ${decision.reason}` : ""}`,
       });
-      await this.executeMode(room, decision.mode, autoCtx.text, {
+      const result = await this.executeMode(room, decision.mode, autoCtx.text, {
         note: autoCtx.note,
         quote: autoCtx.quote,
         content: autoCtx.content,
         sessionNote: autoCtx.sessionNote,
         params: decision.params,
       });
+      logWarn("room-modes auto", `executeMode 完成：sent=[${result.sent.join(", ")}]，skipped=[${result.skipped.join(", ")}]`);
       this.emitFlowUpdate(room.roomId);
       return true;
     }
@@ -967,9 +972,18 @@ export class RoomModeManager {
     }
     this.setSubMode(room.roomId, "self", room.conductorId, undefined);
     this.notice({ roomId: room.roomId, message: `🎙️ 自动选择：主持人独立作答` });
-    const prompt = this.buildPromptContent(room, text, room.conductorId, options);
-    this.agent.prompt(room.conductorId, prompt).catch((err) => {
+    const selfNote = "本轮由你直接作答，请直接回复用户消息，不要输出任何 JSON 或模式选择。";
+    const promptOptions: PromptOptions = {
+      ...options,
+      note: options?.note ? `${options.note}\n\n${selfNote}` : selfNote,
+    };
+    const prompt = this.buildPromptContent(room, text, room.conductorId, promptOptions);
+    logWarn("room-modes self", `正在向主持人 ${room.conductorId} 发送 self 应答 prompt`);
+    this.agent.prompt(room.conductorId, prompt).then(() => {
+      logWarn("room-modes self", `主持人 ${room.conductorId} self 应答 prompt 已完成`);
+    }).catch((err) => {
       logError("room-modes self prompt", err);
+      this.notice({ roomId: room.roomId, message: `主持人独立作答启动失败：${err instanceof Error ? err.message : String(err)}` });
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
   }
@@ -1073,15 +1087,15 @@ export class RoomModeManager {
       return { ...fallback, reason: "决策输出为空" };
     }
 
-    const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fenceMatch?.[1]) {
-      const parsed = this.tryParseAutoJson(fenceMatch[1].trim(), "code fence");
+    const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1]!.trim()).filter(Boolean);
+    for (let i = fences.length - 1; i >= 0; i--) {
+      const parsed = this.tryParseAutoJson(fences[i]!, `code fence #${i + 1}`);
       if (parsed) return parsed;
     }
 
-    const objectText = this.extractJsonObject(text);
-    if (objectText) {
-      const parsed = this.tryParseAutoJson(objectText, "raw json object");
+    const objects = this.extractJsonObjects(text);
+    for (let i = objects.length - 1; i >= 0; i--) {
+      const parsed = this.tryParseAutoJson(objects[i]!, `raw json object #${i + 1}`);
       if (parsed) return parsed;
     }
 
@@ -1149,36 +1163,41 @@ export class RoomModeManager {
     return null;
   }
 
-  private extractJsonObject(text: string): string | null {
-    const start = text.indexOf("{");
-    if (start < 0) return null;
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (inString) {
-        if (escape) {
-          escape = false;
-        } else if (ch === "\\") {
-          escape = true;
-        } else if (ch === '"') {
-          inString = false;
-        }
-      } else {
-        if (ch === '"') {
-          inString = true;
-        } else if (ch === "{") {
-          depth++;
-        } else if (ch === "}") {
-          depth--;
-          if (depth === 0) {
-            return text.slice(start, i + 1);
+  private extractJsonObjects(text: string): string[] {
+    const objects: string[] = [];
+    for (let start = 0; start < text.length; start++) {
+      start = text.indexOf("{", start);
+      if (start < 0) break;
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (inString) {
+          if (escape) {
+            escape = false;
+          } else if (ch === "\\") {
+            escape = true;
+          } else if (ch === '"') {
+            inString = false;
+          }
+        } else {
+          if (ch === '"') {
+            inString = true;
+          } else if (ch === "{") {
+            depth++;
+          } else if (ch === "}") {
+            depth--;
+            if (depth === 0) {
+              objects.push(text.slice(start, i + 1));
+              start = i;
+              break;
+            }
           }
         }
       }
     }
-    return null;
+    return objects;
   }
 
   private isValidMode(mode: string): mode is RuntimeMode {
