@@ -94,6 +94,7 @@ export function ChatScreen() {
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [suggestOpen, setSuggestOpen] = useState(true);
   const [suggestIndex, setSuggestIndex] = useState(0);
+  const [lightbox, setLightbox] = useState<{ src: string; name?: string } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -189,16 +190,31 @@ export function ChatScreen() {
         e.preventDefault();
         setSearchOpen(true);
       }
-      if (e.key === "Escape" && searchOpen) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "/") {
         e.preventDefault();
-        setSearchOpen(false);
-        setInChatSearchQuery("");
-        setChatSearchMatchIndex(-1);
+        inputRef.current?.focus();
+      }
+      if (e.key === "Escape") {
+        if (searchOpen) {
+          e.preventDefault();
+          setSearchOpen(false);
+          setInChatSearchQuery("");
+          setChatSearchMatchIndex(-1);
+        } else if (suggestOpen) {
+          e.preventDefault();
+          setSuggestOpen(false);
+        } else if (cmdOpen) {
+          e.preventDefault();
+          setCmdOpen(false);
+        } else {
+          e.preventDefault();
+          store.backToList();
+        }
       }
     };
     document.addEventListener("keydown", onDocKeyDown);
     return () => document.removeEventListener("keydown", onDocKeyDown);
-  }, [searchOpen]);
+  }, [searchOpen, suggestOpen, cmdOpen, store]);
 
   useLayoutEffect(() => {
     const el = inputRef.current;
@@ -432,6 +448,7 @@ export function ChatScreen() {
               }
               highlight={inChatSearchQuery}
               isCurrentMatch={currentMatchIndex === i}
+              onImageClick={(src, name) => setLightbox({ src, name })}
             />
           );
         })}
@@ -479,7 +496,11 @@ export function ChatScreen() {
           <div className="attachments-bar">
             {store.pendingAttachments.map((a, i) => (
               <span key={i} className="attachment-chip">
-                <img src={`data:${a.mimeType};base64,${a.base64}`} alt="" />
+                <img
+                    src={`data:${a.mimeType};base64,${a.base64}`}
+                    alt=""
+                    onClick={() => setLightbox({ src: `data:${a.mimeType};base64,${a.base64}`, name: a.name })}
+                  />
                 {a.name}
                 <button className="tiny secondary" onClick={() => store.removeAttachment(a)}>
                   ✕
@@ -592,6 +613,15 @@ export function ChatScreen() {
       </div>
 
       {store.showModelPicker && <ModelPicker />}
+
+      {lightbox && (
+        <div className="image-lightbox" onClick={() => setLightbox(null)}>
+          <img src={lightbox.src} alt={lightbox.name} onClick={(e) => e.stopPropagation()} />
+          <button className="lightbox-close" onClick={() => setLightbox(null)}>
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -612,6 +642,7 @@ function ChatMessage({
   onToggleThought,
   highlight,
   isCurrentMatch,
+  onImageClick,
 }: {
   item: ChatItem;
   showAuthor: boolean;
@@ -620,6 +651,7 @@ function ChatMessage({
   onToggleThought: () => void;
   highlight?: string;
   isCurrentMatch?: boolean;
+  onImageClick?: (src: string, name?: string) => void;
 }) {
   const store = useHubStore();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -696,6 +728,7 @@ function ChatMessage({
             className="message-image"
             src={`data:${a.mimeType};base64,${a.base64}`}
             alt={a.name}
+            onClick={() => onImageClick?.(`data:${a.mimeType};base64,${a.base64}`, a.name)}
           />
         ))}
       </div>

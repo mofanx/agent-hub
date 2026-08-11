@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useHubStore } from "../hub/store";
 import type { RoomInfo, RoomModeConfig, SessionInfo } from "../hub/types";
 
@@ -123,6 +123,7 @@ export function SessionListScreen() {
     groupBy: "none",
     showArchived: false,
   });
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (query.trim()) {
@@ -219,6 +220,27 @@ export function SessionListScreen() {
   const archivedRoomCount = useMemo(() => store.rooms.filter((r) => r.archived).length, [store.rooms]);
   const [showFilter, setShowFilter] = useState(false);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "n") {
+        e.preventDefault();
+        setDialog({ type: "session" });
+      }
+      if (e.key === "Escape" && (query || showFilter)) {
+        if (showFilter) setShowFilter(false);
+        setQuery("");
+        setSessionFilter({ query: "", agents: new Set(), cwds: new Set(), statuses: new Set(), groupBy: "none" });
+        setRoomFilter({ query: "", modes: new Set(), groupBy: "none", showArchived: false });
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [query, showFilter]);
+
   const activeSessionChips = useMemo(
     () => buildActiveSessionChips(sessionFilter, availableAgents, availableCwds),
     [sessionFilter, availableAgents, availableCwds],
@@ -281,10 +303,11 @@ export function SessionListScreen() {
     <div className="session-list">
       <div className="session-toolbar">
         <input
+          ref={searchInputRef}
           className="search"
           value={query}
           onChange={(e) => setQuery(e.currentTarget.value)}
-          placeholder="搜索历史消息…"
+          placeholder="搜索历史消息… (Ctrl+K)"
         />
         <button onClick={() => void store.refreshAll()}>刷新</button>
         <button onClick={() => setBatch(!batch)}>{batch ? "退出批量" : "批量"}</button>

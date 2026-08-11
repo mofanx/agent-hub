@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useHubStore } from "../hub/store";
 import type { ConnectionInfo, RoleInfo } from "../hub/types";
+import { version } from "../../package.json";
 
 export function SettingsScreen() {
   const store = useHubStore();
@@ -80,6 +81,16 @@ function GeneralSettings() {
             关闭
           </button>
           <button onClick={() => toggleBypass()}>切换</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>关于</h3>
+        <p className="subtitle">版本 {version}</p>
+        <div className="form-row">
+          <button onClick={() => window.open("https://github.com/mofanx/agent-hub", "_blank")}>
+            打开仓库
+          </button>
         </div>
       </div>
     </div>
