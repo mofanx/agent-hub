@@ -316,10 +316,6 @@ export class ConductorOrchestrator {
         this.notice({ roomId: flow.roomId, message: `派工跳过：未知成员 ${t.to}` });
         continue;
       }
-      if (member.sessionId === room.conductorId) {
-        this.notice({ roomId: flow.roomId, message: `派工跳过：${member.name} 是指挥家` });
-        continue;
-      }
       const taskId = t.id?.trim() || `t${i + 1}`;
       idMap.set(String(i), taskId);
       flow.tasks.set(taskId, {
@@ -399,7 +395,7 @@ export class ConductorOrchestrator {
     const out: FlowTask[] = [];
     for (const t of flow.tasks.values()) {
       if (t.status !== "pending") continue;
-      const depsDone = t.dependsOn.every((d) => doneIds.has(d));
+      const depsDone = t.dependsOn.every((d) => doneIds.has(d) || !flow.tasks.has(d));
       if (!depsDone) continue;
       if (runningSessions.has(t.sessionId)) continue;
       out.push(t);
