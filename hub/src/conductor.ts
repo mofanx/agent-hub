@@ -727,7 +727,7 @@ function parseTasks(output: string, room: Room): { id?: string; to: string; task
   return null;
 }
 
-function resolveMemberByString(
+export function resolveMemberByString(
   room: Room,
   raw: string,
 ): { sessionId: string; name: string } | undefined {

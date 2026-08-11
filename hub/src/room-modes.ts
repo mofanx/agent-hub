@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Room, RoomManager, RoomMode } from "./room.js";
-import { ConductorOrchestrator } from "./conductor.js";
+import { ConductorOrchestrator, parseTasks, resolveMemberByString } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
@@ -32,6 +32,37 @@ type PromptOptions = {
   sessionNote?: ((sessionId: string) => string | undefined) | undefined;
   params?: Record<string, unknown> | undefined;
 };
+
+export function parseTaskCommand(
+  text: string,
+): { to: string; task: string; id: string; dependsOn: string[] }[] | undefined {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("/task")) return undefined;
+  const after = trimmed.slice("/task".length).trimStart();
+  if (!after) return [];
+  const segments = after.split(/[;；\n]+/);
+  const tasks: { to: string; task: string; id: string; dependsOn: string[] }[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]!.trim();
+    if (!seg) continue;
+    const match = seg.match(/^@([^\s;；\n]+)\s+([\s\S]*)/);
+    if (!match) continue;
+    const to = match[1]!.trim();
+    let raw = match[2]!.trim();
+    const depends: string[] = [];
+    const depMatch = raw.match(/\((?:depends|dependsOn):\s*([^)]+)\)/i);
+    if (depMatch) {
+      const depIds = depMatch[1]!
+        .split(/[,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      depends.push(...depIds);
+      raw = raw.replace(depMatch[0], "").trim();
+    }
+    tasks.push({ to, task: raw, id: `t${i + 1}`, dependsOn: depends });
+  }
+  return tasks.length > 0 ? tasks : [];
+}
 
 type AutoDecisionContext = PromptOptions & {
   roomId: string;
@@ -542,6 +573,24 @@ export class RoomModeManager {
     }
   }
 
+  private splitMentionTasks(room: Room, text: string, targets: string[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const sid of targets) {
+      const name = room.members.find((m) => m.sessionId === sid)?.name;
+      if (!name) continue;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`@${escaped}(?![\\w-])`);
+      const match = re.exec(text);
+      if (!match) continue;
+      const start = match.index + match[0].length;
+      const rest = text.slice(start);
+      const end = rest.search(/[@；;\n]|$/);
+      const task = rest.slice(0, end).trim();
+      if (task) result[sid] = task;
+    }
+    return result;
+  }
+
   private async handleMention(
     room: Room,
     text: string,
@@ -555,6 +604,7 @@ export class RoomModeManager {
     const { targets, mentioned } = paramsTargets.length > 0
       ? { targets: paramsTargets, mentioned: [] }
       : this.rooms.route(room.roomId, text);
+    const segments = this.splitMentionTasks(room, text, targets);
     const sent: string[] = [];
     const skipped: string[] = [];
     for (const sid of targets) {
@@ -562,7 +612,7 @@ export class RoomModeManager {
         skipped.push(sid);
         continue;
       }
-      const prompt = this.buildPromptContent(room, text, sid, options);
+      const prompt = this.buildPromptContent(room, segments[sid] ?? text, sid, options);
       this.agent.prompt(sid, prompt).catch((err) => {
         logError("room-modes mention prompt", err);
       });
@@ -585,32 +635,56 @@ export class RoomModeManager {
       return { sent: [], mentioned: [], skipped: [room.conductorId] };
     }
     this.setSubMode(room.roomId, "conductor", room.conductorId, undefined);
+
+    const paramTasks = Array.isArray(options?.params?.tasks)
+      ? (options.params.tasks as unknown[])
+          .map((t) => {
+            const o = t as Record<string, unknown>;
+            if (typeof o.to !== "string" || typeof o.task !== "string") return null;
+            const result: { to: string; task: string; id?: string; dependsOn?: string[] } = {
+              to: o.to,
+              task: o.task,
+            };
+            if (typeof o.id === "string") result.id = o.id;
+            if (Array.isArray(o.dependsOn)) {
+              result.dependsOn = o.dependsOn.map((s) => String(s)).filter(Boolean);
+            }
+            return result;
+          })
+          .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[] }[]
+      : undefined;
+
+    const jsonTasks = parseTasks(text, room) ?? [];
+    const commandTasks = parseTaskCommand(text) ?? [];
+    const initialTasks =
+      paramTasks?.length ? paramTasks : jsonTasks.length ? jsonTasks : (commandTasks.length ? commandTasks : undefined);
+
     let task = text;
     if (options?.note) task = `${options.note}\n\n${task}`;
     if (options?.quote) {
       task = `${task}\n（用户引用了 ${options.quote.author} 的消息："${options.quote.text}"）`;
     }
-    const initialTasks = Array.isArray(options?.params?.tasks)
-      ? (options.params.tasks as unknown[])
-          .map((t) => {
-            const o = t as Record<string, unknown>;
-            if (typeof o.to !== "string" || typeof o.task !== "string") return null;
-            return {
-              to: o.to,
-              task: o.task,
-              id: typeof o.id === "string" ? o.id : undefined,
-              dependsOn: Array.isArray(o.dependsOn)
-                ? o.dependsOn.map((s) => String(s)).filter(Boolean)
-                : undefined,
-            };
-          })
-          .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[] }[]
-      : undefined;
-    this.conductor.start(room, task, initialTasks).catch((err) => {
+
+    if (initialTasks && initialTasks.length > 0) {
+      const sent = new Set<string>();
+      const skipped: string[] = [];
+      for (const t of initialTasks) {
+        const m = resolveMemberByString(room, t.to);
+        if (m) sent.add(m.sessionId);
+        else skipped.push(t.to);
+      }
+      this.conductor.start(room, task, initialTasks).catch((err) => {
+        logError("room-modes conductor start", err);
+      });
+      return { sent: [...sent], mentioned: [], skipped };
+    }
+
+    this.conductor.start(room, task).catch((err) => {
       logError("room-modes conductor start", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
   }
+
 
   private async handleRoundRobin(
     room: Room,

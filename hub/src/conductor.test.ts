@@ -74,4 +74,5 @@ describe("conductor", () => {
     const file = result.artifacts.find((a) => a.type === "file" && a.path === "src/sort.ts");
     assert.ok(file);
   });
+
 });

@@ -1131,6 +1131,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         note: roomNote,
         quote,
         content,
+        params: req.params as Record<string, unknown>,
         sessionNote: (sid) => sessionLostReplyNote(sid),
       });
       persistState();
