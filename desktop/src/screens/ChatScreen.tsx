@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
@@ -91,6 +91,9 @@ export function ChatScreen() {
   const [inChatSearchQuery, setInChatSearchQuery] = useState("");
   const [chatSearchMatchIndex, setChatSearchMatchIndex] = useState(-1);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [suggestOpen, setSuggestOpen] = useState(true);
+  const [suggestIndex, setSuggestIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -143,15 +146,38 @@ export function ChatScreen() {
   }, [store.currentRoom?.roomId, store.currentSession?.sessionId]);
 
   useEffect(() => {
-    if (inChatSearchQuery) return;
+    if (inChatSearchQuery || !isAtBottom) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [store.chatItems.length, store.chatItems[store.chatItems.length - 1]?.kind, inChatSearchQuery]);
+  }, [store.chatItems.length, store.chatItems[store.chatItems.length - 1]?.kind, inChatSearchQuery, isAtBottom]);
 
   useEffect(() => {
     if (chatSearchMatchIndex < 0) return;
     const el = document.querySelector(".chat-messages .message.current-match");
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [chatSearchMatchIndex, matchPositions, inChatSearchQuery]);
+
+  useEffect(() => {
+    if (store.jumpToAt == null || store.chatItems.length === 0) return;
+    const idx = store.chatItems.findIndex((item) => item.at === store.jumpToAt);
+    if (idx < 0) return;
+    const q = store.jumpQuery.trim().toLowerCase();
+    if (q) {
+      const positions = store.chatItems
+        .map((item, i) => (getItemText(item).toLowerCase().includes(q) ? i : -1))
+        .filter((i) => i >= 0);
+      setInChatSearchQuery(store.jumpQuery);
+      setChatSearchMatchIndex(positions.indexOf(idx));
+      setSearchOpen(true);
+    }
+    const container = messagesRef.current;
+    if (!container) return;
+    const offset = store.historyLoading ? 1 : 0;
+    const el = container.children[idx + offset];
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    store.clearJumpToAt();
+  }, [store.jumpToAt, store.chatItems.length, store.historyLoading]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -174,6 +200,18 @@ export function ChatScreen() {
     return () => document.removeEventListener("keydown", onDocKeyDown);
   }, [searchOpen]);
 
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
+
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    setIsAtBottom(true);
+  };
+
   const onMessagesScroll = useMemo(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     return () => {
@@ -181,7 +219,10 @@ export function ChatScreen() {
       timer = setTimeout(() => {
         timer = null;
         const el = messagesRef.current;
-        if (!el || !store.historyHasMore || store.historyLoading) return;
+        if (!el) return;
+        const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop <= 60;
+        setIsAtBottom(atBottom);
+        if (!store.historyHasMore || store.historyLoading) return;
         if (el.scrollTop <= 40) {
           const method = store.currentRoom ? "room.history" : "session.history";
           const idKey = store.currentRoom ? "roomId" : "sessionId";
@@ -221,6 +262,13 @@ export function ChatScreen() {
     inputRef.current?.focus();
   };
 
+  useEffect(() => {
+    if (mention || (slash && slash.length > 0)) {
+      setSuggestOpen(true);
+      setSuggestIndex(0);
+    }
+  }, [mention, slash]);
+
   const insertCommand = (text: string) => {
     setInput(text);
     setCmdOpen(false);
@@ -253,6 +301,31 @@ export function ChatScreen() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const active = mention || (slash && slash.length > 0);
+    if (active && suggestOpen) {
+      const items = mention ? mention.matches : slash || [];
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSuggestIndex((i) => (i + 1) % items.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSuggestIndex((i) => (i - 1 + items.length) % items.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        if (mention) insertMention(mention.matches[suggestIndex]?.[1] ?? mention.matches[0][1]);
+        else if (slash) insertSlash(slash[suggestIndex]?.name ?? slash[0].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSuggestOpen(false);
+        return;
+      }
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
       send();
@@ -363,6 +436,16 @@ export function ChatScreen() {
           );
         })}
         <div ref={bottomRef} />
+        {!isAtBottom && (
+          <button
+            className="scroll-to-bottom"
+            onClick={scrollToBottom}
+            title="回到底部"
+            type="button"
+          >
+            ↓
+          </button>
+        )}
       </div>
 
       {store.quote && (
@@ -469,23 +552,32 @@ export function ChatScreen() {
               onChange={(e) => setInput(e.currentTarget.value)}
               onKeyDown={onKeyDown}
               placeholder={isRoom ? "群聊消息，@名字 指定成员" : "给 AI 下指令…"}
-              rows={2}
             />
 
-            {mention && (
+            {suggestOpen && mention && (
               <div className="suggest-popup">
-                {mention.matches.map(([sid, name]) => (
-                  <div key={sid} className="suggest-item" onClick={() => insertMention(name)}>
+                {mention.matches.map(([sid, name], i) => (
+                  <div
+                    key={sid}
+                    className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                    onClick={() => insertMention(name)}
+                    onMouseEnter={() => setSuggestIndex(i)}
+                  >
                     @{store.sessionName(sid)}
                   </div>
                 ))}
               </div>
             )}
 
-            {slash && slash.length > 0 && (
+            {suggestOpen && slash && slash.length > 0 && (
               <div className="suggest-popup">
-                {slash.map((c) => (
-                  <div key={c.name} className="suggest-item" onClick={() => insertSlash(c.name)}>
+                {slash.map((c, i) => (
+                  <div
+                    key={c.name}
+                    className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                    onClick={() => insertSlash(c.name)}
+                    onMouseEnter={() => setSuggestIndex(i)}
+                  >
                     /{c.name} — {c.description}
                   </div>
                 ))}

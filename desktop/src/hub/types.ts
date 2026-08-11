@@ -110,6 +110,8 @@ export interface SearchHit {
   scopeId: string;
   author: string;
   text: string;
+  at?: number;
+  id?: number;
 }
 
 export interface TokenUsage {

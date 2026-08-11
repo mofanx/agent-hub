@@ -51,7 +51,10 @@ interface State {
   chatItems: ChatItem[];
   busyIds: string[];
   quote: [string, string] | null;
+  searchQuery: string;
   searchResults: SearchHit[];
+  jumpToAt: number | null;
+  jumpQuery: string;
   selectedIds: SelectedIds;
   itemSeq: number;
   drawerOpen: boolean;
@@ -119,8 +122,9 @@ interface Actions {
     memberRoles?: Record<string, string>,
   ): Promise<void>;
 
-  openChat(session: SessionInfo): void;
-  openRoom(room: RoomInfo): void;
+  openChat(session: SessionInfo, anchorAt?: number): void;
+  openRoom(room: RoomInfo, anchorAt?: number): void;
+  clearJumpToAt(): void;
   resumeSession(session: SessionInfo): Promise<void>;
   archiveSession(session: SessionInfo, archived: boolean): Promise<void>;
   archiveRoom(room: RoomInfo, archived: boolean): Promise<void>;
@@ -154,7 +158,7 @@ interface Actions {
   inScope(sessionId: string): boolean;
   shouldShowInRoom(sessionId: string): boolean;
   applyUpdate(sessionId: string, u: Record<string, unknown>): void;
-  loadHistory(method: string, idKey: string, id: string): Promise<void>;
+  loadHistory(method: string, idKey: string, id: string, anchorAt?: number): Promise<void>;
   loadMoreHistory(method: string, idKey: string, id: string): Promise<void>;
   syncBusyIdsFromList(list: SessionInfo[]): void;
   syncBusyIds(): Promise<void>;
@@ -513,7 +517,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
     chatItems: [],
     busyIds: [],
     quote: null,
+    searchQuery: "",
     searchResults: [],
+    jumpToAt: null,
+    jumpQuery: "",
     selectedIds: { sessions: [], rooms: [] },
     itemSeq: 0,
     drawerOpen: false,
@@ -658,6 +665,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         chatItems: [],
         busyIds: [],
         quote: null,
+        searchQuery: "",
+        searchResults: [],
+        jumpToAt: null,
+        jumpQuery: "",
         connecting: false,
         connectError: null,
         agentStatus: stringsFor(get().lang).notConnected,
@@ -822,7 +833,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    openChat: (session: SessionInfo) => {
+    openChat: (session: SessionInfo, anchorAt?: number) => {
       set({
         currentSession: session,
         currentRoom: null,
@@ -832,10 +843,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historyHasMore: false,
         historyLoading: false,
       });
-      get().loadHistory("session.history", "sessionId", session.sessionId);
+      get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
     },
 
-    openRoom: (room: RoomInfo) => {
+    openRoom: (room: RoomInfo, anchorAt?: number) => {
       set({
         currentRoom: room,
         currentSession: null,
@@ -846,8 +857,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historyHasMore: false,
         historyLoading: false,
       });
-      get().loadHistory("room.history", "roomId", room.roomId);
+      get().loadHistory("room.history", "roomId", room.roomId, anchorAt);
       get().refreshFlow(room.roomId);
+    },
+
+    clearJumpToAt: () => {
+      set({ jumpToAt: null, jumpQuery: "" });
     },
 
     resumeSession: async (session: SessionInfo) => {
@@ -1046,19 +1061,26 @@ export const useHubStore = create<State & Actions>((set, get) => {
             scopeId: String(o.scopeId ?? ""),
             author: String(o.author ?? ""),
             text: String(o.text ?? ""),
+            at: typeof o.at === "number" ? o.at : undefined,
+            id: typeof o.id === "number" ? o.id : undefined,
           } as SearchHit;
         });
-        set({ searchResults: list });
+        set({ searchQuery: query, searchResults: list });
       } catch {}
     },
 
     openSearchHit: (hit) => {
+      const anchorAt = hit.at != null && Number.isFinite(hit.at) ? hit.at : undefined;
+      const q = anchorAt != null ? get().searchQuery : "";
+      if (anchorAt != null) {
+        set({ jumpToAt: anchorAt, jumpQuery: q });
+      }
       if (hit.scope === "session") {
         const s = get().sessions.find((it) => it.sessionId === hit.scopeId);
-        if (s) get().openChat(s);
+        if (s) get().openChat(s, anchorAt);
       } else {
         const r = get().rooms.find((it) => it.roomId === hit.scopeId);
-        if (r) get().openRoom(r);
+        if (r) get().openRoom(r, anchorAt);
       }
     },
 
@@ -1066,6 +1088,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({
         currentSession: null,
         currentRoom: null,
+        jumpToAt: null,
+        jumpQuery: "",
         screen: "sessions",
       });
       get().refreshAll();
@@ -1248,9 +1272,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    loadHistory: async (method, idKey, id) => {
+    loadHistory: async (method, idKey, id, anchorAt) => {
       try {
-        const result = (await getOrCall(method, { [idKey]: id })) as Record<string, unknown>;
+        const params: Record<string, unknown> = { [idKey]: id };
+        if (anchorAt != null && Number.isFinite(anchorAt)) params.anchorAt = anchorAt;
+        const result = (await getOrCall(method, params)) as Record<string, unknown>;
         const entries = ((result.entries as unknown[] | undefined) ?? []).map((it) => {
           const o = it as Record<string, unknown>;
           return {
