@@ -58,7 +58,7 @@ function App() {
         )}
       </div>
       <HubDrawer />
-      <div className="screen">
+      <div key={store.screen} className="screen">
         {store.screen === "connect" && <HubConfigScreen />}
         {store.screen === "sessions" && <SessionListScreen />}
         {(store.screen === "chat" || store.screen === "room") && <ChatScreen />}

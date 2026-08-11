@@ -251,6 +251,12 @@ export function SessionListScreen() {
   );
   const activeChips = [...activeSessionChips, ...activeRoomChips];
 
+  const listAnimKey = JSON.stringify({
+    batch,
+    sf: { ...sessionFilter, agents: [...sessionFilter.agents], cwds: [...sessionFilter.cwds], statuses: [...sessionFilter.statuses] },
+    rf: { ...roomFilter, modes: [...roomFilter.modes] },
+  });
+
   const onRemoveChip = (kind: "session" | "room", key: string) => {
     if (kind === "session") {
       const f = sessionFilter;
@@ -355,7 +361,7 @@ export function SessionListScreen() {
         <SearchResults query={query} />
       ) : (
         <>
-          <section>
+          <section key={`s-${listAnimKey}`}>
             <h2>
               会话 ({sessionGroups.reduce((sum, g) => sum + g.sessions.length, 0)})
             </h2>
@@ -375,7 +381,7 @@ export function SessionListScreen() {
             </div>
           </section>
 
-          <section>
+          <section key={`r-${listAnimKey}`}>
             <h2>
               群聊 ({roomGroups.reduce((sum, g) => sum + g.rooms.length, 0)})
             </h2>

@@ -210,6 +210,17 @@ button.tiny {
   flex: 1;
   overflow: auto;
   padding: 1.25rem;
+  animation: screenIn 0.25s ease;
+}
+
+@keyframes screenIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes itemIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .card {
@@ -278,6 +289,7 @@ button.tiny {
   cursor: pointer;
   box-shadow: var(--shadow);
   transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+  animation: itemIn 0.2s ease;
 }
 
 .list-item:hover {
@@ -1530,6 +1542,7 @@ html[data-theme="dark"] .search-highlight {
   font-weight: 600;
   color: var(--muted);
   transition: background 0.15s ease;
+  animation: itemIn 0.2s ease;
 }
 
 /* Image lightbox */
