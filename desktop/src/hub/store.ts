@@ -62,12 +62,15 @@ interface State {
   flow: FlowInfo | null;
   historyHasMore: boolean;
   historyLoading: boolean;
+  historySearchContext: boolean;
   sessionUsage: Record<string, ContextUsage>;
   modelList: ModelInfo[];
   modelCurrent: string;
   modelFilter: string;
   showModelPicker: boolean;
   pendingAttachments: Attachment[];
+  historyCache: Record<string, ChatItem[]>;
+  historyCacheKeys: string[];
 }
 
 interface Actions {
@@ -227,6 +230,54 @@ export const useHubStore = create<State & Actions>((set, get) => {
     } catch {}
   };
 
+  const MAX_HISTORY_CACHE = 20;
+
+  const historyCacheKey = (scope: "session" | "room", id: string) => `${scope}:${id}`;
+
+  const getHistoryCache = (scope: "session" | "room", id: string) => {
+    return get().historyCache[historyCacheKey(scope, id)];
+  };
+
+  const mergeHistoryItems = (a: ChatItem[], b: ChatItem[]): ChatItem[] => {
+    const byId = new Map<number, ChatItem>();
+    const result: ChatItem[] = [];
+    for (const it of [...a, ...b]) {
+      if (it.historyId != null) {
+        const existing = byId.get(it.historyId);
+        if (!existing || (it.at ?? 0) > (existing.at ?? 0)) {
+          byId.set(it.historyId, it);
+        }
+      } else {
+        result.push(it);
+      }
+    }
+    for (const it of byId.values()) result.push(it);
+    result.sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity));
+    return result;
+  };
+
+  const setHistoryCache = (scope: "session" | "room", id: string, items: ChatItem[]) => {
+    const key = historyCacheKey(scope, id);
+    const { historyCache, historyCacheKeys } = get();
+    const cached = historyCache[key] ?? [];
+    const storable = items.filter((it) => it.historyId != null);
+    const merged = mergeHistoryItems(cached, storable);
+    const next: Record<string, ChatItem[]> = { ...historyCache, [key]: merged };
+    const nextKeys = [key, ...historyCacheKeys.filter((k) => k !== key)];
+    while (nextKeys.length > MAX_HISTORY_CACHE) {
+      const removed = nextKeys.pop();
+      if (removed) delete next[removed];
+    }
+    set({ historyCache: next, historyCacheKeys: nextKeys });
+  };
+
+  const saveCurrentHistoryCache = () => {
+    const { currentSession, currentRoom, chatItems, historySearchContext } = get();
+    if (historySearchContext) return;
+    if (currentSession) setHistoryCache("session", currentSession.sessionId, chatItems);
+    if (currentRoom) setHistoryCache("room", currentRoom.roomId, chatItems);
+  };
+
   const saveLastProfile = async (address: string, port: string, token: string) => {
     const cfg: AppConfig = {
       ...defaultConfig,
@@ -316,7 +367,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if ((get().inScope(sid) || !sid) && get().shouldShowInRoom(sid)) {
           const msg = String(params.message ?? "error");
           const author = get().sessionName(sid);
-          const next: ChatItem = { kind: "error", text: msg, author };
+          const next: ChatItem = { kind: "error", at: Date.now(), text: msg, author };
           set({ chatItems: [...get().chatItems, next] });
         }
         break;
@@ -326,7 +377,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const room = get().currentRoom;
         if (room && room.roomId === roomId) {
           const msg = String(params.message ?? "");
-          const next: ChatItem = { kind: "system", text: msg, author: "" };
+          const next: ChatItem = { kind: "system", at: Date.now(), text: msg, author: "" };
           set({ chatItems: [...get().chatItems, next] });
         }
         break;
@@ -354,6 +405,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const requestId = String(params.requestId ?? "");
         const next: ChatItem = {
           kind: "permission",
+          at: Date.now(),
           requestId,
           title,
           options,
@@ -528,12 +580,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
     flow: null,
     historyHasMore: false,
     historyLoading: false,
+    historySearchContext: false,
     sessionUsage: {},
     modelList: [],
     modelCurrent: "",
     modelFilter: "",
     showModelPicker: false,
     pendingAttachments: [],
+    historyCache: {},
+    historyCacheKeys: [],
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -673,6 +728,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         connectError: null,
         agentStatus: stringsFor(get().lang).notConnected,
         selectedIds: { sessions: [], rooms: [] },
+        historyCache: {},
+        historyCacheKeys: [],
+        historySearchContext: false,
         currentProfile: null,
         flow: null,
         sessionUsage: {},
@@ -834,28 +892,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     openChat: (session: SessionInfo, anchorAt?: number) => {
+      saveCurrentHistoryCache();
+      const cached = getHistoryCache("session", session.sessionId);
       set({
         currentSession: session,
         currentRoom: null,
-        chatItems: [],
+        chatItems: cached ?? [],
         quote: null,
         screen: "chat",
         historyHasMore: false,
         historyLoading: false,
+        historySearchContext: anchorAt != null,
       });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
     },
 
     openRoom: (room: RoomInfo, anchorAt?: number) => {
+      saveCurrentHistoryCache();
+      const cached = getHistoryCache("room", room.roomId);
       set({
         currentRoom: room,
         currentSession: null,
-        chatItems: [],
+        chatItems: cached ?? [],
         quote: null,
         screen: "room",
         flow: null,
         historyHasMore: false,
         historyLoading: false,
+        historySearchContext: anchorAt != null,
       });
       get().loadHistory("room.history", "roomId", room.roomId, anchorAt);
       get().refreshFlow(room.roomId);
@@ -948,8 +1012,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (get().handleSlashCommand(text)) return;
       const q = get().quote;
       const atts = get().pendingAttachments;
+      const now = Date.now();
       const userItem: ChatItem = {
         kind: "user",
+        at: now,
         text,
         author: "我",
         attachments: atts.length ? atts : undefined,
@@ -971,7 +1037,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       getOrCall("prompt.send", { sessionId: session.sessionId, content }).catch((e) => {
         set({
           busyIds: get().busyIds.filter((id) => id !== session.sessionId),
-          chatItems: [...get().chatItems, { kind: "error", text: String(e), author: "" }],
+          chatItems: [...get().chatItems, { kind: "error", at: Date.now(), text: String(e), author: "" }],
         });
       });
     },
@@ -982,8 +1048,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (get().handleSlashCommand(text)) return;
       const q = get().quote;
       const atts = get().pendingAttachments;
+      const now = Date.now();
       const userItem: ChatItem = {
         kind: "user",
+        at: now,
         text,
         author: "我",
         attachments: atts.length ? atts : undefined,
@@ -1017,7 +1085,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         })
         .catch((e) => {
           set({
-            chatItems: [...get().chatItems, { kind: "error", text: String(e), author: "" }],
+            chatItems: [...get().chatItems, { kind: "error", at: Date.now(), text: String(e), author: "" }],
           });
         });
     },
@@ -1085,11 +1153,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     backToList: () => {
+      saveCurrentHistoryCache();
       set({
         currentSession: null,
         currentRoom: null,
         jumpToAt: null,
         jumpQuery: "",
+        historySearchContext: false,
         screen: "sessions",
       });
       get().refreshAll();
@@ -1205,7 +1275,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             set({ chatItems: items });
           } else {
             set({
-              chatItems: [...items, { kind: "assistant", id: seq + 1, text, author }],
+              chatItems: [...items, { kind: "assistant", at: Date.now(), id: seq + 1, text, author }],
               itemSeq: seq + 1,
             });
           }
@@ -1220,7 +1290,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             set({ chatItems: items });
           } else {
             set({
-              chatItems: [...items, { kind: "thought", id: seq + 1, text, author }],
+              chatItems: [...items, { kind: "thought", at: Date.now(), id: seq + 1, text, author }],
               itemSeq: seq + 1,
             });
           }
@@ -1232,6 +1302,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
               ...items,
               {
                 kind: "tool",
+                at: Date.now(),
                 toolCallId: String(u.toolCallId ?? ""),
                 title: String(u.title ?? "tool"),
                 status: String(u.status ?? "pending"),
@@ -1265,7 +1336,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             return `[${status}] ${content}`;
           });
           set({
-            chatItems: [...items, { kind: "plan", entries, author }],
+            chatItems: [...items, { kind: "plan", at: Date.now(), entries, author }],
           });
           break;
         }
@@ -1284,6 +1355,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             author: String(o.author ?? ""),
             text: String(o.text ?? ""),
             at: typeof o.at === "number" ? o.at : undefined,
+            historyId: typeof o.id === "number" ? o.id : undefined,
           };
         });
         const chat: ChatItem[] = [];
@@ -1292,19 +1364,35 @@ export const useHubStore = create<State & Actions>((set, get) => {
             ?.map((it) => parseAttachment(it as Record<string, unknown>));
           switch (e.kind) {
             case "user":
-              chat.push({ kind: "user", at: e.at, text: e.text, author: e.author, attachments });
+              chat.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments });
               break;
             case "assistant": {
               const usage = (e as Record<string, unknown>).usage as Record<string, unknown> | undefined;
-              chat.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
+              chat.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
               break;
             }
             case "system":
-              chat.push({ kind: "system", at: e.at, text: e.text, author: e.author });
+              chat.push({ kind: "system", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
+              break;
+            case "error":
+              chat.push({ kind: "error", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
               break;
           }
         }
-        set({ chatItems: chat, itemSeq: chat.length, historyHasMore: result.hasMore === true });
+        const scope = method.startsWith("session") ? "session" : "room";
+        const currentId =
+          scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
+        if (currentId === id) {
+          set({
+            chatItems: chat,
+            itemSeq: chat.length,
+            historyHasMore: result.hasMore === true,
+            historySearchContext: anchorAt != null,
+          });
+        }
+        if (anchorAt == null) {
+          setHistoryCache(scope, id, chat);
+        }
         get().syncBusyIds().catch(() => {});
       } catch {}
     },
@@ -1324,6 +1412,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             author: String(o.author ?? ""),
             text: String(o.text ?? ""),
             at: typeof o.at === "number" ? o.at : undefined,
+            historyId: typeof o.id === "number" ? o.id : undefined,
           };
         });
         const more: ChatItem[] = [];
@@ -1332,19 +1421,31 @@ export const useHubStore = create<State & Actions>((set, get) => {
             ?.map((it) => parseAttachment(it as Record<string, unknown>));
           switch (e.kind) {
             case "user":
-              more.push({ kind: "user", at: e.at, text: e.text, author: e.author, attachments });
+              more.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments });
               break;
             case "assistant": {
               const usage = (e as Record<string, unknown>).usage as Record<string, unknown> | undefined;
-              more.push({ kind: "assistant", at: e.at, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
+              more.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
               break;
             }
             case "system":
-              more.push({ kind: "system", at: e.at, text: e.text, author: e.author });
+              more.push({ kind: "system", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
+              break;
+            case "error":
+              more.push({ kind: "error", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
               break;
           }
         }
-        set({ chatItems: [...more, ...items], historyHasMore: result.hasMore === true, historyLoading: false });
+        const scope = method.startsWith("session") ? "session" : "room";
+        const currentId =
+          scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
+        const nextItems = [...more, ...items];
+        if (currentId === id) {
+          set({ chatItems: nextItems, historyHasMore: result.hasMore === true, historyLoading: false });
+        }
+        if (!get().historySearchContext) {
+          setHistoryCache(scope, id, nextItems);
+        }
       } catch {
         set({ historyLoading: false });
       }

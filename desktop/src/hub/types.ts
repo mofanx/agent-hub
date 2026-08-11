@@ -149,16 +149,17 @@ export interface ModelInfo {
 }
 
 export type ChatItem =
-  | { kind: "user"; at?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string }
-  | { kind: "system"; at?: number; text: string; author: string }
-  | { kind: "assistant"; at?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string }
-  | { kind: "thought"; at?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
-  | { kind: "tool"; at?: number; toolCallId: string; title: string; status: string; author: string }
-  | { kind: "plan"; at?: number; entries: string[]; author: string }
-  | { kind: "error"; at?: number; text: string; author: string }
+  | { kind: "user"; at?: number; historyId?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string }
+  | { kind: "system"; at?: number; historyId?: number; text: string; author: string }
+  | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string }
+  | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
+  | { kind: "tool"; at?: number; historyId?: number; toolCallId: string; title: string; status: string; author: string }
+  | { kind: "plan"; at?: number; historyId?: number; entries: string[]; author: string }
+  | { kind: "error"; at?: number; historyId?: number; text: string; author: string }
   | {
       kind: "permission";
       at?: number;
+      historyId?: number;
       requestId: string;
       title: string;
       options: [string, string][];
