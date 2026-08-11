@@ -3,6 +3,7 @@ package com.agenthub.ui
 import android.graphics.BitmapFactory
 import android.util.Base64
 
+import android.content.ClipData
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -15,9 +16,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.input.pointer.*
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -716,7 +717,8 @@ private fun MessageBubbleBox(
     content: @Composable () -> Unit,
 ) {
     val S = LocalStrings.current
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     var showSelectText by remember { mutableStateOf(false) }
@@ -796,7 +798,9 @@ private fun MessageBubbleBox(
             DropdownMenuItem(
                 text = { Text(S.copy) },
                 onClick = {
-                    clipboard.setText(AnnotatedString(copyText))
+                    scope.launch {
+                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, copyText)))
+                    }
                     expanded = false
                     Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
                 },
@@ -1329,7 +1333,8 @@ private fun FlowTaskRow(task: FlowTask) {
         "failed" -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.outline
     }
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     Column(Modifier.padding(vertical = 3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1356,7 +1361,9 @@ private fun FlowTaskRow(task: FlowTask) {
                         color = MaterialTheme.colorScheme.surface,
                         shape = RoundedCornerShape(4.dp),
                         modifier = Modifier.clickable {
-                            clipboard.setText(AnnotatedString(copyText))
+                            scope.launch {
+                                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, copyText)))
+                            }
                             Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
                         },
                     ) {

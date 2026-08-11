@@ -23,7 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -293,7 +293,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             } else {
                 NavigationBar {
                     NavigationBarItem(
-                        icon = { Icon(Icons.Filled.Chat, contentDescription = S.sessions) },
+                        icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = S.sessions) },
                         label = { Text(S.sessions) },
                         selected = selectedTab == 0,
                         onClick = { selectedTab = 0 },

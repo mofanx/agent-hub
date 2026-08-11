@@ -20,6 +20,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Menu
@@ -380,7 +381,7 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
                     Text(S.about, style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "${S.version} ${packageInfo.versionName} (${packageInfo.versionCode})",
+                        "${S.version} ${packageInfo.versionName} (${PackageInfoCompat.getLongVersionCode(packageInfo)})",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(top = 8.dp),
                     )
