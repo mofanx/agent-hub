@@ -475,6 +475,43 @@ button.tiny {
   margin-top: 0.15rem;
 }
 
+.chat-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.chat-search-bar input {
+  flex: 1;
+  min-width: 6rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+
+.chat-search-bar input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-10);
+}
+
+.chat-search-count {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  min-width: 2.5rem;
+  text-align: center;
+}
+
+.message.current-match {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -1467,4 +1504,68 @@ html[data-theme="dark"] .search-highlight {
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--muted);
+  transition: background 0.15s ease;
+}
+
+/* Micro-interactions */
+button,
+.chip,
+.filter-sheet-tabs button,
+.chat-header button,
+.group-header,
+.message,
+.list-item,
+.chat-search-bar input,
+.filter-query,
+.attachment-chip,
+.message-menu-item {
+  transition: transform 0.08s ease, background 0.12s ease, color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
+}
+
+button:active,
+.chip:active,
+.chat-header button:active,
+.filter-sheet-tabs button:active {
+  transform: scale(0.96);
+}
+
+.chip:hover,
+.filter-sheet-tabs button:hover,
+.group-header:hover {
+  background: var(--surface-variant);
+}
+
+.chip.active:hover {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary);
+}
+
+.message:hover {
+  box-shadow: var(--shadow-raised);
+  transform: translateY(-1px);
+}
+
+.message.current-match {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  transition: outline 0.15s ease, outline-offset 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-search-bar input:focus,
+.filter-query:focus {
+  box-shadow: 0 0 0 3px var(--primary-10);
+}
+
+.attachment-chip:hover {
+  background: var(--surface-variant);
+}
+
+.message-menu-item:hover {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+
+.search-highlight {
+  transition: background 0.1s ease;
 }

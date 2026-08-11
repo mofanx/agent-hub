@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
@@ -47,15 +47,55 @@ function costTierClass(tier: string): string {
   return "";
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightText(text: string, query: string): ReactNode {
+  if (!query) return text;
+  const q = escapeRegExp(query);
+  const re = new RegExp(`(${q})`, "gi");
+  const parts = text.split(re);
+  const ql = query.toLowerCase();
+  return parts.map((part, i) =>
+    i % 2 === 1 && part.toLowerCase() === ql ? (
+      <span key={i} className="search-highlight">{part}</span>
+    ) : (
+      <span key={i}>{part}</span>
+    )
+  );
+}
+
+function highlightHtml(html: string, query: string): string {
+  if (!query) return html;
+  const q = escapeRegExp(query);
+  const re = new RegExp(`(${q})`, "gi");
+  const tagRe = /<[^>]+>/g;
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    out += html.slice(last, m.index).replace(re, '<mark class="search-highlight">$&</mark>');
+    out += m[0];
+    last = tagRe.lastIndex;
+  }
+  out += html.slice(last).replace(re, '<mark class="search-highlight">$&</mark>');
+  return out;
+}
+
 export function ChatScreen() {
   const store = useHubStore();
   const [input, setInput] = useState("");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [showThought, setShowThought] = useState<Record<number, boolean>>({});
+  const [inChatSearchQuery, setInChatSearchQuery] = useState("");
+  const [chatSearchMatchIndex, setChatSearchMatchIndex] = useState(-1);
+  const [searchOpen, setSearchOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const isRoom = !!store.currentRoom;
   const title = store.currentRoom?.name || store.currentSession?.name || "聊天";
@@ -70,13 +110,69 @@ export function ChatScreen() {
   const activeSessionId = store.currentRoom?.activeSpeaker || store.currentSession?.sessionId || "";
   const contextUsage = activeSessionId ? store.sessionUsage[activeSessionId] : undefined;
 
+  const searchQuery = inChatSearchQuery.trim();
+  const matchPositions = useMemo(() => {
+    if (!searchQuery) return [];
+    const q = searchQuery.toLowerCase();
+    return store.chatItems
+      .map((item, i) => (getItemText(item).toLowerCase().includes(q) ? i : -1))
+      .filter((i) => i >= 0);
+  }, [searchQuery, store.chatItems]);
+  const chatSearchMatchCount = matchPositions.length;
+  const currentMatchIndex = chatSearchMatchIndex >= 0 ? matchPositions[chatSearchMatchIndex] : -1;
+
+  const nextMatch = () =>
+    setChatSearchMatchIndex((prev) =>
+      matchPositions.length > 0 ? (prev + 1) % matchPositions.length : -1
+    );
+  const prevMatch = () =>
+    setChatSearchMatchIndex((prev) =>
+      matchPositions.length > 0 ? (prev - 1 + matchPositions.length) % matchPositions.length : -1
+    );
+
+  useEffect(() => {
+    setChatSearchMatchIndex((prev) => {
+      if (matchPositions.length === 0) return -1;
+      if (prev < 0 || prev >= matchPositions.length) return 0;
+      return prev;
+    });
+  }, [matchPositions]);
+
   useEffect(() => {
     store.refreshBusy();
   }, [store.currentRoom?.roomId, store.currentSession?.sessionId]);
 
   useEffect(() => {
+    if (inChatSearchQuery) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [store.chatItems.length, store.chatItems[store.chatItems.length - 1]?.kind]);
+  }, [store.chatItems.length, store.chatItems[store.chatItems.length - 1]?.kind, inChatSearchQuery]);
+
+  useEffect(() => {
+    if (chatSearchMatchIndex < 0) return;
+    const el = document.querySelector(".chat-messages .message.current-match");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [chatSearchMatchIndex, matchPositions, inChatSearchQuery]);
+
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+
+  useEffect(() => {
+    const onDocKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+      if (e.key === "Escape" && searchOpen) {
+        e.preventDefault();
+        setSearchOpen(false);
+        setInChatSearchQuery("");
+        setChatSearchMatchIndex(-1);
+      }
+    };
+    document.addEventListener("keydown", onDocKeyDown);
+    return () => document.removeEventListener("keydown", onDocKeyDown);
+  }, [searchOpen]);
 
   const onMessagesScroll = useMemo(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -172,11 +268,61 @@ export function ChatScreen() {
         <button className="secondary icon" onClick={store.backToList}>
           ←
         </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="chat-title">{title}</div>
-          {subtitle && <div className="chat-subtitle">{subtitle}</div>}
-          {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage)}</div>}
-        </div>
+        {!searchOpen ? (
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="chat-title">{title}</div>
+            {subtitle && <div className="chat-subtitle">{subtitle}</div>}
+            {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage)}</div>}
+          </div>
+        ) : (
+          <div className="chat-search-bar" style={{ flex: 1 }}>
+            <input
+              ref={searchInputRef}
+              value={inChatSearchQuery}
+              onChange={(e) => setInChatSearchQuery(e.currentTarget.value)}
+              placeholder="搜索聊天内容…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && e.shiftKey) {
+                  e.preventDefault();
+                  prevMatch();
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  nextMatch();
+                }
+                if (e.key === "Escape") {
+                  setSearchOpen(false);
+                  setInChatSearchQuery("");
+                  setChatSearchMatchIndex(-1);
+                }
+              }}
+            />
+            <span className="chat-search-count">
+              {chatSearchMatchCount > 0 ? `${chatSearchMatchIndex + 1} / ${chatSearchMatchCount}` : "0"}
+            </span>
+            <button className="secondary" onClick={prevMatch} disabled={chatSearchMatchCount === 0} title="上一个 (Shift+Enter)">
+              ▲
+            </button>
+            <button className="secondary" onClick={nextMatch} disabled={chatSearchMatchCount === 0} title="下一个 (Enter)">
+              ▼
+            </button>
+            <button
+              className="secondary"
+              onClick={() => {
+                setSearchOpen(false);
+                setInChatSearchQuery("");
+                setChatSearchMatchIndex(-1);
+              }}
+              title="关闭 (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {!searchOpen && (
+          <button className="secondary" onClick={() => setSearchOpen(true)} title="搜索 (Ctrl+F)">
+            搜索
+          </button>
+        )}
         <button className="secondary" onClick={() => void store.showModelPickerDialog()}>
           模型
         </button>
@@ -211,6 +357,8 @@ export function ChatScreen() {
               onToggleThought={() =>
                 setShowThought({ ...showThought, [i]: !showThought[i] })
               }
+              highlight={inChatSearchQuery}
+              isCurrentMatch={currentMatchIndex === i}
             />
           );
         })}
@@ -370,16 +518,21 @@ function ChatMessage({
   expanded,
   isQuoted,
   onToggleThought,
+  highlight,
+  isCurrentMatch,
 }: {
   item: ChatItem;
   showAuthor: boolean;
   expanded: boolean;
   isQuoted: boolean;
   onToggleThought: () => void;
+  highlight?: string;
+  isCurrentMatch?: boolean;
 }) {
   const store = useHubStore();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [selectOpen, setSelectOpen] = useState(false);
+  const currentMatchClass = isCurrentMatch ? "current-match" : "";
 
   const canQuote = item.kind === "user" || item.kind === "assistant" || item.kind === "thought";
 
@@ -459,8 +612,8 @@ function ChatMessage({
   switch (item.kind) {
     case "system":
       return (
-        <div className="message system" onContextMenu={onContextMenu}>
-          <div className="text">{item.text}</div>
+        <div className={`message system ${currentMatchClass}`} onContextMenu={onContextMenu}>
+          <div className="text">{highlight ? highlightText(item.text, highlight) : item.text}</div>
           {menuEl}
           {selectModal}
         </div>
@@ -468,14 +621,14 @@ function ChatMessage({
 
     case "user":
       return (
-        <div className={`message user ${isQuoted ? "quoted" : ""}`} onContextMenu={onContextMenu}>
+        <div className={`message user ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="text">
             {item.quoteAuthor && (
               <div className="quote-preview">
                 引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
               </div>
             )}
-            {item.text}
+            {highlight ? highlightText(item.text, highlight) : item.text}
           </div>
           {attachmentsEl}
           {menuEl}
@@ -485,14 +638,17 @@ function ChatMessage({
 
     case "assistant":
       return (
-        <div className={`message assistant ${isQuoted ? "quoted" : ""}`} onContextMenu={onContextMenu}>
+        <div className={`message assistant ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           {item.quoteAuthor && (
             <div className="quote-preview">
               引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
             </div>
           )}
-          <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }} />
+          <div
+            className="text"
+            dangerouslySetInnerHTML={{ __html: highlight ? highlightHtml(renderMarkdown(item.text), highlight) : renderMarkdown(item.text) }}
+          />
           {usageText}
           {menuEl}
           {selectModal}
@@ -501,7 +657,7 @@ function ChatMessage({
 
     case "thought":
       return (
-        <div className={`message thought ${isQuoted ? "quoted" : ""}`} onContextMenu={onContextMenu}>
+        <div className={`message thought ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           {item.quoteAuthor && (
             <div className="quote-preview">
@@ -512,7 +668,10 @@ function ChatMessage({
             {expanded ? "▾ " : "▸ "}思考过程
           </button>
           {expanded && (
-            <div className="text" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }} />
+            <div
+              className="text"
+              dangerouslySetInnerHTML={{ __html: highlight ? highlightHtml(renderMarkdown(item.text), highlight) : renderMarkdown(item.text) }}
+            />
           )}
           {menuEl}
           {selectModal}
@@ -521,10 +680,10 @@ function ChatMessage({
 
     case "tool":
       return (
-        <div className="message tool" onContextMenu={onContextMenu}>
+        <div className={`message tool ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           <div className="tool-row">
-            <span>🔧 {item.title}</span>
+            <span>{highlight ? highlightText(`🔧 ${item.title}`, highlight) : `🔧 ${item.title}`}</span>
             <span className="subtitle">{item.status}</span>
           </div>
           {menuEl}
@@ -534,12 +693,12 @@ function ChatMessage({
 
     case "plan":
       return (
-        <div className="message plan" onContextMenu={onContextMenu}>
+        <div className={`message plan ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           <div className="text" style={{ fontWeight: 600 }}>计划</div>
           {item.entries.map((e, i) => (
             <div key={i} className="text">
-              {e}
+              {highlight ? highlightText(e, highlight) : e}
             </div>
           ))}
           {menuEl}
@@ -549,9 +708,9 @@ function ChatMessage({
 
     case "error":
       return (
-        <div className="message error" onContextMenu={onContextMenu}>
+        <div className={`message error ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="text">
-            {item.author ? `[${item.author}] ` : ""}错误: {item.text}
+            {item.author ? `[${item.author}] ` : ""}错误: {highlight ? highlightText(item.text, highlight) : item.text}
           </div>
           {menuEl}
           {selectModal}
@@ -560,10 +719,10 @@ function ChatMessage({
 
     case "permission":
       return (
-        <div className="message permission" onContextMenu={onContextMenu}>
+        <div className={`message permission ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {showAuthor && item.author && <div className="author">{item.author}</div>}
           <div className="text">
-            审批请求: {item.title}
+            审批请求: {highlight ? highlightText(item.title, highlight) : item.title}
             {item.answered ? (
               <div className="subtitle">已选择: {item.answered}</div>
             ) : (
