@@ -143,21 +143,30 @@ export class Store {
         builtin INTEGER NOT NULL DEFAULT 0
       );
     `);
-    this.seedRoles();
     this.migrateSchema();
+    this.seedRoles();
     this.migrateLegacy();
   }
 
   private migrateSchema(): void {
-    try {
-      this.db.exec("ALTER TABLE connections ADD COLUMN token TEXT");
-    } catch {
-      // already exists
-    }
-    try {
-      this.db.exec("ALTER TABLE connections ADD COLUMN local INTEGER NOT NULL DEFAULT 0");
-    } catch {
-      // already exists
+    const columns: { table: string; column: string; def: string }[] = [
+      { table: "connections", column: "address", def: "TEXT" },
+      { table: "connections", column: "cwd", def: "TEXT" },
+      { table: "connections", column: "token", def: "TEXT" },
+      { table: "connections", column: "local", def: "INTEGER NOT NULL DEFAULT 0" },
+      { table: "roles", column: "agent", def: "TEXT" },
+      { table: "roles", column: "address", def: "TEXT" },
+      { table: "roles", column: "connectionId", def: "TEXT" },
+      { table: "roles", column: "cwd", def: "TEXT" },
+      { table: "roles", column: "persona", def: "TEXT NOT NULL DEFAULT ''" },
+      { table: "roles", column: "builtin", def: "INTEGER NOT NULL DEFAULT 0" },
+    ];
+    for (const { table, column, def } of columns) {
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+      } catch {
+        // already exists or incompatible; ignore
+      }
     }
   }
 
