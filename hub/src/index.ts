@@ -6,7 +6,7 @@ import { Readable, Writable } from "node:stream";
 import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAgent, getPermissionBypass, setPermissionBypass, type HubEvent } from "./agent.js";
-import { RoomManager, type Room, type RoomMode, type RoomModeConfig } from "./room.js";
+import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type ArtifactKind } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, type SessionMeta, type Connection } from "./store.js";
@@ -120,6 +120,13 @@ function repairHistoryAtStartup(): void {
 }
 
 repairHistoryAtStartup();
+
+function parseArtifactKind(raw: unknown): ArtifactKind {
+  const kinds: ArtifactKind[] = ["file", "command", "test", "note"];
+  const k = String(raw ?? "").toLowerCase();
+  if (kinds.includes(k as ArtifactKind)) return k as ArtifactKind;
+  return "note";
+}
 
 function parseRoomMode(raw: unknown): RoomMode {
   const modes: RoomMode[] = [
@@ -480,6 +487,11 @@ function onTurnEnd(sessionId: string, text: string): void {
         kind: "assistant",
         author: displayName,
         text,
+      });
+      rooms.addArtifact(room.roomId, {
+        kind: "note",
+        author: displayName,
+        summary: text.trim().replace(/\s+/g, " ").slice(0, 400),
       });
     }
   }
@@ -1091,6 +1103,37 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
       return { flow: roomModeManager.getFlow(roomId) };
+    }
+    case "room.artifacts": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      return { artifacts: rooms.getArtifacts(roomId, 100) };
+    }
+    case "room.appendArtifact": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      const artifact = rooms.addArtifact(roomId, {
+        kind: parseArtifactKind(req.params?.kind),
+        author: String(req.params?.author ?? ""),
+        summary: String(req.params?.summary ?? ""),
+        path: typeof req.params?.path === "string" ? req.params.path : undefined,
+        command: typeof req.params?.command === "string" ? req.params.command : undefined,
+        taskId: typeof req.params?.taskId === "string" ? req.params.taskId : undefined,
+      });
+      if (!artifact) throw new Error("add artifact failed");
+      persistState();
+      return { artifact };
+    }
+    case "room.removeArtifact": {
+      const roomId = String(req.params?.roomId ?? "");
+      const artifactId = String(req.params?.artifactId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      const removed = rooms.removeArtifact(roomId, artifactId);
+      persistState();
+      return { removed };
     }
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");

@@ -30,6 +30,8 @@ export type Room = {
   /** 并发模式：汇总者 sessionId */
   parallelSummarizerId?: string | undefined;
   archived?: boolean | undefined;
+  /** 房间级作品/artifact 登记处 */
+  artifacts?: Artifact[] | undefined;
 };
 
 export type RoomModeConfig = {
@@ -46,6 +48,24 @@ type BlackboardEntry = { from: string; text: string; at: number };
 
 const BLACKBOARD_LIMIT = 10;
 const BLACKBOARD_OUTPUT_LEN = 400;
+
+export type ArtifactKind = "file" | "command" | "test" | "note";
+
+export type Artifact = {
+  id: string;
+  kind: ArtifactKind;
+  author: string;
+  at: number;
+  summary: string;
+  path?: string | undefined;
+  command?: string | undefined;
+  taskId?: string | undefined;
+  dependsOn?: string[] | undefined;
+};
+
+const ARTIFACT_LIMIT = 50;
+const ARTIFACT_PROMPT_LIMIT = 10;
+const ARTIFACT_SUMMARY_LEN = 240;
 
 export class RoomManager {
   private rooms = new Map<string, Room>();
@@ -84,6 +104,7 @@ export class RoomManager {
       debateSides: config?.debateSides,
       debateJudge: config?.debateJudge,
       debateRounds: config?.debateRounds,
+      artifacts: [],
     };
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
@@ -97,6 +118,7 @@ export class RoomManager {
 
   /** 从持久化状态恢复（不覆盖黑板已有记录） */
   import(room: Room): void {
+    room.artifacts = room.artifacts ?? [];
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
   }
@@ -223,7 +245,41 @@ export class RoomManager {
     return [...(this.blackboards.get(roomId) ?? [])];
   }
 
-  /** 构造发给某个成员的最终 prompt：注入房间上下文与共享黑板 */
+  /** 添加一个 artifact 到房间登记处 */
+  addArtifact(
+    roomId: string,
+    artifact: Omit<Artifact, "id" | "at">,
+  ): Artifact | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const list = (room.artifacts ??= []);
+    const item: Artifact = {
+      ...artifact,
+      id: randomUUID().slice(0, 8),
+      at: Date.now(),
+    };
+    list.push(item);
+    if (list.length > ARTIFACT_LIMIT) list.shift();
+    return item;
+  }
+
+  /** 获取房间 artifact 列表（按时间倒序） */
+  getArtifacts(roomId: string, limit = ARTIFACT_PROMPT_LIMIT): Artifact[] {
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+    return [...(room.artifacts ?? [])].reverse().slice(0, limit);
+  }
+
+  /** 删除某个 artifact */
+  removeArtifact(roomId: string, artifactId: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.artifacts) return false;
+    const before = room.artifacts.length;
+    room.artifacts = room.artifacts.filter((a) => a.id !== artifactId);
+    return room.artifacts.length < before;
+  }
+
+  /** 构造发给某个成员的最终 prompt：注入房间上下文、共享黑板与 artifact 登记处 */
   buildPrompt(
     roomId: string,
     text: string,
@@ -237,6 +293,9 @@ export class RoomManager {
     const board = (this.blackboards.get(roomId) ?? [])
       .filter((e) => e.from !== excludeSessionId)
       .slice(-BLACKBOARD_LIMIT);
+    const artifacts = this.getArtifacts(roomId)
+      .filter((a) => a.author !== excludeSessionId)
+      .slice(0, ARTIFACT_PROMPT_LIMIT);
     const others = room.members
       .filter((m) => m.sessionId !== excludeSessionId)
       .map((m) => `@${m.name}`)
@@ -253,6 +312,16 @@ export class RoomManager {
       lines.push("（暂无）");
     } else {
       for (const e of board) lines.push(`- ${e.from}: ${e.text}`);
+    }
+    if (artifacts.length > 0) {
+      lines.push("", "最近产生的作品/结果：");
+      for (const a of artifacts) {
+        const parts = [`@${a.author}`, `[${a.kind}]`];
+        if (a.path) parts.push(a.path);
+        if (a.command) parts.push(a.command);
+        parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
+        lines.push(`- ${parts.join(" ")}`);
+      }
     }
     if (quote) {
       lines.push("", `用户引用了 ${quote.author} 的消息："${quote.text}"`);

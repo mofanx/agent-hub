@@ -264,6 +264,21 @@ export class ConductorOrchestrator {
           running.status = "done";
           const result = extractTaskResult(output);
           flow.results.set(running.id, result);
+          for (const a of result.artifacts) {
+            this.rooms.addArtifact(flow.roomId, {
+              kind: a.type,
+              author: name,
+              summary: a.summary,
+              path: a.path,
+              taskId: running.id,
+            });
+          }
+          this.rooms.addArtifact(flow.roomId, {
+            kind: "note",
+            author: name,
+            summary: result.text.slice(0, 400),
+            taskId: running.id,
+          });
           const artifactCount = result.artifacts.length;
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
