@@ -155,6 +155,19 @@ describe("room", () => {
     assert.ok(prompt.includes("修改了 room.ts"));
   });
 
+  it("buildPrompt 按 dependsOn 只注入上游 task 的 artifact", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+    ]);
+    rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "上游输出", path: "src/a.ts", taskId: "t1" });
+    rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "无关输出", path: "src/b.ts", taskId: "t2" });
+    const prompt = rooms.buildPrompt(room.roomId, "继续改", "s1", undefined, undefined, { taskId: "t3", dependsOn: ["t1"] });
+    assert.ok(prompt.includes("上游输出"));
+    assert.ok(!prompt.includes("无关输出"));
+  });
+
   it("buildPrompt 不注入自己的 artifacts", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);

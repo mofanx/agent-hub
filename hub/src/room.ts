@@ -279,6 +279,28 @@ export class RoomManager {
     return room.artifacts.length < before;
   }
 
+  /** 获取与当前任务相关的 artifact */
+  getArtifactsForPrompt(
+    roomId: string,
+    excludeSessionId: string,
+    context?: { taskId?: string; dependsOn?: string[] },
+  ): Artifact[] {
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+    const all = room.artifacts ?? [];
+    const deps = context?.dependsOn;
+    if (deps && deps.length > 0) {
+      const set = new Set(deps);
+      return [...all]
+        .filter((a) => set.has(a.taskId ?? "") && a.author !== excludeSessionId)
+        .reverse()
+        .slice(0, ARTIFACT_PROMPT_LIMIT);
+    }
+    return this.getArtifacts(roomId)
+      .filter((a) => a.author !== excludeSessionId)
+      .slice(0, ARTIFACT_PROMPT_LIMIT);
+  }
+
   /** 构造发给某个成员的最终 prompt：注入房间上下文、共享黑板与 artifact 登记处 */
   buildPrompt(
     roomId: string,
@@ -286,6 +308,7 @@ export class RoomManager {
     excludeSessionId: string,
     quote?: { author: string; text: string },
     persona?: string,
+    artifactContext?: { taskId?: string; dependsOn?: string[] },
   ): string {
     const room = this.rooms.get(roomId)!;
     const roleId = room.memberRoles?.[excludeSessionId];
@@ -293,9 +316,7 @@ export class RoomManager {
     const board = (this.blackboards.get(roomId) ?? [])
       .filter((e) => e.from !== excludeSessionId)
       .slice(-BLACKBOARD_LIMIT);
-    const artifacts = this.getArtifacts(roomId)
-      .filter((a) => a.author !== excludeSessionId)
-      .slice(0, ARTIFACT_PROMPT_LIMIT);
+    const artifacts = this.getArtifactsForPrompt(roomId, excludeSessionId, artifactContext);
     const others = room.members
       .filter((m) => m.sessionId !== excludeSessionId)
       .map((m) => `@${m.name}`)

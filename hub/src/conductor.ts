@@ -456,6 +456,9 @@ export class ConductorOrchestrator {
           "如果没有 artifact，可以只输出文本，不必输出 JSON。",
         ].join("\n"),
         t.sessionId,
+        undefined,
+        undefined,
+        { taskId: t.id, dependsOn: t.dependsOn },
       );
       this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
         t.retries = (t.retries ?? 0) + 1;
