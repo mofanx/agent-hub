@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   AppConfig,
+  ArtifactInfo,
   ChatItem,
   ConnProfile,
   ConnectionInfo,
@@ -48,6 +49,7 @@ interface State {
   connections: ConnectionInfo[];
   currentSession: SessionInfo | null;
   currentRoom: RoomInfo | null;
+  currentArtifacts: ArtifactInfo[] | null;
   chatItems: ChatItem[];
   busyIds: string[];
   quote: [string, string] | null;
@@ -169,6 +171,8 @@ interface Actions {
   saveProfileAndConnect(address: string, port: string, token: string, name?: string): void;
   refreshFlow(roomId: string): Promise<void>;
   setFlow(flow: FlowInfo | null): void;
+  refreshArtifacts(roomId: string): Promise<void>;
+  sendArtifactMessage(artifact: ArtifactInfo): void;
 
   showModelPickerDialog(): Promise<void>;
   refreshModelList(): Promise<void>;
@@ -387,6 +391,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const room = get().currentRoom;
         if (room && room.roomId === roomId) {
           set({ flow: (params.flow as FlowInfo) ?? null });
+          get().refreshArtifacts(roomId);
         }
         break;
       }
@@ -566,6 +571,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     connections: [],
     currentSession: null,
     currentRoom: null,
+    currentArtifacts: null,
     chatItems: [],
     busyIds: [],
     quote: null,
@@ -897,6 +903,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({
         currentSession: session,
         currentRoom: null,
+        currentArtifacts: null,
         chatItems: cached ?? [],
         quote: null,
         screen: "chat",
@@ -913,6 +920,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({
         currentRoom: room,
         currentSession: null,
+        currentArtifacts: null,
         chatItems: cached ?? [],
         quote: null,
         screen: "room",
@@ -923,6 +931,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
       get().loadHistory("room.history", "roomId", room.roomId, anchorAt);
       get().refreshFlow(room.roomId);
+      get().refreshArtifacts(room.roomId);
     },
 
     clearJumpToAt: () => {
@@ -1157,6 +1166,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({
         currentSession: null,
         currentRoom: null,
+        currentArtifacts: null,
         jumpToAt: null,
         jumpQuery: "",
         historySearchContext: false,
@@ -1549,6 +1559,25 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     setFlow: (flow: FlowInfo | null) => {
       set({ flow });
+    },
+
+    refreshArtifacts: async (roomId: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        const result = (await client.call("room.artifacts", { roomId })) as Record<string, unknown>;
+        const artifacts = (result.artifacts as ArtifactInfo[] | undefined) ?? [];
+        set({ currentArtifacts: artifacts });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    sendArtifactMessage: (artifact: ArtifactInfo) => {
+      const text = artifact.path
+        ? `继续处理这个 artifact (${artifact.id})：${artifact.path}\n\n摘要：${artifact.summary}`
+        : `继续处理这个 artifact (${artifact.id})：${artifact.summary}`;
+      get().sendRoomMessage(text);
     },
 
     saveProfileAndConnect: (address: string, port: string, token: string, name?: string) => {

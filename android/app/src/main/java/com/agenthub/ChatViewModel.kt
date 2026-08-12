@@ -27,6 +27,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 import com.agenthub.ui.Strings
@@ -200,6 +201,16 @@ data class FlowInfo(
     val tasks: List<FlowTask>,
 )
 
+data class ArtifactInfo(
+    val id: String,
+    val kind: String,
+    val author: String,
+    val at: Long = 0,
+    val summary: String = "",
+    val path: String? = null,
+    val command: String? = null,
+)
+
 enum class SessionGroupBy { None, Agent, Cwd }
 
 enum class RoomGroupBy { None, Mode }
@@ -336,6 +347,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     var flow by mutableStateOf<FlowInfo?>(null)
+    val currentArtifacts = mutableStateListOf<ArtifactInfo>()
     val chatItems = mutableStateListOf<ChatItem>()
     val busyIds = mutableStateListOf<String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
@@ -772,6 +784,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         busyIds.clear()
         currentSession = null
         currentRoom = null
+        currentArtifacts.clear()
         quote = null
         connecting = false
         connectError = null
@@ -1204,6 +1217,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         listTab.value = 0
         currentSession = session
         currentRoom = null
+        currentArtifacts.clear()
         chatItems.clear()
         quote = null
         historyHasMore = false
@@ -1235,6 +1249,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 listTab.value = 1
                 currentRoom = updatedRoom
                 currentSession = null
+                currentArtifacts.clear()
                 chatItems.clear()
                 quote = null
                 flow = null
@@ -1249,6 +1264,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 screen = Screen.Room
                 loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
                 refreshFlow(updatedRoom.roomId)
+                refreshArtifacts(updatedRoom.roomId)
             } catch (e: Exception) {
                 connectError = e.message
             }
@@ -1263,6 +1279,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             // ignore
         }
+    }
+
+    private suspend fun refreshArtifacts(roomId: String) {
+        try {
+            val result = hub.call("room.artifacts", buildJsonObject { put("roomId", roomId) })
+            val list = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
+            currentArtifacts.clear()
+            currentArtifacts.addAll(list)
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    private fun parseArtifactInfo(obj: JsonObject): ArtifactInfo {
+        return ArtifactInfo(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
+            kind = obj["kind"]?.jsonPrimitive?.content ?: "note",
+            author = obj["author"]?.jsonPrimitive?.content ?: "",
+            at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
+            summary = obj["summary"]?.jsonPrimitive?.content ?: "",
+            path = obj["path"]?.jsonPrimitive?.content,
+            command = obj["command"]?.jsonPrimitive?.content,
+        )
     }
 
     private fun parseFlow(obj: JsonObject?): FlowInfo? {
@@ -1693,6 +1732,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun backToList() {
         currentSession = null
         currentRoom = null
+        currentArtifacts.clear()
         jumpToHistoryId = null
         chatSearchMatchIndex = -1
         chatSearchMatchCount = 0
@@ -1799,6 +1839,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "send failed"))
             }
         }
+    }
+
+    fun sendArtifactMessage(artifact: ArtifactInfo) {
+        val text = if (artifact.path.isNullOrBlank()) {
+            "继续处理这个 artifact (${artifact.id})：${artifact.summary}"
+        } else {
+            "继续处理这个 artifact (${artifact.id})：${artifact.path}\n\n摘要：${artifact.summary}"
+        }
+        sendRoomMessage(text)
     }
 
     fun addAttachment(uri: Uri) {
@@ -1968,6 +2017,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val roomId = p["roomId"]!!.jsonPrimitive.content
                 if (currentRoom?.roomId == roomId) {
                     flow = parseFlow(p["flow"]?.jsonObject)
+                    viewModelScope.launch { refreshArtifacts(roomId) }
                 }
             }
             "permission.request" -> {

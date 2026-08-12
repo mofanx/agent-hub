@@ -251,6 +251,22 @@ export class ConductorOrchestrator {
         }
         if (flow.phase === "summarizing") {
           this.flows.delete(flow.roomId);
+          const name =
+            room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+          const result = extractTaskResult(output);
+          for (const a of result.artifacts) {
+            this.rooms.addArtifact(flow.roomId, {
+              kind: a.type,
+              author: name,
+              summary: a.summary,
+              path: a.path,
+            });
+          }
+          this.rooms.addArtifact(flow.roomId, {
+            kind: "note",
+            author: name,
+            summary: result.text.slice(0, 400),
+          });
           return true;
         }
       }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Room, RoomManager, RoomMode } from "./room.js";
-import { ConductorOrchestrator, parseTasks, resolveMemberByString } from "./conductor.js";
+import type { ArtifactKind, Room, RoomManager, RoomMode } from "./room.js";
+import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
@@ -139,6 +139,9 @@ export class RoomModeManager {
   private pipelineFlows = new Map<string, PipelineFlow>();
   private debateFlows = new Map<string, DebateFlow>();
   private roomSubMode = new Map<string, { mode: RuntimeMode; activeSpeaker?: string | undefined; reason?: string | undefined }>();
+  private promptRooms = new Map<string, string>();
+  private autoHistory = new Map<string, { at: number; mode: string; reason: string; accepted?: boolean }[]>();
+  private lastAuto = new Map<string, { at: number }>();
 
   constructor(
     private readonly agent: AgentOps,
@@ -173,6 +176,33 @@ export class RoomModeManager {
 
   private notice(n: ConductorNotice): void {
     this.broadcast("room.notice", n as unknown as Record<string, unknown>);
+  }
+
+  private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
+    this.promptRooms.set(sessionId, roomId);
+    return this.agent.prompt(sessionId, content);
+  }
+
+  private captureArtifacts(sessionId: string, output: string, taskId?: string): void {
+    const roomId = this.promptRooms.get(sessionId);
+    if (!roomId) return;
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      this.promptRooms.delete(sessionId);
+      return;
+    }
+    const name = room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+    const result = extractTaskResult(output);
+    for (const a of result.artifacts) {
+      this.rooms.addArtifact(roomId, {
+        kind: a.type as ArtifactKind,
+        author: name,
+        summary: a.summary,
+        path: a.path,
+        taskId,
+      });
+    }
+    this.promptRooms.delete(sessionId);
   }
 
   private emitModeSelected(e: ModeSelectedEvent): void {
@@ -353,6 +383,15 @@ export class RoomModeManager {
   ): Promise<ModeResult> {
     await this.cancelActive(room.roomId, "收到新消息，当前流程已取消");
 
+    const last = this.lastAuto.get(room.roomId);
+    if (last) {
+      this.lastAuto.delete(room.roomId);
+      const accepted = room.mode === "auto";
+      const entries = this.autoHistory.get(room.roomId);
+      const entry = entries?.find((e) => e.at === last.at);
+      if (entry) entry.accepted = accepted;
+    }
+
     if (room.mode === "auto") {
       const result = await this.handleAuto(room, text, options);
       this.emitFlowUpdate(room.roomId);
@@ -371,12 +410,19 @@ export class RoomModeManager {
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
+      this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (!room) {
         logWarn("room-modes auto", `auto 决策完成但房间不存在：${autoCtx.roomId}`);
         return true;
       }
       const decision = this.parseAutoDecision(output);
+      const at = Date.now();
+      const list = this.autoHistory.get(room.roomId) ?? [];
+      list.push({ at, mode: decision.mode, reason: decision.reason });
+      if (list.length > 50) list.shift();
+      this.autoHistory.set(room.roomId, list);
+      this.lastAuto.set(room.roomId, { at });
       const label = MODE_LABELS[decision.mode] ?? decision.mode;
       logWarn("room-modes auto", `解析决策：mode=${decision.mode}，reason=${decision.reason}`);
       this.setSubMode(room.roomId, decision.mode, this.activeSpeakerFor(room, decision.mode, decision.params), decision.reason);
@@ -416,6 +462,8 @@ export class RoomModeManager {
       return true;
     }
 
+    // mention / 普通点名 / 汇总者等：统一提取 artifact 写入房间 registry
+    this.captureArtifacts(sessionId, output);
     return false;
   }
 
@@ -424,6 +472,7 @@ export class RoomModeManager {
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
+      this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (room) {
         this.notice({ roomId: room.roomId, message: "🎛️ 主持人决策失败，已兜底为点名应答" });
@@ -477,6 +526,7 @@ export class RoomModeManager {
       }
     }
 
+    this.promptRooms.delete(sessionId);
     return false;
   }
 
@@ -613,7 +663,7 @@ export class RoomModeManager {
         continue;
       }
       const prompt = this.buildPromptContent(room, segments[sid] ?? text, sid, options);
-      this.agent.prompt(sid, prompt).catch((err) => {
+      this.sendPrompt(room.roomId, sid, prompt).catch((err) => {
         logError("room-modes mention prompt", err);
       });
       sent.push(sid);
@@ -722,7 +772,7 @@ export class RoomModeManager {
     this.setSubMode(room.roomId, "roundrobin", target, undefined);
     this.notice({ roomId: room.roomId, message: `🔄 轮询模式：由 @${this.nameFor(room.roomId, target)} 作答` });
     const prompt = this.buildPromptContent(room, text, target, options);
-    this.agent.prompt(target, prompt).catch((err) => {
+    this.sendPrompt(room.roomId, target, prompt).catch((err) => {
       logError("room-modes roundrobin prompt", err);
     });
     return { sent: [target], mentioned: [], skipped };
@@ -771,7 +821,7 @@ export class RoomModeManager {
     this.setSubMode(room.roomId, "parallel", summarizer, undefined);
     for (const sid of sent) {
       const prompt = this.buildPromptContent(room, text, sid, options);
-      this.agent.prompt(sid, prompt).catch((err) => {
+      this.sendPrompt(room.roomId, sid, prompt).catch((err) => {
         logError("room-modes parallel prompt", err);
         const f = this.parallelFlows.get(room.roomId);
         if (!f) return;
@@ -790,6 +840,7 @@ export class RoomModeManager {
       if (!flow.pending.has(sessionId)) continue;
       flow.pending.delete(sessionId);
       flow.results.set(sessionId, output);
+      this.captureArtifacts(sessionId, output);
       if (flow.pending.size === 0) {
         this.summarizeParallel(roomId, flow);
       }
@@ -816,7 +867,7 @@ export class RoomModeManager {
     const prompt = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
     this.parallelFlows.delete(roomId);
     this.notice({ roomId, message: "并行回答完成，汇总者正在整理…" });
-    this.agent.prompt(flow.summarizer, prompt).catch((err) => {
+    this.sendPrompt(room.roomId, flow.summarizer, prompt).catch((err) => {
       logError("room-modes parallel summarize", err);
     });
   }
@@ -850,7 +901,7 @@ export class RoomModeManager {
     const path = order.map((sid) => `@${this.nameFor(room.roomId, sid)}`).join(" → ");
     this.notice({ roomId: room.roomId, message: `🔄 流水线模式：${path}` });
     const prompt = this.buildPipelinePrompt(room, flow, 0);
-    this.agent.prompt(first, prompt).catch((err) => {
+    this.sendPrompt(room.roomId, first, prompt).catch((err) => {
       logError("room-modes pipeline prompt", err);
     });
     return { sent: [first], mentioned: [], skipped: [] };
@@ -865,6 +916,7 @@ export class RoomModeManager {
         return true;
       }
       flow.outputs.push(output);
+      this.captureArtifacts(sessionId, output);
       const nextStage = flow.stage + 1;
       if (nextStage >= flow.order.length) {
         this.pipelineFlows.delete(roomId);
@@ -878,7 +930,7 @@ export class RoomModeManager {
       this.setSubMode(roomId, "pipeline", nextSid, undefined);
       this.notice({ roomId, message: `流水线第 ${nextStage + 1} 阶段 → @${this.nameFor(roomId, nextSid)}` });
       const prompt = this.buildPipelinePrompt(room, flow, nextStage, prevName, output);
-      this.agent.prompt(nextSid, prompt).catch((err) => {
+      this.sendPrompt(room.roomId, nextSid, prompt).catch((err) => {
         logError("room-modes pipeline next stage", err);
       });
       return true;
@@ -953,7 +1005,7 @@ export class RoomModeManager {
       )}，裁判 @${this.nameFor(room.roomId, flow.judge)}，共 ${rounds} 轮`,
     });
     const prompt = this.buildDebatePrompt(room, flow, 0, undefined);
-    this.agent.prompt(sideA, prompt).catch((err) => {
+    this.sendPrompt(room.roomId, sideA, prompt).catch((err) => {
       logError("room-modes debate prompt", err);
     });
     return { sent: [sideA], mentioned: [], skipped: [] };
@@ -969,13 +1021,14 @@ export class RoomModeManager {
       const currentSid = flow.sides[flow.sideIndex]!;
       if (sessionId !== currentSid) continue;
       flow.outputs.push({ round: flow.currentRound, side: flow.sideIndex, text: output });
+      this.captureArtifacts(sessionId, output);
 
       if (flow.sideIndex === 0) {
         flow.sideIndex = 1;
         const nextSid = flow.sides[1]!;
         this.setSubMode(roomId, "debate", nextSid, undefined);
         const prompt = this.buildDebatePrompt(room, flow, 1, output);
-        this.agent.prompt(nextSid, prompt).catch((err) => {
+        this.sendPrompt(room.roomId, nextSid, prompt).catch((err) => {
           logError("room-modes debate next side", err);
         });
         return true;
@@ -987,7 +1040,7 @@ export class RoomModeManager {
         const nextSid = flow.sides[0]!;
         this.setSubMode(roomId, "debate", nextSid, undefined);
         const prompt = this.buildDebatePrompt(room, flow, 0, output);
-        this.agent.prompt(nextSid, prompt).catch((err) => {
+        this.sendPrompt(room.roomId, nextSid, prompt).catch((err) => {
           logError("room-modes debate next round", err);
         });
         return true;
@@ -998,7 +1051,7 @@ export class RoomModeManager {
       this.setSubMode(roomId, "debate", flow.judge, undefined);
       this.notice({ roomId, message: "辩论结束，裁判总结中…" });
       const judgePrompt = this.buildJudgePrompt(room, flow);
-      this.agent.prompt(flow.judge, judgePrompt).catch((err) => {
+      this.sendPrompt(room.roomId, flow.judge, judgePrompt).catch((err) => {
         logError("room-modes judge prompt", err);
       });
       return true;
@@ -1053,7 +1106,7 @@ export class RoomModeManager {
     };
     const prompt = this.buildPromptContent(room, text, room.conductorId, promptOptions);
     logWarn("room-modes self", `正在向主持人 ${room.conductorId} 发送 self 应答 prompt`);
-    this.agent.prompt(room.conductorId, prompt).then(() => {
+    this.sendPrompt(room.roomId, room.conductorId, prompt).then(() => {
       logWarn("room-modes self", `主持人 ${room.conductorId} self 应答 prompt 已完成`);
     }).catch((err) => {
       logError("room-modes self prompt", err);
@@ -1086,10 +1139,23 @@ export class RoomModeManager {
     });
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
-    this.agent.prompt(room.conductorId, prompt).catch((err) => {
+    this.sendPrompt(room.roomId, room.conductorId, prompt).catch((err) => {
       logError("room-modes auto decision", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
+  }
+
+  private formatAutoHistory(roomId: string): string {
+    const list = this.autoHistory.get(roomId) ?? [];
+    if (list.length === 0) return "";
+    const decided = list.filter((e) => e.accepted !== undefined);
+    const accepted = decided.filter((e) => e.accepted).length;
+    const total = decided.length;
+    const recent = list.slice(-5).map((e) => {
+      const mark = e.accepted === true ? "✓" : e.accepted === false ? "✗" : "?";
+      return `- ${mark} ${e.mode}: ${e.reason}`;
+    }).join("\n");
+    return `\n最近 auto 决策反馈：共 ${total} 条，被接受 ${accepted} 条，被覆盖 ${total - accepted} 条。\n${recent}\n`;
   }
 
   private buildAutoPrompt(
@@ -1149,7 +1215,7 @@ export class RoomModeManager {
       "",
       "最近上下文：",
       boardText,
-      "",
+      this.formatAutoHistory(room.roomId),
       `${quoteText}用户消息：${text}`,
       noteText,
       sessionNoteText,

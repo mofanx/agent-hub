@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
-import type { ChatItem, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
+import type { ArtifactInfo, ChatItem, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
 
 const safeRenderer = {
   html(text: string) {
@@ -424,6 +424,10 @@ export function ChatScreen() {
 
       {isRoom && store.currentRoom && ["conductor", "parallel", "pipeline", "debate", "auto"].includes(store.currentRoom.mode) && (
         <FlowPanel flow={store.flow} roomMode={store.currentRoom.mode} />
+      )}
+
+      {isRoom && store.currentArtifacts && store.currentArtifacts.length > 0 && (
+        <ArtifactPanel artifacts={store.currentArtifacts} />
       )}
 
       <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
@@ -902,6 +906,56 @@ function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string
       )}
     </div>
   );
+}
+
+function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
+  const store = useHubStore();
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("artifactPanelCollapsed") === "1");
+  useEffect(() => {
+    localStorage.setItem("artifactPanelCollapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
+  const groups = useMemo(() => {
+    const g: Record<string, ArtifactInfo[]> = {};
+    for (const a of artifacts) {
+      (g[a.kind] ??= []).push(a);
+    }
+    return g;
+  }, [artifacts]);
+  return (
+    <div className="artifact-panel">
+      <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
+        <span className="artifact-title">{collapsed ? "▸ " : "▾ "}作品/结果</span>
+        <span className="artifact-count">{artifacts.length} 条</span>
+      </div>
+      {!collapsed && (
+        <div className="artifact-list">
+          {Object.entries(groups).map(([kind, list]) => (
+            <div key={kind} className="artifact-group">
+              <div className="artifact-group-title">{kindLabel(kind)}</div>
+              {list.map((a) => (
+                <button
+                  key={a.id}
+                  className="artifact-item"
+                  onClick={() => store.sendArtifactMessage(a)}
+                  title={a.path ? `${a.path}\n${a.summary}` : a.summary}
+                >
+                  <span className="artifact-author">@{a.author}</span>
+                  <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function kindLabel(kind: string): string {
+  if (kind === "file") return "文件";
+  if (kind === "command") return "命令";
+  if (kind === "test") return "测试";
+  return "笔记";
 }
 
 function renderMarkdown(text: string): string {

@@ -116,6 +116,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import com.agenthub.ArtifactInfo
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
@@ -336,6 +337,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             ) {
                 if (isRoom && vm.currentRoom?.mode in listOf("conductor", "parallel", "pipeline", "debate", "auto")) {
                     FlowPanel(vm.flow, vm.currentRoom!!.mode)
+                }
+                if (isRoom && vm.currentArtifacts.isNotEmpty()) {
+                    ArtifactPanel(vm.currentArtifacts, vm)
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
@@ -1372,6 +1376,80 @@ private fun FlowTaskRow(task: FlowTask) {
                             style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
+    if (artifacts.isEmpty()) return
+    val context = LocalContext.current
+    var collapsed by remember { mutableStateOf(false) }
+    val groups = remember(artifacts) {
+        artifacts.groupBy { it.kind }
+    }
+    val kindLabel = { kind: String ->
+        when (kind) {
+            "file" -> "文件"
+            "command" -> "命令"
+            "test" -> "测试"
+            else -> "笔记"
+        }
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { collapsed = !collapsed },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${if (collapsed) "▸" else "▾"} 作品/结果",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    "${artifacts.size} 条",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!collapsed) {
+                Spacer(Modifier.height(6.dp))
+                groups.forEach { (kind, list) ->
+                    Text(
+                        kindLabel(kind),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                    list.forEach { artifact ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clickable {
+                                    vm.sendArtifactMessage(artifact)
+                                    Toast.makeText(context, "已发送", Toast.LENGTH_SHORT).show()
+                                },
+                        ) {
+                            Text(
+                                "@${artifact.author} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary.take(80)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            )
+                        }
                     }
                 }
             }

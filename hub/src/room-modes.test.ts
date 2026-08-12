@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseTaskCommand } from "./room-modes.js";
+import { parseTaskCommand, RoomModeManager, type AgentOps } from "./room-modes.js";
 import { resolveMemberByString } from "./conductor.js";
+import { RoomManager } from "./room.js";
 import type { Room } from "./room.js";
 
 const room: Room = {
@@ -56,5 +57,31 @@ describe("room-modes", () => {
     assert.equal(resolveMemberByString(room, "s2")?.sessionId, "s2");
     assert.equal(resolveMemberByString(room, "tes")?.sessionId, "s2");
     assert.equal(resolveMemberByString(room, "未知"), undefined);
+  });
+
+  it("mention 模式输出自动提取 artifact 到房间 registry", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ]);
+    const agent: AgentOps = {
+      prompt: async () => {},
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const broadcasted: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) =>
+      broadcasted.push({ method, params }),
+    );
+    await manager.handle(room, "@coder 改一下 room.ts", {});
+    const output = `已修改 hub/src/room.ts\n\`\`\`bash\nnpx tsc --noEmit\n\`\`\``;
+    await manager.onPromptDone("s1", output);
+    const artifacts = rooms.getArtifacts(room.roomId, 10);
+    assert.equal(artifacts.length, 2);
+    const command = artifacts.find((a) => a.kind === "command");
+    const file = artifacts.find((a) => a.kind === "file");
+    assert.equal(command?.summary, "npx tsc --noEmit");
+    assert.equal(file?.path, "hub/src/room.ts");
   });
 });

@@ -64,6 +64,17 @@ export interface FlowTask {
   artifacts: FlowArtifact[];
 }
 
+export interface ArtifactInfo {
+  id: string;
+  kind: "file" | "command" | "test" | "note";
+  author: string;
+  at: number;
+  summary: string;
+  path?: string;
+  command?: string;
+  taskId?: string;
+}
+
 export interface FlowInfo {
   roomId: string;
   phase: string;
