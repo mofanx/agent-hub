@@ -1419,13 +1419,19 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             else -> "笔记"
         }
     }
+    val scroll = rememberScrollState()
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(max = 280.dp)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
     ) {
-        Column(Modifier.padding(10.dp)) {
+        Column(
+            Modifier
+                .padding(10.dp)
+                .verticalScroll(scroll),
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1458,17 +1464,34 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             shape = RoundedCornerShape(4.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 2.dp)
-                                .clickable {
-                                    vm.sendArtifactMessage(artifact)
-                                    Toast.makeText(context, "已发送", Toast.LENGTH_SHORT).show()
-                                },
+                                .padding(vertical = 2.dp),
                         ) {
-                            Text(
-                                "@${artifact.author} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary.take(80)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(
+                                    "@${artifact.author} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f).padding(end = 6.dp),
+                                )
+                                IconButton(
+                                    onClick = {
+                                        vm.sendArtifactMessage(artifact)
+                                        Toast.makeText(context, "已发送", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = "继续",
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }

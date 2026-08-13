@@ -974,7 +974,7 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
                   title={a.path ? `${a.path}\n${a.summary}` : a.summary}
                 >
                   <span className="artifact-author">@{a.author}</span>
-                  <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)}</span>
+                  <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
                 </button>
               ))}
             </div>

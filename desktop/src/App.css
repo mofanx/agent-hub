@@ -1301,10 +1301,10 @@ html[data-theme="dark"] .drawer-item:hover {
 
 .artifact-summary {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  line-height: 1.35;
 }
 
 .history-loading {
