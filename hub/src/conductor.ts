@@ -236,7 +236,7 @@ export class ConductorOrchestrator {
     if (artifactContext?.refs?.length) {
       const artifacts = this.rooms.getArtifactsForPrompt(room.roomId, room.conductorId!, artifactContext);
       if (artifacts.length > 0) {
-        prompt.push("", "用户明确引用了以下作品/结果，请把它们作为上下文：");
+        prompt.push("", "用户明确引用了以下产物，请把它们作为上下文：");
         for (const a of artifacts) {
           const parts = [`@${a.author}`, `[${a.kind}]`];
           if (a.path) parts.push(a.path);

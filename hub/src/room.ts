@@ -46,7 +46,7 @@ export type RoomModeConfig = {
   memberRoles?: Record<string, string> | undefined;
 };
 
-type BlackboardEntry = { from: string; text: string; at: number };
+type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
 
 const BLACKBOARD_LIMIT = 10;
 const BLACKBOARD_OUTPUT_LEN = 400;
@@ -366,6 +366,19 @@ export class RoomManager {
     const before = room.artifacts.length;
     room.artifacts = room.artifacts.filter((a) => a.id !== artifactId);
     return room.artifacts.length < before;
+  }
+
+  /** 清空某个房间的 artifacts，可按 kind 过滤 */
+  clearArtifacts(roomId: string, kind?: ArtifactKind): number {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.artifacts) return 0;
+    const before = room.artifacts.length;
+    room.artifacts = room.artifacts.filter((a) => (kind ? a.kind !== kind : false));
+    if (!kind) {
+      room.artifacts = [];
+      return before;
+    }
+    return before - room.artifacts.length;
   }
 
   private resolveAllowedRoots(roomId: string, author?: string): { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] {
@@ -762,7 +775,7 @@ export class RoomManager {
       for (const e of board) lines.push(`- ${e.from}: ${e.text}`);
     }
     if (artifacts.length > 0) {
-      lines.push("", "最近产生的作品/结果：");
+      lines.push("", "最近产生的产物：");
       for (const a of artifacts) {
         const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`, `[${a.kind}]`];
         if (a.path) parts.push(a.path);
@@ -848,15 +861,35 @@ export class RoomManager {
     return touched;
   }
 
+  /** 删除黑板上的某条摘要 */
+  removeBlackboard(roomId: string, id: string): boolean {
+    const board = this.blackboards.get(roomId);
+    if (!board) return false;
+    const before = board.length;
+    const idx = board.findIndex((e) => e.id === id);
+    if (idx >= 0) board.splice(idx, 1);
+    return board.length < before;
+  }
+
+  /** 清空房间黑板 */
+  clearBlackboard(roomId: string): boolean {
+    const board = this.blackboards.get(roomId);
+    if (!board || board.length === 0) return false;
+    board.length = 0;
+    return true;
+  }
+
   /** 某个 session 一轮结束后，把输出摘要写上黑板（供其他成员参考） */
   recordOutput(sessionId: string, sessionName: string, output: string): string[] {
     const touched: string[] = [];
-    const text = output.trim().replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN);
+    const detail = output.trim();
+    const text = detail.replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN);
     if (!text) return touched;
+    const id = randomUUID();
     for (const room of this.rooms.values()) {
       if (!room.members.some((m) => m.sessionId === sessionId)) continue;
       const board = this.blackboards.get(room.roomId)!;
-      board.push({ from: sessionName, text, at: Date.now() });
+      board.push({ id, from: sessionName, text, detail, at: Date.now() });
       if (board.length > BLACKBOARD_LIMIT) board.shift();
       touched.push(room.roomId);
     }

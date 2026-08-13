@@ -55,8 +55,10 @@ export interface FlowArtifact {
 }
 
 export interface BlackboardInfo {
+  id: string;
   from: string;
   text: string;
+  detail: string;
   at: number;
 }
 

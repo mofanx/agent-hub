@@ -1257,13 +1257,31 @@ function RoomContextPanel({
 }
 
 function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }) {
+  const store = useHubStore();
+  const roomId = store.currentRoom?.roomId;
+  const [detail, setDetail] = useState<BlackboardInfo | null>(null);
   if (!blackboard || blackboard.length === 0) {
     return <div className="context-empty">暂无黑板摘要</div>;
   }
+  const onClear = async () => {
+    if (!roomId) return;
+    if (!window.confirm("确认清空全部黑板摘要？")) return;
+    await store.clearBlackboard(roomId);
+  };
+  const onRemove = async () => {
+    if (!roomId || !detail) return;
+    if (!window.confirm("确认删除这条黑板摘要？")) return;
+    await store.removeBlackboard(roomId, detail.id);
+    setDetail(null);
+  };
   return (
     <div className="context-content blackboard-list">
-      {blackboard.map((e, i) => (
-        <div key={i} className="blackboard-item">
+      <div className="context-content-header">
+        <span className="context-content-title">黑板</span>
+        <button className="context-action danger" onClick={onClear}>清空</button>
+      </div>
+      {blackboard.map((e) => (
+        <div key={e.id} className="blackboard-item" onClick={() => setDetail(e)}>
           <div className="blackboard-line">
             <span className="blackboard-from">@{e.from}</span>
             <span className="blackboard-time">{formatArtifactTime(e.at)}</span>
@@ -1271,6 +1289,23 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
           <div className="blackboard-text">{e.text}</div>
         </div>
       ))}
+
+      {detail && (
+        <div className="dialog-backdrop" onClick={() => setDetail(null)}>
+          <div className="dialog blackboard-detail" onClick={(ev) => ev.stopPropagation()}>
+            <h4>黑板摘要</h4>
+            <div className="blackboard-line">
+              <span className="blackboard-from">@{detail.from}</span>
+              <span className="blackboard-time">{formatArtifactTime(detail.at)}</span>
+            </div>
+            <pre>{detail.detail}</pre>
+            <div className="form-row" style={{ justifyContent: "flex-end" }}>
+              <button onClick={() => setDetail(null)}>关闭</button>
+              <button className="danger" onClick={onRemove}>删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1319,8 +1354,12 @@ type FileGetResult = {
 
 function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo[]; minimal?: boolean }) {
   const store = useHubStore();
+  const roomId = store.currentRoom?.roomId;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("artifactPanelCollapsed") === "1");
   const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
+  const [managing, setManaging] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [clearKind, setClearKind] = useState<string>("all");
   useEffect(() => {
     localStorage.setItem("artifactPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
@@ -1373,7 +1412,75 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     }
   };
 
-  const content = (
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const onDeleteSelected = async () => {
+    if (!roomId || selected.size === 0) return;
+    const list = Array.from(selected);
+    const names = list
+      .map((id) => {
+        const a = artifacts.find((x) => x.id === id);
+        return a ? (a.alias ?? a.id) : id;
+      })
+      .join(", ");
+    if (!window.confirm(`确认删除选中的 ${list.length} 个产物？\n${names}`)) return;
+    await Promise.all(list.map((id) => store.removeArtifact(roomId, id)));
+    setSelected(new Set());
+    setManaging(false);
+  };
+
+  const onClearByKind = async () => {
+    if (!roomId) return;
+    const label = clearKind === "all" ? "全部产物" : `${kindLabel(clearKind)}类产物`;
+    if (!window.confirm(`确认清空 ${label}？`)) return;
+    await store.clearArtifacts(roomId, clearKind === "all" ? undefined : (clearKind as ArtifactInfo["kind"]));
+    setSelected(new Set());
+    setManaging(false);
+  };
+
+  const manageActions = (
+    <div className="artifact-header-actions" onClick={(e) => e.stopPropagation()}>
+      {!managing ? (
+        <button className="context-action" onClick={() => setManaging(true)}>管理</button>
+      ) : (
+        <>
+          <select
+            className="context-select"
+            value={clearKind}
+            onChange={(e) => setClearKind(e.target.value)}
+          >
+            <option value="all">全部</option>
+            <option value="file">文件</option>
+            <option value="command">命令</option>
+            <option value="test">测试</option>
+            <option value="note">笔记</option>
+          </select>
+          <button className="context-action danger" onClick={onClearByKind}>清空</button>
+          <button className="context-action danger" onClick={onDeleteSelected} disabled={selected.size === 0}>
+            删除选中{selected.size > 0 ? ` (${selected.size})` : ""}
+          </button>
+          <button
+            className="context-action"
+            onClick={() => {
+              setManaging(false);
+              setSelected(new Set());
+            }}
+          >
+            完成
+          </button>
+        </>
+      )}
+    </div>
+  );
+
+  const list = (
     <div className="artifact-list">
       {Object.entries(groups).map(([kind, list]) => (
         <div key={kind} className="artifact-group">
@@ -1381,32 +1488,49 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
           {list.map((a) => (
             <div
               key={a.id}
-              className="artifact-item"
+              className={`artifact-item ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""}`}
               title={a.path ? `${a.path}\n${a.summary}` : a.summary}
             >
-              <div className="artifact-info">
+              {managing && (
+                <input
+                  type="checkbox"
+                  checked={selected.has(a.id)}
+                  onChange={(e) => {
+                    setSelected((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(a.id);
+                      else next.delete(a.id);
+                      return next;
+                    });
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              )}
+              <div className="artifact-info" onClick={() => managing && toggleSelected(a.id)}>
                 <span className="artifact-author">@{a.author}</span>
                 <span className="artifact-time">{formatArtifactTime(a.at)}</span>
                 <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
               </div>
-              <div className="artifact-actions">
-                <button
-                  className="artifact-action"
-                  title="引用并继续"
-                  onClick={() => store.sendArtifactMessage(a)}
-                >
-                  ➤
-                </button>
-                {a.kind === "file" && (
+              {!managing && (
+                <div className="artifact-actions">
                   <button
                     className="artifact-action"
-                    title="下载 / 预览"
-                    onClick={() => handleDownload(a)}
+                    title="引用并继续"
+                    onClick={() => store.sendArtifactMessage(a)}
                   >
-                    ↓
+                    ➤
                   </button>
-                )}
-              </div>
+                  {a.kind === "file" && (
+                    <button
+                      className="artifact-action"
+                      title="下载 / 预览"
+                      onClick={() => handleDownload(a)}
+                    >
+                      ↓
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1417,14 +1541,21 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   return (
     <>
       {minimal ? (
-        <div className="context-content">{content}</div>
+        <div className="context-content">
+          <div className="context-content-header">
+            <span className="context-content-title">产物</span>
+            {manageActions}
+          </div>
+          {list}
+        </div>
       ) : (
         <div className="artifact-panel">
           <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
-            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}作品/结果</span>
+            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}产物</span>
             <span className="artifact-count">{artifacts.length} 条</span>
+            {manageActions}
           </div>
-          {!collapsed && content}
+          {!collapsed && list}
         </div>
       )}
 

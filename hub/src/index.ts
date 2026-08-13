@@ -1111,6 +1111,29 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!room) throw new Error("unknown room");
       return { blackboard: rooms.getBlackboard(roomId) };
     }
+    case "room.blackboard.remove": {
+      const roomId = String(req.params?.roomId ?? "");
+      const id = String(req.params?.id ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const removed = rooms.removeBlackboard(roomId, id);
+      broadcast({
+        method: "room.blackboardUpdate",
+        params: { roomId, blackboard: rooms.getBlackboard(roomId) },
+      } as HubEvent);
+      return { removed };
+    }
+    case "room.blackboard.clear": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const cleared = rooms.clearBlackboard(roomId);
+      broadcast({
+        method: "room.blackboardUpdate",
+        params: { roomId, blackboard: rooms.getBlackboard(roomId) },
+      } as HubEvent);
+      return { cleared };
+    }
     case "room.flow": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
@@ -1145,8 +1168,23 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
       const removed = rooms.removeArtifact(roomId, artifactId);
-      persistState();
+      if (removed) {
+        persistState();
+        broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
+      }
       return { removed };
+    }
+    case "room.clearArtifacts": {
+      const roomId = String(req.params?.roomId ?? "");
+      const kind = parseArtifactKind(req.params?.kind);
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      const count = rooms.clearArtifacts(roomId, req.params?.kind ? kind : undefined);
+      if (count > 0) {
+        persistState();
+        broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
+      }
+      return { count };
     }
     case "room.file.send": {
       const roomId = String(req.params?.roomId ?? "");

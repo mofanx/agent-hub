@@ -175,6 +175,10 @@ interface Actions {
   setFlow(flow: FlowInfo | null): void;
   refreshArtifacts(roomId: string): Promise<void>;
   refreshBlackboard(roomId: string): Promise<void>;
+  removeBlackboard(roomId: string, id: string): Promise<void>;
+  clearBlackboard(roomId: string): Promise<void>;
+  removeArtifact(roomId: string, artifactId: string): Promise<void>;
+  clearArtifacts(roomId: string, kind?: ArtifactInfo["kind"]): Promise<void>;
   sendArtifactMessage(artifact: ArtifactInfo): void;
 
   showModelPickerDialog(): Promise<void>;
@@ -405,8 +409,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
           const blackboard = ((params.blackboard as unknown[]) ?? []).map((it) => {
             const e = it as Record<string, unknown>;
             return {
+              id: String(e.id ?? ""),
               from: String(e.from ?? ""),
               text: String(e.text ?? ""),
+              detail: String(e.detail ?? ""),
               at: typeof e.at === "number" ? e.at : 0,
             } as BlackboardInfo;
           });
@@ -1609,14 +1615,56 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const blackboard = ((result.blackboard as unknown[]) ?? []).map((it) => {
           const e = it as Record<string, unknown>;
           return {
+            id: String(e.id ?? ""),
             from: String(e.from ?? ""),
             text: String(e.text ?? ""),
+            detail: String(e.detail ?? ""),
             at: typeof e.at === "number" ? e.at : 0,
           } as BlackboardInfo;
         });
         set({ blackboard });
       } catch {
         /* ignore */
+      }
+    },
+
+    removeBlackboard: async (roomId: string, id: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("room.blackboard.remove", { roomId, id });
+      } catch (err) {
+        alert(`删除失败：${err}`);
+      }
+    },
+
+    clearBlackboard: async (roomId: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("room.blackboard.clear", { roomId });
+      } catch (err) {
+        alert(`清空失败：${err}`);
+      }
+    },
+
+    removeArtifact: async (roomId: string, artifactId: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("room.removeArtifact", { roomId, artifactId });
+      } catch (err) {
+        alert(`删除失败：${err}`);
+      }
+    },
+
+    clearArtifacts: async (roomId: string, kind?: ArtifactInfo["kind"]) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("room.clearArtifacts", { roomId, kind });
+      } catch (err) {
+        alert(`清空失败：${err}`);
       }
     },
 

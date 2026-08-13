@@ -156,7 +156,7 @@ describe("room", () => {
     ]);
     rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "修改了 room.ts", path: "hub/src/room.ts" });
     const prompt = rooms.buildPrompt(room.roomId, "继续改", "s1");
-    assert.ok(prompt.includes("最近产生的作品/结果"));
+    assert.ok(prompt.includes("最近产生的产物"));
     assert.ok(prompt.includes("hub/src/room.ts"));
     assert.ok(prompt.includes("修改了 room.ts"));
   });
@@ -179,7 +179,7 @@ describe("room", () => {
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: "我写的" });
     const prompt = rooms.buildPrompt(room.roomId, "继续", "s1");
-    assert.ok(!prompt.includes("最近产生的作品/结果"));
+    assert.ok(!prompt.includes("最近产生的产物"));
   });
 
   it("parseArtifactRefs 从文本识别 id 与 path", () => {
@@ -222,7 +222,7 @@ describe("room", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     const prompt = rooms.buildPrompt(room.roomId, "继续 abcdefgh", "s1", undefined, undefined);
-    assert.ok(!prompt.includes("最近产生的作品/结果"));
+    assert.ok(!prompt.includes("最近产生的产物"));
   });
 
   it("import 恢复房间时补齐 artifacts 数组", () => {
@@ -368,7 +368,43 @@ describe("room", () => {
     rooms.recordOutput("s1", "a1", "完成了任务");
     const board = rooms.getBlackboard(room.roomId);
     assert.equal(board.length, 1);
+    assert.ok(board[0]!.id);
     assert.equal(board[0]!.from, "a1");
     assert.equal(board[0]!.text, "完成了任务");
+    assert.equal(board[0]!.detail, "完成了任务");
+  });
+
+  it("removeBlackboard 删除指定黑板条目", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    rooms.recordOutput("s1", "a1", "任务一");
+    const board = rooms.getBlackboard(room.roomId);
+    assert.equal(board.length, 1);
+    assert.ok(rooms.removeBlackboard(room.roomId, board[0]!.id));
+    assert.equal(rooms.getBlackboard(room.roomId).length, 0);
+    assert.ok(!rooms.removeBlackboard(room.roomId, "missing"));
+  });
+
+  it("clearBlackboard 清空黑板", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    rooms.recordOutput("s1", "a1", "任务一");
+    rooms.recordOutput("s1", "a1", "任务二");
+    assert.equal(rooms.getBlackboard(room.roomId).length, 2);
+    assert.ok(rooms.clearBlackboard(room.roomId));
+    assert.equal(rooms.getBlackboard(room.roomId).length, 0);
+    assert.ok(!rooms.clearBlackboard(room.roomId));
+  });
+
+  it("clearArtifacts 按 kind 过滤删除或清空全部", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "文件" });
+    rooms.addArtifact(room.roomId, { kind: "note", author: "a1", summary: "笔记" });
+    rooms.addArtifact(room.roomId, { kind: "test", author: "a1", summary: "测试" });
+    assert.equal(rooms.clearArtifacts(room.roomId, "note"), 1);
+    assert.equal(room.artifacts!.length, 2);
+    assert.equal(rooms.clearArtifacts(room.roomId), 2);
+    assert.equal(room.artifacts!.length, 0);
   });
 });

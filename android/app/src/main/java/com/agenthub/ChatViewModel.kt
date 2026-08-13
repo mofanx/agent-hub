@@ -231,8 +231,10 @@ data class FileTreeNode(
 )
 
 data class BlackboardEntry(
+    val id: String,
     val from: String,
     val text: String,
+    val detail: String,
     val at: Long,
 )
 
@@ -1346,8 +1348,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun parseBlackboardEntry(obj: JsonObject): BlackboardEntry {
         return BlackboardEntry(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
             from = obj["from"]?.jsonPrimitive?.content ?: "",
             text = obj["text"]?.jsonPrimitive?.content ?: "",
+            detail = obj["detail"]?.jsonPrimitive?.content ?: "",
             at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
         )
     }
@@ -1915,6 +1919,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sendRoomMessage(text)
     }
 
+    fun removeArtifact(artifact: ArtifactInfo) {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("room.removeArtifact", buildJsonObject {
+                    put("roomId", room.roomId)
+                    put("artifactId", artifact.id)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
+            }
+        }
+    }
+
+    fun clearArtifacts(kind: String? = null) {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("room.clearArtifacts", buildJsonObject {
+                    put("roomId", room.roomId)
+                    if (kind != null) put("kind", kind)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "clear failed"))
+            }
+        }
+    }
+
+    fun removeBlackboardEntry(entry: BlackboardEntry) {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("room.blackboard.remove", buildJsonObject {
+                    put("roomId", room.roomId)
+                    put("id", entry.id)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
+            }
+        }
+    }
+
+    fun clearBlackboard() {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("room.blackboard.clear", buildJsonObject {
+                    put("roomId", room.roomId)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "clear failed"))
+            }
+        }
+    }
+
     fun openArtifactFile(artifact: ArtifactInfo) {
         val room = currentRoom ?: return
         viewModelScope.launch {
@@ -2269,6 +2328,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val list = p["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
                     blackboard.clear()
                     blackboard.addAll(list)
+                }
+            }
+            "room.artifact" -> {
+                val p = obj["params"]!!.jsonObject
+                val roomId = p["roomId"]!!.jsonPrimitive.content
+                if (currentRoom?.roomId == roomId) {
+                    viewModelScope.launch { refreshArtifacts(roomId) }
                 }
             }
             "permission.request" -> {

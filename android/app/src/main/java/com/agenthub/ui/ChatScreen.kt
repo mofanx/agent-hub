@@ -17,6 +17,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -83,6 +84,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -124,6 +126,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import com.agenthub.ArtifactInfo
+import com.agenthub.BlackboardEntry
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
@@ -1493,6 +1496,9 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     if (artifacts.isEmpty()) return
     val context = LocalContext.current
     var collapsed by remember { mutableStateOf(false) }
+    var showClearMenu by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf<String?>(null) }
+    var confirmRemove by remember { mutableStateOf<ArtifactInfo?>(null) }
     val groups = remember(artifacts) {
         artifacts.groupBy { it.kind }
     }
@@ -1501,7 +1507,8 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             "file" -> "文件"
             "command" -> "命令"
             "test" -> "测试"
-            else -> "笔记"
+            "note" -> "笔记"
+            else -> "全部"
         }
     }
     val scroll = rememberScrollState()
@@ -1525,14 +1532,36 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "${if (collapsed) "▸" else "▾"} 作品/结果",
+                    "${if (collapsed) "▸" else "▾"} 产物",
                     style = MaterialTheme.typography.titleSmall,
                 )
-                Text(
-                    "${artifacts.size} 条",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        TextButton(
+                            onClick = { showClearMenu = true },
+                        ) { Text("清空", style = MaterialTheme.typography.bodySmall) }
+                        DropdownMenu(
+                            expanded = showClearMenu,
+                            onDismissRequest = { showClearMenu = false },
+                        ) {
+                            listOf(null, "file", "command", "test", "note").forEach { kind ->
+                                DropdownMenuItem(
+                                    text = { Text(kindLabel(kind ?: "")) },
+                                    onClick = {
+                                        showClearMenu = false
+                                        confirmClear = kind ?: ""
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        "${artifacts.size} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
             }
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
@@ -1589,6 +1618,16 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                             modifier = Modifier.size(18.dp),
                                         )
                                     }
+                                    IconButton(
+                                        onClick = { confirmRemove = artifact },
+                                        modifier = Modifier.size(28.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "删除",
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1596,6 +1635,45 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                 }
             }
         }
+    }
+
+    confirmRemove?.let { artifact ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text("删除产物") },
+            text = { Text("确定删除该产物？\n${artifact.summary}") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.removeArtifact(artifact)
+                        confirmRemove = null
+                    },
+                ) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemove = null }) { Text("取消") }
+            },
+        )
+    }
+
+    confirmClear?.let { kind ->
+        val label = kindLabel(kind)
+        AlertDialog(
+            onDismissRequest = { confirmClear = null },
+            title = { Text("清空产物") },
+            text = { Text("确定清空${label}产物？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.clearArtifacts(kind.ifEmpty { null })
+                        confirmClear = null
+                    },
+                ) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = null }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -1660,6 +1738,11 @@ private fun BlackboardPanel(vm: ChatViewModel) {
     val entries = vm.blackboard
     if (entries.isEmpty()) return
     var collapsed by remember { mutableStateOf(false) }
+    var detailEntry by remember { mutableStateOf<BlackboardEntry?>(null) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1680,16 +1763,29 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                     "${if (collapsed) "▸" else "▾"} 共享黑板",
                     style = MaterialTheme.typography.titleSmall,
                 )
-                Text(
-                    "${entries.size} 条",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { showClearConfirm = true }) {
+                        Text("清空", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text(
+                        "${entries.size} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
             }
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
                 entries.forEach { entry ->
-                    Column(Modifier.padding(vertical = 3.dp)) {
+                    Column(
+                        Modifier
+                            .padding(vertical = 3.dp)
+                            .combinedClickable(
+                                onClick = { detailEntry = entry },
+                                onLongClick = { detailEntry = entry },
+                            ),
+                    ) {
                         Text(
                             "@${entry.from} · ${formatArtifactTime(entry.at)}",
                             style = MaterialTheme.typography.labelSmall,
@@ -1705,5 +1801,82 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                 }
             }
         }
+    }
+
+    detailEntry?.let { entry ->
+        Dialog(onDismissRequest = { detailEntry = null }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "@${entry.from} · ${formatArtifactTime(entry.at)}",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        IconButton(onClick = { detailEntry = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "关闭")
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        Text(
+                            entry.detail.ifBlank { entry.text },
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    ) {
+                        TextButton(onClick = { detailEntry = null }) { Text("关闭") }
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, entry.detail.ifBlank { entry.text })))
+                                }
+                                Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                            },
+                        ) { Text("复制") }
+                        TextButton(
+                            onClick = {
+                                vm.removeBlackboardEntry(entry)
+                                detailEntry = null
+                            },
+                        ) { Text("删除") }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空黑板") },
+            text = { Text("确定清空全部 ${entries.size} 条黑板摘要？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.clearBlackboard()
+                        showClearConfirm = false
+                    },
+                ) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+            },
+        )
     }
 }
