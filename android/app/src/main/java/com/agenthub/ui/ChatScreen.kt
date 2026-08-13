@@ -552,23 +552,43 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         },
                     )
                     if (mentionQuery != null) {
-                        val matches = vm.currentRoom!!.members.filter {
+                        val memberMatches = vm.currentRoom!!.members.filter {
                             it.second.startsWith(mentionQuery, ignoreCase = true)
                         }
+                        val artifactMatches = if (memberMatches.isNotEmpty()) emptyList() else vm.currentArtifacts.filter {
+                            it.id.startsWith(mentionQuery, ignoreCase = true) ||
+                                    (!it.alias.isNullOrBlank() && it.alias.startsWith(mentionQuery, ignoreCase = true)) ||
+                                    (!it.path.isNullOrBlank() && it.path.contains(mentionQuery, ignoreCase = true)) ||
+                                    it.summary.contains(mentionQuery, ignoreCase = true)
+                        }
+                        val matches = memberMatches.isNotEmpty()
                         DropdownMenu(
-                            expanded = matches.isNotEmpty(),
+                            expanded = memberMatches.isNotEmpty() || artifactMatches.isNotEmpty(),
                             onDismissRequest = { },
                             properties = PopupProperties(focusable = false),
                         ) {
-                            matches.forEach { (sid, name) ->
-                                val display = vm.sessionName(sid)
-                                DropdownMenuItem(
-                                    text = { Text("@$display") },
-                                    onClick = {
-                                        val at = input.lastIndexOf('@')
-                                        input = input.substring(0, at) + "@$name "
-                                    },
-                                )
+                            if (matches) {
+                                memberMatches.forEach { (sid, name) ->
+                                    val display = vm.sessionName(sid)
+                                    DropdownMenuItem(
+                                        text = { Text("@$display") },
+                                        onClick = {
+                                            val at = input.lastIndexOf('@')
+                                            input = input.substring(0, at) + "@$name "
+                                        },
+                                    )
+                                }
+                            } else {
+                                artifactMatches.forEach { artifact ->
+                                    val label = "${artifact.path?.let { "$it · " } ?: ""}${artifact.summary.take(60)} · @${artifact.author}"
+                                    DropdownMenuItem(
+                                        text = { Text(label) },
+                                        onClick = {
+                                            val at = input.lastIndexOf('@')
+                                            input = input.substring(0, at) + "@${artifact.alias ?: artifact.id} "
+                                        },
+                                    )
+                                }
                             }
                         }
                     }

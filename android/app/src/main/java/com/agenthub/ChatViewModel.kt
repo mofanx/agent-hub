@@ -203,6 +203,7 @@ data class FlowInfo(
 
 data class ArtifactInfo(
     val id: String,
+    val alias: String? = null,
     val kind: String,
     val author: String,
     val at: Long = 0,
@@ -1295,6 +1296,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun parseArtifactInfo(obj: JsonObject): ArtifactInfo {
         return ArtifactInfo(
             id = obj["id"]?.jsonPrimitive?.content ?: "",
+            alias = obj["alias"]?.jsonPrimitive?.content,
             kind = obj["kind"]?.jsonPrimitive?.content ?: "note",
             author = obj["author"]?.jsonPrimitive?.content ?: "",
             at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
@@ -1842,10 +1844,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun sendArtifactMessage(artifact: ArtifactInfo) {
+        val ref = artifact.alias ?: artifact.id
         val text = if (artifact.path.isNullOrBlank()) {
-            "继续处理这个 artifact (${artifact.id})：${artifact.summary}"
+            "继续处理这个 artifact (${ref})：${artifact.summary}"
         } else {
-            "继续处理这个 artifact (${artifact.id})：${artifact.path}\n\n摘要：${artifact.summary}"
+            "继续处理这个 artifact (${ref})：${artifact.path}\n\n摘要：${artifact.summary}"
         }
         sendRoomMessage(text)
     }

@@ -36,6 +36,7 @@ type Flow = {
   tasks: Map<string, FlowTask>;
   /** 结果以 taskId 为 key */
   results: Map<string, TaskResult>;
+  artifactContext?: { refs?: string[] } | undefined;
 };
 
 export type ConductorNotice = { roomId: string; message: string };
@@ -184,7 +185,12 @@ export class ConductorOrchestrator {
     return `{"tasks":[${sample.join(",")}]}`;
   }
 
-  async start(room: Room, text: string, initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[]): Promise<void> {
+  async start(
+    room: Room,
+    text: string,
+    initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[],
+    artifactContext?: { refs?: string[] },
+  ): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
     if (initialTasks && initialTasks.length > 0) {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
@@ -193,6 +199,7 @@ export class ConductorOrchestrator {
         phase: "planning",
         tasks: new Map(),
         results: new Map(),
+        artifactContext,
       });
       const flow = this.flows.get(room.roomId)!;
       await this.dispatchFromTasks(flow, room, initialTasks, text);
@@ -225,15 +232,29 @@ export class ConductorOrchestrator {
       '- to: "成员A"（不存在该成员）',
       '- task: "处理一下"（不够具体）',
       '- 输出多个 code block 或在 JSON 外加解释文字',
-    ].join("\n");
+    ];
+    if (artifactContext?.refs?.length) {
+      const artifacts = this.rooms.getArtifactsForPrompt(room.roomId, room.conductorId!, artifactContext);
+      if (artifacts.length > 0) {
+        prompt.push("", "用户明确引用了以下作品/结果，请把它们作为上下文：");
+        for (const a of artifacts) {
+          const parts = [`@${a.author}`, `[${a.kind}]`];
+          if (a.path) parts.push(a.path);
+          parts.push(a.summary);
+          prompt.push(`- ${parts.join(" ")}`);
+        }
+      }
+    }
+    const promptText = prompt.join("\n");
     this.flows.set(room.roomId, {
       roomId: room.roomId,
       phase: "planning",
       tasks: new Map(),
       results: new Map(),
+      artifactContext,
     });
     this.notice({ roomId: room.roomId, message: "指挥家拆解任务中…" });
-    await this.agent.prompt(room.conductorId, prompt);
+    await this.agent.prompt(room.conductorId, promptText);
   }
 
   /** 每轮 prompt.done 时调用；返回 true 表示该事件属于某个编排流 */
@@ -459,6 +480,14 @@ export class ConductorOrchestrator {
       t.status = "running";
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       assignments.push(`@${name}：${t.task}`);
+      const taskRefs = this.rooms.parseArtifactRefs(room.roomId, t.task);
+      const refs =
+        taskRefs.length > 0
+          ? [...new Set([...(flow.artifactContext?.refs ?? []), ...taskRefs])]
+          : flow.artifactContext?.refs;
+      const artifactContext = refs && refs.length > 0
+        ? { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}), refs }
+        : { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}) };
       const prompt = this.rooms.buildPrompt(
         room.roomId,
         [
@@ -474,7 +503,7 @@ export class ConductorOrchestrator {
         t.sessionId,
         undefined,
         undefined,
-        { taskId: t.id, dependsOn: t.dependsOn },
+        artifactContext,
       );
       this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
         t.retries = (t.retries ?? 0) + 1;
@@ -543,6 +572,7 @@ export class ConductorOrchestrator {
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
         ),
+        artifactContext: flow.artifactContext,
       })),
     };
   }
@@ -555,11 +585,18 @@ export class ConductorOrchestrator {
       const roomId = String(f.roomId ?? "");
       const room = this.rooms.get(roomId);
       if (!room || !room.conductorId) continue;
+      const refsArr = Array.isArray((f.artifactContext as Record<string, unknown>)?.refs)
+        ? ((f.artifactContext as Record<string, unknown>).refs as unknown[]).map((s) => String(s)).filter(Boolean)
+        : [];
+      const artifactContext = f.artifactContext && typeof f.artifactContext === "object" && refsArr.length > 0
+        ? { refs: refsArr }
+        : undefined;
       const flow: Flow = {
         roomId,
         phase: (f.phase as Flow["phase"]) ?? "working",
         tasks: new Map(),
         results: new Map(),
+        artifactContext,
       };
       for (const t of (f.tasks as unknown[]) ?? []) {
         const o = t as Record<string, unknown>;

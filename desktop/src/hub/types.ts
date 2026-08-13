@@ -66,6 +66,7 @@ export interface FlowTask {
 
 export interface ArtifactInfo {
   id: string;
+  alias?: string;
   kind: "file" | "command" | "test" | "note";
   author: string;
   at: number;

@@ -84,4 +84,48 @@ describe("room-modes", () => {
     assert.equal(command?.summary, "npx tsc --noEmit");
     assert.equal(file?.path, "hub/src/room.ts");
   });
+
+  it("mention 模式自动识别 alias 引用并注入上下文", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ]);
+    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "文件 a", path: "src/a.ts" })!;
+    const prompts: { sessionId: string; text: string | unknown[] }[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "@coder 继续 a1", {});
+    assert.equal(prompts.length, 1);
+    const text = typeof prompts[0]!.text === "string" ? prompts[0]!.text : JSON.stringify(prompts[0]!.text);
+    assert.ok(text.includes("文件 a"));
+    assert.ok(text.includes(a.alias!));
+  });
+
+  it("conductor 模式 /task 解析自动注入 artifact 引用", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ]);
+    room.mode = "conductor";
+    room.conductorId = "s1";
+    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "需要继续的文件", path: "src/a.ts" })!;
+    const prompts: { sessionId: string; text: string | unknown[] }[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "/task @coder 继续 a1");
+    const worker = prompts.find((p) => p.sessionId === "s1");
+    const text = typeof worker?.text === "string" ? worker!.text : JSON.stringify(worker!.text);
+    assert.ok(text?.includes("需要继续的文件"));
+    assert.ok(text?.includes("a1"));
+  });
 });

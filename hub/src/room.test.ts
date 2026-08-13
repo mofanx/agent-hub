@@ -176,6 +176,49 @@ describe("room", () => {
     assert.ok(!prompt.includes("最近产生的作品/结果"));
   });
 
+  it("parseArtifactRefs 从文本识别 id 与 path", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "x", path: "hub/src/room.ts" })!;
+    const refs = rooms.parseArtifactRefs(room.roomId, `继续 ${a.id} 和 artifact:${a.id} 以及 hub/src/room.ts`);
+    assert.deepEqual(refs, [a.id]);
+  });
+
+  it("parseArtifactRefs 识别 alias、括号与 artifact: 前缀", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "alias test", path: "hub/src/x.ts" })!;
+    assert.equal(a.alias, "a1");
+    const refs = rooms.parseArtifactRefs(room.roomId, "继续 a1 和 [a1] 以及 artifact:a1");
+    assert.deepEqual(refs, [a.id]);
+    const byPath = rooms.parseArtifactRefs(room.roomId, "基于 hub/src/x.ts");
+    assert.deepEqual(byPath, [a.id]);
+  });
+
+  it("buildPrompt 显式引用时不过滤作者", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const a = rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: "我写的" })!;
+    const prompt = rooms.buildPrompt(room.roomId, `继续 ${a.id}`, "s1", undefined, undefined, { refs: [a.id] });
+    assert.ok(prompt.includes("我写的"));
+  });
+
+  it("buildPrompt 显式引用 alias 时不过滤作者", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const a = rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: "alias 写的" })!;
+    assert.equal(a.alias, "a1");
+    const prompt = rooms.buildPrompt(room.roomId, "继续 a1", "s1", undefined, undefined, { refs: ["a1"] });
+    assert.ok(prompt.includes("alias 写的"));
+  });
+
+  it("buildPrompt 显式引用不存在的 artifact 不报错", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const prompt = rooms.buildPrompt(room.roomId, "继续 abcdefgh", "s1", undefined, undefined);
+    assert.ok(!prompt.includes("最近产生的作品/结果"));
+  });
+
   it("import 恢复房间时补齐 artifacts 数组", () => {
     const rooms = new RoomManager();
     const room: Room = {

@@ -31,6 +31,7 @@ type PromptOptions = {
   content?: PromptContent | undefined;
   sessionNote?: ((sessionId: string) => string | undefined) | undefined;
   params?: Record<string, unknown> | undefined;
+  artifactContext?: { taskId?: string; dependsOn?: string[]; refs?: string[] } | undefined;
 };
 
 export function parseTaskCommand(
@@ -89,6 +90,7 @@ type ParallelFlow = {
   note?: string | undefined;
   quote?: { author: string; text: string } | undefined;
   content?: PromptContent | undefined;
+  artifactContext?: PromptOptions["artifactContext"];
 };
 
 type PipelineFlow = {
@@ -99,6 +101,7 @@ type PipelineFlow = {
   note?: string | undefined;
   quote?: { author: string; text: string } | undefined;
   content?: PromptContent | undefined;
+  artifactContext?: PromptOptions["artifactContext"];
 };
 
 type DebateOutput = {
@@ -118,6 +121,7 @@ type DebateFlow = {
   note?: string | undefined;
   quote?: { author: string; text: string } | undefined;
   content?: PromptContent | undefined;
+  artifactContext?: PromptOptions["artifactContext"];
 };
 
 const MODE_LABELS: Record<RuntimeMode, string> = {
@@ -392,14 +396,20 @@ export class RoomModeManager {
       if (entry) entry.accepted = accepted;
     }
 
+    const refs = this.rooms.parseArtifactRefs(room.roomId, text);
+    const artifactContext = refs.length > 0
+      ? { ...(options?.artifactContext ?? {}), refs: [...new Set([...(options?.artifactContext?.refs ?? []), ...refs])] }
+      : options?.artifactContext;
+    const mergedOptions: PromptOptions = { ...options, artifactContext };
+
     if (room.mode === "auto") {
-      const result = await this.handleAuto(room, text, options);
+      const result = await this.handleAuto(room, text, mergedOptions);
       this.emitFlowUpdate(room.roomId);
       return result;
     }
 
     this.setSubMode(room.roomId, room.mode, undefined, undefined);
-    const result = await this.executeMode(room, room.mode, text, options);
+    const result = await this.executeMode(room, room.mode, text, mergedOptions);
     this.emitFlowUpdate(room.roomId);
     return result;
   }
@@ -436,6 +446,7 @@ export class RoomModeManager {
         content: autoCtx.content,
         sessionNote: autoCtx.sessionNote,
         params: decision.params,
+        artifactContext: autoCtx.artifactContext,
       });
       logWarn("room-modes auto", `executeMode 完成：sent=[${result.sent.join(", ")}]，skipped=[${result.skipped.join(", ")}]`);
       this.emitFlowUpdate(room.roomId);
@@ -482,6 +493,7 @@ export class RoomModeManager {
           quote: autoCtx.quote,
           content: autoCtx.content,
           sessionNote: autoCtx.sessionNote,
+          artifactContext: autoCtx.artifactContext,
         });
       }
       this.emitFlowUpdate(autoCtx.roomId);
@@ -723,13 +735,13 @@ export class RoomModeManager {
         if (m) sent.add(m.sessionId);
         else skipped.push(t.to);
       }
-      this.conductor.start(room, task, initialTasks).catch((err) => {
+      this.conductor.start(room, task, initialTasks, options?.artifactContext).catch((err) => {
         logError("room-modes conductor start", err);
       });
       return { sent: [...sent], mentioned: [], skipped };
     }
 
-    this.conductor.start(room, task).catch((err) => {
+    this.conductor.start(room, task, undefined, options?.artifactContext).catch((err) => {
       logError("room-modes conductor start", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
@@ -816,6 +828,7 @@ export class RoomModeManager {
       note: options?.note,
       quote: options?.quote,
       content: options?.content,
+      artifactContext: options?.artifactContext,
     };
     this.parallelFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "parallel", summarizer, undefined);
@@ -864,7 +877,8 @@ export class RoomModeManager {
     const lines = [...flow.results.entries()].map(([sid, out]) => {
       return `- @${this.nameFor(roomId, sid)}: ${out.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
-    const prompt = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
+    const promptText = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
+    const prompt = this.buildPromptContent(room, promptText, flow.summarizer, { artifactContext: flow.artifactContext });
     this.parallelFlows.delete(roomId);
     this.notice({ roomId, message: "并行回答完成，汇总者正在整理…" });
     this.sendPrompt(room.roomId, flow.summarizer, prompt).catch((err) => {
@@ -895,6 +909,7 @@ export class RoomModeManager {
       note: options?.note,
       quote: options?.quote,
       content: options?.content,
+      artifactContext: options?.artifactContext,
     };
     this.pipelineFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "pipeline", first, undefined);
@@ -952,7 +967,7 @@ export class RoomModeManager {
       quote = { author: prevName, text: prevOutput };
       task = `请继续下一阶段处理原始任务：${task}`;
     }
-    return this.buildPromptContent(room, task, flow.order[stage]!, { quote, content: flow.content });
+    return this.buildPromptContent(room, task, flow.order[stage]!, { quote, content: flow.content, artifactContext: flow.artifactContext });
   }
 
   private async handleDebate(
@@ -994,6 +1009,7 @@ export class RoomModeManager {
       note: options?.note,
       quote: options?.quote,
       content: options?.content,
+      artifactContext: options?.artifactContext,
     };
     this.debateFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "debate", sideA, undefined);
@@ -1073,15 +1089,16 @@ export class RoomModeManager {
     }。`;
     let task = `${text}\n\n辩题：${flow.topic}`;
     if (flow.note) task = `${flow.note}\n\n${task}`;
-    return this.buildPromptContent(room, task, flow.sides[sideIndex]!, { quote, content: flow.content });
+    return this.buildPromptContent(room, task, flow.sides[sideIndex]!, { quote, content: flow.content, artifactContext: flow.artifactContext });
   }
 
-  private buildJudgePrompt(room: Room, flow: DebateFlow): string {
+  private buildJudgePrompt(room: Room, flow: DebateFlow): string | PromptContent {
     const lines = flow.outputs.map((o) => {
       const side = o.side === 0 ? "正方" : "反方";
       return `- 第 ${o.round} 轮 ${side}：${o.text.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
-    return `你是辩论裁判。辩题：${flow.topic}\n\n辩论记录：\n${lines.join("\n")}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
+    const text = `你是辩论裁判。辩题：${flow.topic}\n\n辩论记录：\n${lines.join("\n")}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
+    return this.buildPromptContent(room, text, flow.judge, { artifactContext: flow.artifactContext });
   }
 
   private async handleSelf(
@@ -1136,6 +1153,7 @@ export class RoomModeManager {
       quote: options?.quote,
       content: options?.content,
       sessionNote: options?.sessionNote,
+      artifactContext: options?.artifactContext,
     });
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
@@ -1366,8 +1384,18 @@ export class RoomModeManager {
     let baseText = text;
     const note = options?.note ?? options?.sessionNote?.(sessionId);
     if (note) baseText = `${note}\n\n${baseText}`;
+    const refs = this.rooms.parseArtifactRefs(room.roomId, baseText);
+    const extraRefs = Array.isArray(options?.params?.artifacts)
+      ? (options.params.artifacts as unknown[]).map((s) => String(s)).filter(Boolean)
+      : [];
+    if (extraRefs.length > 0) refs.push(...extraRefs);
+    if (options?.artifactContext?.refs?.length) refs.push(...options.artifactContext.refs);
+    const uniqueRefs = [...new Set(refs)];
+    const artifactContext = uniqueRefs.length > 0
+      ? { ...(options?.artifactContext ?? {}), refs: uniqueRefs }
+      : options?.artifactContext;
     const persona = room.memberRoles?.[sessionId];
-    const promptText = this.rooms.buildPrompt(room.roomId, baseText, sessionId, options?.quote, persona);
+    const promptText = this.rooms.buildPrompt(room.roomId, baseText, sessionId, options?.quote, persona, artifactContext);
     const content = options?.content;
     if (!content) return promptText;
     const imageBlocks = content.filter((b) => b.type !== "text");

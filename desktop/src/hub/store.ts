@@ -1574,9 +1574,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     sendArtifactMessage: (artifact: ArtifactInfo) => {
+      const ref = artifact.alias ?? artifact.id;
       const text = artifact.path
-        ? `继续处理这个 artifact (${artifact.id})：${artifact.path}\n\n摘要：${artifact.summary}`
-        : `继续处理这个 artifact (${artifact.id})：${artifact.summary}`;
+        ? `继续处理这个 artifact (${ref})：${artifact.path}\n\n摘要：${artifact.summary}`
+        : `继续处理这个 artifact (${ref})：${artifact.summary}`;
       get().sendRoomMessage(text);
     },
 

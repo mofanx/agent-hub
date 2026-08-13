@@ -254,11 +254,18 @@ export function ChatScreen() {
     if (at < 0 || !store.currentRoom) return null;
     const q = input.slice(at + 1).split(/\s/)[0];
     if (!q) return null;
-    const matches = store.currentRoom.members.filter((m) =>
+    const members = store.currentRoom.members.filter((m) =>
       m[1].toLowerCase().startsWith(q.toLowerCase()),
     );
-    return matches.length ? { at, matches } : null;
-  }, [input, store.currentRoom]);
+    if (members.length) return { at, kind: "member" as const, members };
+    const artifacts = (store.currentArtifacts ?? []).filter((a) =>
+      a.id.toLowerCase().startsWith(q.toLowerCase()) ||
+      (a.alias && a.alias.toLowerCase().startsWith(q.toLowerCase())) ||
+      (a.path && a.path.toLowerCase().includes(q.toLowerCase())) ||
+      a.summary.toLowerCase().includes(q.toLowerCase()),
+    );
+    return artifacts.length ? { at, kind: "artifact" as const, artifacts } : null;
+  }, [input, store.currentRoom, store.currentArtifacts]);
 
   const slash = useMemo(() => {
     if (!input.startsWith("/") || /\s/.test(input)) return null;
@@ -270,6 +277,13 @@ export function ChatScreen() {
     if (!mention) return;
     const before = input.slice(0, mention.at);
     setInput(`${before}@${name} `);
+    inputRef.current?.focus();
+  };
+
+  const insertArtifactMention = (artifact: ArtifactInfo) => {
+    if (!mention || mention.kind !== "artifact") return;
+    const before = input.slice(0, mention.at);
+    setInput(`${before}@${artifact.alias ?? artifact.id} `);
     inputRef.current?.focus();
   };
 
@@ -319,7 +333,9 @@ export function ChatScreen() {
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const active = mention || (slash && slash.length > 0);
     if (active && suggestOpen) {
-      const items = mention ? mention.matches : slash || [];
+      const items = mention
+        ? (mention.kind === "member" ? mention.members : mention.artifacts)
+        : slash || [];
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSuggestIndex((i) => (i + 1) % items.length);
@@ -332,8 +348,15 @@ export function ChatScreen() {
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        if (mention) insertMention(mention.matches[suggestIndex]?.[1] ?? mention.matches[0][1]);
-        else if (slash) insertSlash(slash[suggestIndex]?.name ?? slash[0].name);
+        if (mention) {
+          if (mention.kind === "member") {
+            insertMention(mention.members[suggestIndex]?.[1] ?? mention.members[0][1]);
+          } else {
+            insertArtifactMention(mention.artifacts[suggestIndex] ?? mention.artifacts[0]);
+          }
+        } else if (slash) {
+          insertSlash(slash[suggestIndex]?.name ?? slash[0].name);
+        }
         return;
       }
       if (e.key === "Escape") {
@@ -581,16 +604,27 @@ export function ChatScreen() {
 
             {suggestOpen && mention && (
               <div className="suggest-popup">
-                {mention.matches.map(([sid, name], i) => (
-                  <div
-                    key={sid}
-                    className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
-                    onClick={() => insertMention(name)}
-                    onMouseEnter={() => setSuggestIndex(i)}
-                  >
-                    @{store.sessionName(sid)}
-                  </div>
-                ))}
+                {mention.kind === "member"
+                  ? mention.members.map(([sid, name], i) => (
+                      <div
+                        key={sid}
+                        className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                        onClick={() => insertMention(name)}
+                        onMouseEnter={() => setSuggestIndex(i)}
+                      >
+                        @{store.sessionName(sid)}
+                      </div>
+                    ))
+                  : mention.artifacts.map((a, i) => (
+                      <div
+                        key={a.id}
+                        className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                        onClick={() => insertArtifactMention(a)}
+                        onMouseEnter={() => setSuggestIndex(i)}
+                      >
+                        {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)} · @{a.author}
+                      </div>
+                    ))}
               </div>
             )}
 

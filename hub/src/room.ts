@@ -53,6 +53,7 @@ export type ArtifactKind = "file" | "command" | "test" | "note";
 
 export type Artifact = {
   id: string;
+  alias?: string | undefined;
   kind: ArtifactKind;
   author: string;
   at: number;
@@ -70,6 +71,7 @@ const ARTIFACT_SUMMARY_LEN = 240;
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private blackboards = new Map<string, BlackboardEntry[]>();
+  private aliasSeqs = new Map<string, number>();
   private getPersona?: (roleId: string) => string | undefined;
 
   setRoleResolver(getPersona: (roleId: string) => string | undefined): void {
@@ -108,6 +110,7 @@ export class RoomManager {
     };
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
+    this.aliasSeqs.set(room.roomId, 0);
     this.dedupMemberNames(room.roomId);
     return room;
   }
@@ -119,8 +122,14 @@ export class RoomManager {
   /** 从持久化状态恢复（不覆盖黑板已有记录） */
   import(room: Room): void {
     room.artifacts = room.artifacts ?? [];
+    for (let i = 0; i < room.artifacts.length; i++) {
+      if (!room.artifacts[i]!.alias) {
+        room.artifacts[i]!.alias = `a${i + 1}`;
+      }
+    }
     this.rooms.set(room.roomId, room);
     this.blackboards.set(room.roomId, []);
+    this.aliasSeqs.set(room.roomId, room.artifacts.length);
   }
 
   roomsFor(sessionId: string): Room[] {
@@ -248,14 +257,17 @@ export class RoomManager {
   /** 添加一个 artifact 到房间登记处 */
   addArtifact(
     roomId: string,
-    artifact: Omit<Artifact, "id" | "at">,
+    artifact: Omit<Artifact, "id" | "at" | "alias">,
   ): Artifact | undefined {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
     const list = (room.artifacts ??= []);
+    const seq = (this.aliasSeqs.get(roomId) ?? 0) + 1;
+    this.aliasSeqs.set(roomId, seq);
     const item: Artifact = {
       ...artifact,
       id: randomUUID().slice(0, 8),
+      alias: `a${seq}`,
       at: Date.now(),
     };
     list.push(item);
@@ -279,15 +291,77 @@ export class RoomManager {
     return room.artifacts.length < before;
   }
 
+  /** 解析文本中显式引用的 artifact alias / id / path */
+  parseArtifactRefs(roomId: string, text: string): string[] {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.artifacts) return [];
+    const aliasToId = new Map<string, string>();
+    const idSet = new Set<string>();
+    for (const a of room.artifacts) {
+      idSet.add(a.id);
+      if (a.alias) aliasToId.set(a.alias, a.id);
+      if (a.alias) aliasToId.set(a.alias.toLowerCase(), a.id);
+      idSet.add(a.id.toLowerCase());
+    }
+    const refs = new Set<string>();
+
+    // artifact:xxx / artifact[xxx] / [xxx]
+    const bracketRe = /\[([a-zA-Z0-9_-]{1,32})\]/g;
+    const explicitRe = /(?:^|[\s@，,;；:：])\[?artifact[:：]\/??\s*([a-zA-Z0-9_-]{1,32})\]?/gi;
+    const wordRe = /(?:^|[\s（(，,;；:："'"'‘’“”])([a-zA-Z0-9_-]{2,32})(?=[\s）)，,;；。!！?？"'"'‘’“”\]\n]|$)/g;
+
+    const checkAndAdd = (token: string) => {
+      const lower = token.toLowerCase();
+      const id = idSet.has(token) ? token : idSet.has(lower) ? lower : undefined;
+      if (id) refs.add(id);
+      const byAlias = aliasToId.get(token) ?? aliasToId.get(lower);
+      if (byAlias) refs.add(byAlias);
+    };
+
+    for (const m of text.matchAll(bracketRe)) checkAndAdd(m[1]!);
+    for (const m of text.matchAll(explicitRe)) checkAndAdd(m[1]!);
+    for (const m of text.matchAll(wordRe)) checkAndAdd(m[1]!);
+
+    // 也匹配路径：artifact.path 在文本中完整出现
+    for (const a of room.artifacts) {
+      if (a.path && this.containsPath(text, a.path)) {
+        refs.add(a.id);
+      }
+    }
+    return [...refs];
+  }
+
+  private containsPath(text: string, path: string): boolean {
+    const re = new RegExp(`(?:^|[\\s"'“”‘’（(])${this.escapeRegExp(path)}(?=[\\s"'“”‘’）)。,;；，!！?？]|$)`);
+    return re.test(text);
+  }
+
+  private escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
   /** 获取与当前任务相关的 artifact */
   getArtifactsForPrompt(
     roomId: string,
     excludeSessionId: string,
-    context?: { taskId?: string; dependsOn?: string[] },
+    context?: { taskId?: string; dependsOn?: string[]; refs?: string[] },
   ): Artifact[] {
     const room = this.rooms.get(roomId);
     if (!room) return [];
     const all = room.artifacts ?? [];
+    const refs = context?.refs;
+    if (refs && refs.length > 0) {
+      const refSet = new Set(refs.map((r) => r.toLowerCase()));
+      const matched = [...all].filter(
+        (a) =>
+          refSet.has(a.id.toLowerCase()) ||
+          (a.alias && refSet.has(a.alias.toLowerCase())) ||
+          (a.path && refSet.has(a.path.toLowerCase())) ||
+          (a.taskId && refSet.has(a.taskId.toLowerCase())),
+      );
+      // 显式引用时不过滤作者，因为用户指定
+      return matched.reverse().slice(0, ARTIFACT_PROMPT_LIMIT);
+    }
     const deps = context?.dependsOn;
     if (deps && deps.length > 0) {
       const set = new Set(deps);
@@ -308,7 +382,7 @@ export class RoomManager {
     excludeSessionId: string,
     quote?: { author: string; text: string },
     persona?: string,
-    artifactContext?: { taskId?: string; dependsOn?: string[] },
+    artifactContext?: { taskId?: string; dependsOn?: string[]; refs?: string[] },
   ): string {
     const room = this.rooms.get(roomId)!;
     const roleId = room.memberRoles?.[excludeSessionId];
@@ -337,7 +411,7 @@ export class RoomManager {
     if (artifacts.length > 0) {
       lines.push("", "最近产生的作品/结果：");
       for (const a of artifacts) {
-        const parts = [`@${a.author}`, `[${a.kind}]`];
+        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`, `[${a.kind}]`];
         if (a.path) parts.push(a.path);
         if (a.command) parts.push(a.command);
         parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
