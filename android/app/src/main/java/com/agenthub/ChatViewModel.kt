@@ -1721,6 +1721,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         chatSearchMatchIndex = (chatSearchMatchIndex - 1).coerceAtLeast(0)
     }
 
+    fun sessionSearchMatches(q: String): List<SessionInfo> {
+        val query = q.trim().lowercase()
+        if (query.isEmpty()) return emptyList()
+        return sessions.filter { s ->
+            val hay = "${s.name} ${s.agent} ${s.cwd} ${sessionOrigin(s)}".lowercase()
+            hay.contains(query)
+        }.sortedWith(
+            compareByDescending<SessionInfo> { !it.archived }
+                .thenByDescending { pinnedIds.contains(it.sessionId) }
+                .thenBy { it.name.lowercase() }
+        ).take(5)
+    }
+
+    fun roomSearchMatches(q: String): List<RoomInfo> {
+        val query = q.trim().lowercase()
+        if (query.isEmpty()) return emptyList()
+        return rooms.filter { r ->
+            if (r.archived) return@filter false
+            val members = r.members.joinToString(" ") { it.second }.lowercase()
+            val hay = "${r.name} ${r.mode} $members".lowercase()
+            hay.contains(query)
+        }.sortedBy { it.name.lowercase() }.take(5)
+    }
+
     fun archiveSession(session: SessionInfo, archived: Boolean) {
         viewModelScope.launch {
             try {

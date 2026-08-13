@@ -149,6 +149,13 @@ export interface SearchHit {
   id?: number;
 }
 
+export interface SearchGroup {
+  scope: string;
+  scopeId: string;
+  count: number;
+  previews: SearchHit[];
+}
+
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;

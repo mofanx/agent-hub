@@ -234,6 +234,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         when {
                             inBatchMode -> S.selectedCount.format(selectedCount)
                             vm.selectedSearchGroup != null -> searchScopeName
+                            vm.searchQuery.isNotBlank() -> S.searchConversations
                             else -> S.appName
                         }
                     )
@@ -266,7 +267,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }) {
                         Icon(
                             if (showSearchBox) Icons.Filled.Close else Icons.Filled.Search,
-                            contentDescription = if (showSearchBox) S.cancel else S.searchHistory,
+                            contentDescription = if (showSearchBox) S.cancel else S.searchAll,
                         )
                     }
                     IconButton(onClick = { showFilter = true }) { Icon(Icons.Filled.FilterList, contentDescription = S.filter) }
@@ -330,7 +331,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 OutlinedTextField(
                     value = vm.searchQuery,
                     onValueChange = { q -> vm.scheduleSearch(q) },
-                    placeholder = { Text(S.searchHistory) },
+                    placeholder = { Text(S.searchAll) },
                     leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                     trailingIcon = {
                         if (vm.searchQuery.isNotBlank()) {
@@ -365,6 +366,9 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             val flatSessions by remember(sessionGroups) { derivedStateOf { sessionGroups.flatMap { it.sessions } } }
             val flatRooms by remember(roomGroups) { derivedStateOf { roomGroups.flatMap { it.rooms } } }
 
+            val searchSessionMatches by remember(vm.searchQuery) { derivedStateOf { vm.sessionSearchMatches(vm.searchQuery) } }
+            val searchRoomMatches by remember(vm.searchQuery) { derivedStateOf { vm.roomSearchMatches(vm.searchQuery) } }
+
             if (vm.searchQuery.isNotBlank()) {
                 LazyColumn(
                     Modifier.weight(1f).padding(horizontal = 12.dp),
@@ -376,7 +380,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                if (vm.selectedSearchGroup != null) S.searchHistory else S.searchConversations,
+                                if (vm.selectedSearchGroup != null) searchScopeName else S.searchConversations,
                                 Modifier.weight(1f),
                                 style = MaterialTheme.typography.titleSmall,
                             )
@@ -386,11 +390,55 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     }
                     if (vm.selectedSearchGroup == null) {
-                        items(vm.searchGroups.size) { i ->
-                            val group = vm.searchGroups[i]
-                            SearchGroupCard(group, vm)
+                        if (searchSessionMatches.isNotEmpty()) {
+                            item { GroupHeader(S.matchedSessions, searchSessionMatches.size) }
+                            items(searchSessionMatches.size) { i ->
+                                val s = searchSessionMatches[i]
+                                SessionCard(
+                                    s = s,
+                                    vm = vm,
+                                    S = S,
+                                    inBatchMode = false,
+                                    selected = false,
+                                    onClick = { vm.openChat(s) },
+                                    onLongClick = { },
+                                    onEdit = { renameTarget = s },
+                                    onClone = { vm.cloneSession(s) { renameTarget = it } },
+                                    onDelete = { confirmDelete = s },
+                                )
+                            }
                         }
-                        if (vm.searchGroups.isEmpty()) {
+                        if (searchRoomMatches.isNotEmpty()) {
+                            item { GroupHeader(S.matchedRooms, searchRoomMatches.size) }
+                            items(searchRoomMatches.size) { i ->
+                                val r = searchRoomMatches[i]
+                                RoomCard(
+                                    r = r,
+                                    vm = vm,
+                                    S = S,
+                                    inBatchMode = false,
+                                    selected = false,
+                                    onClick = { vm.openRoom(r) },
+                                    onLongClick = { },
+                                    onRename = { roomRenameTarget = r },
+                                    onEdit = { roomEditTarget = r },
+                                    onClone = { roomCloneTarget = r },
+                                    onArchive = { vm.archiveRoom(r, !r.archived) },
+                                    onDelete = { roomDeleteTarget = r },
+                                )
+                            }
+                        }
+                        if (vm.searchGroups.isNotEmpty()) {
+                            item {
+                                val historyCount by remember { derivedStateOf { vm.searchGroups.sumOf { it.count } } }
+                                GroupHeader(S.historyMessages, historyCount)
+                            }
+                            items(vm.searchGroups.size) { i ->
+                                val group = vm.searchGroups[i]
+                                SearchGroupCard(group, vm)
+                            }
+                        }
+                        if (searchSessionMatches.isEmpty() && searchRoomMatches.isEmpty() && vm.searchGroups.isEmpty() && !vm.historyLoading) {
                             item {
                                 Text(
                                     S.noResults,
@@ -405,7 +453,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             val hit = vm.searchResults[i]
                             SearchHitCard(hit, vm.searchQuery, onClick = { vm.openSearchHit(hit) })
                         }
-                        if (vm.searchResults.isEmpty()) {
+                        if (vm.searchResults.isEmpty() && !vm.historyLoading) {
                             item {
                                 Text(
                                     S.noResults,

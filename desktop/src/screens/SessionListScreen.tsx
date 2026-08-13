@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useHubStore } from "../hub/store";
-import type { RoomInfo, RoomModeConfig, SessionInfo } from "../hub/types";
+import type { RoomInfo, RoomModeConfig, SearchGroup, SessionInfo } from "../hub/types";
 
 type Dialog =
   | { type: "session" }
@@ -313,7 +313,7 @@ export function SessionListScreen() {
           className="search"
           value={query}
           onChange={(e) => setQuery(e.currentTarget.value)}
-          placeholder="搜索历史消息… (Ctrl+K)"
+          placeholder="搜索会话、群聊或历史消息… (Ctrl+K)"
         />
         <button onClick={() => void store.refreshAll()}>刷新</button>
         <button onClick={() => setBatch(!batch)}>{batch ? "退出批量" : "批量"}</button>
@@ -437,26 +437,97 @@ function highlightText(text: string, q: string): React.ReactNode {
 
 function SearchResults({ query }: { query: string }) {
   const store = useHubStore();
-  if (!store.searchResults.length) {
-    return <div className="empty">无结果</div>;
-  }
   const q = query.trim().toLowerCase();
+
+  const sessionMatches = useMemo(() => {
+    if (!q) return [];
+    return store.sessions
+      .filter((s) => {
+        const hay = `${s.name} ${s.cwd} ${s.agent} ${store.sessionOrigin(s)}`.toLowerCase();
+        return hay.includes(q);
+      })
+      .sort((a, b) => {
+        if (a.archived !== b.archived) return a.archived ? 1 : -1;
+        const pa = store.pinnedIds.includes(a.sessionId) ? 1 : 0;
+        const pb = store.pinnedIds.includes(b.sessionId) ? 1 : 0;
+        if (pa !== pb) return pb - pa;
+        return a.name.localeCompare(b.name);
+      })
+      .slice(0, 5);
+  }, [q, store.sessions, store.pinnedIds, store.connections, store.sessionOrigin]);
+
+  const roomMatches = useMemo(() => {
+    if (!q) return [];
+    return store.rooms
+      .filter((r) => {
+        if (r.archived) return false;
+        const members = r.members.map((m) => m[1]).join(" ").toLowerCase();
+        const hay = `${r.name} ${r.mode} ${members}`;
+        return hay.includes(q);
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 5);
+  }, [q, store.rooms]);
+
+  const hasAny = sessionMatches.length > 0 || roomMatches.length > 0 || store.searchGroups.length > 0;
+  if (!hasAny) return <div className="empty">无结果</div>;
+
   return (
-    <div className="list">
-      {store.searchResults.map((h, i) => (
-        <div
-          key={i}
-          className="list-item"
-          onClick={() => {
-            store.openSearchHit(h);
-          }}
-        >
-          <span className="title">
-            {h.author || "系统"} · {h.scope === "room" ? "群聊" : "单聊"}
-          </span>
-          <span className="subtitle">{highlightText(h.text.slice(0, 120), q)}</span>
-        </div>
-      ))}
+    <div className="list search-results">
+      {sessionMatches.length > 0 && (
+        <>
+          <div className="group-header">会话 ({sessionMatches.length})</div>
+          {sessionMatches.map((s) => (
+            <SessionCard key={s.sessionId} s={s} batch={false} />
+          ))}
+        </>
+      )}
+      {roomMatches.length > 0 && (
+        <>
+          <div className="group-header">群聊 ({roomMatches.length})</div>
+          {roomMatches.map((r) => (
+            <RoomCard key={r.roomId} r={r} batch={false} />
+          ))}
+        </>
+      )}
+      {store.searchGroups.length > 0 && (
+        <>
+          <div className="group-header">
+            历史消息 ({store.searchGroups.reduce((sum, g) => sum + g.count, 0)})
+          </div>
+          {store.searchGroups.map((g, i) => (
+            <SearchGroupCard key={i} group={g} query={query} />
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SearchGroupCard({ group, query }: { group: SearchGroup; query: string }) {
+  const store = useHubStore();
+  const q = query.trim().toLowerCase();
+  const name = useMemo(() => {
+    if (group.scope === "room") {
+      return store.rooms.find((r) => r.roomId === group.scopeId)?.name ?? group.scopeId;
+    }
+    return store.sessions.find((s) => s.sessionId === group.scopeId)?.name ?? group.scopeId;
+  }, [group, store.sessions, store.rooms]);
+  return (
+    <div className="list-item search-group">
+      <div className="title-wrap">
+        <span className="title">{name} · 共 {group.count} 条</span>
+        {group.previews.map((hit, i) => (
+          <div
+            key={i}
+            className="subtitle search-preview"
+            onClick={() => store.openSearchHit(hit)}
+          >
+            <span className="search-author">{hit.author || "系统"} · </span>
+            {highlightText((hit.text || "").slice(0, 120), q)}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -14,6 +14,7 @@ import type {
   RoomModeConfig,
   RoleInfo,
   Screen,
+  SearchGroup,
   SearchHit,
   SessionInfo,
   SlashCommand,
@@ -57,6 +58,7 @@ interface State {
   quote: [string, string] | null;
   searchQuery: string;
   searchResults: SearchHit[];
+  searchGroups: SearchGroup[];
   jumpToAt: number | null;
   jumpQuery: string;
   selectedIds: SelectedIds;
@@ -610,6 +612,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     quote: null,
     searchQuery: "",
     searchResults: [],
+    searchGroups: [],
     jumpToAt: null,
     jumpQuery: "",
     selectedIds: { sessions: [], rooms: [] },
@@ -761,6 +764,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quote: null,
         searchQuery: "",
         searchResults: [],
+        searchGroups: [],
         jumpToAt: null,
         jumpQuery: "",
         connecting: false,
@@ -1164,19 +1168,31 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     search: async (query) => {
       try {
-        const result = (await getOrCall("history.search", { query })) as Record<string, unknown>;
-        const list = ((result.results as unknown[] | undefined) ?? []).map((it) => {
+        const result = (await getOrCall("history.searchGroups", { query, limit: 20, previewLimit: 3 })) as Record<
+          string,
+          unknown
+        >;
+        const list = ((result.groups as unknown[] | undefined) ?? []).map((it) => {
           const o = it as Record<string, unknown>;
+          const previews = ((o.previews as unknown[] | undefined) ?? []).map((p) => {
+            const po = p as Record<string, unknown>;
+            return {
+              scope: String(po.scope ?? ""),
+              scopeId: String(po.scopeId ?? ""),
+              author: String(po.author ?? ""),
+              text: String(po.text ?? ""),
+              at: typeof po.at === "number" ? po.at : undefined,
+              id: typeof po.id === "number" ? po.id : undefined,
+            } as SearchHit;
+          });
           return {
             scope: String(o.scope ?? ""),
             scopeId: String(o.scopeId ?? ""),
-            author: String(o.author ?? ""),
-            text: String(o.text ?? ""),
-            at: typeof o.at === "number" ? o.at : undefined,
-            id: typeof o.id === "number" ? o.id : undefined,
-          } as SearchHit;
+            count: typeof o.count === "number" ? o.count : 0,
+            previews,
+          } as SearchGroup;
         });
-        set({ searchQuery: query, searchResults: list });
+        set({ searchQuery: query, searchGroups: list });
       } catch {}
     },
 

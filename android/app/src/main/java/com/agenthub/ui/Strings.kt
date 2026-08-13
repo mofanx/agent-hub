@@ -14,6 +14,10 @@ interface Strings {
     val connect: String
     val searchHistory: String
     val searchConversations: String
+    val searchAll: String
+    val matchedSessions: String
+    val matchedRooms: String
+    val historyMessages: String
     val sessions: String
     val newSession: String
     val rooms: String
@@ -178,6 +182,10 @@ object ZhStrings : Strings {
     override val connect = "连接"
     override val searchHistory = "搜索历史…"
     override val searchConversations = "搜索结果"
+    override val searchAll = "搜索会话、群聊或历史消息…"
+    override val matchedSessions = "会话"
+    override val matchedRooms = "群聊"
+    override val historyMessages = "历史消息"
     override val sessions = "会话"
     override val newSession = "新建会话"
     override val rooms = "群聊"
@@ -342,6 +350,10 @@ object EnStrings : Strings {
     override val connect = "Connect"
     override val searchHistory = "Search history…"
     override val searchConversations = "Search results"
+    override val searchAll = "Search sessions, rooms or history…"
+    override val matchedSessions = "Sessions"
+    override val matchedRooms = "Rooms"
+    override val historyMessages = "History"
     override val sessions = "Sessions"
     override val newSession = "New session"
     override val rooms = "Rooms"
