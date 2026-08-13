@@ -1274,7 +1274,7 @@ html[data-theme="dark"] .drawer-item:hover {
 
 .artifact-item {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 0.4rem;
   width: 100%;
   padding: 0.35rem 0.5rem;
@@ -1285,12 +1285,20 @@ html[data-theme="dark"] .drawer-item:hover {
   font-family: inherit;
   font-size: 0.85rem;
   text-align: left;
-  cursor: pointer;
 }
 
 .artifact-item:hover {
   background: var(--primary-bg);
   border-color: var(--primary);
+}
+
+.artifact-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1;
+  cursor: default;
 }
 
 .artifact-author {
@@ -1305,6 +1313,47 @@ html[data-theme="dark"] .drawer-item:hover {
   white-space: pre-wrap;
   overflow-wrap: break-word;
   line-height: 1.35;
+}
+
+.artifact-actions {
+  display: flex;
+  gap: 0.2rem;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.artifact-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--primary);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.artifact-action:hover {
+  background: var(--primary-bg);
+  border-color: var(--primary);
+}
+
+.file-preview pre {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  background: var(--bg);
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+  line-height: 1.4;
 }
 
 .history-loading {

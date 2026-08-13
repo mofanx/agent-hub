@@ -942,9 +942,17 @@ function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string
   );
 }
 
+type FileGetResult = {
+  text?: string;
+  data?: string;
+  name?: string;
+  mime?: string;
+};
+
 function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
   const store = useHubStore();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("artifactPanelCollapsed") === "1");
+  const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
   useEffect(() => {
     localStorage.setItem("artifactPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
@@ -955,6 +963,48 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
     }
     return g;
   }, [artifacts]);
+
+  const fetchFile = async (artifact: ArtifactInfo): Promise<FileGetResult | null> => {
+    const client = store.client;
+    const roomId = store.currentRoom?.roomId;
+    if (!client || !roomId) return null;
+    const result = (await client.call("file.get", { roomId, artifactId: artifact.id })) as FileGetResult;
+    return result;
+  };
+
+  const saveBlob = (name: string, blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const saveText = (name: string, text: string) => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    saveBlob(name, blob);
+  };
+
+  const handleDownload = async (a: ArtifactInfo) => {
+    try {
+      const res = await fetchFile(a);
+      if (!res) return;
+      const name = String(res.name ?? a.path ?? "download");
+      if (typeof res.text === "string") {
+        setPreview({ name, text: res.text });
+        return;
+      }
+      if (typeof res.data === "string") {
+        const bytes = new Uint8Array(atob(res.data).split("").map((c) => c.charCodeAt(0)));
+        const blob = new Blob([bytes], { type: res.mime ?? "application/octet-stream" });
+        saveBlob(name, blob);
+      }
+    } catch (e) {
+      alert(`下载失败：${e}`);
+    }
+  };
+
   return (
     <div className="artifact-panel">
       <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
@@ -967,18 +1017,50 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
             <div key={kind} className="artifact-group">
               <div className="artifact-group-title">{kindLabel(kind)}</div>
               {list.map((a) => (
-                <button
+                <div
                   key={a.id}
                   className="artifact-item"
-                  onClick={() => store.sendArtifactMessage(a)}
                   title={a.path ? `${a.path}\n${a.summary}` : a.summary}
                 >
-                  <span className="artifact-author">@{a.author}</span>
-                  <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
-                </button>
+                  <div className="artifact-info">
+                    <span className="artifact-author">@{a.author}</span>
+                    <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
+                  </div>
+                  <div className="artifact-actions">
+                    <button
+                      className="artifact-action"
+                      title="引用并继续"
+                      onClick={() => store.sendArtifactMessage(a)}
+                    >
+                      ➤
+                    </button>
+                    {a.kind === "file" && (
+                      <button
+                        className="artifact-action"
+                        title="下载 / 预览"
+                        onClick={() => handleDownload(a)}
+                      >
+                        ↓
+                      </button>
+                    )}
+                  </div>
+                </div>
               ))}
             </div>
           ))}
+        </div>
+      )}
+
+      {preview && (
+        <div className="dialog-backdrop" onClick={() => setPreview(null)}>
+          <div className="dialog file-preview" onClick={(e) => e.stopPropagation()}>
+            <h4>{preview.name}</h4>
+            <pre>{preview.text}</pre>
+            <div className="form-row" style={{ justifyContent: "flex-end" }}>
+              <button onClick={() => setPreview(null)}>关闭</button>
+              <button onClick={() => saveText(preview.name, preview.text)}>保存</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

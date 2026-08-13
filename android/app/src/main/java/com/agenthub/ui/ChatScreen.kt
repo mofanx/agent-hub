@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -1478,18 +1479,32 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f).padding(end = 6.dp),
                                 )
-                                IconButton(
-                                    onClick = {
-                                        vm.sendArtifactMessage(artifact)
-                                        Toast.makeText(context, "已发送", Toast.LENGTH_SHORT).show()
-                                    },
-                                    modifier = Modifier.size(28.dp),
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.Send,
-                                        contentDescription = "继续",
-                                        modifier = Modifier.size(18.dp),
-                                    )
+                                Row {
+                                    if (artifact.kind == "file") {
+                                        IconButton(
+                                            onClick = { vm.openArtifactFile(artifact) },
+                                            modifier = Modifier.size(28.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Download,
+                                                contentDescription = "下载",
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            vm.sendArtifactMessage(artifact)
+                                            Toast.makeText(context, "已发送", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.size(28.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.Send,
+                                            contentDescription = "继续",
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
                                 }
                             }
                         }

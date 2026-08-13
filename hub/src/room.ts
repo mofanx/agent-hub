@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 export type RoomMode =
   | "mention"
@@ -67,6 +69,46 @@ export type Artifact = {
 const ARTIFACT_LIMIT = 50;
 const ARTIFACT_PROMPT_LIMIT = 10;
 const ARTIFACT_SUMMARY_LEN = 240;
+
+const BASE_DIR = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
+const FILES_DIR = path.resolve(BASE_DIR, "../data/files");
+const PROJECT_ROOT = path.resolve(BASE_DIR, "../..");
+
+const TEXT_EXTS = new Set([
+  ".txt", ".md", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".toml",
+  ".css", ".html", ".htm", ".xml", ".csv", ".log", ".sh", ".bash", ".zsh", ".fish",
+  ".py", ".rb", ".go", ".rs", ".java", ".kt", ".kts", ".swift", ".c", ".cpp", ".h",
+  ".hpp", ".cs", ".php", ".pl", ".lua", ".sql", ".vim", ".cfg", ".ini", ".conf",
+]);
+
+function isWithin(parent: string, target: string): boolean {
+  const rel = path.relative(parent, target);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function mimeFromExt(ext: string): string {
+  const map: Record<string, string> = {
+    ".txt": "text/plain", ".md": "text/markdown", ".ts": "text/x-typescript", ".tsx": "text/x-typescript",
+    ".js": "text/javascript", ".jsx": "text/javascript", ".json": "application/json",
+    ".yaml": "application/yaml", ".yml": "application/yaml", ".css": "text/css",
+    ".html": "text/html", ".htm": "text/html", ".csv": "text/csv", ".xml": "application/xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".svg": "image/svg+xml", ".pdf": "application/pdf", ".zip": "application/zip",
+  };
+  return map[ext.toLowerCase()] ?? "application/octet-stream";
+}
+
+function isTextBuffer(buf: Buffer): boolean {
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0) return false;
+  }
+  const decoded = buf.toString("utf-8");
+  return !decoded.includes("\uFFFD");
+}
+
+export type FileResult =
+  | { text: string; name: string; mime: string }
+  | { data: string; name: string; mime: string };
 
 export class RoomManager {
   private rooms = new Map<string, Room>();
@@ -289,6 +331,79 @@ export class RoomManager {
     const before = room.artifacts.length;
     room.artifacts = room.artifacts.filter((a) => a.id !== artifactId);
     return room.artifacts.length < before;
+  }
+
+  private resolveProjectPath(input: string): string {
+    const resolved = path.isAbsolute(input) ? path.normalize(input) : path.resolve(PROJECT_ROOT, input);
+    const real = fs.realpathSync(resolved);
+    if (!isWithin(PROJECT_ROOT, real)) throw new Error("path outside project root");
+    const stat = fs.statSync(real);
+    if (!stat.isFile()) throw new Error("not a file");
+    return real;
+  }
+
+  /** 将项目内文件复制到 Hub 缓存，并生成 file artifact */
+  sendFile(roomId: string, filePath: string, author?: string, summary?: string): Artifact | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const src = this.resolveProjectPath(filePath);
+    const rel = path.relative(PROJECT_ROOT, src);
+    const artifact = this.addArtifact(roomId, {
+      kind: "file",
+      author: author ?? "我",
+      summary: summary ?? rel,
+      path: rel,
+    });
+    if (!artifact) return undefined;
+    const destDir = path.join(FILES_DIR, roomId, artifact.id);
+    fs.mkdirSync(destDir, { recursive: true });
+    const dest = path.join(destDir, path.basename(src));
+    fs.copyFileSync(src, dest);
+    return artifact;
+  }
+
+  /** 根据 artifact id / alias / path 读取缓存或原始文件内容 */
+  getFile(roomId: string, ref: string): FileResult {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error("unknown room");
+    const lowerRef = ref.toLowerCase();
+    const all = room.artifacts ?? [];
+    const a = all.find((x) =>
+      x.kind === "file" &&
+      (x.id.toLowerCase() === lowerRef ||
+        (x.alias?.toLowerCase() === lowerRef) ||
+        (x.path?.toLowerCase() === lowerRef) ||
+        (x.path && path.basename(x.path).toLowerCase() === lowerRef))
+    );
+    if (!a || !a.path) throw new Error("file not found");
+
+    const fileName = path.basename(a.path);
+    const cachePath = path.join(FILES_DIR, roomId, a.id, fileName);
+    const locations = [cachePath, path.resolve(PROJECT_ROOT, a.path)];
+    let real: string | undefined;
+    for (const loc of locations) {
+      try {
+        const resolved = fs.realpathSync(loc);
+        if (isWithin(FILES_DIR, resolved) || isWithin(PROJECT_ROOT, resolved)) {
+          const stat = fs.statSync(resolved);
+          if (stat.isFile()) {
+            real = resolved;
+            break;
+          }
+        }
+      } catch {
+        /* try next */
+      }
+    }
+    if (!real) throw new Error("file not readable");
+
+    const buf = fs.readFileSync(real);
+    const ext = path.extname(real);
+    const mime = mimeFromExt(ext);
+    if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
+      return { text: buf.toString("utf-8"), name: fileName, mime };
+    }
+    return { data: buf.toString("base64"), name: fileName, mime };
   }
 
   /** 解析文本中显式引用的 artifact alias / id / path */

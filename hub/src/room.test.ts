@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { RoomManager, type Room } from "./room.js";
+
+const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
+const FILES_DIR = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../data/files");
 
 describe("room", () => {
   it("buildPrompt 通过 roleId 注入角色 persona", () => {
@@ -229,5 +234,51 @@ describe("room", () => {
     } as unknown as Room;
     rooms.import(room);
     assert.deepEqual(rooms.get(room.roomId)!.artifacts, []);
+  });
+
+  it("sendFile 复制文件到缓存并生成 file artifact", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const rel = `hub/src/room-file-test-${Date.now()}.txt`;
+    const full = path.join(PROJECT_ROOT, rel);
+    const content = "hello room file";
+    fs.writeFileSync(full, content);
+    try {
+      const artifact = rooms.sendFile(room.roomId, rel, "s1", "test file");
+      assert.ok(artifact);
+      assert.equal(artifact!.kind, "file");
+      assert.equal(artifact!.summary, "test file");
+      const cached = path.join(FILES_DIR, room.roomId, artifact!.id, path.basename(rel));
+      assert.ok(fs.existsSync(cached));
+      const result = rooms.getFile(room.roomId, artifact!.alias!);
+      assert.equal((result as { text: string }).text, content);
+    } finally {
+      fs.rmSync(full, { force: true });
+      fs.rmSync(path.join(FILES_DIR, room.roomId), { recursive: true, force: true });
+    }
+  });
+
+  it("getFile 返回 base64 给二进制文件", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const rel = `hub/src/room-file-bin-${Date.now()}.bin`;
+    const full = path.join(PROJECT_ROOT, rel);
+    const original = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+    fs.writeFileSync(full, original);
+    try {
+      const artifact = rooms.sendFile(room.roomId, rel);
+      const result = rooms.getFile(room.roomId, artifact!.path!);
+      assert.ok("data" in result);
+      assert.deepEqual(Buffer.from((result as { data: string }).data, "base64"), original);
+    } finally {
+      fs.rmSync(full, { force: true });
+      fs.rmSync(path.join(FILES_DIR, room.roomId), { recursive: true, force: true });
+    }
+  });
+
+  it("sendFile 拒绝项目根目录外的文件", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    assert.throws(() => rooms.sendFile(room.roomId, "/etc/passwd"), /outside project root/);
   });
 });

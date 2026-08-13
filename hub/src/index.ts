@@ -1135,6 +1135,28 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       persistState();
       return { removed };
     }
+    case "room.file.send": {
+      const roomId = String(req.params?.roomId ?? "");
+      const filePath = String(req.params?.path ?? "");
+      const author = typeof req.params?.author === "string" ? req.params.author : undefined;
+      const summary = typeof req.params?.summary === "string" ? req.params.summary : undefined;
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      if (!filePath) throw new Error("file path required");
+      const artifact = rooms.sendFile(roomId, filePath, author, summary);
+      if (!artifact) throw new Error("send file failed");
+      persistState();
+      broadcast({ method: "room.artifact", params: { roomId, artifact } } as HubEvent);
+      return { artifact };
+    }
+    case "file.get": {
+      const roomId = String(req.params?.roomId ?? "");
+      const ref = String(req.params?.path ?? req.params?.artifactId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      if (!ref) throw new Error("file path or artifactId required");
+      return rooms.getFile(roomId, ref);
+    }
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");
       const text = String(req.params?.text ?? "");

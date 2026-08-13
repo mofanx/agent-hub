@@ -4,7 +4,10 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Environment
 import android.util.Base64
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -1851,6 +1854,48 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "继续处理这个 artifact (${ref})：${artifact.path}\n\n摘要：${artifact.summary}"
         }
         sendRoomMessage(text)
+    }
+
+    fun openArtifactFile(artifact: ArtifactInfo) {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                val ref = artifact.path ?: artifact.alias ?: artifact.id
+                val result = withContext(Dispatchers.IO) {
+                    hub.call("file.get", buildJsonObject {
+                        put("roomId", room.roomId)
+                        put("path", ref)
+                    })
+                }
+                val name = result["name"]?.jsonPrimitive?.content
+                    ?: artifact.path?.substringAfterLast('/')
+                    ?: "file"
+                val mime = result["mime"]?.jsonPrimitive?.content ?: "*/*"
+                val text = result["text"]?.jsonPrimitive?.content
+                val data = result["data"]?.jsonPrimitive?.content
+                val bytes = if (text != null) {
+                    text.toByteArray(Charsets.UTF_8)
+                } else if (data != null) {
+                    Base64.decode(data, Base64.NO_WRAP)
+                } else {
+                    throw Exception("empty file")
+                }
+                withContext(Dispatchers.IO) {
+                    val app = getApplication<Application>()
+                    val dir = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
+                    val file = File(dir, name)
+                    if (text != null) file.writeText(text) else file.writeBytes(bytes)
+                    val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    app.startActivity(intent)
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "download failed"))
+            }
+        }
     }
 
     fun addAttachment(uri: Uri) {
