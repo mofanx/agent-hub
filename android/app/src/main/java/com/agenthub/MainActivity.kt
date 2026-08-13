@@ -20,6 +20,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import com.agenthub.ui.AgentHubTheme
 import com.agenthub.ui.ChatScreen
+import com.agenthub.ui.FileTreeScreen
 import com.agenthub.ui.HubDrawer
 import com.agenthub.ui.LocalStrings
 import com.agenthub.ui.SessionListScreen
@@ -81,6 +82,13 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         Screen.Connect -> SessionListScreen(vm, onMenuClick)
         Screen.Sessions -> SessionListScreen(vm, onMenuClick)
         Screen.Chat, Screen.Room -> ChatScreen(vm, onMenuClick)
+        Screen.FileTree -> FileTreeScreen(vm) {
+            vm.screen = when {
+                vm.currentRoom != null -> Screen.Room
+                vm.currentSession != null -> Screen.Chat
+                else -> Screen.Sessions
+            }
+        }
         Screen.Settings -> SettingsScreen(vm, onMenuClick)
     }
 }

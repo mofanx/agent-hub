@@ -3,6 +3,7 @@ import { marked } from "marked";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
 import type { ArtifactInfo, ChatItem, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
+import { FileTreePanel } from "./FileTreePanel";
 
 const safeRenderer = {
   html(text: string) {
@@ -14,12 +15,22 @@ const safeRenderer = {
   },
 };
 
-marked.use({ renderer: safeRenderer as Record<string, unknown> });
+marked.use({ renderer: safeRenderer as Record<string, unknown>, gfm: true });
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+function formatArtifactTime(at: number): string {
+  const d = new Date(at);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (isToday) return time;
+  const date = d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+  return `${date} ${time}`;
 }
 
 function formatTokenUsage(u: TokenUsage): string {
@@ -95,11 +106,13 @@ export function ChatScreen() {
   const [suggestOpen, setSuggestOpen] = useState(true);
   const [suggestIndex, setSuggestIndex] = useState(0);
   const [lightbox, setLightbox] = useState<{ src: string; name?: string } | null>(null);
+  const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const initialScrolledRef = useRef(false);
 
   const isRoom = !!store.currentRoom;
   const title = store.currentRoom?.name || store.currentSession?.name || "聊天";
@@ -144,12 +157,15 @@ export function ChatScreen() {
 
   useEffect(() => {
     store.refreshBusy();
+    initialScrolledRef.current = false;
   }, [store.currentRoom?.roomId, store.currentSession?.sessionId]);
 
   useEffect(() => {
-    if (inChatSearchQuery || !isAtBottom) return;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [store.chatItems.length, store.chatItems[store.chatItems.length - 1]?.kind, inChatSearchQuery, isAtBottom]);
+    if (store.chatItems.length === 0) return;
+    if (initialScrolledRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
+    initialScrolledRef.current = true;
+  }, [store.chatItems.length]);
 
   useEffect(() => {
     if (chatSearchMatchIndex < 0) return;
@@ -186,7 +202,11 @@ export function ChatScreen() {
 
   useEffect(() => {
     const onDocKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFileTreeOpen((open) => !open);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "f" && !e.shiftKey) {
         e.preventDefault();
         setSearchOpen(true);
       }
@@ -195,7 +215,13 @@ export function ChatScreen() {
         inputRef.current?.focus();
       }
       if (e.key === "Escape") {
-        if (searchOpen) {
+        if (lightbox) {
+          e.preventDefault();
+          setLightbox(null);
+        } else if (fileTreeOpen) {
+          e.preventDefault();
+          setFileTreeOpen(false);
+        } else if (searchOpen) {
           e.preventDefault();
           setSearchOpen(false);
           setInChatSearchQuery("");
@@ -214,7 +240,7 @@ export function ChatScreen() {
     };
     document.addEventListener("keydown", onDocKeyDown);
     return () => document.removeEventListener("keydown", onDocKeyDown);
-  }, [searchOpen, suggestOpen, cmdOpen, store]);
+  }, [searchOpen, suggestOpen, cmdOpen, lightbox, fileTreeOpen, store]);
 
   useLayoutEffect(() => {
     const el = inputRef.current;
@@ -435,6 +461,11 @@ export function ChatScreen() {
             搜索
           </button>
         )}
+        {(store.currentRoom || store.currentSession) && (
+          <button className="secondary" onClick={() => setFileTreeOpen(true)} title="项目文件">
+            文件
+          </button>
+        )}
         <button className="secondary" onClick={() => void store.showModelPickerDialog()}>
           模型
         </button>
@@ -650,6 +681,13 @@ export function ChatScreen() {
         </div>
       </div>
 
+      {fileTreeOpen && store.currentRoom && (
+        <FileTreePanel contextId={store.currentRoom.roomId} isSession={false} onClose={() => setFileTreeOpen(false)} />
+      )}
+      {fileTreeOpen && !store.currentRoom && store.currentSession && (
+        <FileTreePanel contextId={store.currentSession.sessionId} isSession onClose={() => setFileTreeOpen(false)} />
+      )}
+
       {store.showModelPicker && <ModelPicker />}
 
       {lightbox && (
@@ -791,7 +829,11 @@ function ChatMessage({
                 引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
               </div>
             )}
-            {highlight ? highlightText(item.text, highlight) : item.text}
+            <div
+              dangerouslySetInnerHTML={{
+                __html: highlight ? highlightHtml(renderMarkdown(item.text), highlight) : renderMarkdown(item.text),
+              }}
+            />
           </div>
           {attachmentsEl}
           {menuEl}
@@ -1024,6 +1066,7 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
                 >
                   <div className="artifact-info">
                     <span className="artifact-author">@{a.author}</span>
+                    <span className="artifact-time">{formatArtifactTime(a.at)}</span>
                     <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
                   </div>
                   <div className="artifact-actions">
@@ -1058,6 +1101,7 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
             <pre>{preview.text}</pre>
             <div className="form-row" style={{ justifyContent: "flex-end" }}>
               <button onClick={() => setPreview(null)}>关闭</button>
+              <button onClick={() => navigator.clipboard.writeText(preview.text).catch(() => {})}>复制</button>
               <button onClick={() => saveText(preview.name, preview.text)}>保存</button>
             </div>
           </div>
@@ -1076,7 +1120,16 @@ function kindLabel(kind: string): string {
 
 function renderMarkdown(text: string): string {
   try {
-    return marked.parse(text, { gfm: true }) as string;
+    const html = marked.parse(text, { gfm: true }) as string;
+    const withScrollableTables = html
+      .replace(/<table([^>]*)>/g, '<div class="table-wrap"><table$1>')
+      .replace(/<\/table>/g, "</table></div>");
+    return withScrollableTables
+      .replace(
+        /<pre><code/g,
+        '<div class="code-block"><button class="copy-code" title="复制" onclick=\'const n=this.nextElementSibling;if(n){navigator.clipboard.writeText(n.textContent).catch(()=>{});this.textContent="已复制";setTimeout(()=>this.textContent="复制",1500)}\'>复制</button><pre><code',
+      )
+      .replace(/<\/code><\/pre>/g, "</code></pre></div>");
   } catch {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\n/g, "<br>");
   }

@@ -40,6 +40,7 @@ const savedRuntime = savedState.runtime;
 const sessionMetas = new Map<string, SessionMeta>(
   savedState.sessions.map((s) => [s.sessionId, s]),
 );
+rooms.setCwdResolver((sessionId) => sessionMetas.get(sessionId)?.cwd);
 for (const room of savedState.rooms) rooms.import(room);
 
 const LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]";
@@ -1149,13 +1150,45 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       broadcast({ method: "room.artifact", params: { roomId, artifact } } as HubEvent);
       return { artifact };
     }
-    case "file.get": {
+    case "room.file.roots": {
       const roomId = String(req.params?.roomId ?? "");
-      const ref = String(req.params?.path ?? req.params?.artifactId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
+      return { roots: rooms.fileRoots(roomId) };
+    }
+    case "room.file.list": {
+      const roomId = String(req.params?.roomId ?? "");
+      const dirPath = String(req.params?.path ?? "");
+      const author = typeof req.params?.author === "string" ? req.params.author : undefined;
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      if (!dirPath) throw new Error("dir path required");
+      return { nodes: rooms.listFiles(roomId, dirPath, author) };
+    }
+    case "session.file.roots": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      return { roots: rooms.sessionFileRoots(sessionId) };
+    }
+    case "session.file.list": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const dirPath = String(req.params?.path ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      if (!dirPath) throw new Error("dir path required");
+      return { nodes: rooms.sessionListFiles(sessionId, dirPath) };
+    }
+    case "file.get": {
+      const roomId = String(req.params?.roomId ?? "");
+      const sessionId = String(req.params?.sessionId ?? "");
+      const ref = String(req.params?.path ?? req.params?.artifactId ?? "");
+      if (!roomId && !sessionId) throw new Error("roomId or sessionId required");
       if (!ref) throw new Error("file path or artifactId required");
-      return rooms.getFile(roomId, ref);
+      if (roomId) {
+        const room = rooms.get(roomId);
+        if (!room) throw new Error(`unknown room: ${roomId}`);
+        return rooms.getFile(roomId, ref);
+      }
+      return rooms.sessionGetFile(sessionId, ref);
     }
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");

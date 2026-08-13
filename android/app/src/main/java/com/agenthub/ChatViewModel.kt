@@ -215,6 +215,21 @@ data class ArtifactInfo(
     val command: String? = null,
 )
 
+data class FileTreeRoot(
+    val name: String,
+    val path: String,
+    val kind: String,
+    val sessionId: String? = null,
+)
+
+data class FileTreeNode(
+    val name: String,
+    val path: String,
+    val kind: String,
+    val at: Long = 0,
+    val size: Long? = null,
+)
+
 enum class SessionGroupBy { None, Agent, Cwd }
 
 enum class RoomGroupBy { None, Mode }
@@ -267,7 +282,7 @@ data class RoleInfo(
     val builtin: Boolean,
 )
 
-enum class Screen { Connect, Sessions, Chat, Room, Settings }
+enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings }
 
 data class ConnProfile(
     val name: String,
@@ -352,6 +367,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     var flow by mutableStateOf<FlowInfo?>(null)
     val currentArtifacts = mutableStateListOf<ArtifactInfo>()
+    var fileTreeRoots by mutableStateOf<List<FileTreeRoot>>(emptyList())
+    var fileTreePath by mutableStateOf<String?>(null)
+    var fileTreeRootPath by mutableStateOf<String?>(null)
+    var fileTreeRootName by mutableStateOf<String?>(null)
+    val fileTreeNodes = mutableStateListOf<FileTreeNode>()
+    var fileTreeLoading by mutableStateOf(false)
     val chatItems = mutableStateListOf<ChatItem>()
     val busyIds = mutableStateListOf<String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
@@ -1896,6 +1917,141 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "download failed"))
             }
         }
+    }
+
+    fun refreshFileTree(path: String? = null) {
+        viewModelScope.launch {
+            fileTreeLoading = true
+            try {
+                val room = currentRoom
+                val session = currentSession
+                val contextId = room?.roomId ?: session?.sessionId
+                if (contextId == null) return@launch
+                val isSession = room == null
+                val result = withContext(Dispatchers.IO) {
+                    if (path == null) {
+                        if (isSession) {
+                            hub.call("session.file.roots", buildJsonObject { put("sessionId", contextId) })
+                        } else {
+                            hub.call("room.file.roots", buildJsonObject { put("roomId", contextId) })
+                        }
+                    } else {
+                        if (isSession) {
+                            hub.call("session.file.list", buildJsonObject {
+                                put("sessionId", contextId)
+                                put("path", path)
+                            })
+                        } else {
+                            hub.call("room.file.list", buildJsonObject {
+                                put("roomId", contextId)
+                                put("path", path)
+                            })
+                        }
+                    }
+                }
+                if (path == null) {
+                    fileTreeRoots = result["roots"]?.jsonArray?.map { root ->
+                        val obj = root.jsonObject
+                        FileTreeRoot(
+                            name = obj["name"]?.jsonPrimitive?.content ?: "",
+                            path = obj["path"]?.jsonPrimitive?.content ?: "",
+                            kind = obj["kind"]?.jsonPrimitive?.content ?: "",
+                            sessionId = obj["sessionId"]?.jsonPrimitive?.content,
+                        )
+                    } ?: emptyList()
+                    fileTreeNodes.clear()
+                    fileTreePath = null
+                    fileTreeRootPath = null
+                    fileTreeRootName = null
+                } else {
+                    val list = result["nodes"]?.jsonArray?.map { node ->
+                        val obj = node.jsonObject
+                        FileTreeNode(
+                            name = obj["name"]?.jsonPrimitive?.content ?: "",
+                            path = obj["path"]?.jsonPrimitive?.content ?: "",
+                            kind = obj["kind"]?.jsonPrimitive?.content ?: "",
+                            at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
+                            size = obj["size"]?.jsonPrimitive?.longOrNull,
+                        )
+                    } ?: emptyList()
+                    fileTreeNodes.clear()
+                    fileTreeNodes.addAll(list)
+                    fileTreePath = path
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "file tree failed"))
+            } finally {
+                fileTreeLoading = false
+            }
+        }
+    }
+
+    fun enterFileTreeRoot(root: FileTreeRoot) {
+        fileTreeRootPath = root.path
+        fileTreeRootName = root.name
+        refreshFileTree(root.path)
+    }
+
+    fun enterFileTreeDir(dir: FileTreeNode) {
+        refreshFileTree(dir.path)
+    }
+
+    fun upFileTree() {
+        val current = fileTreePath ?: return
+        val root = fileTreeRootPath
+        val parent = File(current).parentFile?.absolutePath
+        if (parent == null || root == null || (parent != root && !parent.startsWith(root + File.separator))) {
+            refreshFileTree(null)
+        } else {
+            refreshFileTree(parent)
+        }
+    }
+
+    fun openProjectFile(filePath: String) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    hub.call("file.get", buildJsonObject {
+                        put("path", filePath)
+                        if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
+                    })
+                }
+                val name = result["name"]?.jsonPrimitive?.content
+                    ?: filePath.substringAfterLast('/')
+                val mime = result["mime"]?.jsonPrimitive?.content ?: "*/*"
+                val text = result["text"]?.jsonPrimitive?.content
+                val data = result["data"]?.jsonPrimitive?.content
+                val bytes = if (text != null) {
+                    text.toByteArray(Charsets.UTF_8)
+                } else if (data != null) {
+                    Base64.decode(data, Base64.NO_WRAP)
+                } else {
+                    throw Exception("empty file")
+                }
+                withContext(Dispatchers.IO) {
+                    val app = getApplication<Application>()
+                    val dir = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
+                    val file = File(dir, name)
+                    if (text != null) file.writeText(text) else file.writeBytes(bytes)
+                    val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    app.startActivity(intent)
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "download failed"))
+            }
+        }
+    }
+
+    fun sendProjectFileMessage(filePath: String) {
+        val text = "继续处理这个文件：$filePath"
+        if (currentRoom != null) sendRoomMessage(text) else if (currentSession != null) sendPrompt(text)
     }
 
     fun addAttachment(uri: Uri) {

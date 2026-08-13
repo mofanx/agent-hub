@@ -2,6 +2,11 @@ package com.agenthub.ui
 
 import android.graphics.BitmapFactory
 import android.util.Base64
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.util.Locale
+import java.text.SimpleDateFormat
 
 import android.content.ClipData
 import android.widget.Toast
@@ -121,6 +126,7 @@ import com.agenthub.ArtifactInfo
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
+import com.agenthub.Screen
 import com.agenthub.ContextUsage
 import com.agenthub.FlowArtifact
 import com.agenthub.FlowInfo
@@ -131,6 +137,17 @@ private fun formatNumber(n: Long): String = when {
     n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
     n >= 1_000 -> String.format("%.1fk", n / 1_000.0)
     else -> n.toString()
+}
+
+internal fun formatArtifactTime(at: Long): String {
+    val instant = Instant.ofEpochMilli(at)
+    val zone = ZoneId.systemDefault()
+    val date = instant.atZone(zone).toLocalDate()
+    val now = LocalDate.now(zone)
+    val pattern = if (date == now) "HH:mm" else "M/d HH:mm"
+    val formatter = SimpleDateFormat(pattern, Locale.getDefault())
+    formatter.timeZone = java.util.TimeZone.getTimeZone(zone)
+    return formatter.format(java.util.Date.from(instant))
 }
 
 private fun TokenUsage.format(): String = buildString {
@@ -315,6 +332,11 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             vm.chatSearchMatchCount = 0
                         }) {
                             Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                        }
+                    }
+                    if (isRoom || vm.currentSession != null) {
+                        IconButton(onClick = { vm.screen = Screen.FileTree }) {
+                            Text("文件", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                     IconButton(onClick = { vm.backToList() }) {
@@ -1037,12 +1059,12 @@ fun ChatBubble(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (item.text.isNotBlank()) {
-                            HighlightText(
-                                item.text,
-                                highlight,
+                            MarkdownText(
+                                text = item.text,
+                                textColor = textColor,
+                                fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                                highlight = highlight,
                                 onMatchKeywordY = keywordCallback,
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = textColor,
                             )
                         }
                         if (item.attachments.isNotEmpty()) {
@@ -1475,7 +1497,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
                                 Text(
-                                    "@${artifact.author} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
+                                    "@${artifact.author} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f).padding(end = 6.dp),
                                 )

@@ -5,6 +5,7 @@ import path from "node:path";
 import { RoomManager, type Room } from "./room.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
+const WORKSPACE_ROOT = path.resolve(PROJECT_ROOT, "..");
 const FILES_DIR = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../data/files");
 
 describe("room", () => {
@@ -280,5 +281,33 @@ describe("room", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     assert.throws(() => rooms.sendFile(room.roomId, "/etc/passwd"), /outside project root/);
+  });
+
+  it("getFile 可以通过工作区根目录或 session cwd 解析文件", () => {
+    const rooms = new RoomManager();
+    rooms.setCwdResolver((sessionId) => (sessionId === "s1" ? path.join(WORKSPACE_ROOT, "other-project") : undefined));
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+
+    const rel = `getFile-workspace-${Date.now()}.txt`;
+    const fullByWorkspace = path.join(WORKSPACE_ROOT, rel);
+    fs.writeFileSync(fullByWorkspace, "workspace file");
+
+    const cwdRel = `cwd-file-${Date.now()}.txt`;
+    const cwd = path.join(WORKSPACE_ROOT, "other-project");
+    fs.mkdirSync(cwd, { recursive: true });
+    const fullByCwd = path.join(cwd, cwdRel);
+    fs.writeFileSync(fullByCwd, "cwd file");
+
+    try {
+      const a1 = rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "workspace", path: rel })!;
+      assert.equal((rooms.getFile(room.roomId, a1.id) as { text: string }).text, "workspace file");
+
+      const a2 = rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "cwd", path: cwdRel })!;
+      assert.equal((rooms.getFile(room.roomId, a2.id) as { text: string }).text, "cwd file");
+    } finally {
+      fs.rmSync(fullByWorkspace, { force: true });
+      fs.rmSync(fullByCwd, { force: true });
+      fs.rmSync(path.join(FILES_DIR, room.roomId), { recursive: true, force: true });
+    }
   });
 });

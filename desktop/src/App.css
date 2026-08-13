@@ -453,6 +453,7 @@ button.tiny {
   flex-direction: column;
   height: 100%;
   gap: 0.75rem;
+  position: relative;
 }
 
 .chat-header {
@@ -633,6 +634,19 @@ button.tiny {
 .message .text {
   white-space: pre-wrap;
   line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.message .text h1 { font-size: 1.6em; }
+.message .text h2 { font-size: 1.4em; }
+.message .text h3 { font-size: 1.25em; }
+.message .text h4 { font-size: 1.1em; }
+.message .text h5 { font-size: 1em; }
+.message .text h6 { font-size: 0.95em; }
+
+.table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 .message .text table {
@@ -685,6 +699,46 @@ button.tiny {
 .message .text pre code {
   background: transparent;
   padding: 0;
+}
+
+.code-block {
+  position: relative;
+  margin: 0.5rem 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 0.65rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.copy-code {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: none;
+  opacity: 0.7;
+}
+
+.copy-code:hover {
+  opacity: 1;
+  background: var(--surface-variant);
 }
 
 .message .text blockquote {
@@ -1307,6 +1361,13 @@ html[data-theme="dark"] .drawer-item:hover {
   font-size: 0.8rem;
 }
 
+.artifact-time {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
 .artifact-summary {
   min-width: 0;
   color: var(--muted);
@@ -1758,6 +1819,102 @@ button:active,
 
 .attachment-chip:hover {
   background: var(--surface-variant);
+}
+
+/* File tree side panel */
+.file-tree-panel {
+  position: absolute;
+  top: 3.2rem;
+  right: 0;
+  bottom: 0;
+  width: 22rem;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.file-tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.file-tree-header h4 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.file-tree-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.file-tree-up {
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-variant);
+}
+
+.file-tree-up:hover {
+  background: var(--primary-10);
+}
+
+.file-tree-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.file-tree-loading {
+  padding: 0.75rem;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.file-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.file-tree-item:hover {
+  background: var(--surface-variant);
+}
+
+.file-tree-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.file-tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tree-meta {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 9rem;
+  flex-shrink: 0;
 }
 
 .message-menu-item:hover {

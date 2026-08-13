@@ -73,6 +73,7 @@ const ARTIFACT_SUMMARY_LEN = 240;
 const BASE_DIR = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
 const FILES_DIR = path.resolve(BASE_DIR, "../data/files");
 const PROJECT_ROOT = path.resolve(BASE_DIR, "../..");
+const WORKSPACE_ROOT = path.resolve(PROJECT_ROOT, "..");
 
 const TEXT_EXTS = new Set([
   ".txt", ".md", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".toml",
@@ -110,14 +111,44 @@ export type FileResult =
   | { text: string; name: string; mime: string }
   | { data: string; name: string; mime: string };
 
+export type FileTreeRoot = {
+  name: string;
+  path: string;
+  kind: "project" | "workspace" | "cwd";
+  sessionId?: string;
+};
+
+export type FileTreeNode = {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  at: number;
+  size?: number;
+};
+
+const SKIP_NAMES = new Set([
+  "node_modules", ".git", "__pycache__", "dist", "build", ".gradle", ".idea",
+  ".next", "out", "coverage", ".nuxt", "target", "Debug", "Release", "bin", "obj",
+]);
+
+function shouldSkipFile(name: string): boolean {
+  if (name.startsWith(".")) return true;
+  return SKIP_NAMES.has(name);
+}
+
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private blackboards = new Map<string, BlackboardEntry[]>();
   private aliasSeqs = new Map<string, number>();
   private getPersona?: (roleId: string) => string | undefined;
+  private getCwd?: (sessionId: string) => string | undefined;
 
   setRoleResolver(getPersona: (roleId: string) => string | undefined): void {
     this.getPersona = getPersona;
+  }
+
+  setCwdResolver(getCwd: (sessionId: string) => string | undefined): void {
+    this.getCwd = getCwd;
   }
 
   create(
@@ -333,21 +364,65 @@ export class RoomManager {
     return room.artifacts.length < before;
   }
 
-  private resolveProjectPath(input: string): string {
-    const resolved = path.isAbsolute(input) ? path.normalize(input) : path.resolve(PROJECT_ROOT, input);
-    const real = fs.realpathSync(resolved);
-    if (!isWithin(PROJECT_ROOT, real)) throw new Error("path outside project root");
-    const stat = fs.statSync(real);
-    if (!stat.isFile()) throw new Error("not a file");
-    return real;
+  private resolveAllowedRoots(roomId: string, author?: string): { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] {
+    const room = this.rooms.get(roomId);
+    const roots: { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] = [];
+    if (this.getCwd && room) {
+      if (author) {
+        const member = room.members.find((m) => m.name === author);
+        if (member) {
+          const cwd = this.getCwd(member.sessionId);
+          if (cwd) roots.push({ path: cwd, kind: "cwd", sessionId: member.sessionId });
+        }
+      } else {
+        for (const member of room.members) {
+          const cwd = this.getCwd(member.sessionId);
+          if (cwd) roots.push({ path: cwd, kind: "cwd", sessionId: member.sessionId });
+        }
+      }
+    }
+    roots.push({ path: PROJECT_ROOT, kind: "project" });
+    roots.push({ path: WORKSPACE_ROOT, kind: "workspace" });
+    return roots;
+  }
+
+  private resolveEntry(input: string, roots: string[], kind?: "file" | "dir"): { real: string; root: string } | undefined {
+    for (const root of roots) {
+      const loc = path.resolve(root, input);
+      try {
+        const real = fs.realpathSync(loc);
+        if (!isWithin(root, real)) continue;
+        const stat = fs.statSync(real);
+        if (kind === "file" && !stat.isFile()) continue;
+        if (kind === "dir" && !stat.isDirectory()) continue;
+        return { real, root };
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  }
+
+  private resolveEntryPath(
+    roomId: string,
+    input: string,
+    author?: string,
+    kind?: "file" | "dir",
+  ): { real: string; root: string } | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const roots = this.resolveAllowedRoots(roomId, author).map((r) => r.path);
+    return this.resolveEntry(input, roots, kind);
   }
 
   /** 将项目内文件复制到 Hub 缓存，并生成 file artifact */
   sendFile(roomId: string, filePath: string, author?: string, summary?: string): Artifact | undefined {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
-    const src = this.resolveProjectPath(filePath);
-    const rel = path.relative(PROJECT_ROOT, src);
+    const found = this.resolveEntryPath(roomId, filePath, author, "file");
+    if (!found) throw new Error("path outside project root");
+    const { real, root } = found;
+    const rel = path.relative(root, real);
     const artifact = this.addArtifact(roomId, {
       kind: "file",
       author: author ?? "我",
@@ -357,8 +432,8 @@ export class RoomManager {
     if (!artifact) return undefined;
     const destDir = path.join(FILES_DIR, roomId, artifact.id);
     fs.mkdirSync(destDir, { recursive: true });
-    const dest = path.join(destDir, path.basename(src));
-    fs.copyFileSync(src, dest);
+    const dest = path.join(destDir, path.basename(real));
+    fs.copyFileSync(real, dest);
     return artifact;
   }
 
@@ -375,31 +450,148 @@ export class RoomManager {
         (x.path?.toLowerCase() === lowerRef) ||
         (x.path && path.basename(x.path).toLowerCase() === lowerRef))
     );
-    if (!a || !a.path) throw new Error("file not found");
 
-    const fileName = path.basename(a.path);
-    const cachePath = path.join(FILES_DIR, roomId, a.id, fileName);
-    const locations = [cachePath, path.resolve(PROJECT_ROOT, a.path)];
-    let real: string | undefined;
-    for (const loc of locations) {
-      try {
-        const resolved = fs.realpathSync(loc);
-        if (isWithin(FILES_DIR, resolved) || isWithin(PROJECT_ROOT, resolved)) {
+    if (a?.path) {
+      const fileName = path.basename(a.path);
+      const cachePath = path.join(FILES_DIR, roomId, a.id, fileName);
+      const roots = this.resolveAllowedRoots(roomId, a.author).map((r) => r.path);
+
+      const seen = new Set<string>();
+      const candidates: { root: string; loc: string }[] = [];
+      const add = (root: string, loc: string) => {
+        if (seen.has(loc)) return;
+        seen.add(loc);
+        candidates.push({ root, loc });
+      };
+      add(FILES_DIR, cachePath);
+      for (const root of roots) {
+        add(root, path.resolve(root, a.path));
+      }
+
+      for (const { root, loc } of candidates) {
+        try {
+          const resolved = fs.realpathSync(loc);
+          if (!isWithin(root, resolved)) continue;
           const stat = fs.statSync(resolved);
-          if (stat.isFile()) {
-            real = resolved;
-            break;
+          if (!stat.isFile()) continue;
+          const buf = fs.readFileSync(resolved);
+          const ext = path.extname(resolved);
+          const mime = mimeFromExt(ext);
+          if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
+            return { text: buf.toString("utf-8"), name: fileName, mime };
           }
+          return { data: buf.toString("base64"), name: fileName, mime };
+        } catch {
+          /* try next */
         }
-      } catch {
-        /* try next */
       }
     }
-    if (!real) throw new Error("file not readable");
 
+    // 文件树直接路径读取：ref 不是 artifact 时，按允许路径直接读取
+    if (ref.includes("/") || path.isAbsolute(ref)) {
+      const found = this.resolveEntryPath(roomId, ref, undefined, "file");
+      if (found) {
+        const { real } = found;
+        const fileName = path.basename(real);
+        const buf = fs.readFileSync(real);
+        const ext = path.extname(real);
+        const mime = mimeFromExt(ext);
+        if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
+          return { text: buf.toString("utf-8"), name: fileName, mime };
+        }
+        return { data: buf.toString("base64"), name: fileName, mime };
+      }
+    }
+
+    throw new Error(a ? "file not readable" : "file not found");
+  }
+
+  /** 获取房间可用的文件树根目录 */
+  fileRoots(roomId: string): FileTreeRoot[] {
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+    const roots = new Map<string, FileTreeRoot>();
+    const add = (root: FileTreeRoot) => {
+      if (!roots.has(root.path)) roots.set(root.path, root);
+    };
+    add({ name: "项目根目录", path: PROJECT_ROOT, kind: "project" });
+    add({ name: "工作区根目录", path: WORKSPACE_ROOT, kind: "workspace" });
+    if (this.getCwd) {
+      for (const member of room.members) {
+        const cwd = this.getCwd(member.sessionId);
+        if (cwd) add({ name: `@${member.name}`, path: cwd, kind: "cwd", sessionId: member.sessionId });
+      }
+    }
+    return [...roots.values()];
+  }
+
+  private buildFileTreeNodes(real: string, root: string): FileTreeNode[] {
+    const entries = fs.readdirSync(real, { withFileTypes: true });
+    const nodes: FileTreeNode[] = [];
+    for (const entry of entries) {
+      if (shouldSkipFile(entry.name)) continue;
+      const full = path.join(real, entry.name);
+      const stat = fs.statSync(full);
+      nodes.push({
+        name: entry.name,
+        path: full,
+        kind: entry.isDirectory() ? "dir" : "file",
+        at: stat.mtimeMs,
+        ...(stat.isFile() ? { size: stat.size } : {}),
+      });
+    }
+    // 文件夹排在前面，其次按修改时间倒序
+    return nodes.sort((a, b) => {
+      if (a.kind === "dir" && b.kind !== "dir") return -1;
+      if (a.kind !== "dir" && b.kind === "dir") return 1;
+      return b.at - a.at;
+    });
+  }
+
+  /** 列出指定目录下的文件与文件夹（仅一层，已过滤隐藏/构建目录） */
+  listFiles(roomId: string, dirPath: string, author?: string): FileTreeNode[] {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error("unknown room");
+    const found = this.resolveEntryPath(roomId, dirPath, author, "dir");
+    if (!found) throw new Error("dir not found");
+    return this.buildFileTreeNodes(found.real, found.root);
+  }
+
+  /** 获取指定 session 可用的文件树根目录 */
+  sessionFileRoots(sessionId: string): FileTreeRoot[] {
+    const roots = new Map<string, FileTreeRoot>();
+    const add = (root: FileTreeRoot) => {
+      if (!roots.has(root.path)) roots.set(root.path, root);
+    };
+    add({ name: "项目根目录", path: PROJECT_ROOT, kind: "project" });
+    add({ name: "工作区根目录", path: WORKSPACE_ROOT, kind: "workspace" });
+    if (this.getCwd) {
+      const cwd = this.getCwd(sessionId);
+      if (cwd) add({ name: "当前工作目录", path: cwd, kind: "cwd", sessionId });
+    }
+    return [...roots.values()];
+  }
+
+  /** 列出指定 session 目录下的文件与文件夹（仅一层，已过滤隐藏/构建目录） */
+  sessionListFiles(sessionId: string, dirPath: string): FileTreeNode[] {
+    const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
+    const found = this.resolveEntry(dirPath, roots, "dir");
+    if (!found) throw new Error("dir not found");
+    return this.buildFileTreeNodes(found.real, found.root);
+  }
+
+  /** 读取指定 session 的文件内容 */
+  sessionGetFile(sessionId: string, ref: string): FileResult {
+    // session 没有 artifact 注册表，只支持绝对路径或直接路径
+    if (!ref.includes("/") && !path.isAbsolute(ref)) throw new Error("file not found");
+    const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
+    const found = this.resolveEntry(ref, roots, "file");
+    if (!found) throw new Error("file not found");
+    const { real } = found;
     const buf = fs.readFileSync(real);
     const ext = path.extname(real);
     const mime = mimeFromExt(ext);
+    const fileName = path.basename(real);
     if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
       return { text: buf.toString("utf-8"), name: fileName, mime };
     }
