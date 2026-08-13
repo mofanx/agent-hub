@@ -511,7 +511,13 @@ function onAgentEvent(event: HubEvent): void {
     const origin = originFor(meta);
     const displayName = origin ? `${baseName} (${origin})` : baseName;
     if (!roomModeManager.isHiddenSession(sessionId!)) {
-      rooms.recordOutput(sessionId!, displayName, output);
+      const touched = rooms.recordOutput(sessionId!, displayName, output);
+      for (const roomId of touched) {
+        broadcast({
+          method: "room.blackboardUpdate",
+          params: { roomId, blackboard: rooms.getBlackboard(roomId) },
+        } as HubEvent);
+      }
     }
     void roomModeManager
       .onPromptDone(sessionId!, output)
@@ -1099,6 +1105,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "room.list":
       return { rooms: rooms.list().map(enrichRoom) };
+    case "room.blackboard": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      return { blackboard: rooms.getBlackboard(roomId) };
+    }
     case "room.flow": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);

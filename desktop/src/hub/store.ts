@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AppConfig,
   ArtifactInfo,
+  BlackboardInfo,
   ChatItem,
   ConnProfile,
   ConnectionInfo,
@@ -50,6 +51,7 @@ interface State {
   currentSession: SessionInfo | null;
   currentRoom: RoomInfo | null;
   currentArtifacts: ArtifactInfo[] | null;
+  blackboard: BlackboardInfo[] | null;
   chatItems: ChatItem[];
   busyIds: string[];
   quote: [string, string] | null;
@@ -172,6 +174,7 @@ interface Actions {
   refreshFlow(roomId: string): Promise<void>;
   setFlow(flow: FlowInfo | null): void;
   refreshArtifacts(roomId: string): Promise<void>;
+  refreshBlackboard(roomId: string): Promise<void>;
   sendArtifactMessage(artifact: ArtifactInfo): void;
 
   showModelPickerDialog(): Promise<void>;
@@ -395,6 +398,29 @@ export const useHubStore = create<State & Actions>((set, get) => {
         }
         break;
       }
+      case "room.blackboardUpdate": {
+        const roomId = String(params.roomId ?? "");
+        const room = get().currentRoom;
+        if (room && room.roomId === roomId) {
+          const blackboard = ((params.blackboard as unknown[]) ?? []).map((it) => {
+            const e = it as Record<string, unknown>;
+            return {
+              from: String(e.from ?? ""),
+              text: String(e.text ?? ""),
+              at: typeof e.at === "number" ? e.at : 0,
+            } as BlackboardInfo;
+          });
+          set({ blackboard });
+        }
+        break;
+      }
+      case "room.artifact": {
+        const roomId = String(params.roomId ?? "");
+        if (roomId && get().currentRoom?.roomId === roomId) {
+          get().refreshArtifacts(roomId);
+        }
+        break;
+      }
       case "permission.request": {
         const sid = String(params.sessionId ?? "");
         if (!get().inScope(sid)) return;
@@ -572,6 +598,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     currentSession: null,
     currentRoom: null,
     currentArtifacts: null,
+    blackboard: null,
     chatItems: [],
     busyIds: [],
     quote: null,
@@ -932,6 +959,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().loadHistory("room.history", "roomId", room.roomId, anchorAt);
       get().refreshFlow(room.roomId);
       get().refreshArtifacts(room.roomId);
+      get().refreshBlackboard(room.roomId);
     },
 
     clearJumpToAt: () => {
@@ -1568,6 +1596,25 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const result = (await client.call("room.artifacts", { roomId })) as Record<string, unknown>;
         const artifacts = (result.artifacts as ArtifactInfo[] | undefined) ?? [];
         set({ currentArtifacts: artifacts });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    refreshBlackboard: async (roomId: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        const result = (await client.call("room.blackboard", { roomId })) as Record<string, unknown>;
+        const blackboard = ((result.blackboard as unknown[]) ?? []).map((it) => {
+          const e = it as Record<string, unknown>;
+          return {
+            from: String(e.from ?? ""),
+            text: String(e.text ?? ""),
+            at: typeof e.at === "number" ? e.at : 0,
+          } as BlackboardInfo;
+        });
+        set({ blackboard });
       } catch {
         /* ignore */
       }

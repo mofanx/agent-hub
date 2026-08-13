@@ -1925,3 +1925,159 @@ button:active,
 .search-highlight {
   transition: background 0.1s ease;
 }
+
+/* Room context capsule panel */
+.context-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0 0.75rem;
+}
+
+.context-bar {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.context-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 0.85rem;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.context-capsule:hover:not(:disabled) {
+  background: var(--surface-variant);
+}
+
+.context-capsule.active {
+  background: var(--primary-container);
+  border-color: var(--primary);
+  color: var(--on-primary-container);
+}
+
+.context-capsule:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.context-content {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-height: 260px;
+  overflow: auto;
+  padding: 0.6rem 0.75rem;
+  box-shadow: var(--shadow);
+}
+
+.context-empty {
+  padding: 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Blackboard panel */
+.blackboard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.blackboard-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.4rem 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.blackboard-line {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.blackboard-from {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.blackboard-time {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.blackboard-text {
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* File reference pills in messages */
+.file-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.1rem 0.35rem;
+  background: var(--primary-10);
+  border: 1px solid var(--primary);
+  border-radius: 4px;
+  color: var(--on-primary-container);
+  font-size: 0.85em;
+  cursor: pointer;
+  white-space: pre-wrap;
+}
+
+.file-pill:hover {
+  background: var(--primary-container);
+}
+
+/* Suggest popup for file refs */
+.suggest-icon {
+  flex-shrink: 0;
+}
+
+.suggest-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggest-meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
+
+.suggest-loading {
+  padding: 0.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.file-ref-popup .suggest-item {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}

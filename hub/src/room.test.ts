@@ -310,4 +310,65 @@ describe("room", () => {
       fs.rmSync(path.join(FILES_DIR, room.roomId), { recursive: true, force: true });
     }
   });
+
+  it("parseFileRefs 解析 #path", () => {
+    const rooms = new RoomManager();
+    rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    assert.deepEqual(rooms.parseFileRefs("看一下 #hub/src/room.ts"), ["hub/src/room.ts"]);
+    assert.deepEqual(rooms.parseFileRefs("对比 #a 和 #b/c"), ["a", "b/c"]);
+    assert.deepEqual(rooms.parseFileRefs("# 标题不会命中"), []);
+    assert.deepEqual(rooms.parseFileRefs("## 也不会"), []);
+  });
+
+  it("buildPrompt 内联 #path 引用的文件内容", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const rel = `hub/src/file-ref-${Date.now()}.txt`;
+    const full = path.join(PROJECT_ROOT, rel);
+    fs.writeFileSync(full, "hello file ref");
+    try {
+      const prompt = rooms.buildPrompt(room.roomId, `查看 #${rel}`, "s1");
+      assert.ok(prompt.includes("相关文件："));
+      assert.ok(prompt.includes("hello file ref"));
+      assert.ok(prompt.includes(`#${rel}`));
+    } finally {
+      fs.rmSync(full, { force: true });
+    }
+  });
+
+  it("buildPrompt 内联 #path 引用的文件夹列表", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const dir = `hub/src/file-ref-dir-${Date.now()}`;
+    const full = path.join(PROJECT_ROOT, dir);
+    fs.mkdirSync(full, { recursive: true });
+    fs.writeFileSync(path.join(full, "a.txt"), "a");
+    fs.writeFileSync(path.join(full, "b.txt"), "b");
+    try {
+      const prompt = rooms.buildPrompt(room.roomId, `查看 #${dir}`, "s1");
+      assert.ok(prompt.includes("相关文件："));
+      assert.ok(prompt.includes("a.txt"));
+      assert.ok(prompt.includes("b.txt"));
+    } finally {
+      fs.rmSync(full, { recursive: true, force: true });
+    }
+  });
+
+  it("buildPrompt 对不存在的 #path 给出提示", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const prompt = rooms.buildPrompt(room.roomId, "查看 #not/exist.txt", "s1");
+    assert.ok(prompt.includes("相关文件："));
+    assert.ok(prompt.includes("未找到文件或文件夹"));
+  });
+
+  it("getBlackboard 与 recordOutput", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    rooms.recordOutput("s1", "a1", "完成了任务");
+    const board = rooms.getBlackboard(room.roomId);
+    assert.equal(board.length, 1);
+    assert.equal(board[0]!.from, "a1");
+    assert.equal(board[0]!.text, "完成了任务");
+  });
 });

@@ -230,6 +230,12 @@ data class FileTreeNode(
     val size: Long? = null,
 )
 
+data class BlackboardEntry(
+    val from: String,
+    val text: String,
+    val at: Long,
+)
+
 enum class SessionGroupBy { None, Agent, Cwd }
 
 enum class RoomGroupBy { None, Mode }
@@ -367,6 +373,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     var flow by mutableStateOf<FlowInfo?>(null)
     val currentArtifacts = mutableStateListOf<ArtifactInfo>()
+    val blackboard = mutableStateListOf<BlackboardEntry>()
     var fileTreeRoots by mutableStateOf<List<FileTreeRoot>>(emptyList())
     var fileTreePath by mutableStateOf<String?>(null)
     var fileTreeRootPath by mutableStateOf<String?>(null)
@@ -378,6 +385,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
+    var fileRefToInsert by mutableStateOf<String?>(null)
 
     var showModelPicker by mutableStateOf(false)
     val modelList = mutableStateListOf<ModelInfo>()
@@ -810,7 +818,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSession = null
         currentRoom = null
         currentArtifacts.clear()
+        blackboard.clear()
+        flow = null
         quote = null
+        fileRefToInsert = null
         connecting = false
         connectError = null
         agentStatus = "未连接"
@@ -1243,8 +1254,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSession = session
         currentRoom = null
         currentArtifacts.clear()
-        chatItems.clear()
+        blackboard.clear()
+        flow = null
         quote = null
+        fileRefToInsert = null
         historyHasMore = false
         historyLoading = false
         if (anchorAt == null) {
@@ -1275,8 +1288,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 currentRoom = updatedRoom
                 currentSession = null
                 currentArtifacts.clear()
+                blackboard.clear()
                 chatItems.clear()
                 quote = null
+                fileRefToInsert = null
                 flow = null
                 historyHasMore = false
                 historyLoading = false
@@ -1290,6 +1305,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
                 refreshFlow(updatedRoom.roomId)
                 refreshArtifacts(updatedRoom.roomId)
+                refreshBlackboard(updatedRoom.roomId)
             } catch (e: Exception) {
                 connectError = e.message
             }
@@ -1315,6 +1331,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             // ignore
         }
+    }
+
+    private suspend fun refreshBlackboard(roomId: String) {
+        try {
+            val result = hub.call("room.blackboard", buildJsonObject { put("roomId", roomId) })
+            val list = result["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
+            blackboard.clear()
+            blackboard.addAll(list)
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    private fun parseBlackboardEntry(obj: JsonObject): BlackboardEntry {
+        return BlackboardEntry(
+            from = obj["from"]?.jsonPrimitive?.content ?: "",
+            text = obj["text"]?.jsonPrimitive?.content ?: "",
+            at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
+        )
     }
 
     private fun parseArtifactInfo(obj: JsonObject): ArtifactInfo {
@@ -1759,6 +1794,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSession = null
         currentRoom = null
         currentArtifacts.clear()
+        blackboard.clear()
+        flow = null
+        fileRefToInsert = null
         jumpToHistoryId = null
         chatSearchMatchIndex = -1
         chatSearchMatchCount = 0
@@ -2222,6 +2260,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (currentRoom?.roomId == roomId) {
                     flow = parseFlow(p["flow"]?.jsonObject)
                     viewModelScope.launch { refreshArtifacts(roomId) }
+                }
+            }
+            "room.blackboardUpdate" -> {
+                val p = obj["params"]!!.jsonObject
+                val roomId = p["roomId"]!!.jsonPrimitive.content
+                if (currentRoom?.roomId == roomId) {
+                    val list = p["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
+                    blackboard.clear()
+                    blackboard.addAll(list)
                 }
             }
             "permission.request" -> {

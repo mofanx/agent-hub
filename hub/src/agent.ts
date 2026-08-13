@@ -39,6 +39,7 @@ export type HubEvent =
     }
   | { method: "room.notice"; params: { roomId: string; message: string } }
   | { method: "room.artifact"; params: { roomId: string; artifact: unknown } }
+  | { method: "room.blackboardUpdate"; params: { roomId: string; blackboard: { from: string; text: string; at: number }[] } }
   | { method: "agent.status"; params: { status: string; detail?: string } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };

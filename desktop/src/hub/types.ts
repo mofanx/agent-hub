@@ -54,6 +54,27 @@ export interface FlowArtifact {
   summary: string;
 }
 
+export interface BlackboardInfo {
+  from: string;
+  text: string;
+  at: number;
+}
+
+export interface FileTreeRoot {
+  name: string;
+  path: string;
+  kind: string;
+  sessionId?: string;
+}
+
+export interface FileTreeNode {
+  name: string;
+  path: string;
+  kind: string;
+  at: number;
+  size?: number;
+}
+
 export interface FlowTask {
   id: string;
   sessionId: string;

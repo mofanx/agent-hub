@@ -70,6 +70,10 @@ const ARTIFACT_LIMIT = 50;
 const ARTIFACT_PROMPT_LIMIT = 10;
 const ARTIFACT_SUMMARY_LEN = 240;
 
+const FILE_REF_LIMIT = 5;
+const FILE_REF_CHAR_LIMIT = 10000;
+const FILE_REF_TOTAL_LIMIT = 50000;
+
 const BASE_DIR = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
 const FILES_DIR = path.resolve(BASE_DIR, "../data/files");
 const PROJECT_ROOT = path.resolve(BASE_DIR, "../..");
@@ -647,6 +651,48 @@ export class RoomManager {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
+  /** 解析文本中的 #path 引用 */
+  parseFileRefs(text: string): string[] {
+    const refs = new Set<string>();
+    const re = /(?:^|[\s（(，,;；:：])#([^#\s][^\s，,;；。!！?？\)\]\n]*)/g;
+    for (const m of text.matchAll(re)) {
+      const ref = m[1]!.replace(/\/+$/g, "");
+      if (ref) refs.add(ref);
+    }
+    return [...refs];
+  }
+
+  private readFileRef(
+    roomId: string,
+    ref: string,
+  ): { name: string; text?: string; error?: string } {
+    const fileFound = this.resolveEntryPath(roomId, ref, undefined, "file");
+    if (fileFound) {
+      const { real } = fileFound;
+      const name = path.basename(real);
+      try {
+        const buf = fs.readFileSync(real);
+        const ext = path.extname(real);
+        if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
+          return { name, text: buf.toString("utf-8") };
+        }
+        return { name, text: "[二进制文件，已省略内容]" };
+      } catch {
+        return { name, error: "无法读取文件" };
+      }
+    }
+    const dirFound = this.resolveEntryPath(roomId, ref, undefined, "dir");
+    if (dirFound) {
+      const { real, root } = dirFound;
+      const nodes = this.buildFileTreeNodes(real, root);
+      const listing =
+        nodes.map((n) => `${n.name}${n.kind === "dir" ? "/" : ""}`).join("\n") ||
+        "（空文件夹）";
+      return { name: path.basename(real), text: listing };
+    }
+    return { name: ref, error: "未找到文件或文件夹" };
+  }
+
   /** 获取与当前任务相关的 artifact */
   getArtifactsForPrompt(
     roomId: string,
@@ -723,6 +769,36 @@ export class RoomManager {
         if (a.command) parts.push(a.command);
         parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
         lines.push(`- ${parts.join(" ")}`);
+      }
+    }
+    const fileRefs = this.parseFileRefs(text).slice(0, FILE_REF_LIMIT);
+    if (fileRefs.length > 0) {
+      lines.push("", "相关文件：");
+      let total = 0;
+      for (const [i, ref] of fileRefs.entries()) {
+        if (total >= FILE_REF_TOTAL_LIMIT) {
+          lines.push(`- ... 还有 ${fileRefs.length - i} 个文件未加载（超出总大小限制）`);
+          break;
+        }
+        const result = this.readFileRef(roomId, ref);
+        if (result.error) {
+          lines.push(`- #${ref}：${result.error}`);
+          continue;
+        }
+        let content = result.text ?? "";
+        if (content.length > FILE_REF_CHAR_LIMIT) {
+          content = `${content.slice(0, FILE_REF_CHAR_LIMIT)}\n（已截断，原始大小 ${content.length} 字符）`;
+        }
+        if (total + content.length > FILE_REF_TOTAL_LIMIT) {
+          lines.push(`- ... 还有 ${fileRefs.length - i} 个文件未加载（超出总大小限制）`);
+          break;
+        }
+        total += content.length;
+        const body = content
+          .split("\n")
+          .map((line) => `  ${line}`)
+          .join("\n");
+        lines.push(`- #${ref}（${result.name}）：\n${body}`);
       }
     }
     if (quote) {

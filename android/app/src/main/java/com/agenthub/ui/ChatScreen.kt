@@ -82,6 +82,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -126,6 +127,8 @@ import com.agenthub.ArtifactInfo
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
+import com.agenthub.FileTreeNode
+import com.agenthub.FileTreeRoot
 import com.agenthub.Screen
 import com.agenthub.ContextUsage
 import com.agenthub.FlowArtifact
@@ -138,6 +141,8 @@ private fun formatNumber(n: Long): String = when {
     n >= 1_000 -> String.format("%.1fk", n / 1_000.0)
     else -> n.toString()
 }
+
+private data class FileRefItem(val name: String, val path: String, val isDir: Boolean)
 
 internal fun formatArtifactTime(at: Long): String {
     val instant = Instant.ofEpochMilli(at)
@@ -183,6 +188,12 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val messages by remember { derivedStateOf { vm.chatItems.asReversed() } }
     val isAtTop by remember { derivedStateOf { messages.isNotEmpty() && listState.firstVisibleItemIndex >= messages.lastIndex - 2 } }
+
+    LaunchedEffect(vm.fileRefToInsert) {
+        val ref = vm.fileRefToInsert ?: return@LaunchedEffect
+        input = if (input.isBlank()) "#$ref" else "$input #$ref"
+        vm.fileRefToInsert = null
+    }
 
     LaunchedEffect(isAtTop, vm.historyHasMore, vm.historyLoading) {
         if (isAtTop && vm.historyHasMore && !vm.historyLoading) {
@@ -358,11 +369,14 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         WindowInsets.ime.exclude(WindowInsets.navigationBars),
                     ),
             ) {
-                if (isRoom && vm.currentRoom?.mode in listOf("conductor", "parallel", "pipeline", "debate", "auto")) {
-                    FlowPanel(vm.flow, vm.currentRoom!!.mode)
-                }
-                if (isRoom && vm.currentArtifacts.isNotEmpty()) {
-                    ArtifactPanel(vm.currentArtifacts, vm)
+                if (isRoom) {
+                    var expandedTop by remember { mutableStateOf<String?>(null) }
+                    ChatTopCapsules(vm, expandedTop) { expandedTop = it }
+                    when (expandedTop) {
+                        "flow" -> FlowPanel(vm.flow, vm.currentRoom!!.mode)
+                        "blackboard" -> BlackboardPanel(vm)
+                        "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
+                    }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
@@ -477,6 +491,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 val q = input.substring(at + 1)
                 if (q.contains(' ') || q.contains('\n')) null else q
             }
+            val fileRefQuery: String? = run {
+                if (vm.currentRoom == null && vm.currentSession == null) return@run null
+                val hash = input.lastIndexOf('#')
+                if (hash < 0) return@run null
+                val q = input.substring(hash + 1)
+                if (q.contains(' ') || q.contains('\n')) null else q
+            }
             if (vm.pendingAttachments.isNotEmpty()) {
                 AttachmentPreviews(
                     attachments = vm.pendingAttachments,
@@ -547,6 +568,17 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
                 Box(Modifier.weight(1f)) {
+                    LaunchedEffect(fileRefQuery) {
+                        if (fileRefQuery == null || vm.fileTreeLoading) return@LaunchedEffect
+                        if (fileRefQuery.endsWith("/")) {
+                            val dir = fileRefQuery.removeSuffix("/")
+                            if (dir.isNotBlank() && vm.fileTreePath != dir) {
+                                vm.refreshFileTree(dir)
+                            }
+                        } else if (vm.fileTreeRoots.isEmpty() && vm.fileTreePath == null) {
+                            vm.refreshFileTree(null)
+                        }
+                    }
                     BasicTextField(
                         value = input,
                         onValueChange = { input = it },
@@ -633,6 +665,36 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 DropdownMenuItem(
                                     text = { Text("/${cmd.name} — ${cmd.description}") },
                                     onClick = { input = "/${cmd.name} " },
+                                )
+                            }
+                        }
+                    }
+                    if (fileRefQuery != null) {
+                        val filter = fileRefQuery.substringAfterLast("/")
+                        val candidates = if (vm.fileTreePath != null) {
+                            vm.fileTreeNodes.map { FileRefItem(it.name, it.path, it.kind == "dir") }
+                        } else {
+                            vm.fileTreeRoots.map { FileRefItem(it.name, it.path, true) }
+                        }
+                        val matches = candidates.filter {
+                            it.name.contains(filter, ignoreCase = true) ||
+                                it.path.contains(fileRefQuery, ignoreCase = true)
+                        }.take(20)
+                        DropdownMenu(
+                            expanded = matches.isNotEmpty(),
+                            onDismissRequest = { },
+                            properties = PopupProperties(focusable = false),
+                        ) {
+                            matches.forEach { item ->
+                                val icon = if (item.isDir) "📁" else "🗎"
+                                DropdownMenuItem(
+                                    text = { Text("$icon ${item.name}") },
+                                    onClick = {
+                                        val hash = input.lastIndexOf('#')
+                                        val base = if (hash >= 0) input.substring(0, hash) else input
+                                        input = "$base#${item.path}" + if (item.isDir) "/" else " "
+                                        if (item.isDir) vm.refreshFileTree(item.path)
+                                    },
                                 )
                             }
                         }
@@ -1530,6 +1592,115 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, onExpand: (String?) -> Unit) {
+    val flow = vm.flow
+    val flowCount = flow?.tasks?.size ?: 0
+    val blackboardCount = vm.blackboard.size
+    val artifactCount = vm.currentArtifacts.size
+    if (flowCount == 0 && blackboardCount == 0 && artifactCount == 0) return
+    val flowProgress = flow?.progress
+    val flowLabel = if (flowProgress != null) {
+        "编排 ${flowProgress.done}/${flowProgress.total}"
+    } else "编排"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (flowCount > 0) {
+            AssistChip(
+                onClick = { onExpand(if (expanded == "flow") null else "flow") },
+                label = { Text(flowLabel, style = MaterialTheme.typography.labelMedium) },
+                leadingIcon = {
+                    Text(
+                        if (expanded == "flow") "▾" else "▸",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                },
+            )
+        }
+        if (blackboardCount > 0) {
+            AssistChip(
+                onClick = { onExpand(if (expanded == "blackboard") null else "blackboard") },
+                label = { Text("黑板 $blackboardCount", style = MaterialTheme.typography.labelMedium) },
+                leadingIcon = {
+                    Text(
+                        if (expanded == "blackboard") "▾" else "▸",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                },
+            )
+        }
+        if (artifactCount > 0) {
+            AssistChip(
+                onClick = { onExpand(if (expanded == "artifact") null else "artifact") },
+                label = { Text("产物 $artifactCount", style = MaterialTheme.typography.labelMedium) },
+                leadingIcon = {
+                    Text(
+                        if (expanded == "artifact") "▾" else "▸",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun BlackboardPanel(vm: ChatViewModel) {
+    val entries = vm.blackboard
+    if (entries.isEmpty()) return
+    var collapsed by remember { mutableStateOf(false) }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        ),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { collapsed = !collapsed },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${if (collapsed) "▸" else "▾"} 共享黑板",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    "${entries.size} 条",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!collapsed) {
+                Spacer(Modifier.height(6.dp))
+                entries.forEach { entry ->
+                    Column(Modifier.padding(vertical = 3.dp)) {
+                        Text(
+                            "@${entry.from} · ${formatArtifactTime(entry.at)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            entry.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }

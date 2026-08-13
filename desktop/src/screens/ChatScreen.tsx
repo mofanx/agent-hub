@@ -2,20 +2,44 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
-import type { ArtifactInfo, ChatItem, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 const safeRenderer = {
   html(text: string) {
-    return text
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+    return escapeHtml(text);
   },
 };
 
-marked.use({ renderer: safeRenderer as Record<string, unknown>, gfm: true });
+const fileRefExt = {
+  name: "fileRef",
+  level: "inline" as const,
+  start(src: string) {
+    const m = src.match(/(?:^|[\s（(，,;；:：])#(?=[^#\s])/);
+    return m ? (m.index ?? 0) + m[0].length - 1 : -1;
+  },
+  tokenizer(src: string) {
+    const rule = /^#([^#\s][^\s，,;；。!！?？\)\]\n]*)/;
+    const match = rule.exec(src);
+    if (match) {
+      return { type: "fileRef", raw: match[0], path: match[1].replace(/\/+$/, "") };
+    }
+    return undefined;
+  },
+  renderer(token: { raw: string; path: string }) {
+    return `<span class="file-pill" data-path="${escapeHtml(token.path)}">${escapeHtml(token.raw)}</span>`;
+  },
+};
+
+marked.use({ renderer: safeRenderer as Record<string, unknown>, gfm: true, extensions: [fileRefExt as never] });
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -107,6 +131,14 @@ export function ChatScreen() {
   const [suggestIndex, setSuggestIndex] = useState(0);
   const [lightbox, setLightbox] = useState<{ src: string; name?: string } | null>(null);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const [fileTreeInitialPath, setFileTreeInitialPath] = useState<string | null>(null);
+  const [filePreview, setFilePreview] = useState<{ name: string; text?: string; data?: string; mime?: string } | null>(null);
+  const [activeContext, setActiveContext] = useState<"flow" | "blackboard" | "artifact" | null>(null);
+  const [fileRef, setFileRef] = useState<{
+    query: { at: number; q: string; dir: string; filter: string };
+    candidates: (FileTreeRoot | FileTreeNode)[];
+    loading: boolean;
+  } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -299,6 +331,67 @@ export function ChatScreen() {
     return store.slashCommands.filter((c) => c.name.toLowerCase().startsWith(q));
   }, [input, store.slashCommands]);
 
+  const fileRefQuery = useMemo(() => {
+    const hash = input.lastIndexOf("#");
+    if (hash < 0) return null;
+    const after = input.slice(hash + 1);
+    const stopRe = /[\s，,;；。!！?？\)\]\n]/;
+    const stop = after.search(stopRe);
+    const q = stop >= 0 ? after.slice(0, stop) : after;
+    if (!q) return { at: hash, q: "", dir: "", filter: "" };
+    const slash = q.lastIndexOf("/");
+    if (slash < 0) return { at: hash, q, dir: "", filter: q };
+    if (q.endsWith("/")) return { at: hash, q, dir: q, filter: "" };
+    return { at: hash, q, dir: q.slice(0, slash + 1), filter: q.slice(slash + 1) };
+  }, [input]);
+
+  useEffect(() => {
+    if (!fileRefQuery) {
+      setFileRef(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const client = store.client;
+      const room = store.currentRoom;
+      const session = store.currentSession;
+      const contextId = room?.roomId ?? session?.sessionId;
+      if (!client || !contextId) {
+        if (!cancelled) setFileRef({ query: fileRefQuery, candidates: [], loading: false });
+        return;
+      }
+      const isSession = !room;
+      const { dir, filter } = fileRefQuery;
+      const listDir = dir.replace(/\/$/, "");
+      if (!cancelled) setFileRef({ query: fileRefQuery, candidates: [], loading: true });
+      try {
+        let candidates: (FileTreeRoot | FileTreeNode)[] = [];
+        if (listDir) {
+          const method = isSession ? "session.file.list" : "room.file.list";
+          const params = isSession ? { sessionId: contextId, path: listDir } : { roomId: contextId, path: listDir };
+          const result = (await client.call(method, params)) as { nodes?: FileTreeNode[] };
+          candidates = result.nodes ?? [];
+        } else {
+          const method = isSession ? "session.file.roots" : "room.file.roots";
+          const params = isSession ? { sessionId: contextId } : { roomId: contextId };
+          const result = (await client.call(method, params)) as { roots?: FileTreeRoot[] };
+          candidates = result.roots ?? [];
+        }
+        const f = filter.toLowerCase();
+        const filtered = f
+          ? candidates.filter((n) => n.name.toLowerCase().startsWith(f) || n.name.toLowerCase().includes(f))
+          : candidates;
+        if (!cancelled) setFileRef({ query: fileRefQuery, candidates: filtered, loading: false });
+      } catch {
+        if (!cancelled) setFileRef({ query: fileRefQuery, candidates: [], loading: false });
+      }
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [fileRefQuery, store.client, store.currentRoom, store.currentSession]);
+
   const insertMention = (name: string) => {
     if (!mention) return;
     const before = input.slice(0, mention.at);
@@ -318,12 +411,79 @@ export function ChatScreen() {
     inputRef.current?.focus();
   };
 
+  const insertFileRef = (candidate: FileTreeRoot | FileTreeNode) => {
+    if (!fileRef?.query) return;
+    const { at, q } = fileRef.query;
+    const before = input.slice(0, at);
+    const after = input.slice(at + 1 + q.length);
+    const isDir = (candidate as FileTreeNode).kind === "dir";
+    const path = candidate.path + (isDir ? "/" : "");
+    if (isDir) {
+      setInput(`${before}#${path}${after}`);
+      setSuggestOpen(true);
+    } else {
+      setInput(`${before}#${path} ${after}`);
+      setSuggestOpen(false);
+    }
+    inputRef.current?.focus();
+  };
+
+  const saveBlob = (name: string, blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const saveText = (name: string, text: string) => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    saveBlob(name, blob);
+  };
+
+  const handleFilePillClick = async (ref: string) => {
+    const client = store.client;
+    const room = store.currentRoom;
+    const session = store.currentSession;
+    const contextId = room?.roomId ?? session?.sessionId;
+    if (!client || !contextId) return;
+    const isSession = !room;
+    try {
+      const params = isSession ? { sessionId: contextId, path: ref } : { roomId: contextId, path: ref };
+      const result = (await client.call("file.get", params)) as { text?: string; data?: string; name?: string; mime?: string };
+      const name = result.name ?? ref.split("/").pop() ?? "download";
+      if (typeof result.text === "string") {
+        setFilePreview({ name, text: result.text, mime: result.mime ?? "text/plain" });
+      } else if (typeof result.data === "string") {
+        const bytes = new Uint8Array(
+          atob(result.data)
+            .split("")
+            .map((c) => c.charCodeAt(0)),
+        );
+        const blob = new Blob([bytes], { type: result.mime ?? "application/octet-stream" });
+        saveBlob(name, blob);
+      }
+      const parent = ref.split("/").slice(0, -1).join("/") || null;
+      setFileTreeInitialPath(parent);
+      setFileTreeOpen(true);
+    } catch {
+      try {
+        const method = isSession ? "session.file.list" : "room.file.list";
+        const params = isSession ? { sessionId: contextId, path: ref } : { roomId: contextId, path: ref };
+        await client.call(method, params);
+        setFileTreeInitialPath(ref);
+        setFileTreeOpen(true);
+      } catch {}
+    }
+  };
+
   useEffect(() => {
-    if (mention || (slash && slash.length > 0)) {
+    if (mention || (slash && slash.length > 0) || (fileRef && fileRef.candidates.length > 0)) {
       setSuggestOpen(true);
       setSuggestIndex(0);
     }
-  }, [mention, slash]);
+  }, [mention, slash, fileRef]);
 
   const insertCommand = (text: string) => {
     setInput(text);
@@ -357,11 +517,13 @@ export function ChatScreen() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const active = mention || (slash && slash.length > 0);
+    const active = mention || (slash && slash.length > 0) || (fileRef && fileRef.candidates.length > 0);
     if (active && suggestOpen) {
       const items = mention
         ? (mention.kind === "member" ? mention.members : mention.artifacts)
-        : slash || [];
+        : slash && slash.length > 0
+          ? slash
+          : fileRef?.candidates ?? [];
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSuggestIndex((i) => (i + 1) % items.length);
@@ -380,8 +542,10 @@ export function ChatScreen() {
           } else {
             insertArtifactMention(mention.artifacts[suggestIndex] ?? mention.artifacts[0]);
           }
-        } else if (slash) {
+        } else if (slash && slash.length > 0) {
           insertSlash(slash[suggestIndex]?.name ?? slash[0].name);
+        } else if (fileRef && fileRef.candidates.length > 0) {
+          insertFileRef(fileRef.candidates[suggestIndex] ?? fileRef.candidates[0]);
         }
         return;
       }
@@ -476,12 +640,15 @@ export function ChatScreen() {
         )}
       </div>
 
-      {isRoom && store.currentRoom && ["conductor", "parallel", "pipeline", "debate", "auto"].includes(store.currentRoom.mode) && (
-        <FlowPanel flow={store.flow} roomMode={store.currentRoom.mode} />
-      )}
-
-      {isRoom && store.currentArtifacts && store.currentArtifacts.length > 0 && (
-        <ArtifactPanel artifacts={store.currentArtifacts} />
+      {isRoom && store.currentRoom && (
+        <RoomContextPanel
+          flow={store.flow}
+          blackboard={store.blackboard}
+          artifacts={store.currentArtifacts ?? []}
+          roomMode={store.currentRoom.mode}
+          active={activeContext}
+          onChange={setActiveContext}
+        />
       )}
 
       <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
@@ -507,6 +674,7 @@ export function ChatScreen() {
               highlight={inChatSearchQuery}
               isCurrentMatch={currentMatchIndex === i}
               onImageClick={(src, name) => setLightbox({ src, name })}
+              onFilePillClick={handleFilePillClick}
             />
           );
         })}
@@ -673,6 +841,27 @@ export function ChatScreen() {
                 ))}
               </div>
             )}
+
+            {suggestOpen && fileRef && fileRef.candidates.length > 0 && (
+              <div className="suggest-popup file-ref-popup">
+                {fileRef.loading && <div className="suggest-loading">加载中…</div>}
+                {fileRef.candidates.map((c, i) => {
+                  const isDir = (c as FileTreeNode).kind === "dir";
+                  return (
+                    <div
+                      key={c.path}
+                      className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                      onClick={() => insertFileRef(c)}
+                      onMouseEnter={() => setSuggestIndex(i)}
+                    >
+                      <span className="suggest-icon">{isDir ? "📁" : "🗎"}</span>
+                      <span className="suggest-name">{c.name}</span>
+                      <span className="suggest-meta" title={c.path}>{c.path}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <button onClick={send} disabled={(!input.trim() && !store.pendingAttachments.length) || store.isGenerating()}>
@@ -682,10 +871,58 @@ export function ChatScreen() {
       </div>
 
       {fileTreeOpen && store.currentRoom && (
-        <FileTreePanel contextId={store.currentRoom.roomId} isSession={false} onClose={() => setFileTreeOpen(false)} />
+        <FileTreePanel
+          contextId={store.currentRoom.roomId}
+          isSession={false}
+          onClose={() => setFileTreeOpen(false)}
+          initialPath={fileTreeInitialPath}
+        />
       )}
       {fileTreeOpen && !store.currentRoom && store.currentSession && (
-        <FileTreePanel contextId={store.currentSession.sessionId} isSession onClose={() => setFileTreeOpen(false)} />
+        <FileTreePanel
+          contextId={store.currentSession.sessionId}
+          isSession
+          onClose={() => setFileTreeOpen(false)}
+          initialPath={fileTreeInitialPath}
+        />
+      )}
+
+      {filePreview && (
+        <div className="dialog-backdrop" onClick={() => setFilePreview(null)}>
+          <div className="dialog file-preview" onClick={(e) => e.stopPropagation()}>
+            <h4>{filePreview.name}</h4>
+            {filePreview.text != null ? (
+              <pre>{filePreview.text}</pre>
+            ) : (
+              <div className="subtitle">二进制文件</div>
+            )}
+            <div className="form-row" style={{ justifyContent: "flex-end" }}>
+              <button onClick={() => setFilePreview(null)}>关闭</button>
+              {filePreview.text != null && (
+                <button onClick={() => navigator.clipboard.writeText(filePreview.text ?? "").catch(() => {})}>复制</button>
+              )}
+              {filePreview.text != null ? (
+                <button onClick={() => saveText(filePreview.name, filePreview.text ?? "")}>保存</button>
+              ) : (
+                <button
+                  onClick={() => {
+                    if (filePreview.data) {
+                      const bytes = new Uint8Array(
+                        atob(filePreview.data)
+                          .split("")
+                          .map((c) => c.charCodeAt(0)),
+                      );
+                      const blob = new Blob([bytes], { type: filePreview.mime ?? "application/octet-stream" });
+                      saveBlob(filePreview.name, blob);
+                    }
+                  }}
+                >
+                  保存
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {store.showModelPicker && <ModelPicker />}
@@ -719,6 +956,7 @@ function ChatMessage({
   highlight,
   isCurrentMatch,
   onImageClick,
+  onFilePillClick,
 }: {
   item: ChatItem;
   showAuthor: boolean;
@@ -728,6 +966,7 @@ function ChatMessage({
   highlight?: string;
   isCurrentMatch?: boolean;
   onImageClick?: (src: string, name?: string) => void;
+  onFilePillClick?: (path: string) => void;
 }) {
   const store = useHubStore();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -810,6 +1049,18 @@ function ChatMessage({
       </div>
     ) : null;
 
+  const onTextClick = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    const pill = target.closest(".file-pill") as HTMLElement | null;
+    if (pill && onFilePillClick) {
+      e.preventDefault();
+      const path = pill.getAttribute("data-path");
+      if (path) onFilePillClick(path);
+    }
+  };
+
+  const markdownHtml = (text: string) => (highlight ? highlightHtml(renderMarkdown(text), highlight) : renderMarkdown(text));
+
   switch (item.kind) {
     case "system":
       return (
@@ -829,11 +1080,7 @@ function ChatMessage({
                 引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
               </div>
             )}
-            <div
-              dangerouslySetInnerHTML={{
-                __html: highlight ? highlightHtml(renderMarkdown(item.text), highlight) : renderMarkdown(item.text),
-              }}
-            />
+            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
           </div>
           {attachmentsEl}
           {menuEl}
@@ -850,10 +1097,7 @@ function ChatMessage({
               引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
             </div>
           )}
-          <div
-            className="text"
-            dangerouslySetInnerHTML={{ __html: highlight ? highlightHtml(renderMarkdown(item.text), highlight) : renderMarkdown(item.text) }}
-          />
+          <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
           {usageText}
           {menuEl}
           {selectModal}
@@ -873,10 +1117,7 @@ function ChatMessage({
             {expanded ? "▾ " : "▸ "}思考过程
           </button>
           {expanded && (
-            <div
-              className="text"
-              dangerouslySetInnerHTML={{ __html: highlight ? highlightHtml(renderMarkdown(item.text), highlight) : renderMarkdown(item.text) }}
-            />
+            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
           )}
           {menuEl}
           {selectModal}
@@ -953,7 +1194,88 @@ function ChatMessage({
   }
 }
 
-function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string }) {
+function RoomContextPanel({
+  flow,
+  blackboard,
+  artifacts,
+  roomMode,
+  active,
+  onChange,
+}: {
+  flow: FlowInfo | null;
+  blackboard: BlackboardInfo[] | null;
+  artifacts: ArtifactInfo[];
+  roomMode: string;
+  active: "flow" | "blackboard" | "artifact" | null;
+  onChange: (active: "flow" | "blackboard" | "artifact" | null) => void;
+}) {
+  const flowCount = flow?.tasks?.length ?? 0;
+  const blackboardCount = blackboard?.length ?? 0;
+  const artifactCount = artifacts.length;
+  const progress = flow?.progress;
+
+  const toggle = (key: "flow" | "blackboard" | "artifact") => {
+    onChange(active === key ? null : key);
+  };
+
+  return (
+    <div className="context-panel">
+      <div className="context-bar">
+        <button
+          className={`context-capsule ${active === "flow" ? "active" : ""}`}
+          onClick={() => toggle("flow")}
+          disabled={flowCount === 0}
+          title="任务编排"
+        >
+          {active === "flow" ? "▾ " : "▸ "}任务
+          {progress ? ` · ${progress.done}/${progress.total}` : ""}
+        </button>
+        <button
+          className={`context-capsule ${active === "blackboard" ? "active" : ""}`}
+          onClick={() => toggle("blackboard")}
+          disabled={blackboardCount === 0}
+          title="共享黑板"
+        >
+          {active === "blackboard" ? "▾ " : "▸ "}黑板
+          {blackboardCount > 0 ? ` · ${blackboardCount}` : ""}
+        </button>
+        <button
+          className={`context-capsule ${active === "artifact" ? "active" : ""}`}
+          onClick={() => toggle("artifact")}
+          disabled={artifactCount === 0}
+          title="产物"
+        >
+          {active === "artifact" ? "▾ " : "▸ "}产物
+          {artifactCount > 0 ? ` · ${artifactCount}` : ""}
+        </button>
+      </div>
+      {active === "flow" && <FlowPanel flow={flow} roomMode={roomMode} minimal />}
+      {active === "blackboard" && <BlackboardPanel blackboard={blackboard} />}
+      {active === "artifact" && <ArtifactPanel artifacts={artifacts} minimal />}
+    </div>
+  );
+}
+
+function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }) {
+  if (!blackboard || blackboard.length === 0) {
+    return <div className="context-empty">暂无黑板摘要</div>;
+  }
+  return (
+    <div className="context-content blackboard-list">
+      {blackboard.map((e, i) => (
+        <div key={i} className="blackboard-item">
+          <div className="blackboard-line">
+            <span className="blackboard-from">@{e.from}</span>
+            <span className="blackboard-time">{formatArtifactTime(e.at)}</span>
+          </div>
+          <div className="blackboard-text">{e.text}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null; roomMode: string; minimal?: boolean }) {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("flowPanelCollapsed") === "1");
   useEffect(() => {
     localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
@@ -962,6 +1284,16 @@ function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string
   const { progress, tasks } = flow;
   if (tasks.length === 0) return null;
   const title = roomMode === "conductor" ? "指挥编排" : "编排进度";
+  const content = (
+    <div className="flow-tasks">
+      {tasks.map((t) => (
+        <FlowTaskItem key={t.id} task={t} />
+      ))}
+    </div>
+  );
+  if (minimal) {
+    return <div className="context-content">{content}</div>;
+  }
   return (
     <div className="flow-panel">
       <div className="flow-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
@@ -973,13 +1305,7 @@ function FlowPanel({ flow, roomMode }: { flow: FlowInfo | null; roomMode: string
           {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
         </span>
       </div>
-      {!collapsed && (
-        <div className="flow-tasks">
-          {tasks.map((t) => (
-            <FlowTaskItem key={t.id} task={t} />
-          ))}
-        </div>
-      )}
+      {!collapsed && content}
     </div>
   );
 }
@@ -991,7 +1317,7 @@ type FileGetResult = {
   mime?: string;
 };
 
-function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
+function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo[]; minimal?: boolean }) {
   const store = useHubStore();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("artifactPanelCollapsed") === "1");
   const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
@@ -1047,50 +1373,58 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
     }
   };
 
-  return (
-    <div className="artifact-panel">
-      <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
-        <span className="artifact-title">{collapsed ? "▸ " : "▾ "}作品/结果</span>
-        <span className="artifact-count">{artifacts.length} 条</span>
-      </div>
-      {!collapsed && (
-        <div className="artifact-list">
-          {Object.entries(groups).map(([kind, list]) => (
-            <div key={kind} className="artifact-group">
-              <div className="artifact-group-title">{kindLabel(kind)}</div>
-              {list.map((a) => (
-                <div
-                  key={a.id}
-                  className="artifact-item"
-                  title={a.path ? `${a.path}\n${a.summary}` : a.summary}
+  const content = (
+    <div className="artifact-list">
+      {Object.entries(groups).map(([kind, list]) => (
+        <div key={kind} className="artifact-group">
+          <div className="artifact-group-title">{kindLabel(kind)}</div>
+          {list.map((a) => (
+            <div
+              key={a.id}
+              className="artifact-item"
+              title={a.path ? `${a.path}\n${a.summary}` : a.summary}
+            >
+              <div className="artifact-info">
+                <span className="artifact-author">@{a.author}</span>
+                <span className="artifact-time">{formatArtifactTime(a.at)}</span>
+                <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
+              </div>
+              <div className="artifact-actions">
+                <button
+                  className="artifact-action"
+                  title="引用并继续"
+                  onClick={() => store.sendArtifactMessage(a)}
                 >
-                  <div className="artifact-info">
-                    <span className="artifact-author">@{a.author}</span>
-                    <span className="artifact-time">{formatArtifactTime(a.at)}</span>
-                    <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
-                  </div>
-                  <div className="artifact-actions">
-                    <button
-                      className="artifact-action"
-                      title="引用并继续"
-                      onClick={() => store.sendArtifactMessage(a)}
-                    >
-                      ➤
-                    </button>
-                    {a.kind === "file" && (
-                      <button
-                        className="artifact-action"
-                        title="下载 / 预览"
-                        onClick={() => handleDownload(a)}
-                      >
-                        ↓
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
+                  ➤
+                </button>
+                {a.kind === "file" && (
+                  <button
+                    className="artifact-action"
+                    title="下载 / 预览"
+                    onClick={() => handleDownload(a)}
+                  >
+                    ↓
+                  </button>
+                )}
+              </div>
             </div>
           ))}
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <>
+      {minimal ? (
+        <div className="context-content">{content}</div>
+      ) : (
+        <div className="artifact-panel">
+          <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
+            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}作品/结果</span>
+            <span className="artifact-count">{artifacts.length} 条</span>
+          </div>
+          {!collapsed && content}
         </div>
       )}
 
@@ -1107,7 +1441,7 @@ function ArtifactPanel({ artifacts }: { artifacts: ArtifactInfo[] }) {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

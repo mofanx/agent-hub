@@ -1,20 +1,6 @@
 import { useEffect, useState } from "react";
 import { useHubStore } from "../hub/store";
-
-type FileTreeRoot = {
-  name: string;
-  path: string;
-  kind: string;
-  sessionId?: string;
-};
-
-type FileTreeNode = {
-  name: string;
-  path: string;
-  kind: string;
-  at: number;
-  size?: number;
-};
+import type { FileTreeRoot, FileTreeNode } from "../hub/types";
 
 type FileGetResult = {
   text?: string;
@@ -27,10 +13,12 @@ export function FileTreePanel({
   contextId,
   isSession,
   onClose,
+  initialPath,
 }: {
   contextId: string;
   isSession: boolean;
   onClose: () => void;
+  initialPath?: string | null;
 }) {
   const store = useHubStore();
   const [roots, setRoots] = useState<FileTreeRoot[]>([]);
@@ -68,6 +56,14 @@ export function FileTreePanel({
     }
   };
 
+  const setRootFromPath = (path: string) => {
+    const root = roots.find((r) => path === r.path || path.startsWith(r.path + "/"));
+    if (root) {
+      setRootName(root.name);
+      setRootPath(root.path);
+    }
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -79,6 +75,13 @@ export function FileTreePanel({
   useEffect(() => {
     load();
   }, [contextId, isSession, store.client]);
+
+  useEffect(() => {
+    if (initialPath && roots.length > 0) {
+      setRootFromPath(initialPath);
+      load(initialPath);
+    }
+  }, [initialPath, roots]);
 
   const openFile = async (filePath: string) => {
     const client = store.client;
