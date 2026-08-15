@@ -229,6 +229,13 @@ export function ChatScreen() {
   }, [store.jumpToAt, store.chatItems.length, store.historyLoading]);
 
   useEffect(() => {
+    if (!store.fileRefToInsert) return;
+    setInput((prev) => `${prev}${store.fileRefToInsert}`);
+    store.clearFileRef();
+    inputRef.current?.focus();
+  }, [store.fileRefToInsert, store, inputRef]);
+
+  useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
   }, [searchOpen]);
 
@@ -876,6 +883,12 @@ export function ChatScreen() {
           isSession={false}
           onClose={() => setFileTreeOpen(false)}
           initialPath={fileTreeInitialPath}
+          onQuote={(filePath) => {
+            setFileTreeOpen(false);
+            setInput((prev) => `${prev}#${filePath.endsWith("/") ? filePath.slice(0, -1) : filePath} `);
+            inputRef.current?.focus();
+          }}
+          onPreview={(file) => setFilePreview(file)}
         />
       )}
       {fileTreeOpen && !store.currentRoom && store.currentSession && (
@@ -884,6 +897,12 @@ export function ChatScreen() {
           isSession
           onClose={() => setFileTreeOpen(false)}
           initialPath={fileTreeInitialPath}
+          onQuote={(filePath) => {
+            setFileTreeOpen(false);
+            setInput((prev) => `${prev}#${filePath.endsWith("/") ? filePath.slice(0, -1) : filePath} `);
+            inputRef.current?.focus();
+          }}
+          onPreview={(file) => setFilePreview(file)}
         />
       )}
 
@@ -893,6 +912,12 @@ export function ChatScreen() {
             <h4>{filePreview.name}</h4>
             {filePreview.text != null ? (
               <pre>{filePreview.text}</pre>
+            ) : filePreview.data && filePreview.mime?.startsWith("image/") ? (
+              <img
+                src={`data:${filePreview.mime};base64,${filePreview.data}`}
+                alt={filePreview.name}
+                style={{ maxWidth: "100%", maxHeight: "60vh", objectFit: "contain" }}
+              />
             ) : (
               <div className="subtitle">二进制文件</div>
             )}
@@ -901,25 +926,23 @@ export function ChatScreen() {
               {filePreview.text != null && (
                 <button onClick={() => navigator.clipboard.writeText(filePreview.text ?? "").catch(() => {})}>复制</button>
               )}
-              {filePreview.text != null ? (
-                <button onClick={() => saveText(filePreview.name, filePreview.text ?? "")}>保存</button>
-              ) : (
-                <button
-                  onClick={() => {
-                    if (filePreview.data) {
-                      const bytes = new Uint8Array(
-                        atob(filePreview.data)
-                          .split("")
-                          .map((c) => c.charCodeAt(0)),
-                      );
-                      const blob = new Blob([bytes], { type: filePreview.mime ?? "application/octet-stream" });
-                      saveBlob(filePreview.name, blob);
-                    }
-                  }}
-                >
-                  保存
-                </button>
-              )}
+              <button
+                onClick={() => {
+                  if (filePreview.data) {
+                    const bytes = new Uint8Array(
+                      atob(filePreview.data)
+                        .split("")
+                        .map((c) => c.charCodeAt(0)),
+                    );
+                    const blob = new Blob([bytes], { type: filePreview.mime ?? "application/octet-stream" });
+                    saveBlob(filePreview.name, blob);
+                  } else if (filePreview.text != null) {
+                    saveText(filePreview.name, filePreview.text);
+                  }
+                }}
+              >
+                保存
+              </button>
             </div>
           </div>
         </div>
@@ -1209,12 +1232,14 @@ function RoomContextPanel({
   active: "flow" | "blackboard" | "artifact" | null;
   onChange: (active: "flow" | "blackboard" | "artifact" | null) => void;
 }) {
+  const store = useHubStore();
   const flowCount = flow?.tasks?.length ?? 0;
   const blackboardCount = blackboard?.length ?? 0;
   const artifactCount = artifacts.length;
   const progress = flow?.progress;
 
   const toggle = (key: "flow" | "blackboard" | "artifact") => {
+    if (key === "artifact") store.clearNewArtifacts();
     onChange(active === key ? null : key);
   };
 
@@ -1247,6 +1272,7 @@ function RoomContextPanel({
         >
           {active === "artifact" ? "▾ " : "▸ "}产物
           {artifactCount > 0 ? ` · ${artifactCount}` : ""}
+          {store.hasNewArtifacts && active !== "artifact" && <span className="new-dot" />}
         </button>
       </div>
       {active === "flow" && <FlowPanel flow={flow} roomMode={roomMode} minimal />}
@@ -1280,15 +1306,18 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
         <span className="context-content-title">黑板</span>
         <button className="context-action danger" onClick={onClear}>清空</button>
       </div>
-      {blackboard.map((e) => (
-        <div key={e.id} className="blackboard-item" onClick={() => setDetail(e)}>
-          <div className="blackboard-line">
-            <span className="blackboard-from">@{e.from}</span>
-            <span className="blackboard-time">{formatArtifactTime(e.at)}</span>
+      {blackboard
+        .slice()
+        .reverse()
+        .map((e) => (
+          <div key={e.id} className="blackboard-item" onClick={() => setDetail(e)}>
+            <div className="blackboard-line">
+              <span className="blackboard-from">@{e.from}</span>
+              <span className="blackboard-time">{formatArtifactTime(e.at)}</span>
+            </div>
+            <div className="blackboard-text">{e.text}</div>
           </div>
-          <div className="blackboard-text">{e.text}</div>
-        </div>
-      ))}
+        ))}
 
       {detail && (
         <div className="dialog-backdrop" onClick={() => setDetail(null)}>
@@ -1356,10 +1385,9 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   const store = useHubStore();
   const roomId = store.currentRoom?.roomId;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("artifactPanelCollapsed") === "1");
-  const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
+  const [preview, setPreview] = useState<(FileGetResult & { name: string }) | null>(null);
   const [managing, setManaging] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [clearKind, setClearKind] = useState<string>("all");
   useEffect(() => {
     localStorage.setItem("artifactPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
@@ -1393,16 +1421,24 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     saveBlob(name, blob);
   };
 
+  const handlePreview = async (a: ArtifactInfo) => {
+    try {
+      const res = await fetchFile(a);
+      if (!res) return;
+      setPreview({ ...res, name: String(res.name ?? a.path ?? "preview") });
+    } catch (e) {
+      alert(`预览失败：${e}`);
+    }
+  };
+
   const handleDownload = async (a: ArtifactInfo) => {
     try {
       const res = await fetchFile(a);
       if (!res) return;
       const name = String(res.name ?? a.path ?? "download");
       if (typeof res.text === "string") {
-        setPreview({ name, text: res.text });
-        return;
-      }
-      if (typeof res.data === "string") {
+        saveText(name, res.text);
+      } else if (typeof res.data === "string") {
         const bytes = new Uint8Array(atob(res.data).split("").map((c) => c.charCodeAt(0)));
         const blob = new Blob([bytes], { type: res.mime ?? "application/octet-stream" });
         saveBlob(name, blob);
@@ -1436,11 +1472,10 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     setManaging(false);
   };
 
-  const onClearByKind = async () => {
+  const onClearAll = async () => {
     if (!roomId) return;
-    const label = clearKind === "all" ? "全部产物" : `${kindLabel(clearKind)}类产物`;
-    if (!window.confirm(`确认清空 ${label}？`)) return;
-    await store.clearArtifacts(roomId, clearKind === "all" ? undefined : (clearKind as ArtifactInfo["kind"]));
+    if (!window.confirm("确认清空全部产物？")) return;
+    await store.clearArtifacts(roomId);
     setSelected(new Set());
     setManaging(false);
   };
@@ -1451,18 +1486,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
         <button className="context-action" onClick={() => setManaging(true)}>管理</button>
       ) : (
         <>
-          <select
-            className="context-select"
-            value={clearKind}
-            onChange={(e) => setClearKind(e.target.value)}
-          >
-            <option value="all">全部</option>
-            <option value="file">文件</option>
-            <option value="command">命令</option>
-            <option value="test">测试</option>
-            <option value="note">笔记</option>
-          </select>
-          <button className="context-action danger" onClick={onClearByKind}>清空</button>
+          <button className="context-action danger" onClick={onClearAll}>清空</button>
           <button className="context-action danger" onClick={onDeleteSelected} disabled={selected.size === 0}>
             删除选中{selected.size > 0 ? ` (${selected.size})` : ""}
           </button>
@@ -1483,12 +1507,12 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   const list = (
     <div className="artifact-list">
       {Object.entries(groups).map(([kind, list]) => (
-        <div key={kind} className="artifact-group">
-          <div className="artifact-group-title">{kindLabel(kind)}</div>
+        <div key={kind} className={`artifact-group artifact-group-${kind}`}>
+          <div className="artifact-group-title">{kindIcon(kind)} {kindLabel(kind)}</div>
           {list.map((a) => (
             <div
               key={a.id}
-              className={`artifact-item ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""}`}
+              className={`artifact-item artifact-kind-${kind} ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""}`}
               title={a.path ? `${a.path}\n${a.summary}` : a.summary}
             >
               {managing && (
@@ -1507,6 +1531,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
                 />
               )}
               <div className="artifact-info" onClick={() => managing && toggleSelected(a.id)}>
+                <span className="artifact-kind-badge">{kindIcon(kind)}</span>
                 <span className="artifact-author">@{a.author}</span>
                 <span className="artifact-time">{formatArtifactTime(a.at)}</span>
                 <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
@@ -1515,19 +1540,28 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
                 <div className="artifact-actions">
                   <button
                     className="artifact-action"
-                    title="引用并继续"
-                    onClick={() => store.sendArtifactMessage(a)}
+                    title="引用"
+                    onClick={() => store.quoteArtifact(a)}
                   >
-                    ➤
+                    引
                   </button>
                   {a.kind === "file" && (
-                    <button
-                      className="artifact-action"
-                      title="下载 / 预览"
-                      onClick={() => handleDownload(a)}
-                    >
-                      ↓
-                    </button>
+                    <>
+                      <button
+                        className="artifact-action"
+                        title="预览"
+                        onClick={() => handlePreview(a)}
+                      >
+                        看
+                      </button>
+                      <button
+                        className="artifact-action"
+                        title="下载"
+                        onClick={() => handleDownload(a)}
+                      >
+                        ↓
+                      </button>
+                    </>
                   )}
                 </div>
               )}
@@ -1538,24 +1572,32 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     </div>
   );
 
+  const countText = `${artifacts.length} 条`;
+  const listContent = Object.keys(groups).length > 0 ? list : <div className="context-empty">没有产物</div>;
+
   return (
     <>
       {minimal ? (
         <div className="context-content">
           <div className="context-content-header">
             <span className="context-content-title">产物</span>
+            <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
-          {list}
+          {listContent}
         </div>
       ) : (
         <div className="artifact-panel">
           <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
             <span className="artifact-title">{collapsed ? "▸ " : "▾ "}产物</span>
-            <span className="artifact-count">{artifacts.length} 条</span>
+            <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
-          {!collapsed && list}
+          {!collapsed && (
+            <>
+              {listContent}
+            </>
+          )}
         </div>
       )}
 
@@ -1563,11 +1605,39 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
         <div className="dialog-backdrop" onClick={() => setPreview(null)}>
           <div className="dialog file-preview" onClick={(e) => e.stopPropagation()}>
             <h4>{preview.name}</h4>
-            <pre>{preview.text}</pre>
+            {preview.text != null ? (
+              <pre>{preview.text}</pre>
+            ) : preview.data && preview.mime?.startsWith("image/") ? (
+              <img
+                src={`data:${preview.mime};base64,${preview.data}`}
+                alt={preview.name}
+                style={{ maxWidth: "100%", maxHeight: "60vh", objectFit: "contain" }}
+              />
+            ) : (
+              <div className="subtitle">二进制文件</div>
+            )}
             <div className="form-row" style={{ justifyContent: "flex-end" }}>
               <button onClick={() => setPreview(null)}>关闭</button>
-              <button onClick={() => navigator.clipboard.writeText(preview.text).catch(() => {})}>复制</button>
-              <button onClick={() => saveText(preview.name, preview.text)}>保存</button>
+              {preview.text != null && (
+                <button onClick={() => navigator.clipboard.writeText(preview.text ?? "").catch(() => {})}>复制</button>
+              )}
+              {preview.text != null ? (
+                <button onClick={() => saveText(preview.name, preview.text ?? "")}>保存</button>
+              ) : preview.data ? (
+                <button
+                  onClick={() => {
+                    const bytes = new Uint8Array(
+                      atob(preview.data!)
+                        .split("")
+                        .map((c) => c.charCodeAt(0)),
+                    );
+                    const blob = new Blob([bytes], { type: preview.mime ?? "application/octet-stream" });
+                    saveBlob(preview.name, blob);
+                  }}
+                >
+                  保存
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1576,8 +1646,30 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   );
 }
 
-function kindLabel(kind: string): string {
+function kindIcon(kind: string, action?: string): string {
+  if (kind === "file") return "▤";
+  if (kind === "event") {
+    if (action === "delete") return "🗑";
+    if (action === "rename") return "➡";
+    if (action === "command") return "⚡";
+    if (action === "test") return "✓";
+    return "✎";
+  }
+  if (kind === "command") return "⚡";
+  if (kind === "test") return "✓";
+  return "✎";
+}
+
+function kindLabel(kind: string, action?: string): string {
   if (kind === "file") return "文件";
+  if (kind === "event") {
+    if (action === "delete") return "删除";
+    if (action === "rename") return "重命名";
+    if (action === "command") return "命令";
+    if (action === "test") return "测试";
+    if (action === "note") return "笔记";
+    return "事件";
+  }
   if (kind === "command") return "命令";
   if (kind === "test") return "测试";
   return "笔记";

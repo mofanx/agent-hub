@@ -1376,6 +1376,32 @@ html[data-theme="dark"] .drawer-item:hover {
   line-height: 1.35;
 }
 
+.artifact-kind-badge {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.artifact-kind-file .artifact-kind-badge,
+.artifact-group-file .artifact-group-title {
+  color: #4f9cc5;
+}
+
+.artifact-kind-command .artifact-kind-badge,
+.artifact-group-command .artifact-group-title {
+  color: #c28adb;
+}
+
+.artifact-kind-test .artifact-kind-badge,
+.artifact-group-test .artifact-group-title {
+  color: #5dc068;
+}
+
+.artifact-kind-note .artifact-kind-badge,
+.artifact-group-note .artifact-group-title {
+  color: #e0a356;
+}
+
 .artifact-actions {
   display: flex;
   gap: 0.2rem;
@@ -1402,6 +1428,14 @@ html[data-theme="dark"] .drawer-item:hover {
 .artifact-action:hover {
   background: var(--primary-bg);
   border-color: var(--primary);
+}
+
+.file-preview img {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  display: block;
+  margin: 0 auto;
 }
 
 .file-preview pre {
@@ -1447,6 +1481,7 @@ html[data-theme="dark"] .drawer-item:hover {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-raised);
   min-width: 140px;
+  max-width: 10rem;
   z-index: 200;
   overflow: hidden;
   animation: fadeIn 0.1s ease;
@@ -1459,6 +1494,9 @@ html[data-theme="dark"] .drawer-item:hover {
   padding: 0.55rem 0.85rem;
   cursor: pointer;
   font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: background 0.12s ease;
 }
 
@@ -1917,6 +1955,47 @@ button:active,
   flex-shrink: 0;
 }
 
+.file-tree-context-menu {
+  position: fixed;
+  z-index: 200;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+  min-width: 8rem;
+  max-width: 10rem;
+  padding: 0.25rem 0;
+}
+
+.file-tree-context-menu button {
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-tree-context-menu button:hover {
+  background: var(--surface-variant);
+}
+
+.file-tree-context-menu button.danger {
+  color: var(--error);
+}
+
+.file-preview img {
+  display: block;
+  margin: 0 auto;
+  border-radius: 0.25rem;
+}
+
 .message-menu-item:hover {
   background: var(--primary-container);
   color: var(--on-primary-container);
@@ -1969,6 +2048,14 @@ button:active,
 .context-capsule:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.new-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--error, #ff5f5f);
+  margin-left: 0.2rem;
 }
 
 .context-content {
@@ -2153,6 +2240,23 @@ button:active,
   display: flex;
   gap: 0.3rem;
   align-items: center;
+}
+
+.artifact-filters {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.artifact-search {
+  flex: 1;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
 }
 
 .artifact-item.managing {

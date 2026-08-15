@@ -123,10 +123,11 @@ function repairHistoryAtStartup(): void {
 repairHistoryAtStartup();
 
 function parseArtifactKind(raw: unknown): ArtifactKind {
-  const kinds: ArtifactKind[] = ["file", "command", "test", "note"];
+  const kinds: ArtifactKind[] = ["file", "event"];
   const k = String(raw ?? "").toLowerCase();
+  if (k === "command" || k === "test" || k === "note") return "event";
   if (kinds.includes(k as ArtifactKind)) return k as ArtifactKind;
-  return "note";
+  return "event";
 }
 
 function parseRoomMode(raw: unknown): RoomMode {
@@ -488,11 +489,6 @@ function onTurnEnd(sessionId: string, text: string): void {
         kind: "assistant",
         author: displayName,
         text,
-      });
-      rooms.addArtifact(room.roomId, {
-        kind: "note",
-        author: displayName,
-        summary: text.trim().replace(/\s+/g, " ").slice(0, 400),
       });
     }
   }
@@ -1239,6 +1235,60 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         return rooms.getFile(roomId, ref);
       }
       return rooms.sessionGetFile(sessionId, ref);
+    }
+    case "file.delete": {
+      const roomId = String(req.params?.roomId ?? "");
+      const sessionId = String(req.params?.sessionId ?? "");
+      const filePath = String(req.params?.path ?? "");
+      if (!roomId && !sessionId) throw new Error("roomId or sessionId required");
+      if (!filePath) throw new Error("file path required");
+      if (roomId) {
+        const room = rooms.get(roomId);
+        if (!room) throw new Error(`unknown room: ${roomId}`);
+        const ok = rooms.deleteFile(roomId, filePath, String(req.params?.author ?? ""));
+        broadcast({ method: "file.update", params: { roomId, path: filePath, op: "delete" } } as HubEvent);
+        return { deleted: ok };
+      }
+      const ok = rooms.sessionDeleteFile(sessionId, filePath);
+      broadcast({ method: "file.update", params: { sessionId, path: filePath, op: "delete" } } as HubEvent);
+      return { deleted: ok };
+    }
+    case "file.rename": {
+      const roomId = String(req.params?.roomId ?? "");
+      const sessionId = String(req.params?.sessionId ?? "");
+      const from = String(req.params?.from ?? "");
+      const to = String(req.params?.to ?? "");
+      if (!roomId && !sessionId) throw new Error("roomId or sessionId required");
+      if (!from || !to) throw new Error("from and to paths required");
+      if (roomId) {
+        const room = rooms.get(roomId);
+        if (!room) throw new Error(`unknown room: ${roomId}`);
+        const ok = rooms.renameFile(roomId, from, to, String(req.params?.author ?? ""));
+        broadcast({ method: "file.update", params: { roomId, path: from, op: "rename", from, to } } as HubEvent);
+        return { renamed: ok };
+      }
+      const ok = rooms.sessionRenameFile(sessionId, from, to);
+      broadcast({ method: "file.update", params: { sessionId, path: from, op: "rename", from, to } } as HubEvent);
+      return { renamed: ok };
+    }
+    case "session.file.delete": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const filePath = String(req.params?.path ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      if (!filePath) throw new Error("file path required");
+      const ok = rooms.sessionDeleteFile(sessionId, filePath);
+      broadcast({ method: "file.update", params: { sessionId, path: filePath, op: "delete" } } as HubEvent);
+      return { deleted: ok };
+    }
+    case "session.file.rename": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const from = String(req.params?.from ?? "");
+      const to = String(req.params?.to ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      if (!from || !to) throw new Error("from and to paths required");
+      const ok = rooms.sessionRenameFile(sessionId, from, to);
+      broadcast({ method: "file.update", params: { sessionId, path: from, op: "rename", from, to } } as HubEvent);
+      return { renamed: ok };
     }
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");

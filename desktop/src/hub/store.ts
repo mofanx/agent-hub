@@ -56,6 +56,9 @@ interface State {
   chatItems: ChatItem[];
   busyIds: string[];
   quote: [string, string] | null;
+  fileRefToInsert: string | null;
+  hasNewArtifacts: boolean;
+  lastArtifactAt: number;
   searchQuery: string;
   searchResults: SearchHit[];
   searchGroups: SearchGroup[];
@@ -77,6 +80,7 @@ interface State {
   pendingAttachments: Attachment[];
   historyCache: Record<string, ChatItem[]>;
   historyCacheKeys: string[];
+  fileUpdateAt: number;
 }
 
 interface Actions {
@@ -181,7 +185,11 @@ interface Actions {
   clearBlackboard(roomId: string): Promise<void>;
   removeArtifact(roomId: string, artifactId: string): Promise<void>;
   clearArtifacts(roomId: string, kind?: ArtifactInfo["kind"]): Promise<void>;
-  sendArtifactMessage(artifact: ArtifactInfo): void;
+  quoteArtifact(artifact: ArtifactInfo): void;
+  clearFileRef(): void;
+  clearNewArtifacts(): void;
+  deleteFile(contextId: string, isSession: boolean, path: string): Promise<void>;
+  renameFile(contextId: string, isSession: boolean, from: string, to: string): Promise<void>;
 
   showModelPickerDialog(): Promise<void>;
   refreshModelList(): Promise<void>;
@@ -429,6 +437,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
         }
         break;
       }
+      case "file.update": {
+        const roomId = String(params.roomId ?? "");
+        const sessionId = String(params.sessionId ?? "");
+        const currentRoom = get().currentRoom;
+        const currentSession = get().currentSession;
+        if ((roomId && currentRoom?.roomId === roomId) || (sessionId && currentSession?.sessionId === sessionId)) {
+          set({ fileUpdateAt: Date.now() });
+        }
+        break;
+      }
       case "permission.request": {
         const sid = String(params.sessionId ?? "");
         if (!get().inScope(sid)) return;
@@ -610,6 +628,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
     chatItems: [],
     busyIds: [],
     quote: null,
+    fileRefToInsert: null,
+    hasNewArtifacts: false,
+    lastArtifactAt: 0,
     searchQuery: "",
     searchResults: [],
     searchGroups: [],
@@ -631,6 +652,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     pendingAttachments: [],
     historyCache: {},
     historyCacheKeys: [],
+    fileUpdateAt: 0,
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -762,6 +784,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         chatItems: [],
         busyIds: [],
         quote: null,
+    fileRefToInsert: null,
+    hasNewArtifacts: false,
+    lastArtifactAt: 0,
         searchQuery: "",
         searchResults: [],
         searchGroups: [],
@@ -782,6 +807,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         modelFilter: "",
         showModelPicker: false,
         pendingAttachments: [],
+        fileUpdateAt: 0,
       });
       updateTray();
     },
@@ -943,6 +969,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         currentArtifacts: null,
         chatItems: cached ?? [],
         quote: null,
+        fileRefToInsert: null,
+        hasNewArtifacts: false,
+        lastArtifactAt: 0,
         screen: "chat",
         historyHasMore: false,
         historyLoading: false,
@@ -960,6 +989,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         currentArtifacts: null,
         chatItems: cached ?? [],
         quote: null,
+        fileRefToInsert: null,
+        hasNewArtifacts: false,
+        lastArtifactAt: 0,
         screen: "room",
         flow: null,
         historyHasMore: false,
@@ -1617,7 +1649,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const result = (await client.call("room.artifacts", { roomId })) as Record<string, unknown>;
         const artifacts = (result.artifacts as ArtifactInfo[] | undefined) ?? [];
-        set({ currentArtifacts: artifacts });
+        const maxAt = artifacts.length ? Math.max(...artifacts.map((a) => a.at)) : 0;
+        const last = get().lastArtifactAt;
+        set({
+          currentArtifacts: artifacts,
+          lastArtifactAt: last === 0 ? maxAt : Math.max(last, maxAt),
+          hasNewArtifacts: last !== 0 && maxAt > last,
+        });
       } catch {
         /* ignore */
       }
@@ -1684,13 +1722,36 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    sendArtifactMessage: (artifact: ArtifactInfo) => {
-      const ref = artifact.alias ?? artifact.id;
-      const text = artifact.path
-        ? `继续处理这个 artifact (${ref})：${artifact.path}\n\n摘要：${artifact.summary}`
-        : `继续处理这个 artifact (${ref})：${artifact.summary}`;
-      get().sendRoomMessage(text);
+    deleteFile: async (contextId: string, isSession: boolean, filePath: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        const params = isSession ? { sessionId: contextId, path: filePath } : { roomId: contextId, path: filePath };
+        await client.call("file.delete", params);
+      } catch (err) {
+        alert(`删除失败：${err}`);
+      }
     },
+
+    renameFile: async (contextId: string, isSession: boolean, from: string, to: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        const params = isSession
+          ? { sessionId: contextId, from, to }
+          : { roomId: contextId, from, to };
+        await client.call("file.rename", params);
+      } catch (err) {
+        alert(`重命名失败：${err}`);
+      }
+    },
+
+    quoteArtifact: (artifact: ArtifactInfo) => {
+      const ref = artifact.path ? `#${artifact.path}` : `@${artifact.alias ?? artifact.id}`;
+      set({ fileRefToInsert: `${ref} `, quote: [artifact.author, artifact.summary] });
+    },
+    clearFileRef: () => set({ fileRefToInsert: null }),
+    clearNewArtifacts: () => set({ hasNewArtifacts: false }),
 
     saveProfileAndConnect: (address: string, port: string, token: string, name?: string) => {
       const derived = address

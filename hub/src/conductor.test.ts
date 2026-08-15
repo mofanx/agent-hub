@@ -51,18 +51,16 @@ describe("conductor", () => {
     assert.equal(result.artifacts[0]!.path, "src/sort.ts");
   });
 
-  it("extractTaskResult 自动扫描文件路径", () => {
-    const output = `我已经修改了 src/utils.ts 和 tests/utils.test.ts，并运行了 npm test。`;
+  it("extractTaskResult 不再自动扫描普通文件路径", () => {
+    const output = `我已经修改了 src/utils.ts 和 src/foo.ts，并运行了 npm test。`;
     const result = extractTaskResult(output);
-    const paths = result.artifacts.map((a) => a.path);
-    assert.ok(paths.includes("src/utils.ts"));
-    assert.ok(paths.includes("tests/utils.test.ts"));
+    assert.equal(result.artifacts.filter((a) => a.type === "file").length, 0);
   });
 
   it("extractTaskResult 自动扫描 bash 命令", () => {
     const output = `\`\`\`bash\nnpx tsc --noEmit\n\`\`\`\n代码编译通过。`;
     const result = extractTaskResult(output);
-    const cmd = result.artifacts.find((a) => a.type === "command");
+    const cmd = result.artifacts.find((a) => a.type === "event" && a.action === "command");
     assert.ok(cmd);
     if (!cmd) return;
     assert.ok(cmd.summary.includes("tsc"));
@@ -73,6 +71,28 @@ describe("conductor", () => {
     const result = extractTaskResult(output);
     const file = result.artifacts.find((a) => a.type === "file" && a.path === "src/sort.ts");
     assert.ok(file);
+  });
+
+  it("extractTaskResult 忽略 build/node_modules diff", () => {
+    const output = `diff --git a/node_modules/foo/index.ts b/node_modules/foo/index.ts\n--- a/node_modules/foo/index.ts\n+++ b/node_modules/foo/index.ts\n@@ -1,1 +1,2 @@\n+export {}`;
+    const result = extractTaskResult(output);
+    assert.equal(result.artifacts.length, 0);
+  });
+
+  it("extractTaskResult 自动扫描测试结果", () => {
+    const output = `已完成，运行测试：\n\`\`\`bash\nnpm test\n\`\`\`\nTest passed: 12 failed, 3 skipped`;
+    const result = extractTaskResult(output);
+    const test = result.artifacts.find((a) => a.type === "event" && a.action === "test");
+    assert.ok(test);
+    assert.ok(test?.summary.includes("12 failed"));
+    assert.ok(test?.summary.includes("3 skipped"));
+  });
+
+  it("extractTaskResult 自动扫描测试文件路径", () => {
+    const output = `修改了 tests/sort.test.ts，运行测试全部通过。`;
+    const result = extractTaskResult(output);
+    const test = result.artifacts.find((a) => a.type === "event" && a.action === "test" && a.path === "tests/sort.test.ts");
+    assert.ok(test);
   });
 
 });

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.util.Base64
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.File
 import androidx.compose.runtime.mutableStateListOf
@@ -208,10 +209,12 @@ data class ArtifactInfo(
     val id: String,
     val alias: String? = null,
     val kind: String,
+    val action: String? = null,
     val author: String,
     val at: Long = 0,
     val summary: String = "",
     val path: String? = null,
+    val oldPath: String? = null,
     val command: String? = null,
 )
 
@@ -228,6 +231,22 @@ data class FileTreeNode(
     val kind: String,
     val at: Long = 0,
     val size: Long? = null,
+)
+
+data class FilePreview(
+    val name: String,
+    val path: String,
+    val text: String? = null,
+    val data: ByteArray? = null,
+    val mime: String = "*/*",
+    val isDir: Boolean = false,
+)
+
+data class DownloadRequest(
+    val name: String,
+    val text: String?,
+    val data: String?,
+    val mime: String,
 )
 
 data class BlackboardEntry(
@@ -382,12 +401,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var fileTreeRootName by mutableStateOf<String?>(null)
     val fileTreeNodes = mutableStateListOf<FileTreeNode>()
     var fileTreeLoading by mutableStateOf(false)
+    var filePreview by mutableStateOf<FilePreview?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
     val busyIds = mutableStateListOf<String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
     var fileRefToInsert by mutableStateOf<String?>(null)
+    var pendingDownload by mutableStateOf<DownloadRequest?>(null)
 
     var showModelPicker by mutableStateOf(false)
     val modelList = mutableStateListOf<ModelInfo>()
@@ -1360,11 +1381,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return ArtifactInfo(
             id = obj["id"]?.jsonPrimitive?.content ?: "",
             alias = obj["alias"]?.jsonPrimitive?.content,
-            kind = obj["kind"]?.jsonPrimitive?.content ?: "note",
+            kind = obj["kind"]?.jsonPrimitive?.content ?: "event",
+            action = obj["action"]?.jsonPrimitive?.content,
             author = obj["author"]?.jsonPrimitive?.content ?: "",
             at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
             summary = obj["summary"]?.jsonPrimitive?.content ?: "",
             path = obj["path"]?.jsonPrimitive?.content,
+            oldPath = obj["oldPath"]?.jsonPrimitive?.content,
             command = obj["command"]?.jsonPrimitive?.content,
         )
     }
@@ -1933,18 +1956,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sendArtifactMessage(artifact: ArtifactInfo) {
-        val ref = artifact.alias ?: artifact.id
-        val text = if (artifact.path.isNullOrBlank()) {
-            "继续处理这个 artifact (${ref})：${artifact.summary}"
-        } else {
-            "继续处理这个 artifact (${ref})：${artifact.path}\n\n摘要：${artifact.summary}"
+    fun quoteArtifact(artifact: ArtifactInfo) {
+        if (!artifact.path.isNullOrBlank()) {
+            fileRefToInsert = artifact.path
         }
-        sendRoomMessage(text)
+        quote = artifact.author to artifact.summary
     }
 
     fun removeArtifact(artifact: ArtifactInfo) {
         val room = currentRoom ?: return
+        currentArtifacts.remove(artifact)
         viewModelScope.launch {
             try {
                 hub.call("room.removeArtifact", buildJsonObject {
@@ -1952,6 +1973,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("artifactId", artifact.id)
                 })
             } catch (e: Exception) {
+                currentArtifacts.add(artifact)
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
             }
         }
@@ -1998,44 +2020,170 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun openArtifactFile(artifact: ArtifactInfo) {
+    fun downloadArtifactFile(artifact: ArtifactInfo) {
         val room = currentRoom ?: return
+        if (artifact.path.isNullOrBlank()) {
+            Toast.makeText(getApplication(), "该产物没有可下载文件", Toast.LENGTH_SHORT).show()
+            return
+        }
         viewModelScope.launch {
             try {
-                val ref = artifact.path ?: artifact.alias ?: artifact.id
                 val result = withContext(Dispatchers.IO) {
                     hub.call("file.get", buildJsonObject {
                         put("roomId", room.roomId)
-                        put("path", ref)
+                        put("path", artifact.path)
                     })
                 }
                 val name = result["name"]?.jsonPrimitive?.content
-                    ?: artifact.path?.substringAfterLast('/')
-                    ?: "file"
+                    ?: artifact.path.substringAfterLast('/')
                 val mime = result["mime"]?.jsonPrimitive?.content ?: "*/*"
                 val text = result["text"]?.jsonPrimitive?.content
                 val data = result["data"]?.jsonPrimitive?.content
-                val bytes = if (text != null) {
-                    text.toByteArray(Charsets.UTF_8)
-                } else if (data != null) {
-                    Base64.decode(data, Base64.NO_WRAP)
-                } else {
-                    throw Exception("empty file")
+                if (text == null && data == null) throw Exception("empty file")
+                pendingDownload = DownloadRequest(name, text, data, mime)
+            } catch (e: Exception) {
+                val msg = when {
+                    e.message?.contains("not readable", true) == true -> "文件不存在或无法读取"
+                    e.message?.contains("not found", true) == true -> "文件不存在"
+                    else -> e.message ?: "下载失败"
                 }
-                withContext(Dispatchers.IO) {
-                    val app = getApplication<Application>()
-                    val dir = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
-                    val file = File(dir, name)
-                    if (text != null) file.writeText(text) else file.writeBytes(bytes)
-                    val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, mime)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    app.startActivity(intent)
+                Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun loadFilePreview(filePath: String) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        filePreview = FilePreview(name = File(filePath).name, path = filePath)
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    hub.call("file.get", buildJsonObject {
+                        put("path", filePath)
+                        if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
+                    })
+                }
+                val name = result["name"]?.jsonPrimitive?.content ?: filePath.substringAfterLast('/')
+                val mime = result["mime"]?.jsonPrimitive?.content ?: "*/*"
+                val text = result["text"]?.jsonPrimitive?.content
+                val data = result["data"]?.jsonPrimitive?.content
+                filePreview = if (text != null) {
+                    FilePreview(name, filePath, text, null, mime)
+                } else if (data != null) {
+                    FilePreview(name, filePath, null, Base64.decode(data, Base64.NO_WRAP), mime)
+                } else {
+                    FilePreview(name, filePath, null, null, mime)
                 }
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "download failed"))
+                filePreview = FilePreview(name = File(filePath).name, path = filePath, text = "加载失败: ${e.message}")
+            }
+        }
+    }
+
+    fun dismissFilePreview() {
+        filePreview = null
+    }
+
+    fun loadArtifactPreview(artifact: ArtifactInfo) {
+        val room = currentRoom ?: return
+        val name = artifact.path?.substringAfterLast('/') ?: artifact.alias ?: artifact.id
+        filePreview = FilePreview(name = name, path = artifact.path ?: "")
+        if (artifact.kind != "file") {
+            filePreview = FilePreview(name = name, path = artifact.path ?: "", text = artifact.summary)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    hub.call("file.get", buildJsonObject {
+                        put("roomId", room.roomId)
+                        put("artifactId", artifact.id)
+                    })
+                }
+                val fileName = result["name"]?.jsonPrimitive?.content ?: name
+                val mime = result["mime"]?.jsonPrimitive?.content ?: "*/*"
+                val text = result["text"]?.jsonPrimitive?.content
+                val data = result["data"]?.jsonPrimitive?.content
+                filePreview = if (text != null) {
+                    FilePreview(fileName, artifact.path ?: "", text, null, mime)
+                } else if (data != null) {
+                    FilePreview(fileName, artifact.path ?: "", null, Base64.decode(data, Base64.NO_WRAP), mime)
+                } else {
+                    FilePreview(fileName, artifact.path ?: "", null, null, mime)
+                }
+            } catch (e: Exception) {
+                filePreview = FilePreview(name = name, path = artifact.path ?: "", text = "加载失败: ${e.message}")
+            }
+        }
+    }
+
+    fun removeArtifacts(artifacts: List<ArtifactInfo>) {
+        val room = currentRoom ?: return
+        currentArtifacts.removeAll(artifacts)
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    for (a in artifacts) {
+                        hub.call("room.removeArtifact", buildJsonObject {
+                            put("roomId", room.roomId)
+                            put("artifactId", a.id)
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                for (a in artifacts) {
+                    if (!currentArtifacts.contains(a)) currentArtifacts.add(a)
+                }
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
+            }
+        }
+    }
+
+    fun deleteProjectFile(filePath: String) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    hub.call("file.delete", buildJsonObject {
+                        put("path", filePath)
+                        if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
+                    })
+                }
+                refreshFileTree(fileTreePath)
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "delete failed"))
+            }
+        }
+    }
+
+    fun renameProjectFile(from: String, to: String) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    if (roomId != null) {
+                        hub.call("file.rename", buildJsonObject {
+                            put("roomId", roomId)
+                            put("from", from)
+                            put("to", to)
+                        })
+                    } else {
+                        hub.call("session.file.rename", buildJsonObject {
+                            put("sessionId", sessionId!!)
+                            put("from", from)
+                            put("to", to)
+                        })
+                    }
+                }
+                refreshFileTree(fileTreePath)
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "rename failed"))
             }
         }
     }
@@ -2165,7 +2313,57 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     app.startActivity(intent)
                 }
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "download failed"))
+                val msg = when {
+                    e.message?.contains("not readable", true) == true -> "文件不存在或无法读取"
+                    e.message?.contains("not found", true) == true -> "文件不存在"
+                    else -> e.message ?: "打开失败"
+                }
+                Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun downloadProjectFile(filePath: String) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    hub.call("file.get", buildJsonObject {
+                        put("path", filePath)
+                        if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
+                    })
+                }
+                val name = result["name"]?.jsonPrimitive?.content
+                    ?: filePath.substringAfterLast('/')
+                val mime = result["mime"]?.jsonPrimitive?.content ?: "*/*"
+                val text = result["text"]?.jsonPrimitive?.content
+                val data = result["data"]?.jsonPrimitive?.content
+                if (text == null && data == null) throw Exception("empty file")
+                pendingDownload = DownloadRequest(name, text, data, mime)
+            } catch (e: Exception) {
+                val msg = when {
+                    e.message?.contains("not readable", true) == true -> "文件不存在或无法读取"
+                    e.message?.contains("not found", true) == true -> "文件不存在"
+                    else -> e.message ?: "下载失败"
+                }
+                Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun saveDownloadToUri(uri: Uri, request: DownloadRequest) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { os ->
+                        if (request.text != null) os.write(request.text.toByteArray(Charsets.UTF_8)) else os.write(Base64.decode(request.data, Base64.NO_WRAP))
+                    } ?: throw Exception("无法打开输出流")
+                }
+                Toast.makeText(getApplication(), "已保存到：${request.name}", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(getApplication(), e.message ?: "保存失败", Toast.LENGTH_SHORT).show()
             }
         }
     }

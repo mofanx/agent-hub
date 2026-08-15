@@ -9,9 +9,13 @@ export interface AgentOps {
 }
 
 type TaskArtifact = {
-  type: "file" | "command" | "test";
+  type: "file" | "event";
+  /** 事件动作，如 command / test / note / delete / rename */
+  action?: string | undefined;
   path?: string | undefined;
   summary: string;
+  /** 完整文本内容，仅用于 diff/file 这类需要预览时回显的场景 */
+  content?: string | undefined;
 };
 
 type TaskResult = {
@@ -31,7 +35,7 @@ type FlowTask = {
 
 type Flow = {
   roomId: string;
-  phase: "planning" | "working" | "summarizing";
+  phase: "planning" | "working" | "summarizing" | "done";
   /** 任务以 taskId 为 key */
   tasks: Map<string, FlowTask>;
   /** 结果以 taskId 为 key */
@@ -134,7 +138,7 @@ export class ConductorOrchestrator {
   }
 
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */
-  onPromptError(sessionId: string): boolean {
+  onPromptError(sessionId: string): string | undefined {
     for (const [roomId, flow] of [...this.flows]) {
       const room = this.rooms.get(roomId);
       if (!room) {
@@ -144,7 +148,7 @@ export class ConductorOrchestrator {
       if (sessionId === room.conductorId) {
         this.flows.delete(roomId);
         this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
-        return true;
+        return roomId;
       }
       if (flow.phase === "working") {
         const running = [...flow.tasks.values()].find(
@@ -162,11 +166,11 @@ export class ConductorOrchestrator {
           void this.scheduleTasks(flow, room).catch((err) => {
             logError("conductor schedule after error", err);
           });
-          return true;
+          return roomId;
         }
       }
     }
-    return false;
+    return undefined;
   }
 
   private buildMemberList(room: Room): string {
@@ -257,8 +261,8 @@ export class ConductorOrchestrator {
     await this.agent.prompt(room.conductorId, promptText);
   }
 
-  /** 每轮 prompt.done 时调用；返回 true 表示该事件属于某个编排流 */
-  async onPromptDone(sessionId: string, output: string): Promise<boolean> {
+  /** 每轮 prompt.done 时调用；返回 flow roomId 表示该事件属于某个编排流 */
+  async onPromptDone(sessionId: string, output: string): Promise<string | undefined> {
     for (const flow of this.flows.values()) {
       const room = this.rooms.get(flow.roomId);
       if (!room) {
@@ -268,27 +272,33 @@ export class ConductorOrchestrator {
       if (sessionId === room.conductorId) {
         if (flow.phase === "planning") {
           await this.dispatch(flow, room, output);
-          return true;
+          return flow.roomId;
         }
         if (flow.phase === "summarizing") {
-          this.flows.delete(flow.roomId);
+          const roomId = flow.roomId;
           const name =
             room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
           const result = extractTaskResult(output);
           for (const a of result.artifacts) {
-            this.rooms.addArtifact(flow.roomId, {
+            this.rooms.addArtifact(roomId, {
               kind: a.type,
+              action: a.action,
               author: name,
               summary: a.summary,
               path: a.path,
+              content: a.content,
             });
           }
-          this.rooms.addArtifact(flow.roomId, {
-            kind: "note",
-            author: name,
-            summary: result.text.slice(0, 400),
-          });
-          return true;
+          if (result.artifacts.length === 0 && result.text) {
+            this.rooms.addArtifact(roomId, {
+              kind: "event",
+              action: "note",
+              author: name,
+              summary: result.text.slice(0, 400),
+            });
+          }
+          this.flows.delete(roomId);
+          return roomId;
         }
       }
       if (flow.phase === "working") {
@@ -304,18 +314,14 @@ export class ConductorOrchestrator {
           for (const a of result.artifacts) {
             this.rooms.addArtifact(flow.roomId, {
               kind: a.type,
+              action: a.action,
               author: name,
               summary: a.summary,
               path: a.path,
+              content: a.content,
               taskId: running.id,
             });
           }
-          this.rooms.addArtifact(flow.roomId, {
-            kind: "note",
-            author: name,
-            summary: result.text.slice(0, 400),
-            taskId: running.id,
-          });
           const artifactCount = result.artifacts.length;
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
@@ -324,11 +330,11 @@ export class ConductorOrchestrator {
             message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
           });
           await this.scheduleTasks(flow, room);
-          return true;
+          return flow.roomId;
         }
       }
     }
-    return false;
+    return undefined;
   }
 
   private resolveMember(
@@ -658,12 +664,21 @@ function extractTaskResult(output: string): TaskResult {
       if (Array.isArray(obj.artifacts)) {
         for (const a of obj.artifacts) {
           const o = a as Record<string, unknown>;
-          const type = String(o.type ?? "");
-          if (type !== "file" && type !== "command" && type !== "test") continue;
+          let type = String(o.type ?? "");
+          if (type !== "file" && type !== "event") {
+            // 兼容旧 kind：command / test / note 转为 event
+            if (type === "command" || type === "test" || type === "note") type = "event";
+            else continue;
+          }
           const path = typeof o.path === "string" ? o.path : undefined;
           const summary = typeof o.summary === "string" ? o.summary : "";
           if (path || summary) {
-            artifacts.push({ type, path, summary });
+            artifacts.push({
+              type: type as TaskArtifact["type"],
+              action: type === "event" ? (typeof o.action === "string" ? o.action : undefined) : undefined,
+              path,
+              summary,
+            });
           }
         }
       }
@@ -677,23 +692,16 @@ function extractTaskResult(output: string): TaskResult {
     }
   }
 
-  // 2. 没有合法 artifact JSON 时，自动扫描常见文件/命令/diff
+  // 2. 没有合法 artifact JSON 时，自动扫描 diff 和命令
   const autoArtifacts: TaskArtifact[] = [];
-  const filePaths = new Set<string>();
 
-  // 2.1 扫描 ```bash / ```shell 代码块作为命令 artifact
+  // 2.1 扫描 ```bash / ```shell 代码块作为 command 事件
   const shellRe = /```(?:bash|shell|sh)\s*([\s\S]*?)```/g;
   let sm: RegExpExecArray | null;
   while ((sm = shellRe.exec(output)) !== null) {
     const cmd = sm[1]?.trim();
     if (cmd) {
-      autoArtifacts.push({ type: "command", summary: cmd.slice(0, 200) });
-      // 同时提取命令中的文件路径
-      const pathRe = /(?:[\s=]|^)([A-Za-z0-9_\-/.]+\.[a-zA-Z0-9]+)(?:\s|$)/g;
-      let pm: RegExpExecArray | null;
-      while ((pm = pathRe.exec(cmd)) !== null) {
-        if (pm[1]) filePaths.add(pm[1]);
-      }
+      autoArtifacts.push({ type: "event", action: "command", summary: cmd.slice(0, 200) });
     }
   }
 
@@ -703,28 +711,34 @@ function extractTaskResult(output: string): TaskResult {
   while ((dm = diffRe.exec(output)) !== null) {
     const diff = dm[1]?.trim();
     if (diff && diff.length > 20) {
-      autoArtifacts.push({ type: "file", path: extractDiffPath(diff), summary: "代码 diff" });
+      const path = extractDiffPath(diff);
+      if (path && !isNoisePath(path)) {
+        autoArtifacts.push({ type: "file", path, summary: diff.slice(0, 10000), content: diff });
+      }
     }
   }
 
-  // 2.3 扫描显式文件声明：文件：xxx / File: xxx / Path: xxx
-  const explicitRe = /(?:文件|File|Path|路径)[：:]\s*(`|'|\"|)([A-Za-z0-9_\-/.]+)\1/gi;
-  let em: RegExpExecArray | null;
-  while ((em = explicitRe.exec(output)) !== null) {
-    if (em[2]) filePaths.add(em[2]);
+  // 2.3 扫描测试相关结果
+  const testResultRe = /(\d+)\s*(passed|failed|skipped|pending)/gi;
+  let tm: RegExpExecArray | null;
+  const testResults: string[] = [];
+  while ((tm = testResultRe.exec(output)) !== null) {
+    if (tm[1] && tm[2]) testResults.push(`${tm[1]} ${tm[2].toLowerCase()}`);
+  }
+  if (testResults.length > 0) {
+    autoArtifacts.push({ type: "event", action: "test", summary: testResults.slice(0, 5).join(", ") });
+  }
+  const testPathRe = /\b(?:test|tests|__tests__)\/([A-Za-z0-9_\-/.]+\.[a-zA-Z0-9]+)\b/g;
+  const testPaths = new Set<string>();
+  while ((tm = testPathRe.exec(output)) !== null) {
+    const p = tm[0];
+    if (!isNoisePath(p)) testPaths.add(p);
+  }
+  for (const p of [...testPaths].slice(0, 5)) {
+    autoArtifacts.push({ type: "event", action: "test", path: p, summary: "测试文件" });
   }
 
-  // 2.4 扫描常见源码文件路径
-  const fileRe = /(?:`|'|\"|\b)([A-Za-z0-9_\-/.]+\.(?:ts|tsx|js|jsx|py|kt|java|md|json|yaml|yml|toml|rs|go|css|scss|html|sql|sh))(?:`|'|\"|\b)/g;
-  let fm: RegExpExecArray | null;
-  while ((fm = fileRe.exec(output)) !== null) {
-    if (fm[1]) filePaths.add(fm[1]);
-  }
-  for (const p of [...filePaths].slice(0, 10)) {
-    autoArtifacts.push({ type: "file", path: p, summary: "子任务输出中提到的文件路径" });
-  }
-
-  const artifacts: TaskArtifact[] = autoArtifacts.slice(0, 15);
+  const artifacts: TaskArtifact[] = autoArtifacts.slice(0, 10);
 
   // 3. 兜底：返回截断文本
   return {
@@ -736,6 +750,10 @@ function extractTaskResult(output: string): TaskResult {
 function extractDiffPath(diff: string): string | undefined {
   const m = diff.match(/diff --git a\/(\S+)/);
   return m?.[1];
+}
+
+function isNoisePath(path: string): boolean {
+  return /(?:^|\/)(node_modules|\.gradle|\.git|build|dist)(?:\/|$)/i.test(path);
 }
 
 function parseTasks(output: string, room: Room): { id?: string; to: string; task: string; dependsOn?: string[] }[] | null {

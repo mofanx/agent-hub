@@ -118,7 +118,7 @@ describe("room", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     for (let i = 0; i < 15; i++) {
-      rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: `n${i}` });
+      rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: `n${i}` });
     }
     const all = rooms.getArtifacts(room.roomId, 100);
     assert.equal(all.length, 15);
@@ -132,7 +132,7 @@ describe("room", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     for (let i = 0; i < 55; i++) {
-      rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: `n${i}` });
+      rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: `n${i}` });
     }
     assert.equal(room.artifacts!.length, 50);
     assert.ok(room.artifacts!.every((a) => a.summary.startsWith("n")));
@@ -156,7 +156,7 @@ describe("room", () => {
     ]);
     rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "修改了 room.ts", path: "hub/src/room.ts" });
     const prompt = rooms.buildPrompt(room.roomId, "继续改", "s1");
-    assert.ok(prompt.includes("最近产生的产物"));
+    assert.ok(prompt.includes("最近产物"));
     assert.ok(prompt.includes("hub/src/room.ts"));
     assert.ok(prompt.includes("修改了 room.ts"));
   });
@@ -177,7 +177,7 @@ describe("room", () => {
   it("buildPrompt 不注入自己的 artifacts", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: "我写的" });
+    rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: "我写的" });
     const prompt = rooms.buildPrompt(room.roomId, "继续", "s1");
     assert.ok(!prompt.includes("最近产生的产物"));
   });
@@ -204,7 +204,7 @@ describe("room", () => {
   it("buildPrompt 显式引用时不过滤作者", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: "我写的" })!;
+    const a = rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: "我写的" })!;
     const prompt = rooms.buildPrompt(room.roomId, `继续 ${a.id}`, "s1", undefined, undefined, { refs: [a.id] });
     assert.ok(prompt.includes("我写的"));
   });
@@ -212,7 +212,7 @@ describe("room", () => {
   it("buildPrompt 显式引用 alias 时不过滤作者", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "note", author: "s1", summary: "alias 写的" })!;
+    const a = rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: "alias 写的" })!;
     assert.equal(a.alias, "a1");
     const prompt = rooms.buildPrompt(room.roomId, "继续 a1", "s1", undefined, undefined, { refs: ["a1"] });
     assert.ok(prompt.includes("alias 写的"));
@@ -400,11 +400,98 @@ describe("room", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "文件" });
-    rooms.addArtifact(room.roomId, { kind: "note", author: "a1", summary: "笔记" });
-    rooms.addArtifact(room.roomId, { kind: "test", author: "a1", summary: "测试" });
-    assert.equal(rooms.clearArtifacts(room.roomId, "note"), 1);
-    assert.equal(room.artifacts!.length, 2);
-    assert.equal(rooms.clearArtifacts(room.roomId), 2);
+    rooms.addArtifact(room.roomId, { kind: "event", author: "a1", summary: "笔记" });
+    rooms.addArtifact(room.roomId, { kind: "event", author: "a1", summary: "测试" });
+    assert.equal(rooms.clearArtifacts(room.roomId, "event"), 2);
+    assert.equal(room.artifacts!.length, 1);
+    assert.equal(rooms.clearArtifacts(room.roomId), 1);
     assert.equal(room.artifacts!.length, 0);
+  });
+
+  it("deleteFile 删除房间允许路径内的文件，并清除 artifact path", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const rel = `hub/src/room-delete-${Date.now()}.txt`;
+    const full = path.join(PROJECT_ROOT, rel);
+    fs.writeFileSync(full, "delete me");
+    rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "test", path: rel })!;
+    try {
+      assert.ok(rooms.deleteFile(room.roomId, rel));
+      assert.ok(!fs.existsSync(full));
+      assert.ok(!room.artifacts!.some((a) => a.kind === "file" && a.path === rel));
+      assert.ok(room.artifacts!.some((a) => a.kind === "event" && a.action === "delete" && a.path === rel));
+      assert.throws(() => rooms.deleteFile(room.roomId, rel), /file not found/);
+    } finally {
+      fs.rmSync(full, { force: true });
+    }
+  });
+
+  it("deleteFile 拒绝项目根目录外的文件", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    assert.throws(() => rooms.deleteFile(room.roomId, "/etc/passwd"), /outside project root/);
+  });
+
+  it("renameFile 重命名房间允许路径内的文件，并更新 artifact path", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const fromRel = `hub/src/room-rename-from-${Date.now()}.txt`;
+    const toRel = `hub/src/room-rename-to-${Date.now()}.txt`;
+    const fromFull = path.join(PROJECT_ROOT, fromRel);
+    const toFull = path.join(PROJECT_ROOT, toRel);
+    fs.writeFileSync(fromFull, "rename me");
+    const artifact = rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "test", path: fromRel })!;
+    try {
+      assert.ok(rooms.renameFile(room.roomId, fromRel, toRel));
+      assert.ok(!fs.existsSync(fromFull));
+      assert.ok(fs.existsSync(toFull));
+      assert.equal(artifact.path, toRel);
+    } finally {
+      fs.rmSync(fromFull, { force: true });
+      fs.rmSync(toFull, { force: true });
+    }
+  });
+
+  it("renameFile 拒绝目标路径越界", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const rel = `hub/src/room-rename-out-${Date.now()}.txt`;
+    const full = path.join(PROJECT_ROOT, rel);
+    fs.writeFileSync(full, "x");
+    try {
+      assert.throws(() => rooms.renameFile(room.roomId, rel, "../outside.txt"), /outside project root/);
+    } finally {
+      fs.rmSync(full, { force: true });
+    }
+  });
+
+  it("sessionDeleteFile / sessionRenameFile 在 session cwd 内操作", () => {
+    const rooms = new RoomManager();
+    const cwd = path.join(WORKSPACE_ROOT, `session-file-op-${Date.now()}`);
+    fs.mkdirSync(cwd, { recursive: true });
+    rooms.setCwdResolver((sessionId) => (sessionId === "s1" ? cwd : undefined));
+    const fromName = `from-${Date.now()}.txt`;
+    const toName = `to-${Date.now()}.txt`;
+    const fromFull = path.join(cwd, fromName);
+    const toFull = path.join(cwd, toName);
+    fs.writeFileSync(fromFull, "session");
+    try {
+      assert.ok(rooms.sessionRenameFile("s1", fromName, toName));
+      assert.ok(!fs.existsSync(fromFull));
+      assert.ok(fs.existsSync(toFull));
+      assert.ok(rooms.sessionDeleteFile("s1", toName));
+      assert.ok(!fs.existsSync(toFull));
+      assert.throws(() => rooms.sessionDeleteFile("s1", toName), /file not found/);
+    } finally {
+      fs.rmSync(fromFull, { force: true });
+      fs.rmSync(toFull, { force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("sessionDeleteFile 拒绝越界路径", () => {
+    const rooms = new RoomManager();
+    rooms.setCwdResolver((sessionId) => (sessionId === "s1" ? WORKSPACE_ROOT : undefined));
+    assert.throws(() => rooms.sessionDeleteFile("s1", "/etc/passwd"), /outside project root/);
   });
 });

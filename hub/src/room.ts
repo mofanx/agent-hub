@@ -51,16 +51,20 @@ type BlackboardEntry = { id: string; from: string; text: string; detail: string;
 const BLACKBOARD_LIMIT = 10;
 const BLACKBOARD_OUTPUT_LEN = 400;
 
-export type ArtifactKind = "file" | "command" | "test" | "note";
+export type ArtifactKind = "file" | "event";
 
 export type Artifact = {
   id: string;
   alias?: string | undefined;
   kind: ArtifactKind;
+  /** 事件动作类型，如 delete / rename / command / test / note */
+  action?: string | undefined;
   author: string;
   at: number;
   summary: string;
   path?: string | undefined;
+  /** 重命名事件中的原路径 */
+  oldPath?: string | undefined;
   command?: string | undefined;
   taskId?: string | undefined;
   dependsOn?: string[] | undefined;
@@ -114,6 +118,16 @@ function isTextBuffer(buf: Buffer): boolean {
 export type FileResult =
   | { text: string; name: string; mime: string }
   | { data: string; name: string; mime: string };
+
+function fileResultFromBuf(buf: Buffer, real: string): FileResult {
+  const name = path.basename(real);
+  const ext = path.extname(real);
+  const mime = mimeFromExt(ext);
+  if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
+    return { text: buf.toString("utf-8"), name, mime };
+  }
+  return { data: buf.toString("base64"), name, mime };
+}
 
 export type FileTreeRoot = {
   name: string;
@@ -334,7 +348,7 @@ export class RoomManager {
   /** 添加一个 artifact 到房间登记处 */
   addArtifact(
     roomId: string,
-    artifact: Omit<Artifact, "id" | "at" | "alias">,
+    artifact: Omit<Artifact, "id" | "at" | "alias"> & { content?: string | undefined },
   ): Artifact | undefined {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
@@ -347,6 +361,16 @@ export class RoomManager {
       alias: `a${seq}`,
       at: Date.now(),
     };
+    if (artifact.content && item.path) {
+      const fileName = path.basename(item.path);
+      const destDir = path.join(FILES_DIR, roomId, item.id);
+      try {
+        fs.mkdirSync(destDir, { recursive: true });
+        fs.writeFileSync(path.join(destDir, fileName), artifact.content, "utf-8");
+      } catch {
+        // 缓存写入失败不阻塞 artifact 注册
+      }
+    }
     list.push(item);
     if (list.length > ARTIFACT_LIMIT) list.shift();
     return item;
@@ -432,7 +456,86 @@ export class RoomManager {
     return this.resolveEntry(input, roots, kind);
   }
 
-  /** 将项目内文件复制到 Hub 缓存，并生成 file artifact */
+  private resolveTargetPath(
+    roomId: string,
+    input: string,
+    author?: string,
+  ): { real: string; root: string } | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const roots = this.resolveAllowedRoots(roomId, author).map((r) => r.path);
+    return this.resolveTarget(input, roots);
+  }
+
+  private resolveSessionTargetPath(sessionId: string, input: string): { real: string; root: string } | undefined {
+    const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
+    return this.resolveTarget(input, roots);
+  }
+
+  private resolveTarget(input: string, roots: string[]): { real: string; root: string } | undefined {
+    for (const root of roots) {
+      const parent = path.resolve(root, path.dirname(input));
+      try {
+        const realParent = fs.realpathSync(parent);
+        if (!isWithin(root, realParent)) continue;
+        const real = path.join(realParent, path.basename(input));
+        if (!isWithin(root, real)) continue;
+        return { real, root };
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  }
+
+  /** 在允许根目录下按相对路径尾缀查找文件，解决 agent 在子目录运行产出的路径偏移 */
+  private findFileByRelPath(
+    roots: string[],
+    relPath: string,
+  ): { real: string; root: string } | undefined {
+    const parts = relPath.split(/[\\/]/).filter(Boolean);
+    if (parts.length === 0) return undefined;
+    const joined = parts.join("/");
+    for (const root of roots) {
+      const queue: string[] = [root];
+      while (queue.length) {
+        const dir = queue.shift()!;
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const e of entries) {
+          const child = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            if (SKIP_NAMES.has(e.name)) continue;
+            queue.push(child);
+          } else if (e.isFile()) {
+            try {
+              const real = fs.realpathSync(child);
+              if (!isWithin(root, real)) continue;
+              const tail = path
+                .relative(root, real)
+                .replace(/\\/g, "/")
+                .split("/")
+                .filter(Boolean)
+                .slice(-parts.length)
+                .join("/");
+              if (tail === joined) {
+                return { real, root };
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /** 将项目内文件复制到 Hub 缓存，并生成/更新 file artifact */
   sendFile(roomId: string, filePath: string, author?: string, summary?: string): Artifact | undefined {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
@@ -440,7 +543,13 @@ export class RoomManager {
     if (!found) throw new Error("path outside project root");
     const { real, root } = found;
     const rel = path.relative(root, real);
-    const artifact = this.addArtifact(roomId, {
+    const existing = room.artifacts?.find((a) => a.kind === "file" && a.path === rel);
+    if (existing) {
+      existing.summary = summary ?? rel;
+      existing.author = author ?? existing.author;
+      existing.at = Date.now();
+    }
+    const artifact = existing ?? this.addArtifact(roomId, {
       kind: "file",
       author: author ?? "我",
       summary: summary ?? rel,
@@ -451,6 +560,13 @@ export class RoomManager {
     fs.mkdirSync(destDir, { recursive: true });
     const dest = path.join(destDir, path.basename(real));
     fs.copyFileSync(real, dest);
+    this.addArtifact(roomId, {
+      kind: "event",
+      action: existing ? "modify" : "add",
+      author: author ?? "系统",
+      summary: existing ? `修改 ${rel}` : `新增 ${rel}`,
+      path: rel,
+    });
     return artifact;
   }
 
@@ -491,15 +607,24 @@ export class RoomManager {
           if (!isWithin(root, resolved)) continue;
           const stat = fs.statSync(resolved);
           if (!stat.isFile()) continue;
-          const buf = fs.readFileSync(resolved);
-          const ext = path.extname(resolved);
-          const mime = mimeFromExt(ext);
-          if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
-            return { text: buf.toString("utf-8"), name: fileName, mime };
-          }
-          return { data: buf.toString("base64"), name: fileName, mime };
+          return fileResultFromBuf(fs.readFileSync(resolved), resolved);
         } catch {
           /* try next */
+        }
+      }
+
+      // diff artifact 优先展示 diff 摘要，避免子目录搜索到当前文件版本
+      if (a.summary.startsWith("diff --git")) {
+        return { text: a.summary, name: fileName, mime: "text/plain" };
+      }
+
+      // 文件可能在子目录中（例如 agent 在子项目运行 diff，路径只含 src/...）
+      const found = this.findFileByRelPath(roots, a.path);
+      if (found) {
+        try {
+          return fileResultFromBuf(fs.readFileSync(found.real), found.real);
+        } catch {
+          /* 继续 fallback */
         }
       }
     }
@@ -508,19 +633,69 @@ export class RoomManager {
     if (ref.includes("/") || path.isAbsolute(ref)) {
       const found = this.resolveEntryPath(roomId, ref, undefined, "file");
       if (found) {
-        const { real } = found;
-        const fileName = path.basename(real);
-        const buf = fs.readFileSync(real);
-        const ext = path.extname(real);
-        const mime = mimeFromExt(ext);
-        if (TEXT_EXTS.has(ext) || isTextBuffer(buf)) {
-          return { text: buf.toString("utf-8"), name: fileName, mime };
-        }
-        return { data: buf.toString("base64"), name: fileName, mime };
+        return fileResultFromBuf(fs.readFileSync(found.real), found.real);
       }
     }
 
-    throw new Error(a ? "file not readable" : "file not found");
+    if (a?.summary) {
+      const name = a.path ? path.basename(a.path) : (a.alias ?? a.id);
+      return { text: a.summary, name, mime: "text/plain" };
+    }
+    if (!a) throw new Error("file not found");
+    throw new Error("file not readable");
+  }
+
+  /** 删除房间允许路径内的文件，并生成 delete 事件 */
+  deleteFile(roomId: string, filePath: string, author?: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error("unknown room");
+    const found = this.resolveEntryPath(roomId, filePath, author, "file");
+    if (!found) {
+      const target = this.resolveTargetPath(roomId, filePath, author);
+      if (!target) throw new Error("path outside project root");
+      throw new Error("file not found");
+    }
+    const { real, root } = found;
+    if (!fs.existsSync(real)) throw new Error("file not found");
+    fs.unlinkSync(real);
+    const rel = path.relative(root, real);
+    room.artifacts = (room.artifacts ?? []).filter((a) => !(a.kind === "file" && a.path === rel));
+    this.addArtifact(roomId, {
+      kind: "event",
+      action: "delete",
+      author: author ?? "系统",
+      summary: `删除 ${rel}`,
+      path: rel,
+    });
+    return true;
+  }
+
+  /** 重命名房间允许路径内的文件，并生成 rename 事件 */
+  renameFile(roomId: string, from: string, to: string, author?: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error("unknown room");
+    const fromFound = this.resolveEntryPath(roomId, from, author, "file");
+    if (!fromFound) throw new Error("source path outside project root");
+    const toFound = this.resolveTarget(to, [fromFound.root]);
+    if (!toFound) throw new Error("target path outside project root");
+    const { real: fromReal, root: fromRoot } = fromFound;
+    if (!fs.existsSync(fromReal)) throw new Error("source file not found");
+    if (fs.existsSync(toFound.real)) throw new Error("target file already exists");
+    fs.renameSync(fromReal, toFound.real);
+    const oldRel = path.relative(fromRoot, fromReal);
+    const newRel = path.relative(toFound.root, toFound.real);
+    for (const a of room.artifacts ?? []) {
+      if (a.kind === "file" && a.path === oldRel) a.path = newRel;
+    }
+    this.addArtifact(roomId, {
+      kind: "event",
+      action: "rename",
+      author: author ?? "系统",
+      summary: `${oldRel} → ${newRel}`,
+      path: newRel,
+      oldPath: oldRel,
+    });
+    return true;
   }
 
   /** 获取房间可用的文件树根目录 */
@@ -613,6 +788,33 @@ export class RoomManager {
       return { text: buf.toString("utf-8"), name: fileName, mime };
     }
     return { data: buf.toString("base64"), name: fileName, mime };
+  }
+
+  /** 删除指定 session 允许路径内的文件 */
+  sessionDeleteFile(sessionId: string, filePath: string): boolean {
+    const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
+    const found = this.resolveEntry(filePath, roots, "file");
+    if (!found) {
+      const target = this.resolveSessionTargetPath(sessionId, filePath);
+      if (!target) throw new Error("path outside project root");
+      throw new Error("file not found");
+    }
+    if (!fs.existsSync(found.real)) throw new Error("file not found");
+    fs.unlinkSync(found.real);
+    return true;
+  }
+
+  /** 重命名指定 session 允许路径内的文件 */
+  sessionRenameFile(sessionId: string, from: string, to: string): boolean {
+    const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
+    const fromFound = this.resolveEntry(from, roots, "file");
+    if (!fromFound) throw new Error("source path outside project root");
+    const toFound = this.resolveTarget(to, [fromFound.root]);
+    if (!toFound) throw new Error("target path outside project root");
+    if (!fs.existsSync(fromFound.real)) throw new Error("source file not found");
+    if (fs.existsSync(toFound.real)) throw new Error("target file already exists");
+    fs.renameSync(fromFound.real, toFound.real);
+    return true;
   }
 
   /** 解析文本中显式引用的 artifact alias / id / path */
@@ -774,12 +976,24 @@ export class RoomManager {
     } else {
       for (const e of board) lines.push(`- ${e.from}: ${e.text}`);
     }
-    if (artifacts.length > 0) {
-      lines.push("", "最近产生的产物：");
-      for (const a of artifacts) {
-        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`, `[${a.kind}]`];
+    const fileArtifacts = artifacts.filter((a) => a.kind === "file");
+    const eventArtifacts = artifacts.filter((a) => a.kind !== "file");
+    if (fileArtifacts.length > 0) {
+      lines.push("", "最近产物（文件）：");
+      for (const a of fileArtifacts) {
+        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`];
         if (a.path) parts.push(a.path);
-        if (a.command) parts.push(a.command);
+        parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
+        lines.push(`- ${parts.join(" ")}`);
+      }
+    }
+    if (eventArtifacts.length > 0) {
+      lines.push("", "最近事件：");
+      for (const a of eventArtifacts) {
+        const action = a.action ?? a.kind;
+        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`, `[${action}]`];
+        if (a.oldPath) parts.push(`${a.oldPath} →`);
+        if (a.path) parts.push(a.path);
         parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
         lines.push(`- ${parts.join(" ")}`);
       }

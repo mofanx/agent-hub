@@ -53,6 +53,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -68,22 +69,28 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.FormatQuote
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Badge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -97,6 +104,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -118,6 +126,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -130,6 +139,7 @@ import com.agenthub.BlackboardEntry
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
+import com.agenthub.DownloadRequest
 import com.agenthub.FileTreeNode
 import com.agenthub.FileTreeRoot
 import com.agenthub.Screen
@@ -191,6 +201,21 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val messages by remember { derivedStateOf { vm.chatItems.asReversed() } }
     val isAtTop by remember { derivedStateOf { messages.isNotEmpty() && listState.firstVisibleItemIndex >= messages.lastIndex - 2 } }
+
+    var activeDownload by remember { mutableStateOf<DownloadRequest?>(null) }
+    val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        val request = activeDownload
+        if (uri != null && request != null) {
+            vm.saveDownloadToUri(uri, request)
+        }
+        activeDownload = null
+    }
+    LaunchedEffect(vm.pendingDownload) {
+        val request = vm.pendingDownload ?: return@LaunchedEffect
+        vm.pendingDownload = null
+        activeDownload = request
+        saveLauncher.launch(request.name)
+    }
 
     LaunchedEffect(vm.fileRefToInsert) {
         val ref = vm.fileRefToInsert ?: return@LaunchedEffect
@@ -378,7 +403,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     when (expandedTop) {
                         "flow" -> FlowPanel(vm.flow, vm.currentRoom!!.mode)
                         "blackboard" -> BlackboardPanel(vm)
-                        "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
+                        "artifact" -> ArtifactPanel(vm.currentArtifacts.filter { it.kind == "file" }, vm)
+                        "event" -> EventPanel(vm.currentArtifacts.filter { it.kind != "file" }, vm)
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -737,6 +763,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             }
         }
     }
+
+    vm.filePreview?.let { FilePreviewDialog(it) { vm.dismissFilePreview() } }
 }
 }
 
@@ -936,14 +964,18 @@ private fun MessageBubbleBox(
             }
         }
         if (showSelectText) {
-            Dialog(onDismissRequest = { showSelectText = false }) {
+            Dialog(
+                onDismissRequest = { showSelectText = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
                 Card(
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surface,
                     ),
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .fillMaxWidth(0.9f)
+                        .widthIn(max = 520.dp)
                         .padding(24.dp),
                 ) {
                     Column(
@@ -1491,17 +1523,18 @@ private fun FlowTaskRow(task: FlowTask) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     if (artifacts.isEmpty()) return
     val context = LocalContext.current
     var collapsed by remember { mutableStateOf(false) }
-    var showClearMenu by remember { mutableStateOf(false) }
-    var confirmClear by remember { mutableStateOf<String?>(null) }
+    var showClearConfirm by remember { mutableStateOf(false) }
     var confirmRemove by remember { mutableStateOf<ArtifactInfo?>(null) }
-    val groups = remember(artifacts) {
-        artifacts.groupBy { it.kind }
-    }
+    var managing by remember { mutableStateOf(false) }
+    val selected = remember { mutableStateListOf<ArtifactInfo>() }
+    var confirmRemoveSelected by remember { mutableStateOf(false) }
+    val groups = artifacts.groupBy { it.kind }
     val kindLabel = { kind: String ->
         when (kind) {
             "file" -> "文件"
@@ -1511,17 +1544,24 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             else -> "全部"
         }
     }
+    val kindColors = mapOf(
+        "file" to MaterialTheme.colorScheme.primary,
+        "command" to MaterialTheme.colorScheme.tertiary,
+        "test" to MaterialTheme.colorScheme.secondary,
+        "note" to MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    val kindColor = { kind: String -> kindColors[kind] ?: Color.Gray }
     val scroll = rememberScrollState()
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 280.dp)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
     ) {
         Column(
             Modifier
-                .padding(10.dp)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
                 .verticalScroll(scroll),
         ) {
             Row(
@@ -1533,27 +1573,40 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             ) {
                 Text(
                     "${if (collapsed) "▸" else "▾"} 产物",
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.labelLarge,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box {
-                        TextButton(
-                            onClick = { showClearMenu = true },
-                        ) { Text("清空", style = MaterialTheme.typography.bodySmall) }
-                        DropdownMenu(
-                            expanded = showClearMenu,
-                            onDismissRequest = { showClearMenu = false },
-                        ) {
-                            listOf(null, "file", "command", "test", "note").forEach { kind ->
-                                DropdownMenuItem(
-                                    text = { Text(kindLabel(kind ?: "")) },
-                                    onClick = {
-                                        showClearMenu = false
-                                        confirmClear = kind ?: ""
-                                    },
-                                )
-                            }
-                        }
+                    if (managing) {
+                        Text(
+                            "删除 ${selected.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selected.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                            modifier = Modifier
+                                .clickable(enabled = selected.isNotEmpty()) { confirmRemoveSelected = true }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                        Text(
+                            "取消",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .clickable { managing = false; selected.clear() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    } else {
+                        Text(
+                            "清空",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .clickable { showClearConfirm = true }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                        Text(
+                            "管理",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .clickable { managing = true }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
                     }
                     Text(
                         "${artifacts.size} 条",
@@ -1566,73 +1619,127 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
                 groups.forEach { (kind, list) ->
-                    Text(
-                        kindLabel(kind),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 2.dp),
-                    )
-                    list.forEach { artifact ->
-                        Surface(
-                            color = MaterialTheme.colorScheme.surface,
-                            shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(vertical = 2.dp),
                         ) {
-                            Row(
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(kindColor(kind), CircleShape)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "${kindLabel(kind)} (${list.size})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = kindColor(kind),
+                            )
+                        }
+                        list.forEach { artifact ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(4.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                    .padding(vertical = 2.dp),
                             ) {
-                                Text(
-                                    "@${artifact.author} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.weight(1f).padding(end = 6.dp),
-                                )
-                                Row {
-                                    if (artifact.kind == "file") {
-                                        IconButton(
-                                            onClick = { vm.openArtifactFile(artifact) },
-                                            modifier = Modifier.size(28.dp),
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Download,
-                                                contentDescription = "下载",
-                                                modifier = Modifier.size(18.dp),
-                                            )
+                                if (managing) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                if (selected.contains(artifact)) selected.remove(artifact)
+                                                else selected.add(artifact)
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Checkbox(
+                                            checked = selected.contains(artifact),
+                                            onCheckedChange = {
+                                                if (selected.contains(artifact)) selected.remove(artifact)
+                                                else selected.add(artifact)
+                                            },
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .width(4.dp)
+                                                .height(20.dp)
+                                                .background(kindColor(artifact.kind))
+                                        )
+                                        Text(
+                                            "@${artifact.author} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.weight(1f).padding(start = 6.dp),
+                                        )
+                                    }
+                                } else {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(4.dp)
+                                                .height(20.dp)
+                                                .background(kindColor(artifact.kind))
+                                        )
+                                        Text(
+                                            "@${artifact.author} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.weight(1f).padding(start = 6.dp, end = 6.dp),
+                                        )
+                                        Row {
+                                            IconButton(
+                                                onClick = { vm.loadArtifactPreview(artifact) },
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Visibility,
+                                                    contentDescription = "预览",
+                                                    modifier = Modifier.size(22.dp),
+                                                )
+                                            }
+                                            if (artifact.kind == "file") {
+                                                IconButton(
+                                                    onClick = { vm.downloadArtifactFile(artifact) },
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Download,
+                                                        contentDescription = "下载",
+                                                        modifier = Modifier.size(22.dp),
+                                                    )
+                                                }
+                                            }
+                                            IconButton(
+                                                onClick = {
+                                                    vm.quoteArtifact(artifact)
+                                                    Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                                },
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.FormatQuote,
+                                                    contentDescription = "引用",
+                                                    modifier = Modifier.size(22.dp),
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { confirmRemove = artifact },
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Delete,
+                                                    contentDescription = "删除",
+                                                    modifier = Modifier.size(22.dp),
+                                                )
+                                            }
                                         }
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            vm.sendArtifactMessage(artifact)
-                                            Toast.makeText(context, "已发送", Toast.LENGTH_SHORT).show()
-                                        },
-                                        modifier = Modifier.size(28.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.Send,
-                                            contentDescription = "继续",
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { confirmRemove = artifact },
-                                        modifier = Modifier.size(28.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Delete,
-                                            contentDescription = "删除",
-                                            modifier = Modifier.size(18.dp),
-                                        )
                                     }
                                 }
                             }
                         }
                     }
-                }
             }
         }
     }
@@ -1656,24 +1763,149 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
         )
     }
 
-    confirmClear?.let { kind ->
-        val label = kindLabel(kind)
+    if (showClearConfirm) {
         AlertDialog(
-            onDismissRequest = { confirmClear = null },
+            onDismissRequest = { showClearConfirm = false },
             title = { Text("清空产物") },
-            text = { Text("确定清空${label}产物？") },
+            text = { Text("确定清空全部产物？") },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        vm.clearArtifacts(kind.ifEmpty { null })
-                        confirmClear = null
+                        vm.clearArtifacts()
+                        showClearConfirm = false
                     },
                 ) { Text("清空") }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClear = null }) { Text("取消") }
+                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
             },
         )
+    }
+
+    if (confirmRemoveSelected) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoveSelected = false },
+            title = { Text("删除选中产物") },
+            text = { Text("确定删除 ${selected.size} 条产物？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.removeArtifacts(selected.toList())
+                        selected.clear()
+                        managing = false
+                        confirmRemoveSelected = false
+                    },
+                ) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoveSelected = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun EventPanel(events: List<ArtifactInfo>, vm: ChatViewModel) {
+    if (events.isEmpty()) return
+    val context = LocalContext.current
+    var collapsed by remember { mutableStateOf(false) }
+    val scroll = rememberScrollState()
+    val actionLabel = { action: String? ->
+        when (action) {
+            "delete" -> "删除"
+            "rename" -> "重命名"
+            "command" -> "命令"
+            "test" -> "测试"
+            "note" -> "笔记"
+            else -> "事件"
+        }
+    }
+    val colorScheme = MaterialTheme.colorScheme
+    val actionColors = mapOf(
+        "delete" to colorScheme.error,
+        "rename" to colorScheme.tertiary,
+        "command" to colorScheme.primary,
+        "test" to colorScheme.secondary,
+        "note" to colorScheme.onSurfaceVariant,
+    )
+    val actionColor = { action: String? -> actionColors[action] ?: Color.Gray }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 280.dp)
+            .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+    ) {
+        Column(
+            Modifier
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .verticalScroll(scroll),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { collapsed = !collapsed },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${if (collapsed) "▸" else "▾"} 事件",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Text(
+                    "${events.size} 条",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!collapsed) {
+                Spacer(Modifier.height(6.dp))
+                events.forEach { event ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(actionColor(event.action), CircleShape)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${actionLabel(event.action)} · @${event.author} · ${formatArtifactTime(event.at)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = actionColor(event.action),
+                            )
+                            Text(
+                                buildString {
+                                    if (event.oldPath != null) append("${event.oldPath} → ")
+                                    if (event.path != null) append("${event.path} · ")
+                                    append(event.summary)
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (event.kind == "event" && (event.action == "command" || event.action == "test")) {
+                            IconButton(
+                                onClick = {
+                                    vm.quoteArtifact(event)
+                                    Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.FormatQuote,
+                                    contentDescription = "引用",
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1682,8 +1914,11 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, onExpand: (Str
     val flow = vm.flow
     val flowCount = flow?.tasks?.size ?: 0
     val blackboardCount = vm.blackboard.size
-    val artifactCount = vm.currentArtifacts.size
-    if (flowCount == 0 && blackboardCount == 0 && artifactCount == 0) return
+    val fileArtifacts = vm.currentArtifacts.filter { it.kind == "file" }
+    val eventArtifacts = vm.currentArtifacts.filter { it.kind != "file" }
+    val artifactCount = fileArtifacts.size
+    val eventCount = eventArtifacts.size
+    if (flowCount == 0 && blackboardCount == 0 && artifactCount == 0 && eventCount == 0) return
     val flowProgress = flow?.progress
     val flowLabel = if (flowProgress != null) {
         "编排 ${flowProgress.done}/${flowProgress.total}"
@@ -1691,8 +1926,8 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, onExpand: (Str
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = 12.dp, vertical = 1.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (flowCount > 0) {
             AssistChip(
@@ -1719,12 +1954,49 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, onExpand: (Str
             )
         }
         if (artifactCount > 0) {
+            var unread by remember { mutableStateOf(0) }
+            var previousCount by remember { mutableStateOf(artifactCount) }
+            LaunchedEffect(artifactCount, expanded) {
+                if (expanded == "artifact") {
+                    unread = 0
+                    previousCount = artifactCount
+                } else {
+                    if (artifactCount > previousCount) {
+                        unread += artifactCount - previousCount
+                    } else if (artifactCount < previousCount) {
+                        unread = maxOf(0, unread - (previousCount - artifactCount))
+                    }
+                    previousCount = artifactCount
+                }
+            }
+            BadgedBox(
+                badge = {
+                    if (unread > 0) {
+                        Badge(
+                            containerColor = MaterialTheme.colorScheme.error,
+                        ) { Text(unread.toString(), style = MaterialTheme.typography.labelSmall) }
+                    }
+                },
+            ) {
+                AssistChip(
+                    onClick = { onExpand(if (expanded == "artifact") null else "artifact") },
+                    label = { Text("产物 $artifactCount", style = MaterialTheme.typography.labelMedium) },
+                    leadingIcon = {
+                        Text(
+                            if (expanded == "artifact") "▾" else "▸",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    },
+                )
+            }
+        }
+        if (eventCount > 0) {
             AssistChip(
-                onClick = { onExpand(if (expanded == "artifact") null else "artifact") },
-                label = { Text("产物 $artifactCount", style = MaterialTheme.typography.labelMedium) },
+                onClick = { onExpand(if (expanded == "event") null else "event") },
+                label = { Text("事件 $eventCount", style = MaterialTheme.typography.labelMedium) },
                 leadingIcon = {
                     Text(
-                        if (expanded == "artifact") "▾" else "▸",
+                        if (expanded == "event") "▾" else "▸",
                         style = MaterialTheme.typography.labelMedium,
                     )
                 },
@@ -1746,12 +2018,12 @@ private fun BlackboardPanel(vm: ChatViewModel) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 8.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
         ),
     ) {
-        Column(Modifier.padding(10.dp)) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1761,12 +2033,16 @@ private fun BlackboardPanel(vm: ChatViewModel) {
             ) {
                 Text(
                     "${if (collapsed) "▸" else "▾"} 共享黑板",
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.labelLarge,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { showClearConfirm = true }) {
-                        Text("清空", style = MaterialTheme.typography.bodySmall)
-                    }
+                    Text(
+                        "清空",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .clickable { showClearConfirm = true }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
                     Text(
                         "${entries.size} 条",
                         style = MaterialTheme.typography.bodySmall,
@@ -1776,8 +2052,8 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                 }
             }
             if (!collapsed) {
-                Spacer(Modifier.height(6.dp))
-                entries.forEach { entry ->
+                Spacer(Modifier.height(4.dp))
+                entries.reversed().forEach { entry ->
                     Column(
                         Modifier
                             .padding(vertical = 3.dp)
@@ -1804,9 +2080,14 @@ private fun BlackboardPanel(vm: ChatViewModel) {
     }
 
     detailEntry?.let { entry ->
-        Dialog(onDismissRequest = { detailEntry = null }) {
+        Dialog(
+            onDismissRequest = { detailEntry = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth(0.9f)
+                    .widthIn(max = 520.dp),
                 shape = RoundedCornerShape(12.dp),
             ) {
                 Column(Modifier.padding(16.dp)) {

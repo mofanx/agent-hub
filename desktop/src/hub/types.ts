@@ -49,7 +49,8 @@ export interface RoomModeConfig {
 }
 
 export interface FlowArtifact {
-  type: "file" | "command" | "test";
+  type: "file" | "event";
+  action?: string;
   path?: string;
   summary: string;
 }
@@ -90,11 +91,15 @@ export interface FlowTask {
 export interface ArtifactInfo {
   id: string;
   alias?: string;
-  kind: "file" | "command" | "test" | "note";
+  kind: "file" | "event";
+  /** 事件动作类型 */
+  action?: string;
   author: string;
   at: number;
   summary: string;
   path?: string;
+  /** 重命名事件中的原路径 */
+  oldPath?: string;
   command?: string;
   taskId?: string;
 }

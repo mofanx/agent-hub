@@ -200,9 +200,11 @@ export class RoomModeManager {
     for (const a of result.artifacts) {
       this.rooms.addArtifact(roomId, {
         kind: a.type as ArtifactKind,
+        action: a.action,
         author: name,
         summary: a.summary,
         path: a.path,
+        content: a.content,
         taskId,
       });
     }
@@ -215,19 +217,7 @@ export class RoomModeManager {
 
   private emitFlowUpdate(roomId: string): void {
     const flow = this.getFlow(roomId);
-    if (!flow) return;
     this.broadcast("room.flowUpdate", { roomId, flow });
-  }
-
-  private emitFlowUpdateForSession(sessionId: string): void {
-    for (const roomId of this.rooms.list().map((r) => r.roomId)) {
-      const flow = this.getFlow(roomId);
-      if (!flow) continue;
-      const tasks = (flow.tasks as { sessionId: string }[] | undefined) ?? [];
-      if (tasks.some((t) => t.sessionId === sessionId)) {
-        this.broadcast("room.flowUpdate", { roomId, flow });
-      }
-    }
   }
 
   getFlow(roomId: string): Record<string, unknown> | undefined {
@@ -454,22 +444,26 @@ export class RoomModeManager {
     }
 
     // conductor 编排
-    if (await this.conductor.onPromptDone(sessionId, output)) {
-      this.emitFlowUpdateForSession(sessionId);
+    const conductorRoom = await this.conductor.onPromptDone(sessionId, output);
+    if (conductorRoom) {
+      this.emitFlowUpdate(conductorRoom);
       return true;
     }
 
     // 其他流程
-    if (this.onParallelDone(sessionId, output)) {
-      this.emitFlowUpdateForSession(sessionId);
+    const parallelRoom = this.onParallelDone(sessionId, output);
+    if (parallelRoom) {
+      this.emitFlowUpdate(parallelRoom);
       return true;
     }
-    if (this.onPipelineDone(sessionId, output)) {
-      this.emitFlowUpdateForSession(sessionId);
+    const pipelineRoom = this.onPipelineDone(sessionId, output);
+    if (pipelineRoom) {
+      this.emitFlowUpdate(pipelineRoom);
       return true;
     }
-    if (this.onDebateDone(sessionId, output)) {
-      this.emitFlowUpdateForSession(sessionId);
+    const debateRoom = this.onDebateDone(sessionId, output);
+    if (debateRoom) {
+      this.emitFlowUpdate(debateRoom);
       return true;
     }
 
@@ -500,8 +494,9 @@ export class RoomModeManager {
       return true;
     }
 
-    if (this.conductor.onPromptError(sessionId)) {
-      this.emitFlowUpdateForSession(sessionId);
+    const conductorRoom = this.conductor.onPromptError(sessionId);
+    if (conductorRoom) {
+      this.emitFlowUpdate(conductorRoom);
       return true;
     }
 
@@ -848,7 +843,7 @@ export class RoomModeManager {
     return { sent, mentioned: [], skipped };
   }
 
-  private onParallelDone(sessionId: string, output: string): boolean {
+  private onParallelDone(sessionId: string, output: string): string | undefined {
     for (const [roomId, flow] of this.parallelFlows) {
       if (!flow.pending.has(sessionId)) continue;
       flow.pending.delete(sessionId);
@@ -857,9 +852,9 @@ export class RoomModeManager {
       if (flow.pending.size === 0) {
         this.summarizeParallel(roomId, flow);
       }
-      return true;
+      return roomId;
     }
-    return false;
+    return undefined;
   }
 
   private summarizeParallel(roomId: string, flow: ParallelFlow): void {
@@ -922,13 +917,13 @@ export class RoomModeManager {
     return { sent: [first], mentioned: [], skipped: [] };
   }
 
-  private onPipelineDone(sessionId: string, output: string): boolean {
+  private onPipelineDone(sessionId: string, output: string): string | undefined {
     for (const [roomId, flow] of this.pipelineFlows) {
       if (flow.order[flow.stage] !== sessionId) continue;
       const room = this.rooms.get(roomId);
       if (!room) {
         this.pipelineFlows.delete(roomId);
-        return true;
+        return roomId;
       }
       flow.outputs.push(output);
       this.captureArtifacts(sessionId, output);
@@ -937,7 +932,7 @@ export class RoomModeManager {
         this.pipelineFlows.delete(roomId);
         this.setSubMode(roomId, "pipeline", undefined, undefined);
         this.notice({ roomId, message: "流水线模式：全部阶段完成" });
-        return true;
+        return roomId;
       }
       const prevName = this.nameFor(roomId, flow.order[flow.stage]!);
       flow.stage = nextStage;
@@ -948,9 +943,9 @@ export class RoomModeManager {
       this.sendPrompt(room.roomId, nextSid, prompt).catch((err) => {
         logError("room-modes pipeline next stage", err);
       });
-      return true;
+      return roomId;
     }
-    return false;
+    return undefined;
   }
 
   private buildPipelinePrompt(
@@ -1027,12 +1022,12 @@ export class RoomModeManager {
     return { sent: [sideA], mentioned: [], skipped: [] };
   }
 
-  private onDebateDone(sessionId: string, output: string): boolean {
+  private onDebateDone(sessionId: string, output: string): string | undefined {
     for (const [roomId, flow] of this.debateFlows) {
       const room = this.rooms.get(roomId);
       if (!room) {
         this.debateFlows.delete(roomId);
-        return true;
+        return roomId;
       }
       const currentSid = flow.sides[flow.sideIndex]!;
       if (sessionId !== currentSid) continue;
@@ -1047,7 +1042,7 @@ export class RoomModeManager {
         this.sendPrompt(room.roomId, nextSid, prompt).catch((err) => {
           logError("room-modes debate next side", err);
         });
-        return true;
+        return roomId;
       }
 
       if (flow.currentRound < flow.rounds) {
@@ -1059,7 +1054,7 @@ export class RoomModeManager {
         this.sendPrompt(room.roomId, nextSid, prompt).catch((err) => {
           logError("room-modes debate next round", err);
         });
-        return true;
+        return roomId;
       }
 
       // 辩论结束，裁判总结
@@ -1070,9 +1065,9 @@ export class RoomModeManager {
       this.sendPrompt(room.roomId, flow.judge, judgePrompt).catch((err) => {
         logError("room-modes judge prompt", err);
       });
-      return true;
+      return roomId;
     }
-    return false;
+    return undefined;
   }
 
   private buildDebatePrompt(

@@ -78,11 +78,9 @@ describe("room-modes", () => {
     const output = `已修改 hub/src/room.ts\n\`\`\`bash\nnpx tsc --noEmit\n\`\`\``;
     await manager.onPromptDone("s1", output);
     const artifacts = rooms.getArtifacts(room.roomId, 10);
-    assert.equal(artifacts.length, 2);
-    const command = artifacts.find((a) => a.kind === "command");
-    const file = artifacts.find((a) => a.kind === "file");
-    assert.equal(command?.summary, "npx tsc --noEmit");
-    assert.equal(file?.path, "hub/src/room.ts");
+    assert.equal(artifacts.length, 1);
+    const event = artifacts.find((a) => a.kind === "event" && a.action === "command");
+    assert.equal(event?.summary, "npx tsc --noEmit");
   });
 
   it("mention 模式自动识别 alias 引用并注入上下文", async () => {
@@ -127,5 +125,34 @@ describe("room-modes", () => {
     const text = typeof worker?.text === "string" ? worker!.text : JSON.stringify(worker!.text);
     assert.ok(text?.includes("需要继续的文件"));
     assert.ok(text?.includes("a1"));
+  });
+
+  it("conductor 流程结束时通过 flowUpdate 清除进度面板", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ]);
+    room.mode = "conductor";
+    room.conductorId = "s1";
+    const agent: AgentOps = {
+      prompt: async () => {},
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const broadcasts: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) =>
+      broadcasts.push({ method, params }),
+    );
+    await manager.handle(room, "/task @tester 写测试");
+    const flowUpdates = () => broadcasts.filter((b) => b.method === "room.flowUpdate");
+    const lastFlow = () => flowUpdates().at(-1)?.params.flow as { phase?: string } | undefined;
+    assert.equal(lastFlow()?.phase, "working");
+
+    await manager.onPromptDone("s2", "完成了");
+    assert.equal(lastFlow()?.phase, "summarizing");
+
+    await manager.onPromptDone("s1", "最终总结");
+    assert.equal(lastFlow(), undefined);
   });
 });
