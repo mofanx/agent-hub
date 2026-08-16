@@ -1355,6 +1355,16 @@ html[data-theme="dark"] .drawer-item:hover {
   cursor: default;
 }
 
+.artifact-path {
+  flex-shrink: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .artifact-author {
   flex-shrink: 0;
   font-weight: 600;

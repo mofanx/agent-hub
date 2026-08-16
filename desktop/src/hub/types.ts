@@ -11,7 +11,6 @@ export type JsonObject = Record<string, JsonValue>;
 export interface ConnProfile {
   name: string;
   address: string;
-  port: string;
   token: string;
 }
 
@@ -55,6 +54,17 @@ export interface FlowArtifact {
   summary: string;
 }
 
+export interface EventInfo {
+  id: string;
+  author: string;
+  at: number;
+  action: "add" | "modify" | "delete" | "rename" | "command" | "test";
+  summary: string;
+  path?: string;
+  oldPath?: string;
+  taskId?: string;
+}
+
 export interface BlackboardInfo {
   id: string;
   from: string;
@@ -91,16 +101,10 @@ export interface FlowTask {
 export interface ArtifactInfo {
   id: string;
   alias?: string;
-  kind: "file" | "event";
-  /** 事件动作类型 */
-  action?: string;
   author: string;
   at: number;
   summary: string;
   path?: string;
-  /** 重命名事件中的原路径 */
-  oldPath?: string;
-  command?: string;
   taskId?: string;
 }
 
@@ -228,5 +232,5 @@ export interface AppConfig {
   commands: string[];
   theme: string;
   lang: string;
-  last: { address: string; port: string; token: string } | null;
+  last: { address: string; token: string } | null;
 }

@@ -34,12 +34,10 @@ fun HubProfileDialog(
     val S = LocalStrings.current
     var name by remember { mutableStateOf(profile?.name ?: "") }
     var host by remember { mutableStateOf(profile?.address ?: "") }
-    var port by remember { mutableStateOf(profile?.port ?: "8787") }
     var token by remember { mutableStateOf(profile?.token ?: "dev-token") }
 
     val isCurrent = profile != null && vm.currentProfile == profile
-    val hostPortChanged = profile != null &&
-        (profile.address != host.trim() || profile.port != port.trim())
+    val hostChanged = profile != null && profile.address != host.trim()
 
     val title = if (profile == null) "添加 Hub" else "编辑 Hub"
 
@@ -68,25 +66,14 @@ fun HubProfileDialog(
                     singleLine = true,
                 )
                 Spacer(Modifier.height(10.dp))
-                Row {
-                    OutlinedTextField(
-                        value = port,
-                        onValueChange = { port = it },
-                        label = { Text(S.portLabel) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(16.dp),
-                        singleLine = true,
-                    )
-                    Spacer(Modifier.size(10.dp))
-                    OutlinedTextField(
-                        value = token,
-                        onValueChange = { token = it },
-                        label = { Text(S.tokenLabel) },
-                        modifier = Modifier.weight(2f),
-                        shape = RoundedCornerShape(16.dp),
-                        singleLine = true,
-                    )
-                }
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    label = { Text(S.tokenLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    singleLine = true,
+                )
                 vm.connectError?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -99,7 +86,7 @@ fun HubProfileDialog(
         },
         confirmButton = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                val canSave = profile != null && !hostPortChanged
+                val canSave = profile != null && !hostChanged
                 if (canSave) {
                     TextButton(
                         onClick = {
@@ -107,7 +94,6 @@ fun HubProfileDialog(
                                 profile,
                                 name.trim(),
                                 host.trim(),
-                                port.trim(),
                                 token.trim(),
                                 connectNow = false,
                             )
@@ -124,7 +110,6 @@ fun HubProfileDialog(
                             profile,
                             name.trim(),
                             host.trim(),
-                            port.trim(),
                             token.trim(),
                             connectNow = true,
                         )
@@ -133,7 +118,7 @@ fun HubProfileDialog(
                     enabled = !vm.connecting && host.isNotBlank(),
                 ) {
                     val label = when {
-                        isCurrent && hostPortChanged -> "保存并切换"
+                        isCurrent && hostChanged -> "保存并切换"
                         isCurrent -> "保存并连接"
                         profile == null -> "添加并连接"
                         else -> "保存并连接"

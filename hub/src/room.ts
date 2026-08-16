@@ -32,8 +32,12 @@ export type Room = {
   /** 并发模式：汇总者 sessionId */
   parallelSummarizerId?: string | undefined;
   archived?: boolean | undefined;
-  /** 房间级作品/artifact 登记处 */
+  /** 房间共享黑板 */
+  blackboard?: BlackboardEntry[] | undefined;
+  /** 房间文件产物登记处 */
   artifacts?: Artifact[] | undefined;
+  /** 房间事件时间轴 */
+  events?: RoomEvent[] | undefined;
 };
 
 export type RoomModeConfig = {
@@ -46,37 +50,55 @@ export type RoomModeConfig = {
   memberRoles?: Record<string, string> | undefined;
 };
 
-type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
+export type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
 
 const BLACKBOARD_LIMIT = 10;
 const BLACKBOARD_OUTPUT_LEN = 400;
 
-export type ArtifactKind = "file" | "event";
+export type EventAction = "add" | "modify" | "delete" | "rename" | "command" | "test";
+
+export type RoomEvent = {
+  id: string;
+  author: string;
+  at: number;
+  action: EventAction;
+  summary: string;
+  path?: string | undefined;
+  oldPath?: string | undefined;
+  taskId?: string | undefined;
+};
 
 export type Artifact = {
   id: string;
   alias?: string | undefined;
-  kind: ArtifactKind;
-  /** 事件动作类型，如 delete / rename / command / test / note */
-  action?: string | undefined;
   author: string;
   at: number;
   summary: string;
   path?: string | undefined;
-  /** 重命名事件中的原路径 */
-  oldPath?: string | undefined;
-  command?: string | undefined;
   taskId?: string | undefined;
-  dependsOn?: string[] | undefined;
+};
+
+/** 兼容旧 persistence 的混合条目，导入时拆分 */
+type LegacyArtifact = Artifact & {
+  kind?: "file" | "event";
+  action?: string;
+  oldPath?: string;
+  command?: string;
+  dependsOn?: string[];
 };
 
 const ARTIFACT_LIMIT = 50;
 const ARTIFACT_PROMPT_LIMIT = 10;
 const ARTIFACT_SUMMARY_LEN = 240;
+const EVENT_LIMIT = 200;
 
 const FILE_REF_LIMIT = 5;
 const FILE_REF_CHAR_LIMIT = 10000;
 const FILE_REF_TOTAL_LIMIT = 50000;
+
+export function isEventAction(action: string | undefined): action is EventAction {
+  return !!action && ["add", "modify", "delete", "rename", "command", "test"].includes(action);
+}
 
 const BASE_DIR = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
 const FILES_DIR = path.resolve(BASE_DIR, "../data/files");
@@ -156,7 +178,6 @@ function shouldSkipFile(name: string): boolean {
 
 export class RoomManager {
   private rooms = new Map<string, Room>();
-  private blackboards = new Map<string, BlackboardEntry[]>();
   private aliasSeqs = new Map<string, number>();
   private getPersona?: (roleId: string) => string | undefined;
   private getCwd?: (sessionId: string) => string | undefined;
@@ -197,10 +218,11 @@ export class RoomManager {
       debateSides: config?.debateSides,
       debateJudge: config?.debateJudge,
       debateRounds: config?.debateRounds,
+      blackboard: [],
       artifacts: [],
+      events: [],
     };
     this.rooms.set(room.roomId, room);
-    this.blackboards.set(room.roomId, []);
     this.aliasSeqs.set(room.roomId, 0);
     this.dedupMemberNames(room.roomId);
     return room;
@@ -210,16 +232,52 @@ export class RoomManager {
     return this.rooms.get(roomId);
   }
 
-  /** 从持久化状态恢复（不覆盖黑板已有记录） */
+  /** 从持久化状态恢复：拆分旧 artifact、初始化黑板 */
   import(room: Room): void {
-    room.artifacts = room.artifacts ?? [];
+    const legacy: LegacyArtifact[] = (room.artifacts ?? []) as LegacyArtifact[];
+    const artifacts: Artifact[] = [];
+    const events: RoomEvent[] = [];
+    for (const a of legacy) {
+      if (a.kind === "file" || (!a.kind && a.path)) {
+        artifacts.push({
+          id: a.id,
+          alias: a.alias,
+          author: a.author,
+          at: a.at,
+          summary: a.summary,
+          path: a.path,
+          taskId: a.taskId,
+        });
+      } else if (a.kind === "event") {
+        const action = a.action as EventAction;
+        events.push({
+          id: a.id,
+          author: a.author,
+          at: a.at,
+          action: ["add", "modify", "delete", "rename", "command", "test"].includes(action) ? action : "command",
+          summary: a.summary,
+          path: a.path,
+          oldPath: a.oldPath,
+          taskId: a.taskId,
+        });
+      }
+    }
+    const resolveAuthor = (author: string) =>
+      room.members.find((m) => m.sessionId === author || m.name === author)?.sessionId ?? author;
+    for (const a of artifacts) a.author = resolveAuthor(a.author);
+    for (const e of events) e.author = resolveAuthor(e.author);
+    if (room.events) {
+      for (const e of room.events) e.author = resolveAuthor(e.author);
+    }
+    room.artifacts = artifacts;
+    room.events = room.events ?? events ?? [];
+    room.blackboard = room.blackboard ?? [];
     for (let i = 0; i < room.artifacts.length; i++) {
       if (!room.artifacts[i]!.alias) {
         room.artifacts[i]!.alias = `a${i + 1}`;
       }
     }
     this.rooms.set(room.roomId, room);
-    this.blackboards.set(room.roomId, []);
     this.aliasSeqs.set(room.roomId, room.artifacts.length);
   }
 
@@ -236,7 +294,6 @@ export class RoomManager {
       if (!room.members.some((m) => m.sessionId === sessionId)) continue;
       if ((room.mode === "conductor" || room.mode === "auto") && room.conductorId === sessionId) {
         this.rooms.delete(room.roomId);
-        this.blackboards.delete(room.roomId);
         dissolved.push(room.roomId);
         continue;
       }
@@ -246,7 +303,6 @@ export class RoomManager {
       }
       if (room.members.length < 2) {
         this.rooms.delete(room.roomId);
-        this.blackboards.delete(room.roomId);
         dissolved.push(room.roomId);
       }
     }
@@ -258,9 +314,7 @@ export class RoomManager {
   }
 
   delete(roomId: string): boolean {
-    const ok = this.rooms.delete(roomId);
-    this.blackboards.delete(roomId);
-    return ok;
+    return this.rooms.delete(roomId);
   }
 
   rename(roomId: string, name: string): Room {
@@ -342,31 +396,68 @@ export class RoomManager {
 
   /** 获取房间共享黑板 */
   getBlackboard(roomId: string): BlackboardEntry[] {
-    return [...(this.blackboards.get(roomId) ?? [])];
+    const room = this.rooms.get(roomId);
+    return [...(room?.blackboard ?? [])];
   }
 
-  /** 添加一个 artifact 到房间登记处 */
-  addArtifact(
+  private nextAlias(roomId: string): string {
+    const seq = (this.aliasSeqs.get(roomId) ?? 0) + 1;
+    this.aliasSeqs.set(roomId, seq);
+    return `a${seq}`;
+  }
+
+  memberName(roomId: string, sessionId: string): string {
+    const room = this.rooms.get(roomId);
+    return room?.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+  }
+
+  private resolveMember(room: Room, author?: string): { sessionId: string; name: string } | undefined {
+    if (!author) return undefined;
+    return room.members.find((m) => m.sessionId === author || m.name === author);
+  }
+
+  /** 添加一个文件产物；同房间同 path 时更新已有条目 */
+  addFile(
     roomId: string,
-    artifact: Omit<Artifact, "id" | "at" | "alias"> & { content?: string | undefined },
+    file: Omit<Artifact, "id" | "at" | "alias"> & { content?: string | undefined },
   ): Artifact | undefined {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
     const list = (room.artifacts ??= []);
-    const seq = (this.aliasSeqs.get(roomId) ?? 0) + 1;
-    this.aliasSeqs.set(roomId, seq);
+    const author = this.resolveMember(room, file.author)?.sessionId ?? file.author;
+    if (file.path) {
+      const existing = list.find((a) => a.path === file.path);
+      if (existing) {
+        existing.author = author;
+        existing.summary = file.summary;
+        existing.at = Date.now();
+        if (file.taskId) existing.taskId = file.taskId;
+        if (file.content && existing.path) {
+          const fileName = path.basename(existing.path);
+          const destDir = path.join(FILES_DIR, roomId, existing.id);
+          try {
+            fs.mkdirSync(destDir, { recursive: true });
+            fs.writeFileSync(path.join(destDir, fileName), file.content, "utf-8");
+          } catch {
+            // 缓存写入失败不阻塞 artifact 更新
+          }
+        }
+        return existing;
+      }
+    }
     const item: Artifact = {
-      ...artifact,
+      ...file,
+      author,
       id: randomUUID().slice(0, 8),
-      alias: `a${seq}`,
+      alias: this.nextAlias(roomId),
       at: Date.now(),
     };
-    if (artifact.content && item.path) {
+    if (file.content && item.path) {
       const fileName = path.basename(item.path);
       const destDir = path.join(FILES_DIR, roomId, item.id);
       try {
         fs.mkdirSync(destDir, { recursive: true });
-        fs.writeFileSync(path.join(destDir, fileName), artifact.content, "utf-8");
+        fs.writeFileSync(path.join(destDir, fileName), file.content, "utf-8");
       } catch {
         // 缓存写入失败不阻塞 artifact 注册
       }
@@ -376,14 +467,71 @@ export class RoomManager {
     return item;
   }
 
-  /** 获取房间 artifact 列表（按时间倒序） */
+  /** 添加一个事件到时间轴 */
+  addEvent(roomId: string, event: Omit<RoomEvent, "id" | "at">): RoomEvent | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const list = (room.events ??= []);
+    const item: RoomEvent = {
+      ...event,
+      author: this.resolveMember(room, event.author)?.sessionId ?? event.author,
+      id: randomUUID().slice(0, 8),
+      at: Date.now(),
+    };
+    list.push(item);
+    if (list.length > EVENT_LIMIT) list.shift();
+    return item;
+  }
+
+  /** 兼容旧 API：根据 kind 分发到 addFile / addEvent */
+  addArtifact(
+    roomId: string,
+    artifact: {
+      kind: "file" | "event";
+      author: string;
+      summary: string;
+      path?: string | undefined;
+      oldPath?: string | undefined;
+      taskId?: string | undefined;
+      action?: string | undefined;
+      content?: string | undefined;
+      alias?: string | undefined;
+    },
+  ): Artifact | RoomEvent | undefined {
+    if (artifact.kind === "file") {
+      return this.addFile(roomId, {
+        author: artifact.author,
+        summary: artifact.summary,
+        path: artifact.path,
+        taskId: artifact.taskId,
+        content: artifact.content,
+      });
+    }
+    return this.addEvent(roomId, {
+      author: artifact.author,
+      action: isEventAction(artifact.action) ? artifact.action : "command",
+      summary: artifact.summary,
+      path: artifact.path,
+      oldPath: artifact.oldPath,
+      taskId: artifact.taskId,
+    });
+  }
+
+  /** 获取房间文件产物列表（按时间倒序） */
   getArtifacts(roomId: string, limit = ARTIFACT_PROMPT_LIMIT): Artifact[] {
     const room = this.rooms.get(roomId);
     if (!room) return [];
     return [...(room.artifacts ?? [])].reverse().slice(0, limit);
   }
 
-  /** 删除某个 artifact */
+  /** 获取房间事件时间轴（按时间倒序） */
+  getEvents(roomId: string, limit = EVENT_LIMIT): RoomEvent[] {
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+    return [...(room.events ?? [])].reverse().slice(0, limit);
+  }
+
+  /** 从登记处移除某个产物（不删除磁盘文件） */
   removeArtifact(roomId: string, artifactId: string): boolean {
     const room = this.rooms.get(roomId);
     if (!room || !room.artifacts) return false;
@@ -392,17 +540,22 @@ export class RoomManager {
     return room.artifacts.length < before;
   }
 
-  /** 清空某个房间的 artifacts，可按 kind 过滤 */
-  clearArtifacts(roomId: string, kind?: ArtifactKind): number {
+  /** 清空房间的产物登记处 */
+  clearArtifacts(roomId: string): number {
     const room = this.rooms.get(roomId);
     if (!room || !room.artifacts) return 0;
     const before = room.artifacts.length;
-    room.artifacts = room.artifacts.filter((a) => (kind ? a.kind !== kind : false));
-    if (!kind) {
-      room.artifacts = [];
-      return before;
-    }
-    return before - room.artifacts.length;
+    room.artifacts = [];
+    return before;
+  }
+
+  /** 清空房间的事件时间轴 */
+  clearEvents(roomId: string): number {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.events) return 0;
+    const before = room.events.length;
+    room.events = [];
+    return before;
   }
 
   private resolveAllowedRoots(roomId: string, author?: string): { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] {
@@ -410,7 +563,7 @@ export class RoomManager {
     const roots: { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] = [];
     if (this.getCwd && room) {
       if (author) {
-        const member = room.members.find((m) => m.name === author);
+        const member = this.resolveMember(room, author);
         if (member) {
           const cwd = this.getCwd(member.sessionId);
           if (cwd) roots.push({ path: cwd, kind: "cwd", sessionId: member.sessionId });
@@ -543,14 +696,13 @@ export class RoomManager {
     if (!found) throw new Error("path outside project root");
     const { real, root } = found;
     const rel = path.relative(root, real);
-    const existing = room.artifacts?.find((a) => a.kind === "file" && a.path === rel);
+    const existing = room.artifacts?.find((a) => a.path === rel);
     if (existing) {
       existing.summary = summary ?? rel;
       existing.author = author ?? existing.author;
       existing.at = Date.now();
     }
-    const artifact = existing ?? this.addArtifact(roomId, {
-      kind: "file",
+    const artifact = existing ?? this.addFile(roomId, {
       author: author ?? "我",
       summary: summary ?? rel,
       path: rel,
@@ -560,8 +712,7 @@ export class RoomManager {
     fs.mkdirSync(destDir, { recursive: true });
     const dest = path.join(destDir, path.basename(real));
     fs.copyFileSync(real, dest);
-    this.addArtifact(roomId, {
-      kind: "event",
+    this.addEvent(roomId, {
       action: existing ? "modify" : "add",
       author: author ?? "系统",
       summary: existing ? `修改 ${rel}` : `新增 ${rel}`,
@@ -577,11 +728,10 @@ export class RoomManager {
     const lowerRef = ref.toLowerCase();
     const all = room.artifacts ?? [];
     const a = all.find((x) =>
-      x.kind === "file" &&
-      (x.id.toLowerCase() === lowerRef ||
-        (x.alias?.toLowerCase() === lowerRef) ||
-        (x.path?.toLowerCase() === lowerRef) ||
-        (x.path && path.basename(x.path).toLowerCase() === lowerRef))
+      x.id.toLowerCase() === lowerRef ||
+      (x.alias?.toLowerCase() === lowerRef) ||
+      (x.path?.toLowerCase() === lowerRef) ||
+      (x.path && path.basename(x.path).toLowerCase() === lowerRef)
     );
 
     if (a?.path) {
@@ -659,9 +809,8 @@ export class RoomManager {
     if (!fs.existsSync(real)) throw new Error("file not found");
     fs.unlinkSync(real);
     const rel = path.relative(root, real);
-    room.artifacts = (room.artifacts ?? []).filter((a) => !(a.kind === "file" && a.path === rel));
-    this.addArtifact(roomId, {
-      kind: "event",
+    room.artifacts = (room.artifacts ?? []).filter((a) => a.path !== rel);
+    this.addEvent(roomId, {
       action: "delete",
       author: author ?? "系统",
       summary: `删除 ${rel}`,
@@ -685,10 +834,9 @@ export class RoomManager {
     const oldRel = path.relative(fromRoot, fromReal);
     const newRel = path.relative(toFound.root, toFound.real);
     for (const a of room.artifacts ?? []) {
-      if (a.kind === "file" && a.path === oldRel) a.path = newRel;
+      if (a.path === oldRel) a.path = newRel;
     }
-    this.addArtifact(roomId, {
-      kind: "event",
+    this.addEvent(roomId, {
       action: "rename",
       author: author ?? "系统",
       summary: `${oldRel} → ${newRel}`,
@@ -791,7 +939,7 @@ export class RoomManager {
   }
 
   /** 删除指定 session 允许路径内的文件 */
-  sessionDeleteFile(sessionId: string, filePath: string): boolean {
+  sessionDeleteFile(sessionId: string, filePath: string): { deleted: boolean; rel: string } {
     const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
     const found = this.resolveEntry(filePath, roots, "file");
     if (!found) {
@@ -801,11 +949,11 @@ export class RoomManager {
     }
     if (!fs.existsSync(found.real)) throw new Error("file not found");
     fs.unlinkSync(found.real);
-    return true;
+    return { deleted: true, rel: path.relative(found.root, found.real) };
   }
 
   /** 重命名指定 session 允许路径内的文件 */
-  sessionRenameFile(sessionId: string, from: string, to: string): boolean {
+  sessionRenameFile(sessionId: string, from: string, to: string): { renamed: boolean; fromRel: string; toRel: string } {
     const roots = this.sessionFileRoots(sessionId).map((r) => r.path);
     const fromFound = this.resolveEntry(from, roots, "file");
     if (!fromFound) throw new Error("source path outside project root");
@@ -814,7 +962,11 @@ export class RoomManager {
     if (!fs.existsSync(fromFound.real)) throw new Error("source file not found");
     if (fs.existsSync(toFound.real)) throw new Error("target file already exists");
     fs.renameSync(fromFound.real, toFound.real);
-    return true;
+    return {
+      renamed: true,
+      fromRel: path.relative(fromFound.root, fromFound.real),
+      toRel: path.relative(toFound.root, toFound.real),
+    };
   }
 
   /** 解析文本中显式引用的 artifact alias / id / path */
@@ -955,7 +1107,7 @@ export class RoomManager {
     const room = this.rooms.get(roomId)!;
     const roleId = room.memberRoles?.[excludeSessionId];
     const resolved = persona ?? (roleId ? this.getPersona?.(roleId) : undefined) ?? roleId;
-    const board = (this.blackboards.get(roomId) ?? [])
+    const board = (room.blackboard ?? [])
       .filter((e) => e.from !== excludeSessionId)
       .slice(-BLACKBOARD_LIMIT);
     const artifacts = this.getArtifactsForPrompt(roomId, excludeSessionId, artifactContext);
@@ -976,23 +1128,10 @@ export class RoomManager {
     } else {
       for (const e of board) lines.push(`- ${e.from}: ${e.text}`);
     }
-    const fileArtifacts = artifacts.filter((a) => a.kind === "file");
-    const eventArtifacts = artifacts.filter((a) => a.kind !== "file");
-    if (fileArtifacts.length > 0) {
+    if (artifacts.length > 0) {
       lines.push("", "最近产物（文件）：");
-      for (const a of fileArtifacts) {
-        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`];
-        if (a.path) parts.push(a.path);
-        parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
-        lines.push(`- ${parts.join(" ")}`);
-      }
-    }
-    if (eventArtifacts.length > 0) {
-      lines.push("", "最近事件：");
-      for (const a of eventArtifacts) {
-        const action = a.action ?? a.kind;
-        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${a.author}`, `[${action}]`];
-        if (a.oldPath) parts.push(`${a.oldPath} →`);
+      for (const a of artifacts) {
+        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${this.memberName(roomId, a.author)}`];
         if (a.path) parts.push(a.path);
         parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
         lines.push(`- ${parts.join(" ")}`);
@@ -1077,19 +1216,19 @@ export class RoomManager {
 
   /** 删除黑板上的某条摘要 */
   removeBlackboard(roomId: string, id: string): boolean {
-    const board = this.blackboards.get(roomId);
-    if (!board) return false;
-    const before = board.length;
-    const idx = board.findIndex((e) => e.id === id);
-    if (idx >= 0) board.splice(idx, 1);
-    return board.length < before;
+    const room = this.rooms.get(roomId);
+    if (!room || !room.blackboard) return false;
+    const before = room.blackboard.length;
+    const idx = room.blackboard.findIndex((e) => e.id === id);
+    if (idx >= 0) room.blackboard.splice(idx, 1);
+    return room.blackboard.length < before;
   }
 
   /** 清空房间黑板 */
   clearBlackboard(roomId: string): boolean {
-    const board = this.blackboards.get(roomId);
-    if (!board || board.length === 0) return false;
-    board.length = 0;
+    const room = this.rooms.get(roomId);
+    if (!room || !room.blackboard || room.blackboard.length === 0) return false;
+    room.blackboard.length = 0;
     return true;
   }
 
@@ -1102,7 +1241,7 @@ export class RoomManager {
     const id = randomUUID();
     for (const room of this.rooms.values()) {
       if (!room.members.some((m) => m.sessionId === sessionId)) continue;
-      const board = this.blackboards.get(room.roomId)!;
+      const board = (room.blackboard ??= []);
       board.push({ id, from: sessionName, text, detail, at: Date.now() });
       if (board.length > BLACKBOARD_LIMIT) board.shift();
       touched.push(room.roomId);

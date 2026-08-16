@@ -7,6 +7,7 @@ import type {
   ConnProfile,
   ConnectionInfo,
   ContextUsage,
+  EventInfo,
   FlowInfo,
   ModelInfo,
   Attachment,
@@ -52,6 +53,7 @@ interface State {
   currentSession: SessionInfo | null;
   currentRoom: RoomInfo | null;
   currentArtifacts: ArtifactInfo[] | null;
+  currentEvents: EventInfo[] | null;
   blackboard: BlackboardInfo[] | null;
   chatItems: ChatItem[];
   busyIds: string[];
@@ -97,7 +99,7 @@ interface Actions {
   updateThemeMode(mode: string): void;
   updateLang(lang: string): void;
 
-  connect(host: string, port: string, token: string, name?: string): void;
+  connect(address: string, token: string, name?: string): void;
   disconnect(): void;
   toggleDrawer(): void;
   closeDrawer(): void;
@@ -176,15 +178,15 @@ interface Actions {
   syncBusyIdsFromList(list: SessionInfo[]): void;
   syncBusyIds(): Promise<void>;
   handleSlashCommand(text: string): boolean;
-  saveProfileAndConnect(address: string, port: string, token: string, name?: string): void;
+  saveProfileAndConnect(address: string, token: string, name?: string): void;
   refreshFlow(roomId: string): Promise<void>;
   setFlow(flow: FlowInfo | null): void;
-  refreshArtifacts(roomId: string): Promise<void>;
+  refreshArtifacts(scope: { roomId: string } | { sessionId: string }): Promise<void>;
   refreshBlackboard(roomId: string): Promise<void>;
   removeBlackboard(roomId: string, id: string): Promise<void>;
   clearBlackboard(roomId: string): Promise<void>;
   removeArtifact(roomId: string, artifactId: string): Promise<void>;
-  clearArtifacts(roomId: string, kind?: ArtifactInfo["kind"]): Promise<void>;
+  clearArtifacts(roomId: string, kind?: "file" | "event"): Promise<void>;
   quoteArtifact(artifact: ArtifactInfo): void;
   clearFileRef(): void;
   clearNewArtifacts(): void;
@@ -212,7 +214,31 @@ const defaultConfig: AppConfig = {
 };
 
 function profileKey(p: ConnProfile): string {
-  return `${p.address}\u0001${p.port}`;
+  return p.address;
+}
+
+function buildWsUrl(address: string, token: string): string {
+  const hasScheme = address.startsWith("ws://") || address.startsWith("wss://");
+  if (hasScheme) {
+    return `${address}${address.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+  }
+  const host = address.includes(":") ? address : `${address}:8787`;
+  return `ws://${host}/?token=${encodeURIComponent(token)}`;
+}
+
+function migrateAddress(address: string, port?: string): string {
+  if (!port || address.includes(":")) return address;
+  return `${address}:${port}`;
+}
+
+function migrateProfile(p: unknown): ConnProfile {
+  const o = p as Record<string, unknown>;
+  const address = migrateAddress(String(o.address ?? ""), o.port as string | undefined);
+  return {
+    name: String(o.name ?? ""),
+    address,
+    token: String(o.token ?? ""),
+  };
 }
 
 function findLastIndex<T>(arr: T[], pred: (it: T) => boolean): number {
@@ -299,7 +325,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     if (currentRoom) setHistoryCache("room", currentRoom.roomId, chatItems);
   };
 
-  const saveLastProfile = async (address: string, port: string, token: string) => {
+  const saveLastProfile = async (address: string, token: string) => {
     const cfg: AppConfig = {
       ...defaultConfig,
       profiles: get().profiles,
@@ -308,7 +334,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       commands: get().customCommands,
       theme: get().themeMode,
       lang: get().lang,
-      last: { address, port, token },
+      last: { address, token },
     };
     try {
       await saveConfig(JSON.stringify(cfg));
@@ -408,7 +434,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const room = get().currentRoom;
         if (room && room.roomId === roomId) {
           set({ flow: (params.flow as FlowInfo) ?? null });
-          get().refreshArtifacts(roomId);
+          get().refreshArtifacts({ roomId });
         }
         break;
       }
@@ -433,7 +459,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
       case "room.artifact": {
         const roomId = String(params.roomId ?? "");
         if (roomId && get().currentRoom?.roomId === roomId) {
-          get().refreshArtifacts(roomId);
+          get().refreshArtifacts({ roomId });
+        }
+        break;
+      }
+      case "session.artifact": {
+        const sessionId = String(params.sessionId ?? "");
+        if (sessionId && get().currentSession?.sessionId === sessionId) {
+          get().refreshArtifacts({ sessionId });
         }
         break;
       }
@@ -624,6 +657,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     currentSession: null,
     currentRoom: null,
     currentArtifacts: null,
+    currentEvents: null,
     blackboard: null,
     chatItems: [],
     busyIds: [],
@@ -668,10 +702,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
     loadConfigFromDisk: async () => {
       try {
         const raw = await loadConfig();
-        const cfg: Partial<AppConfig> = raw ? (JSON.parse(raw) as Partial<AppConfig>) : {};
+        const cfg: Partial<AppConfig> & { profiles?: unknown[]; last?: { address?: string; port?: string; token?: string } | null } = raw
+          ? (JSON.parse(raw) as Partial<AppConfig>)
+          : {};
         const S = stringsFor(cfg.lang ?? "zh");
+        const profiles = (cfg.profiles ?? []).map(migrateProfile);
+        if (cfg.last?.port && cfg.last.address && !cfg.last.address.includes(":")) {
+          cfg.last.address = `${cfg.last.address}:${cfg.last.port}`;
+        }
         set({
-          profiles: cfg.profiles ?? [],
+          profiles,
           pinnedIds: cfg.pinned ?? [],
           recentCwds: cfg.cwds ?? [],
           customCommands: cfg.commands ?? [],
@@ -739,13 +779,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
       persist();
     },
 
-    connect: (host: string, port: string, token: string, name?: string) => {
+    connect: (address: string, token: string, name?: string) => {
       get().disconnect();
       set({ connecting: true, connectError: null });
-      const url =
-        host.startsWith("ws://") || host.startsWith("wss://")
-          ? `${host}${host.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`
-          : `ws://${host}:${port}/?token=${encodeURIComponent(token)}`;
+      const url = buildWsUrl(address, token);
 
       const client = new HubClient({ heartbeatIntervalMs: 20000, maxReconnectDelayMs: 60000 });
       set({ client });
@@ -763,7 +800,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         url,
         () => {
           set({ connecting: false, connectError: null });
-          get().saveProfileAndConnect(host, port, token, name);
+          get().saveProfileAndConnect(address, token, name);
         },
         (msg) => {
           set({ connecting: false, connectError: msg });
@@ -781,6 +818,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         connections: [],
         currentSession: null,
         currentRoom: null,
+        currentArtifacts: null,
+        currentEvents: null,
+        blackboard: null,
         chatItems: [],
         busyIds: [],
         quote: null,
@@ -819,7 +859,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     switchProfile: (p: ConnProfile) => {
       const current = get().currentProfile;
       if (current && profileKey(current) === profileKey(p)) return;
-      get().connect(p.address, p.port, p.token, p.name);
+      get().connect(p.address, p.token, p.name);
     },
 
     refreshAll: async () => {
@@ -967,6 +1007,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         currentSession: session,
         currentRoom: null,
         currentArtifacts: null,
+        currentEvents: null,
+        blackboard: null,
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
@@ -978,6 +1020,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historySearchContext: anchorAt != null,
       });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
+      get().refreshArtifacts({ sessionId: session.sessionId });
     },
 
     openRoom: (room: RoomInfo, anchorAt?: number) => {
@@ -987,6 +1030,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         currentRoom: room,
         currentSession: null,
         currentArtifacts: null,
+        currentEvents: null,
+        blackboard: null,
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
@@ -1000,7 +1045,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
       get().loadHistory("room.history", "roomId", room.roomId, anchorAt);
       get().refreshFlow(room.roomId);
-      get().refreshArtifacts(room.roomId);
+      get().refreshArtifacts({ roomId: room.roomId });
       get().refreshBlackboard(room.roomId);
     },
 
@@ -1249,6 +1294,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         currentSession: null,
         currentRoom: null,
         currentArtifacts: null,
+        currentEvents: null,
+        blackboard: null,
         jumpToAt: null,
         jumpQuery: "",
         historySearchContext: false,
@@ -1643,16 +1690,63 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ flow });
     },
 
-    refreshArtifacts: async (roomId: string) => {
+    refreshArtifacts: async (scope: { roomId: string } | { sessionId: string }) => {
       const client = get().client;
       if (!client) return;
+      const isRoom = "roomId" in scope;
+      if (isRoom && get().currentRoom?.roomId !== scope.roomId) return;
+      if (!isRoom && get().currentSession?.sessionId !== scope.sessionId) return;
       try {
-        const result = (await client.call("room.artifacts", { roomId })) as Record<string, unknown>;
-        const artifacts = (result.artifacts as ArtifactInfo[] | undefined) ?? [];
+        const result = (await client.call(
+          isRoom ? "room.artifacts" : "session.artifacts",
+          isRoom ? { roomId: scope.roomId } : { sessionId: scope.sessionId },
+        )) as Record<string, unknown>;
+        const artifacts = ((result.artifacts as unknown[]) ?? []).map((it) => {
+          const a = it as Record<string, unknown>;
+          return {
+            id: String(a.id ?? ""),
+            alias: typeof a.alias === "string" ? a.alias : undefined,
+            author: String(a.author ?? ""),
+            at: typeof a.at === "number" ? a.at : 0,
+            summary: String(a.summary ?? ""),
+            path: typeof a.path === "string" ? a.path : undefined,
+            taskId: typeof a.taskId === "string" ? a.taskId : undefined,
+          } as ArtifactInfo;
+        });
+        const events = ((result.events as unknown[]) ?? []).map((it) => {
+          const e = it as Record<string, unknown>;
+          const action = String(e.action ?? "");
+          return {
+            id: String(e.id ?? ""),
+            author: String(e.author ?? ""),
+            at: typeof e.at === "number" ? e.at : 0,
+            action: ["add", "modify", "delete", "rename", "command", "test"].includes(action)
+              ? (action as EventInfo["action"])
+              : "command",
+            summary: String(e.summary ?? ""),
+            path: typeof e.path === "string" ? e.path : undefined,
+            oldPath: typeof e.oldPath === "string" ? e.oldPath : undefined,
+            taskId: typeof e.taskId === "string" ? e.taskId : undefined,
+          } as EventInfo;
+        });
+        const blackboard = isRoom
+          ? ((result.blackboard as unknown[]) ?? []).map((it) => {
+              const e = it as Record<string, unknown>;
+              return {
+                id: String(e.id ?? ""),
+                from: String(e.from ?? ""),
+                text: String(e.text ?? ""),
+                detail: String(e.detail ?? ""),
+                at: typeof e.at === "number" ? e.at : 0,
+              } as BlackboardInfo;
+            })
+          : get().blackboard;
         const maxAt = artifacts.length ? Math.max(...artifacts.map((a) => a.at)) : 0;
         const last = get().lastArtifactAt;
         set({
           currentArtifacts: artifacts,
+          currentEvents: events,
+          ...(isRoom ? { blackboard } : {}),
           lastArtifactAt: last === 0 ? maxAt : Math.max(last, maxAt),
           hasNewArtifacts: last !== 0 && maxAt > last,
         });
@@ -1702,21 +1796,29 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    removeArtifact: async (roomId: string, artifactId: string) => {
+    removeArtifact: async (contextId: string, artifactId: string) => {
       const client = get().client;
       if (!client) return;
+      const isSession = !get().currentRoom && !!get().currentSession;
       try {
-        await client.call("room.removeArtifact", { roomId, artifactId });
+        await client.call(
+          isSession ? "session.removeArtifact" : "room.removeArtifact",
+          isSession ? { sessionId: contextId, artifactId } : { roomId: contextId, artifactId },
+        );
       } catch (err) {
         alert(`删除失败：${err}`);
       }
     },
 
-    clearArtifacts: async (roomId: string, kind?: ArtifactInfo["kind"]) => {
+    clearArtifacts: async (contextId: string, kind?: "file" | "event") => {
       const client = get().client;
       if (!client) return;
+      const isSession = !get().currentRoom && !!get().currentSession;
       try {
-        await client.call("room.clearArtifacts", { roomId, kind });
+        const method = isSession
+          ? kind === "event" ? "session.clearEvents" : "session.clearArtifacts"
+          : kind === "event" ? "room.clearEvents" : "room.clearArtifacts";
+        await client.call(method, isSession ? { sessionId: contextId } : { roomId: contextId, kind });
       } catch (err) {
         alert(`清空失败：${err}`);
       }
@@ -1748,22 +1850,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     quoteArtifact: (artifact: ArtifactInfo) => {
       const ref = artifact.path ? `#${artifact.path}` : `@${artifact.alias ?? artifact.id}`;
-      set({ fileRefToInsert: `${ref} `, quote: [artifact.author, artifact.summary] });
+      set({ fileRefToInsert: `${ref} `, quote: [get().sessionName(artifact.author), artifact.summary] });
     },
     clearFileRef: () => set({ fileRefToInsert: null }),
     clearNewArtifacts: () => set({ hasNewArtifacts: false }),
 
-    saveProfileAndConnect: (address: string, port: string, token: string, name?: string) => {
+    saveProfileAndConnect: (address: string, token: string, name?: string) => {
       const derived = address
         .replace(/^wss?:\/\//, "")
       .split(/[\/\?:]/)[0];
       const profileName = name?.trim() || derived;
-      let profiles = get().profiles.filter((p) => !(p.address === address && p.port === port));
-      const profile: ConnProfile = { name: profileName, address, port, token };
+      let profiles = get().profiles.filter((p) => p.address !== address);
+      const profile: ConnProfile = { name: profileName, address, token };
       profiles = [...profiles, profile];
       set({ profiles, currentProfile: profile, drawerOpen: false });
       persist();
-      saveLastProfile(address, port, token).catch(() => {});
+      saveLastProfile(address, token).catch(() => {});
       set({ screen: "sessions" });
       get().refreshAll();
     },

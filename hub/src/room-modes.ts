@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ArtifactKind, Room, RoomManager, RoomMode } from "./room.js";
+import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
 import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 
@@ -195,18 +195,25 @@ export class RoomModeManager {
       this.promptRooms.delete(sessionId);
       return;
     }
-    const name = room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
     const result = extractTaskResult(output);
     for (const a of result.artifacts) {
-      this.rooms.addArtifact(roomId, {
-        kind: a.type as ArtifactKind,
-        action: a.action,
-        author: name,
-        summary: a.summary,
-        path: a.path,
-        content: a.content,
-        taskId,
-      });
+      if (a.type === "file") {
+        this.rooms.addFile(roomId, {
+          author: sessionId,
+          summary: a.summary,
+          path: a.path,
+          taskId,
+          content: a.content,
+        });
+      } else if (a.type === "event" && isEventAction(a.action)) {
+        this.rooms.addEvent(roomId, {
+          author: sessionId,
+          action: a.action,
+          summary: a.summary,
+          path: a.path,
+          taskId,
+        });
+      }
     }
     this.promptRooms.delete(sessionId);
   }
@@ -547,6 +554,16 @@ export class RoomModeManager {
       if (flow.role === "conductor" && flow.phase !== "summarizing") return true;
     }
     return false;
+  }
+
+  /** 这次输出是否属于某个房间回合（含隐藏编排） */
+  isRoomTurn(sessionId: string): boolean {
+    return this.promptRooms.has(sessionId)
+      || this.autoDecisions.has(sessionId)
+      || this.conductor.getFlowForSession(sessionId) != null
+      || [...this.parallelFlows.values()].some((f) => f.pending.has(sessionId))
+      || [...this.pipelineFlows.values()].some((f) => f.order[f.stage] === sessionId)
+      || [...this.debateFlows.values()].some((f) => f.sides.includes(sessionId) || f.judge === sessionId);
   }
 
   /** 用于 prompt.done 跳过广播：是否是内部工作输出 */

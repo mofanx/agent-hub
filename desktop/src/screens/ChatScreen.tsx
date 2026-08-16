@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { marked } from "marked";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
-import type { ArtifactInfo, BlackboardInfo, ChatItem, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 
 function escapeHtml(text: string): string {
@@ -133,7 +133,7 @@ export function ChatScreen() {
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [fileTreeInitialPath, setFileTreeInitialPath] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<{ name: string; text?: string; data?: string; mime?: string } | null>(null);
-  const [activeContext, setActiveContext] = useState<"flow" | "blackboard" | "artifact" | null>(null);
+  const [activeContext, setActiveContext] = useState<"flow" | "blackboard" | "artifact" | "event" | null>(null);
   const [fileRef, setFileRef] = useState<{
     query: { at: number; q: string; dir: string; filter: string };
     candidates: (FileTreeRoot | FileTreeNode)[];
@@ -647,14 +647,23 @@ export function ChatScreen() {
         )}
       </div>
 
-      {isRoom && store.currentRoom && (
+      {store.currentRoom && (
         <RoomContextPanel
           flow={store.flow}
           blackboard={store.blackboard}
           artifacts={store.currentArtifacts ?? []}
+          events={store.currentEvents ?? []}
           roomMode={store.currentRoom.mode}
           active={activeContext}
           onChange={setActiveContext}
+        />
+      )}
+      {!store.currentRoom && store.currentSession && (
+        <SessionContextPanel
+          artifacts={store.currentArtifacts ?? []}
+          events={store.currentEvents ?? []}
+          active={activeContext === "artifact" || activeContext === "event" ? activeContext : null}
+          onChange={(next) => setActiveContext(next)}
         />
       )}
 
@@ -828,7 +837,7 @@ export function ChatScreen() {
                         onClick={() => insertArtifactMention(a)}
                         onMouseEnter={() => setSuggestIndex(i)}
                       >
-                        {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)} · @{a.author}
+                        {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)} · @{store.sessionName(a.author)}
                       </div>
                     ))}
               </div>
@@ -1217,10 +1226,58 @@ function ChatMessage({
   }
 }
 
+function SessionContextPanel({
+  artifacts,
+  events,
+  active,
+  onChange,
+}: {
+  artifacts: ArtifactInfo[];
+  events: EventInfo[];
+  active: "artifact" | "event" | null;
+  onChange: (active: "artifact" | "event" | null) => void;
+}) {
+  const store = useHubStore();
+  const artifactCount = artifacts.length;
+  const eventCount = events.length;
+  const toggle = (key: "artifact" | "event") => {
+    if (key === "artifact") store.clearNewArtifacts();
+    onChange(active === key ? null : key);
+  };
+  return (
+    <div className="context-panel">
+      <div className="context-bar">
+        <button
+          className={`context-capsule ${active === "artifact" ? "active" : ""}`}
+          onClick={() => toggle("artifact")}
+          disabled={artifactCount === 0}
+          title="产物"
+        >
+          {active === "artifact" ? "▾ " : "▸ "}产物
+          {artifactCount > 0 ? ` · ${artifactCount}` : ""}
+          {store.hasNewArtifacts && active !== "artifact" && <span className="new-dot" />}
+        </button>
+        <button
+          className={`context-capsule ${active === "event" ? "active" : ""}`}
+          onClick={() => toggle("event")}
+          disabled={eventCount === 0}
+          title="事件"
+        >
+          {active === "event" ? "▾ " : "▸ "}事件
+          {eventCount > 0 ? ` · ${eventCount}` : ""}
+        </button>
+      </div>
+      {active === "artifact" && <ArtifactPanel artifacts={artifacts} minimal />}
+      {active === "event" && <EventPanel events={events} minimal />}
+    </div>
+  );
+}
+
 function RoomContextPanel({
   flow,
   blackboard,
   artifacts,
+  events,
   roomMode,
   active,
   onChange,
@@ -1228,17 +1285,19 @@ function RoomContextPanel({
   flow: FlowInfo | null;
   blackboard: BlackboardInfo[] | null;
   artifacts: ArtifactInfo[];
+  events: EventInfo[];
   roomMode: string;
-  active: "flow" | "blackboard" | "artifact" | null;
-  onChange: (active: "flow" | "blackboard" | "artifact" | null) => void;
+  active: "flow" | "blackboard" | "artifact" | "event" | null;
+  onChange: (active: "flow" | "blackboard" | "artifact" | "event" | null) => void;
 }) {
   const store = useHubStore();
   const flowCount = flow?.tasks?.length ?? 0;
   const blackboardCount = blackboard?.length ?? 0;
   const artifactCount = artifacts.length;
+  const eventCount = events.length;
   const progress = flow?.progress;
 
-  const toggle = (key: "flow" | "blackboard" | "artifact") => {
+  const toggle = (key: "flow" | "blackboard" | "artifact" | "event") => {
     if (key === "artifact") store.clearNewArtifacts();
     onChange(active === key ? null : key);
   };
@@ -1274,10 +1333,20 @@ function RoomContextPanel({
           {artifactCount > 0 ? ` · ${artifactCount}` : ""}
           {store.hasNewArtifacts && active !== "artifact" && <span className="new-dot" />}
         </button>
+        <button
+          className={`context-capsule ${active === "event" ? "active" : ""}`}
+          onClick={() => toggle("event")}
+          disabled={eventCount === 0}
+          title="事件"
+        >
+          {active === "event" ? "▾ " : "▸ "}事件
+          {eventCount > 0 ? ` · ${eventCount}` : ""}
+        </button>
       </div>
       {active === "flow" && <FlowPanel flow={flow} roomMode={roomMode} minimal />}
       {active === "blackboard" && <BlackboardPanel blackboard={blackboard} />}
       {active === "artifact" && <ArtifactPanel artifacts={artifacts} minimal />}
+      {active === "event" && <EventPanel events={events} minimal />}
     </div>
   );
 }
@@ -1384,6 +1453,8 @@ type FileGetResult = {
 function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo[]; minimal?: boolean }) {
   const store = useHubStore();
   const roomId = store.currentRoom?.roomId;
+  const sessionId = store.currentSession?.sessionId;
+  const contextId = roomId ?? sessionId;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("artifactPanelCollapsed") === "1");
   const [preview, setPreview] = useState<(FileGetResult & { name: string }) | null>(null);
   const [managing, setManaging] = useState(false);
@@ -1391,20 +1462,14 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   useEffect(() => {
     localStorage.setItem("artifactPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
-  const groups = useMemo(() => {
-    const g: Record<string, ArtifactInfo[]> = {};
-    for (const a of artifacts) {
-      (g[a.kind] ??= []).push(a);
-    }
-    return g;
-  }, [artifacts]);
 
   const fetchFile = async (artifact: ArtifactInfo): Promise<FileGetResult | null> => {
     const client = store.client;
-    const roomId = store.currentRoom?.roomId;
-    if (!client || !roomId) return null;
-    const result = (await client.call("file.get", { roomId, artifactId: artifact.id })) as FileGetResult;
-    return result;
+    if (!client || !contextId) return null;
+    const params = roomId
+      ? { roomId, artifactId: artifact.id }
+      : { sessionId: contextId, path: artifact.path ?? artifact.id };
+    return (await client.call("file.get", params)) as FileGetResult;
   };
 
   const saveBlob = (name: string, blob: Blob) => {
@@ -1458,7 +1523,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   };
 
   const onDeleteSelected = async () => {
-    if (!roomId || selected.size === 0) return;
+    if (!contextId || selected.size === 0) return;
     const list = Array.from(selected);
     const names = list
       .map((id) => {
@@ -1467,15 +1532,15 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
       })
       .join(", ");
     if (!window.confirm(`确认删除选中的 ${list.length} 个产物？\n${names}`)) return;
-    await Promise.all(list.map((id) => store.removeArtifact(roomId, id)));
+    await Promise.all(list.map((id) => store.removeArtifact(contextId, id)));
     setSelected(new Set());
     setManaging(false);
   };
 
   const onClearAll = async () => {
-    if (!roomId) return;
+    if (!contextId) return;
     if (!window.confirm("确认清空全部产物？")) return;
-    await store.clearArtifacts(roomId);
+    await store.clearArtifacts(contextId);
     setSelected(new Set());
     setManaging(false);
   };
@@ -1506,74 +1571,66 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
 
   const list = (
     <div className="artifact-list">
-      {Object.entries(groups).map(([kind, list]) => (
-        <div key={kind} className={`artifact-group artifact-group-${kind}`}>
-          <div className="artifact-group-title">{kindIcon(kind)} {kindLabel(kind)}</div>
-          {list.map((a) => (
-            <div
-              key={a.id}
-              className={`artifact-item artifact-kind-${kind} ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""}`}
-              title={a.path ? `${a.path}\n${a.summary}` : a.summary}
-            >
-              {managing && (
-                <input
-                  type="checkbox"
-                  checked={selected.has(a.id)}
-                  onChange={(e) => {
-                    setSelected((prev) => {
-                      const next = new Set(prev);
-                      if (e.target.checked) next.add(a.id);
-                      else next.delete(a.id);
-                      return next;
-                    });
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              )}
-              <div className="artifact-info" onClick={() => managing && toggleSelected(a.id)}>
-                <span className="artifact-kind-badge">{kindIcon(kind)}</span>
-                <span className="artifact-author">@{a.author}</span>
-                <span className="artifact-time">{formatArtifactTime(a.at)}</span>
-                <span className="artifact-summary">{a.path ? `${a.path} · ` : ""}{a.summary}</span>
-              </div>
-              {!managing && (
-                <div className="artifact-actions">
-                  <button
-                    className="artifact-action"
-                    title="引用"
-                    onClick={() => store.quoteArtifact(a)}
-                  >
-                    引
-                  </button>
-                  {a.kind === "file" && (
-                    <>
-                      <button
-                        className="artifact-action"
-                        title="预览"
-                        onClick={() => handlePreview(a)}
-                      >
-                        看
-                      </button>
-                      <button
-                        className="artifact-action"
-                        title="下载"
-                        onClick={() => handleDownload(a)}
-                      >
-                        ↓
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
+      {artifacts.map((a) => (
+        <div
+          key={a.id}
+          className={`artifact-item artifact-kind-file ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""}`}
+          title={a.path ? `${a.path}\n${a.summary}` : a.summary}
+        >
+          {managing && (
+            <input
+              type="checkbox"
+              checked={selected.has(a.id)}
+              onChange={(e) => {
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  if (e.target.checked) next.add(a.id);
+                  else next.delete(a.id);
+                  return next;
+                });
+              }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          )}
+          <div className="artifact-info" onClick={() => managing && toggleSelected(a.id)}>
+            <span className="artifact-kind-badge">{kindIcon("file")}</span>
+            <span className="artifact-path">{a.path ?? a.alias ?? a.id}</span>
+            <span className="artifact-author">@{store.sessionName(a.author)}</span>
+            <span className="artifact-time">{formatArtifactTime(a.at)}</span>
+            <span className="artifact-summary">{a.summary}</span>
+          </div>
+          {!managing && (
+            <div className="artifact-actions">
+              <button
+                className="artifact-action"
+                title="引用"
+                onClick={() => store.quoteArtifact(a)}
+              >
+                引
+              </button>
+              <button
+                className="artifact-action"
+                title="预览"
+                onClick={() => handlePreview(a)}
+              >
+                看
+              </button>
+              <button
+                className="artifact-action"
+                title="下载"
+                onClick={() => handleDownload(a)}
+              >
+                ↓
+              </button>
             </div>
-          ))}
+          )}
         </div>
       ))}
     </div>
   );
 
   const countText = `${artifacts.length} 条`;
-  const listContent = Object.keys(groups).length > 0 ? list : <div className="context-empty">没有产物</div>;
+  const listContent = artifacts.length > 0 ? list : <div className="context-empty">没有产物</div>;
 
   return (
     <>
@@ -1646,33 +1703,76 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   );
 }
 
-function kindIcon(kind: string, action?: string): string {
+function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?: boolean }) {
+  const store = useHubStore();
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("eventPanelCollapsed") === "1");
+  useEffect(() => {
+    localStorage.setItem("eventPanelCollapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
+
+  const list = (
+    <div className="artifact-list event-list">
+      {events.map((e) => (
+        <div key={e.id} className="artifact-item artifact-kind-event" title={e.summary}>
+          <div className="artifact-info">
+            <span className="artifact-kind-badge">{eventIcon(e.action)}</span>
+            <span className="artifact-author">@{store.sessionName(e.author)}</span>
+            <span className="artifact-time">{formatArtifactTime(e.at)}</span>
+            <span className="artifact-summary">
+              {eventLabel(e.action)} · {e.oldPath ? `${e.oldPath} → ` : ""}
+              {e.path ? `${e.path} · ` : ""}{e.summary}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const countText = `${events.length} 条`;
+  const listContent = events.length > 0 ? list : <div className="context-empty">没有事件</div>;
+
+  return minimal ? (
+    <div className="context-content">
+      <div className="context-content-header">
+        <span className="context-content-title">事件</span>
+        <span className="artifact-count">{countText}</span>
+      </div>
+      {listContent}
+    </div>
+  ) : (
+    <div className="artifact-panel">
+      <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
+        <span className="artifact-title">{collapsed ? "▸ " : "▾ "}事件</span>
+        <span className="artifact-count">{countText}</span>
+      </div>
+      {!collapsed && listContent}
+    </div>
+  );
+}
+
+function kindIcon(kind: string): string {
   if (kind === "file") return "▤";
-  if (kind === "event") {
-    if (action === "delete") return "🗑";
-    if (action === "rename") return "➡";
-    if (action === "command") return "⚡";
-    if (action === "test") return "✓";
-    return "✎";
-  }
-  if (kind === "command") return "⚡";
-  if (kind === "test") return "✓";
   return "✎";
 }
 
-function kindLabel(kind: string, action?: string): string {
-  if (kind === "file") return "文件";
-  if (kind === "event") {
-    if (action === "delete") return "删除";
-    if (action === "rename") return "重命名";
-    if (action === "command") return "命令";
-    if (action === "test") return "测试";
-    if (action === "note") return "笔记";
-    return "事件";
-  }
-  if (kind === "command") return "命令";
-  if (kind === "test") return "测试";
-  return "笔记";
+function eventIcon(action?: string): string {
+  if (action === "delete") return "🗑";
+  if (action === "rename") return "➡";
+  if (action === "command") return "⚡";
+  if (action === "test") return "✓";
+  if (action === "add") return "+";
+  if (action === "modify") return "✎";
+  return "✎";
+}
+
+function eventLabel(action?: string): string {
+  if (action === "delete") return "删除";
+  if (action === "rename") return "重命名";
+  if (action === "command") return "命令";
+  if (action === "test") return "测试";
+  if (action === "add") return "新增";
+  if (action === "modify") return "修改";
+  return "事件";
 }
 
 function renderMarkdown(text: string): string {

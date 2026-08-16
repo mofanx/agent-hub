@@ -99,26 +99,45 @@ describe("room", () => {
     assert.deepEqual(room.pipelineOrder, ["s3", "s1"]);
   });
 
-  it("addArtifact 写入房间 registry 并返回 id", () => {
+  it("addFile 写入房间 registry 并返回 id", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const artifact = rooms.addArtifact(room.roomId, {
-      kind: "file",
+    const artifact = rooms.addFile(room.roomId, {
       author: "s1",
       summary: "修改了 room.ts",
       path: "hub/src/room.ts",
     });
     assert.ok(artifact);
     assert.ok(artifact!.id);
-    assert.equal(artifact!.kind, "file");
+    assert.equal(artifact!.path, "hub/src/room.ts");
+    assert.equal(artifact!.author, "s1");
     assert.equal(room.artifacts!.length, 1);
+  });
+
+  it("addFile 同 path 时 upsert，作者名规范为 sessionId", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+    ]);
+    const first = rooms.addFile(room.roomId, { author: "a1", summary: "初版", path: "src/a.ts" })!;
+    const second = rooms.addFile(room.roomId, { author: "a2", summary: "改过", path: "src/a.ts", taskId: "t2" })!;
+    assert.equal(room.artifacts!.length, 1);
+    assert.equal(second.id, first.id);
+    assert.equal(second.alias, first.alias);
+    assert.equal(second.author, "s2");
+    assert.equal(second.summary, "改过");
+    assert.equal(second.taskId, "t2");
+    const ev = rooms.addEvent(room.roomId, { author: "a1", action: "command", summary: "跑测试" });
+    assert.equal(ev!.author, "s1");
+    assert.equal(room.events!.length, 1);
   });
 
   it("getArtifacts 按时间倒序返回并支持 limit", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     for (let i = 0; i < 15; i++) {
-      rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: `n${i}` });
+      rooms.addFile(room.roomId, { author: "s1", summary: `n${i}`, path: `p${i}.ts` });
     }
     const all = rooms.getArtifacts(room.roomId, 100);
     assert.equal(all.length, 15);
@@ -132,7 +151,7 @@ describe("room", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
     for (let i = 0; i < 55; i++) {
-      rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: `n${i}` });
+      rooms.addFile(room.roomId, { author: "s1", summary: `n${i}`, path: `p${i}.ts` });
     }
     assert.equal(room.artifacts!.length, 50);
     assert.ok(room.artifacts!.every((a) => a.summary.startsWith("n")));
@@ -142,7 +161,7 @@ describe("room", () => {
   it("removeArtifact 删除指定 artifact", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s1", summary: "s", path: "p" });
+    const a = rooms.addFile(room.roomId, { author: "s1", summary: "s", path: "p" });
     assert.ok(rooms.removeArtifact(room.roomId, a!.id));
     assert.equal(room.artifacts!.length, 0);
     assert.ok(!rooms.removeArtifact(room.roomId, "missing"));
@@ -154,11 +173,13 @@ describe("room", () => {
       { sessionId: "s1", name: "a1" },
       { sessionId: "s2", name: "a2" },
     ]);
-    rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "修改了 room.ts", path: "hub/src/room.ts" });
+    rooms.addFile(room.roomId, { author: "s2", summary: "修改了 room.ts", path: "hub/src/room.ts" });
     const prompt = rooms.buildPrompt(room.roomId, "继续改", "s1");
     assert.ok(prompt.includes("最近产物"));
     assert.ok(prompt.includes("hub/src/room.ts"));
     assert.ok(prompt.includes("修改了 room.ts"));
+    assert.ok(prompt.includes("@a2"));
+    assert.ok(!prompt.includes("@s2"));
   });
 
   it("buildPrompt 按 dependsOn 只注入上游 task 的 artifact", () => {
@@ -167,8 +188,8 @@ describe("room", () => {
       { sessionId: "s1", name: "a1" },
       { sessionId: "s2", name: "a2" },
     ]);
-    rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "上游输出", path: "src/a.ts", taskId: "t1" });
-    rooms.addArtifact(room.roomId, { kind: "file", author: "a2", summary: "无关输出", path: "src/b.ts", taskId: "t2" });
+    rooms.addFile(room.roomId, { author: "s2", summary: "上游输出", path: "src/a.ts", taskId: "t1" });
+    rooms.addFile(room.roomId, { author: "s2", summary: "无关输出", path: "src/b.ts", taskId: "t2" });
     const prompt = rooms.buildPrompt(room.roomId, "继续改", "s1", undefined, undefined, { taskId: "t3", dependsOn: ["t1"] });
     assert.ok(prompt.includes("上游输出"));
     assert.ok(!prompt.includes("无关输出"));
@@ -177,15 +198,15 @@ describe("room", () => {
   it("buildPrompt 不注入自己的 artifacts", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: "我写的" });
+    rooms.addFile(room.roomId, { author: "s1", summary: "我写的", path: "src/a.ts" });
     const prompt = rooms.buildPrompt(room.roomId, "继续", "s1");
-    assert.ok(!prompt.includes("最近产生的产物"));
+    assert.ok(!prompt.includes("最近产物"));
   });
 
   it("parseArtifactRefs 从文本识别 id 与 path", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "x", path: "hub/src/room.ts" })!;
+    const a = rooms.addFile(room.roomId, { author: "s2", summary: "x", path: "hub/src/room.ts" })!;
     const refs = rooms.parseArtifactRefs(room.roomId, `继续 ${a.id} 和 artifact:${a.id} 以及 hub/src/room.ts`);
     assert.deepEqual(refs, [a.id]);
   });
@@ -193,7 +214,7 @@ describe("room", () => {
   it("parseArtifactRefs 识别 alias、括号与 artifact: 前缀", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "alias test", path: "hub/src/x.ts" })!;
+    const a = rooms.addFile(room.roomId, { author: "s2", summary: "alias test", path: "hub/src/x.ts" })!;
     assert.equal(a.alias, "a1");
     const refs = rooms.parseArtifactRefs(room.roomId, "继续 a1 和 [a1] 以及 artifact:a1");
     assert.deepEqual(refs, [a.id]);
@@ -204,7 +225,7 @@ describe("room", () => {
   it("buildPrompt 显式引用时不过滤作者", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: "我写的" })!;
+    const a = rooms.addFile(room.roomId, { author: "s1", summary: "我写的", path: "src/a.ts" })!;
     const prompt = rooms.buildPrompt(room.roomId, `继续 ${a.id}`, "s1", undefined, undefined, { refs: [a.id] });
     assert.ok(prompt.includes("我写的"));
   });
@@ -212,7 +233,7 @@ describe("room", () => {
   it("buildPrompt 显式引用 alias 时不过滤作者", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    const a = rooms.addArtifact(room.roomId, { kind: "event", author: "s1", summary: "alias 写的" })!;
+    const a = rooms.addFile(room.roomId, { author: "s1", summary: "alias 写的", path: "src/a.ts" })!;
     assert.equal(a.alias, "a1");
     const prompt = rooms.buildPrompt(room.roomId, "继续 a1", "s1", undefined, undefined, { refs: ["a1"] });
     assert.ok(prompt.includes("alias 写的"));
@@ -237,6 +258,35 @@ describe("room", () => {
     assert.deepEqual(rooms.get(room.roomId)!.artifacts, []);
   });
 
+  it("import 把旧作者名规范为 sessionId", () => {
+    const rooms = new RoomManager();
+    const room: Room = {
+      roomId: "r2",
+      name: "team",
+      mode: "mention",
+      members: [{ sessionId: "s1", name: "a1" }],
+      artifacts: [{
+        id: "x1",
+        alias: "a1",
+        kind: "file",
+        author: "a1",
+        at: 1,
+        summary: "旧文件",
+        path: "src/a.ts",
+      }],
+      events: [{
+        id: "e1",
+        author: "a1",
+        at: 2,
+        action: "command",
+        summary: "旧命令",
+      }],
+    } as unknown as Room;
+    rooms.import(room);
+    assert.equal(rooms.get(room.roomId)!.artifacts![0]!.author, "s1");
+    assert.equal(rooms.get(room.roomId)!.events![0]!.author, "s1");
+  });
+
   it("sendFile 复制文件到缓存并生成 file artifact", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
@@ -247,7 +297,6 @@ describe("room", () => {
     try {
       const artifact = rooms.sendFile(room.roomId, rel, "s1", "test file");
       assert.ok(artifact);
-      assert.equal(artifact!.kind, "file");
       assert.equal(artifact!.summary, "test file");
       const cached = path.join(FILES_DIR, room.roomId, artifact!.id, path.basename(rel));
       assert.ok(fs.existsSync(cached));
@@ -299,10 +348,10 @@ describe("room", () => {
     fs.writeFileSync(fullByCwd, "cwd file");
 
     try {
-      const a1 = rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "workspace", path: rel })!;
+      const a1 = rooms.addFile(room.roomId, { author: "a1", summary: "workspace", path: rel })!;
       assert.equal((rooms.getFile(room.roomId, a1.id) as { text: string }).text, "workspace file");
 
-      const a2 = rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "cwd", path: cwdRel })!;
+      const a2 = rooms.addFile(room.roomId, { author: "a1", summary: "cwd", path: cwdRel })!;
       assert.equal((rooms.getFile(room.roomId, a2.id) as { text: string }).text, "cwd file");
     } finally {
       fs.rmSync(fullByWorkspace, { force: true });
@@ -396,16 +445,17 @@ describe("room", () => {
     assert.ok(!rooms.clearBlackboard(room.roomId));
   });
 
-  it("clearArtifacts 按 kind 过滤删除或清空全部", () => {
+  it("clearArtifacts 清空文件产物，clearEvents 清空事件", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "文件" });
-    rooms.addArtifact(room.roomId, { kind: "event", author: "a1", summary: "笔记" });
-    rooms.addArtifact(room.roomId, { kind: "event", author: "a1", summary: "测试" });
-    assert.equal(rooms.clearArtifacts(room.roomId, "event"), 2);
-    assert.equal(room.artifacts!.length, 1);
+    rooms.addFile(room.roomId, { author: "s1", summary: "文件", path: "a.ts" });
+    rooms.addEvent(room.roomId, { author: "s1", action: "command", summary: "笔记" });
+    rooms.addEvent(room.roomId, { author: "s1", action: "test", summary: "测试" });
     assert.equal(rooms.clearArtifacts(room.roomId), 1);
     assert.equal(room.artifacts!.length, 0);
+    assert.equal(room.events!.length, 2);
+    assert.equal(rooms.clearEvents(room.roomId), 2);
+    assert.equal(room.events!.length, 0);
   });
 
   it("deleteFile 删除房间允许路径内的文件，并清除 artifact path", () => {
@@ -414,12 +464,12 @@ describe("room", () => {
     const rel = `hub/src/room-delete-${Date.now()}.txt`;
     const full = path.join(PROJECT_ROOT, rel);
     fs.writeFileSync(full, "delete me");
-    rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "test", path: rel })!;
+    rooms.addFile(room.roomId, { author: "s1", summary: "test", path: rel })!;
     try {
       assert.ok(rooms.deleteFile(room.roomId, rel));
       assert.ok(!fs.existsSync(full));
-      assert.ok(!room.artifacts!.some((a) => a.kind === "file" && a.path === rel));
-      assert.ok(room.artifacts!.some((a) => a.kind === "event" && a.action === "delete" && a.path === rel));
+      assert.ok(!room.artifacts!.some((a) => a.path === rel));
+      assert.ok(room.events!.some((e) => e.action === "delete" && e.path === rel));
       assert.throws(() => rooms.deleteFile(room.roomId, rel), /file not found/);
     } finally {
       fs.rmSync(full, { force: true });
@@ -440,7 +490,7 @@ describe("room", () => {
     const fromFull = path.join(PROJECT_ROOT, fromRel);
     const toFull = path.join(PROJECT_ROOT, toRel);
     fs.writeFileSync(fromFull, "rename me");
-    const artifact = rooms.addArtifact(room.roomId, { kind: "file", author: "a1", summary: "test", path: fromRel })!;
+    const artifact = rooms.addFile(room.roomId, { author: "a1", summary: "test", path: fromRel })!;
     try {
       assert.ok(rooms.renameFile(room.roomId, fromRel, toRel));
       assert.ok(!fs.existsSync(fromFull));

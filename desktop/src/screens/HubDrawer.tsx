@@ -2,7 +2,7 @@ import { useHubStore } from "../hub/store";
 import type { ConnProfile } from "../hub/types";
 
 function profileKey(p: ConnProfile) {
-  return `${p.address}\u0001${p.port}`;
+  return p.address;
 }
 
 export function HubDrawer() {
@@ -48,7 +48,7 @@ export function HubDrawer() {
               </span>
               <span>{store.currentProfile.name}</span>
               <span className="subtitle">
-                {store.currentProfile.address}:{store.currentProfile.port}
+                {store.currentProfile.address}
               </span>
             </span>
           ) : (
@@ -71,7 +71,7 @@ export function HubDrawer() {
                 <div className="title-wrap">
                   <span className="title">{p.name}</span>
                   <span className="subtitle">
-                    {p.address}:{p.port}
+                    {p.address}
                   </span>
                 </div>
                 {active && (

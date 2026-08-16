@@ -208,14 +208,22 @@ data class FlowInfo(
 data class ArtifactInfo(
     val id: String,
     val alias: String? = null,
-    val kind: String,
-    val action: String? = null,
     val author: String,
     val at: Long = 0,
     val summary: String = "",
     val path: String? = null,
+    val taskId: String? = null,
+)
+
+data class EventInfo(
+    val id: String,
+    val author: String,
+    val at: Long = 0,
+    val action: String,
+    val summary: String = "",
+    val path: String? = null,
     val oldPath: String? = null,
-    val command: String? = null,
+    val taskId: String? = null,
 )
 
 data class FileTreeRoot(
@@ -314,9 +322,23 @@ enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings }
 data class ConnProfile(
     val name: String,
     val address: String,
-    val port: String,
     val token: String,
 )
+
+fun migrateAddress(address: String, port: String): String {
+    if (port.isBlank() || address.contains(":")) return address
+    return "$address:$port"
+}
+
+fun buildWsUrl(address: String, token: String): String {
+    return if (address.startsWith("ws://") || address.startsWith("wss://")) {
+        val sep = if (address.contains("?")) "&" else "?"
+        "$address${sep}token=${Uri.encode(token)}"
+    } else {
+        val host = if (address.contains(":")) address else "$address:8787"
+        "ws://$host/?token=${Uri.encode(token)}"
+    }
+}
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val hub = HubClient(viewModelScope)
@@ -394,6 +416,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     var flow by mutableStateOf<FlowInfo?>(null)
     val currentArtifacts = mutableStateListOf<ArtifactInfo>()
+    val currentEvents = mutableStateListOf<EventInfo>()
     val blackboard = mutableStateListOf<BlackboardEntry>()
     var fileTreeRoots by mutableStateOf<List<FileTreeRoot>>(emptyList())
     var fileTreePath by mutableStateOf<String?>(null)
@@ -418,30 +441,37 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     init {
         prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
             val parts = line.split("\u0001")
-            if (parts.size == 4) {
-                profiles.add(ConnProfile(parts[0], parts[1], parts[2], parts[3]))
+            when (parts.size) {
+                3 -> profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
+                4 -> {
+                    val (name, address, port, token) = parts
+                    val migrated = migrateAddress(address, port)
+                    profiles.add(ConnProfile(name, migrated, token))
+                }
             }
         }
         prefs.getString("last", null)?.let { line ->
             val parts = line.split("\u0001")
-            if (parts.size == 3) {
-                val (address, port, token) = parts
-                val profile = profiles.find { it.address == address && it.port == port }
-                    ?: ConnProfile(
-                        address.removePrefix("wss://").removePrefix("ws://")
-                            .substringBefore("/").substringBefore(":").substringBefore("?"),
-                        address, port, token,
-                    )
-                currentProfile = profile
-                connect(address, port, token, profile.name)
+            val (address, token) = when (parts.size) {
+                2 -> parts[0] to parts[1]
+                3 -> migrateAddress(parts[0], parts[1]) to parts[2]
+                else -> return@let
             }
+            val profile = profiles.find { it.address == address }
+                ?: ConnProfile(
+                    address.removePrefix("wss://").removePrefix("ws://")
+                        .substringBefore("/").substringBefore(":").substringBefore("?"),
+                    address, token,
+                )
+            currentProfile = profile
+            connect(address, token, profile.name)
         }
     }
 
     private fun persistProfiles() {
         prefs.edit().putStringSet(
             "profiles",
-            profiles.map { "${it.name}\u0001${it.address}\u0001${it.port}\u0001${it.token}" }.toSet(),
+            profiles.map { "${it.name}\u0001${it.address}\u0001${it.token}" }.toSet(),
         ).apply()
     }
 
@@ -455,14 +485,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun switchProfile(p: ConnProfile) {
         if (currentProfile == p) return
-        connect(p.address, p.port, p.token, p.name)
+        connect(p.address, p.token, p.name)
     }
 
     fun upsertProfile(
         old: ConnProfile?,
         name: String,
         address: String,
-        port: String,
         token: String,
         connectNow: Boolean = false,
     ) {
@@ -471,34 +500,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 address.removePrefix("wss://").removePrefix("ws://")
                     .substringBefore("/").substringBefore(":").substringBefore("?")
             },
-            address, port, token,
+            address, token,
         )
         if (old != null) {
             profiles.remove(old)
         }
-        profiles.removeAll { it.address == address && it.port == port }
+        profiles.removeAll { it.address == address }
         profiles.add(newProfile)
         if (connectNow) {
             currentProfile = newProfile
-        } else if (currentProfile == old && old?.address == address && old.port == port) {
+        } else if (currentProfile == old && old?.address == address) {
             currentProfile = newProfile
         }
         persistProfiles()
         if (connectNow) {
-            connect(address, port, token, newProfile.name)
+            connect(address, token, newProfile.name)
         }
     }
 
-    private fun saveProfile(address: String, port: String, token: String, name: String? = null) {
+    private fun saveProfile(address: String, token: String, name: String? = null) {
         val derived = address.removePrefix("wss://").removePrefix("ws://")
             .substringBefore("/").substringBefore(":").substringBefore("?")
         val profileName = name?.takeIf { it.isNotBlank() } ?: derived
-        profiles.removeAll { it.address == address && it.port == port }
-        val profile = ConnProfile(profileName, address, port, token)
+        profiles.removeAll { it.address == address }
+        val profile = ConnProfile(profileName, address, token)
         profiles.add(profile)
         currentProfile = profile
         persistProfiles()
-        prefs.edit().putString("last", "$address\u0001$port\u0001$token").apply()
+        prefs.edit().putString("last", "$address\u0001$token").apply()
         if (screen == Screen.Connect) screen = Screen.Sessions
     }
 
@@ -531,10 +560,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var itemSeq = 0L
     private var eventJob: Job? = null
 
-    fun sessionName(sessionId: String): String =
-        currentRoom?.members?.find { it.first == sessionId }?.second
-            ?: sessions.find { it.sessionId == sessionId }?.let { displayName(it) }
-            ?: sessionId
+    fun sessionName(sessionId: String): String {
+        if (sessionId.isBlank()) return sessionId
+        currentRoom?.members?.find { it.first == sessionId }?.second?.let { return it }
+        sessions.find { it.sessionId == sessionId }?.let { return displayName(it) }
+        currentRoom?.members?.find { it.second == sessionId }?.second?.let { return it }
+        return sessionId
+    }
 
     private fun parseTokenUsage(u: JsonObject?): TokenUsage? {
         if (u == null) return null
@@ -780,23 +812,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    fun connect(host: String, port: String, token: String, name: String? = null) {
+    fun connect(address: String, token: String, name: String? = null) {
         disconnect()
         connecting = true
         connectError = null
-        val url = if (host.startsWith("ws://") || host.startsWith("wss://")) {
-            val sep = if (host.contains("?")) "&" else "?"
-            "$host${sep}token=$token"
-        } else {
-            "ws://$host:$port/?token=$token"
-        }
+        val url = buildWsUrl(address, token)
         hub.connect(url,
             onOpen = {
                 viewModelScope.launch {
                     val firstConnect = connecting
                     connecting = false
                     connectError = null
-                    saveProfile(host, port, token, name)
+                    saveProfile(address, token, name)
                     startHubService()
                     agentStatus = "已连接"
                     if (firstConnect) screen = Screen.Sessions
@@ -841,6 +868,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSession = null
         currentRoom = null
         currentArtifacts.clear()
+        currentEvents.clear()
         blackboard.clear()
         flow = null
         quote = null
@@ -1277,6 +1305,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSession = session
         currentRoom = null
         currentArtifacts.clear()
+        currentEvents.clear()
         blackboard.clear()
         flow = null
         quote = null
@@ -1291,6 +1320,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         chatSearchMatchCount = 0
         screen = Screen.Chat
         loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
+        viewModelScope.launch { refreshSessionArtifacts(session.sessionId) }
     }
 
     fun openRoom(room: RoomInfo, anchorAt: Long? = null) {
@@ -1311,6 +1341,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 currentRoom = updatedRoom
                 currentSession = null
                 currentArtifacts.clear()
+                currentEvents.clear()
                 blackboard.clear()
                 chatItems.clear()
                 quote = null
@@ -1348,9 +1379,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun refreshArtifacts(roomId: String) {
         try {
             val result = hub.call("room.artifacts", buildJsonObject { put("roomId", roomId) })
-            val list = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
+            val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
+            val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
+            val board = result["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
             currentArtifacts.clear()
-            currentArtifacts.addAll(list)
+            currentArtifacts.addAll(artifacts)
+            currentEvents.clear()
+            currentEvents.addAll(events)
+            blackboard.clear()
+            blackboard.addAll(board)
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    private suspend fun refreshSessionArtifacts(sessionId: String) {
+        try {
+            val result = hub.call("session.artifacts", buildJsonObject { put("sessionId", sessionId) })
+            val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
+            val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
+            currentArtifacts.clear()
+            currentArtifacts.addAll(artifacts)
+            currentEvents.clear()
+            currentEvents.addAll(events)
         } catch (e: Exception) {
             // ignore
         }
@@ -1381,14 +1432,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return ArtifactInfo(
             id = obj["id"]?.jsonPrimitive?.content ?: "",
             alias = obj["alias"]?.jsonPrimitive?.content,
-            kind = obj["kind"]?.jsonPrimitive?.content ?: "event",
-            action = obj["action"]?.jsonPrimitive?.content,
             author = obj["author"]?.jsonPrimitive?.content ?: "",
             at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
             summary = obj["summary"]?.jsonPrimitive?.content ?: "",
             path = obj["path"]?.jsonPrimitive?.content,
+            taskId = obj["taskId"]?.jsonPrimitive?.content,
+        )
+    }
+
+    private fun parseEventInfo(obj: JsonObject): EventInfo {
+        val action = obj["action"]?.jsonPrimitive?.content ?: "command"
+        return EventInfo(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
+            author = obj["author"]?.jsonPrimitive?.content ?: "",
+            at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
+            action = if (action in setOf("add", "modify", "delete", "rename", "command", "test")) action else "command",
+            summary = obj["summary"]?.jsonPrimitive?.content ?: "",
+            path = obj["path"]?.jsonPrimitive?.content,
             oldPath = obj["oldPath"]?.jsonPrimitive?.content,
-            command = obj["command"]?.jsonPrimitive?.content,
+            taskId = obj["taskId"]?.jsonPrimitive?.content,
         )
     }
 
@@ -1845,6 +1907,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSession = null
         currentRoom = null
         currentArtifacts.clear()
+        currentEvents.clear()
         blackboard.clear()
         flow = null
         fileRefToInsert = null
@@ -1960,18 +2023,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (!artifact.path.isNullOrBlank()) {
             fileRefToInsert = artifact.path
         }
-        quote = artifact.author to artifact.summary
+        quote = sessionName(artifact.author) to artifact.summary
+    }
+
+    fun quoteEvent(event: EventInfo) {
+        quote = sessionName(event.author) to "[${event.action}] ${event.summary}"
     }
 
     fun removeArtifact(artifact: ArtifactInfo) {
-        val room = currentRoom ?: return
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
         currentArtifacts.remove(artifact)
         viewModelScope.launch {
             try {
-                hub.call("room.removeArtifact", buildJsonObject {
-                    put("roomId", room.roomId)
-                    put("artifactId", artifact.id)
-                })
+                if (roomId != null) {
+                    hub.call("room.removeArtifact", buildJsonObject {
+                        put("roomId", roomId)
+                        put("artifactId", artifact.id)
+                    })
+                } else {
+                    hub.call("session.removeArtifact", buildJsonObject {
+                        put("sessionId", sessionId!!)
+                        put("artifactId", artifact.id)
+                    })
+                }
             } catch (e: Exception) {
                 currentArtifacts.add(artifact)
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
@@ -1980,13 +2056,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearArtifacts(kind: String? = null) {
-        val room = currentRoom ?: return
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
         viewModelScope.launch {
             try {
-                hub.call("room.clearArtifacts", buildJsonObject {
-                    put("roomId", room.roomId)
-                    if (kind != null) put("kind", kind)
-                })
+                if (roomId != null) {
+                    hub.call("room.clearArtifacts", buildJsonObject {
+                        put("roomId", roomId)
+                        if (kind != null) put("kind", kind)
+                    })
+                } else if (kind == "event") {
+                    hub.call("session.clearEvents", buildJsonObject { put("sessionId", sessionId!!) })
+                } else {
+                    hub.call("session.clearArtifacts", buildJsonObject { put("sessionId", sessionId!!) })
+                }
             } catch (e: Exception) {
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "clear failed"))
             }
@@ -2021,7 +2105,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun downloadArtifactFile(artifact: ArtifactInfo) {
-        val room = currentRoom ?: return
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
         if (artifact.path.isNullOrBlank()) {
             Toast.makeText(getApplication(), "该产物没有可下载文件", Toast.LENGTH_SHORT).show()
             return
@@ -2030,8 +2116,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = withContext(Dispatchers.IO) {
                     hub.call("file.get", buildJsonObject {
-                        put("roomId", room.roomId)
                         put("path", artifact.path)
+                        if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
                     })
                 }
                 val name = result["name"]?.jsonPrimitive?.content
@@ -2087,19 +2173,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun loadArtifactPreview(artifact: ArtifactInfo) {
-        val room = currentRoom ?: return
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
         val name = artifact.path?.substringAfterLast('/') ?: artifact.alias ?: artifact.id
         filePreview = FilePreview(name = name, path = artifact.path ?: "")
-        if (artifact.kind != "file") {
-            filePreview = FilePreview(name = name, path = artifact.path ?: "", text = artifact.summary)
-            return
-        }
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     hub.call("file.get", buildJsonObject {
-                        put("roomId", room.roomId)
-                        put("artifactId", artifact.id)
+                        if (roomId != null) {
+                            put("roomId", roomId)
+                            put("artifactId", artifact.id)
+                        } else {
+                            put("sessionId", sessionId!!)
+                            put("path", artifact.path ?: artifact.id)
+                        }
                     })
                 }
                 val fileName = result["name"]?.jsonPrimitive?.content ?: name
@@ -2120,16 +2209,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun removeArtifacts(artifacts: List<ArtifactInfo>) {
-        val room = currentRoom ?: return
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
         currentArtifacts.removeAll(artifacts)
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     for (a in artifacts) {
-                        hub.call("room.removeArtifact", buildJsonObject {
-                            put("roomId", room.roomId)
-                            put("artifactId", a.id)
-                        })
+                        if (roomId != null) {
+                            hub.call("room.removeArtifact", buildJsonObject {
+                                put("roomId", roomId)
+                                put("artifactId", a.id)
+                            })
+                        } else {
+                            hub.call("session.removeArtifact", buildJsonObject {
+                                put("sessionId", sessionId!!)
+                                put("artifactId", a.id)
+                            })
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -2557,6 +2655,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val roomId = p["roomId"]!!.jsonPrimitive.content
                 if (currentRoom?.roomId == roomId) {
                     viewModelScope.launch { refreshArtifacts(roomId) }
+                }
+            }
+            "session.artifact" -> {
+                val p = obj["params"]!!.jsonObject
+                val sessionId = p["sessionId"]!!.jsonPrimitive.content
+                if (currentSession?.sessionId == sessionId && currentRoom == null) {
+                    viewModelScope.launch { refreshSessionArtifacts(sessionId) }
                 }
             }
             "permission.request" -> {

@@ -118,14 +118,12 @@ class HubService : Service() {
         val prefs = getSharedPreferences("agent-hub", MODE_PRIVATE)
         val last = prefs.getString("last", null) ?: return
         val parts = last.split("\u0001")
-        if (parts.size != 3) return
-        val (address, port, token) = parts
-        val url = if (address.startsWith("ws://") || address.startsWith("wss://")) {
-            val sep = if (address.contains("?")) "&" else "?"
-            "$address${sep}token=$token"
-        } else {
-            "ws://$address:$port/?token=$token"
+        val (address, token) = when (parts.size) {
+            2 -> parts[0] to parts[1]
+            3 -> migrateAddress(parts[0], parts[1]) to parts[2]
+            else -> return
         }
+        val url = buildWsUrl(address, token)
         val client = hub ?: HubClient(scope).also { hub = it }
         client.onEvent = { raw -> handleEvent(raw) }
         client.onClosed = { onDisconnected() }

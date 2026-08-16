@@ -6,10 +6,12 @@ import { Readable, Writable } from "node:stream";
 import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAgent, getPermissionBypass, setPermissionBypass, type HubEvent } from "./agent.js";
-import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type ArtifactKind } from "./room.js";
+import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, type SessionMeta, type Connection } from "./store.js";
+import { SessionLedger } from "./session-ledger.js";
+import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
 import { AGENT_DEFS } from "./agent-defs.js";
@@ -40,6 +42,8 @@ const savedRuntime = savedState.runtime;
 const sessionMetas = new Map<string, SessionMeta>(
   savedState.sessions.map((s) => [s.sessionId, s]),
 );
+const sessionLedger = new SessionLedger();
+sessionLedger.importFromMeta(savedState.sessions);
 rooms.setCwdResolver((sessionId) => sessionMetas.get(sessionId)?.cwd);
 for (const room of savedState.rooms) rooms.import(room);
 
@@ -122,12 +126,10 @@ function repairHistoryAtStartup(): void {
 
 repairHistoryAtStartup();
 
-function parseArtifactKind(raw: unknown): ArtifactKind {
-  const kinds: ArtifactKind[] = ["file", "event"];
-  const k = String(raw ?? "").toLowerCase();
-  if (k === "command" || k === "test" || k === "note") return "event";
-  if (kinds.includes(k as ArtifactKind)) return k as ArtifactKind;
-  return "event";
+function parseEventAction(raw: unknown): EventAction {
+  const actions: EventAction[] = ["add", "modify", "delete", "rename", "command", "test"];
+  const a = String(raw ?? "").toLowerCase();
+  return actions.includes(a as EventAction) ? (a as EventAction) : "command";
 }
 
 function parseRoomMode(raw: unknown): RoomMode {
@@ -194,7 +196,7 @@ function enrichRoom(room: Room): Record<string, unknown> {
 
 function persistState(): void {
   store.save({
-    sessions: [...sessionMetas.values()],
+    sessions: sessionLedger.attachTo([...sessionMetas.values()]),
     rooms: rooms.list(),
     runtime: roomModeManager.exportRuntime(),
   });
@@ -514,6 +516,10 @@ function onAgentEvent(event: HubEvent): void {
           params: { roomId, blackboard: rooms.getBlackboard(roomId) },
         } as HubEvent);
       }
+    }
+    if (!roomModeManager.isRoomTurn(sessionId!)) {
+      sessionLedger.captureOutput(sessionId!, extractTaskResult(output).artifacts);
+      broadcast({ method: "session.artifact", params: { sessionId: sessionId! } });
     }
     void roomModeManager
       .onPromptDone(sessionId!, output)
@@ -888,6 +894,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (ownerConnectionId) agents.get(ownerConnectionId)?.dropSession(sessionId);
       owners.delete(sessionId);
       sessionMetas.delete(sessionId);
+      sessionLedger.drop(sessionId);
       store.deleteHistory("session", sessionId);
       const dissolved = rooms.removeMember(sessionId);
       for (const roomId of dissolved) store.deleteHistory("room", roomId);
@@ -913,6 +920,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         if (ownerConnectionId) agents.get(ownerConnectionId)?.dropSession(sessionId);
         owners.delete(sessionId);
         sessionMetas.delete(sessionId);
+        sessionLedger.drop(sessionId);
         store.deleteHistory("session", sessionId);
         dissolved.push(...rooms.removeMember(sessionId));
       }
@@ -1172,24 +1180,91 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!room) throw new Error("unknown room");
       return { flow: roomModeManager.getFlow(roomId) };
     }
+    case "session.artifacts": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      if (!sessionMetas.has(sessionId) && !owners.has(sessionId)) {
+        throw new Error(`unknown session: ${sessionId}`);
+      }
+      return {
+        artifacts: sessionLedger.getArtifacts(sessionId, 100),
+        events: sessionLedger.getEvents(sessionId, 100),
+      };
+    }
+    case "session.events": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      if (!sessionMetas.has(sessionId) && !owners.has(sessionId)) {
+        throw new Error(`unknown session: ${sessionId}`);
+      }
+      return { events: sessionLedger.getEvents(sessionId, 100) };
+    }
+    case "session.removeArtifact": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const artifactId = String(req.params?.artifactId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      const removed = sessionLedger.removeArtifact(sessionId, artifactId);
+      if (removed) {
+        persistState();
+        broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      }
+      return { removed };
+    }
+    case "session.clearArtifacts": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      const count = sessionLedger.clearArtifacts(sessionId);
+      if (count > 0) {
+        persistState();
+        broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      }
+      return { count };
+    }
+    case "session.clearEvents": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      const count = sessionLedger.clearEvents(sessionId);
+      if (count > 0) {
+        persistState();
+        broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      }
+      return { count };
+    }
     case "room.artifacts": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
-      return { artifacts: rooms.getArtifacts(roomId, 100) };
+      return {
+        artifacts: rooms.getArtifacts(roomId, 100),
+        events: rooms.getEvents(roomId, 100),
+        blackboard: rooms.getBlackboard(roomId),
+      };
+    }
+    case "room.events": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      return { events: rooms.getEvents(roomId, 100) };
     }
     case "room.appendArtifact": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
-      const artifact = rooms.addArtifact(roomId, {
-        kind: parseArtifactKind(req.params?.kind),
-        author: String(req.params?.author ?? ""),
-        summary: String(req.params?.summary ?? ""),
-        path: typeof req.params?.path === "string" ? req.params.path : undefined,
-        command: typeof req.params?.command === "string" ? req.params.command : undefined,
-        taskId: typeof req.params?.taskId === "string" ? req.params.taskId : undefined,
-      });
+      const kind = String(req.params?.kind ?? "file").toLowerCase();
+      const author = String(req.params?.author ?? "");
+      const summary = String(req.params?.summary ?? "");
+      const path = typeof req.params?.path === "string" ? req.params.path : undefined;
+      const taskId = typeof req.params?.taskId === "string" ? req.params.taskId : undefined;
+      const artifact =
+        kind === "file"
+          ? rooms.addFile(roomId, { author, summary, path, taskId })
+          : rooms.addEvent(roomId, {
+              author,
+              action: parseEventAction(req.params?.action),
+              summary,
+              path,
+              taskId,
+            });
       if (!artifact) throw new Error("add artifact failed");
       persistState();
       return { artifact };
@@ -1208,10 +1283,21 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "room.clearArtifacts": {
       const roomId = String(req.params?.roomId ?? "");
-      const kind = parseArtifactKind(req.params?.kind);
+      const kind = String(req.params?.kind ?? "").toLowerCase();
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
-      const count = rooms.clearArtifacts(roomId, req.params?.kind ? kind : undefined);
+      const count = kind === "event" ? rooms.clearEvents(roomId) : rooms.clearArtifacts(roomId);
+      if (count > 0) {
+        persistState();
+        broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
+      }
+      return { count };
+    }
+    case "room.clearEvents": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      const count = rooms.clearEvents(roomId);
       if (count > 0) {
         persistState();
         broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
@@ -1285,9 +1371,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         broadcast({ method: "file.update", params: { roomId, path: filePath, op: "delete" } } as HubEvent);
         return { deleted: ok };
       }
-      const ok = rooms.sessionDeleteFile(sessionId, filePath);
+      const result = rooms.sessionDeleteFile(sessionId, filePath);
+      sessionLedger.recordDelete(sessionId, result.rel);
+      persistState();
       broadcast({ method: "file.update", params: { sessionId, path: filePath, op: "delete" } } as HubEvent);
-      return { deleted: ok };
+      broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      return { deleted: result.deleted };
     }
     case "file.rename": {
       const roomId = String(req.params?.roomId ?? "");
@@ -1303,18 +1392,24 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         broadcast({ method: "file.update", params: { roomId, path: from, op: "rename", from, to } } as HubEvent);
         return { renamed: ok };
       }
-      const ok = rooms.sessionRenameFile(sessionId, from, to);
+      const result = rooms.sessionRenameFile(sessionId, from, to);
+      sessionLedger.recordRename(sessionId, result.fromRel, result.toRel);
+      persistState();
       broadcast({ method: "file.update", params: { sessionId, path: from, op: "rename", from, to } } as HubEvent);
-      return { renamed: ok };
+      broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      return { renamed: result.renamed };
     }
     case "session.file.delete": {
       const sessionId = String(req.params?.sessionId ?? "");
       const filePath = String(req.params?.path ?? "");
       if (!sessionId) throw new Error("sessionId required");
       if (!filePath) throw new Error("file path required");
-      const ok = rooms.sessionDeleteFile(sessionId, filePath);
+      const result = rooms.sessionDeleteFile(sessionId, filePath);
+      sessionLedger.recordDelete(sessionId, result.rel);
+      persistState();
       broadcast({ method: "file.update", params: { sessionId, path: filePath, op: "delete" } } as HubEvent);
-      return { deleted: ok };
+      broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      return { deleted: result.deleted };
     }
     case "session.file.rename": {
       const sessionId = String(req.params?.sessionId ?? "");
@@ -1322,9 +1417,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const to = String(req.params?.to ?? "");
       if (!sessionId) throw new Error("sessionId required");
       if (!from || !to) throw new Error("from and to paths required");
-      const ok = rooms.sessionRenameFile(sessionId, from, to);
+      const result = rooms.sessionRenameFile(sessionId, from, to);
+      sessionLedger.recordRename(sessionId, result.fromRel, result.toRel);
+      persistState();
       broadcast({ method: "file.update", params: { sessionId, path: from, op: "rename", from, to } } as HubEvent);
-      return { renamed: ok };
+      broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      return { renamed: result.renamed };
     }
     case "room.message": {
       const roomId = String(req.params?.roomId ?? "");

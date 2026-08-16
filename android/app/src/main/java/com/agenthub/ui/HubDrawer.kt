@@ -138,7 +138,7 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
                     Column {
                         Text(current.name, style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "${current.address}:${current.port}",
+                            current.address,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -170,7 +170,7 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
                         )
                     }
                 } else {
-                    items(vm.profiles, key = { "${it.address}\u0001${it.port}" }) { p ->
+                    items(vm.profiles, key = { it.address }) { p ->
                         val active = current == p
                         ProfileDrawerItem(
                             p = p,
@@ -268,7 +268,7 @@ private fun ProfileDrawerItem(
                     color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    "${p.address}:${p.port}",
+                    p.address,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

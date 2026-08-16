@@ -3,7 +3,7 @@ import { useHubStore } from "../hub/store";
 import type { ConnProfile } from "../hub/types";
 
 function profileKey(p: ConnProfile) {
-  return `${p.address}\u0001${p.port}`;
+  return p.address;
 }
 
 function isRemote(p: ConnProfile) {
@@ -14,7 +14,6 @@ export function HubConfigScreen() {
   const store = useHubStore();
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
-  const [port, setPort] = useState("8787");
   const [token, setToken] = useState("dev-token");
   const [editing, setEditing] = useState<ConnProfile | null>(null);
 
@@ -28,7 +27,6 @@ export function HubConfigScreen() {
     if (last) {
       setName(last.name);
       setHost(last.address);
-      setPort(last.port);
       setToken(last.token);
       setEditing(null);
     }
@@ -37,7 +35,6 @@ export function HubConfigScreen() {
   const reset = () => {
     setName("");
     setHost("");
-    setPort("8787");
     setToken("dev-token");
     setEditing(null);
   };
@@ -45,7 +42,6 @@ export function HubConfigScreen() {
   const fill = (p: ConnProfile, edit = false) => {
     setName(p.name);
     setHost(p.address);
-    setPort(p.port);
     setToken(p.token);
     setEditing(edit ? p : null);
   };
@@ -53,10 +49,10 @@ export function HubConfigScreen() {
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = name.trim();
-    if (editing && profileKey(editing) !== `${host}\u0001${port}`) {
+    if (editing && profileKey(editing) !== host) {
       store.deleteProfile(editing);
     }
-    store.connect(host, port, token, trimmed);
+    store.connect(host, token, trimmed);
   };
 
   const onDelete = (p: ConnProfile) => {
@@ -82,16 +78,8 @@ export function HubConfigScreen() {
           <input
             value={host}
             onChange={(e) => setHost(e.currentTarget.value)}
-            placeholder="IP 或 ws(s)://地址"
+            placeholder="例如 localhost:8787 或 wss://hub.example.com"
             required
-          />
-        </div>
-        <div className="form-row">
-          <label>端口</label>
-          <input
-            value={port}
-            onChange={(e) => setPort(e.currentTarget.value)}
-            placeholder="8787"
           />
         </div>
         <div className="form-row">
@@ -131,7 +119,7 @@ export function HubConfigScreen() {
                     {isRemote(p) ? "🌐" : "📡"} {p.name}
                   </span>
                   <span className="subtitle">
-                    {isRemote(p) ? "远程 (wss)" : "局域网"} · {p.address}:{p.port}
+                    {isRemote(p) ? "远程 (wss)" : "局域网"} · {p.address}
                   </span>
                   <div className="actions" onClick={(e) => e.stopPropagation()}>
                     <button className="tiny" onClick={() => fill(p, true)}>

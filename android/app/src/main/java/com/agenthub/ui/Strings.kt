@@ -9,7 +9,6 @@ interface Strings {
     val remoteTag: String
     val del: String
     val hubAddress: String
-    val portLabel: String
     val tokenLabel: String
     val connect: String
     val searchHistory: String
@@ -176,8 +175,7 @@ object ZhStrings : Strings {
     override val lanTag = "局域网"
     override val remoteTag = "远程 (wss)"
     override val del = "删"
-    override val hubAddress = "Hub IP 或完整 wss 地址（远程）"
-    override val portLabel = "端口"
+    override val hubAddress = "例如 localhost:8787 或 wss://hub.example.com"
     override val tokenLabel = "Token"
     override val connect = "连接"
     override val searchHistory = "搜索历史…"
@@ -344,8 +342,7 @@ object EnStrings : Strings {
     override val lanTag = "LAN"
     override val remoteTag = "Remote (wss)"
     override val del = "Del"
-    override val hubAddress = "Hub IP or full wss URL (remote)"
-    override val portLabel = "Port"
+    override val hubAddress = "e.g. localhost:8787 or wss://hub.example.com"
     override val tokenLabel = "Token"
     override val connect = "Connect"
     override val searchHistory = "Search history…"

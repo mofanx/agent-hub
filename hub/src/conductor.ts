@@ -1,4 +1,4 @@
-import type { Room, RoomManager } from "./room.js";
+import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { logError } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
@@ -242,7 +242,7 @@ export class ConductorOrchestrator {
       if (artifacts.length > 0) {
         prompt.push("", "用户明确引用了以下产物，请把它们作为上下文：");
         for (const a of artifacts) {
-          const parts = [`@${a.author}`, `[${a.kind}]`];
+          const parts = [`@${this.rooms.memberName(room.roomId, a.author)}`];
           if (a.path) parts.push(a.path);
           parts.push(a.summary);
           prompt.push(`- ${parts.join(" ")}`);
@@ -276,26 +276,9 @@ export class ConductorOrchestrator {
         }
         if (flow.phase === "summarizing") {
           const roomId = flow.roomId;
-          const name =
-            room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
           const result = extractTaskResult(output);
           for (const a of result.artifacts) {
-            this.rooms.addArtifact(roomId, {
-              kind: a.type,
-              action: a.action,
-              author: name,
-              summary: a.summary,
-              path: a.path,
-              content: a.content,
-            });
-          }
-          if (result.artifacts.length === 0 && result.text) {
-            this.rooms.addArtifact(roomId, {
-              kind: "event",
-              action: "note",
-              author: name,
-              summary: result.text.slice(0, 400),
-            });
+            this.commitArtifact(roomId, a, sessionId);
           }
           this.flows.delete(roomId);
           return roomId;
@@ -312,15 +295,7 @@ export class ConductorOrchestrator {
           const result = extractTaskResult(output);
           flow.results.set(running.id, result);
           for (const a of result.artifacts) {
-            this.rooms.addArtifact(flow.roomId, {
-              kind: a.type,
-              action: a.action,
-              author: name,
-              summary: a.summary,
-              path: a.path,
-              content: a.content,
-              taskId: running.id,
-            });
+            this.commitArtifact(flow.roomId, a, sessionId, running.id);
           }
           const artifactCount = result.artifacts.length;
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
@@ -335,6 +310,33 @@ export class ConductorOrchestrator {
       }
     }
     return undefined;
+  }
+
+  private commitArtifact(
+    roomId: string,
+    a: TaskArtifact,
+    author: string,
+    taskId?: string,
+  ): void {
+    if (a.type === "file") {
+      this.rooms.addFile(roomId, {
+        author,
+        summary: a.summary,
+        path: a.path,
+        taskId,
+        content: a.content,
+      });
+      return;
+    }
+    const action = isEventAction(a.action) ? a.action : undefined;
+    if (!action) return;
+    this.rooms.addEvent(roomId, {
+      author,
+      action,
+      summary: a.summary,
+      path: a.path,
+      taskId,
+    });
   }
 
   private resolveMember(
@@ -630,9 +632,13 @@ export class ConductorOrchestrator {
               ? r.artifacts
                   .map((a) => {
                     const o = a as Record<string, unknown>;
-                    const type = String(o.type ?? "");
-                    if (type !== "file" && type !== "command" && type !== "test") return null;
-                    return { type, path: typeof o.path === "string" ? o.path : undefined, summary: String(o.summary ?? "") };
+                    const rawType = String(o.type ?? "");
+                    let type: TaskArtifact["type"];
+                    if (rawType === "file") type = "file";
+                    else if (rawType === "event" || rawType === "command" || rawType === "test") type = "event";
+                    else return null;
+                    const action = isEventAction(String(o.action ?? "")) ? String(o.action) : undefined;
+                    return { type, action, path: typeof o.path === "string" ? o.path : undefined, summary: String(o.summary ?? "") };
                   })
                   .filter((a) => a !== null) as TaskArtifact[]
               : [],

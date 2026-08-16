@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Room } from "./room.js";
+import type { Artifact, Room, RoomEvent } from "./room.js";
 import { logWarn } from "./logger.js";
 
 export type Connection = {
@@ -24,6 +24,8 @@ export type SessionMeta = {
   connectionId?: string | undefined;
   roleId?: string | undefined;
   archived?: boolean | undefined;
+  artifacts?: Artifact[] | undefined;
+  events?: RoomEvent[] | undefined;
 };
 
 export type HistoryEntry = {

@@ -75,11 +75,14 @@ describe("room-modes", () => {
       broadcasted.push({ method, params }),
     );
     await manager.handle(room, "@coder 改一下 room.ts", {});
+    assert.equal(manager.isRoomTurn("s1"), true);
+    assert.equal(manager.isRoomTurn("s2"), false);
     const output = `已修改 hub/src/room.ts\n\`\`\`bash\nnpx tsc --noEmit\n\`\`\``;
     await manager.onPromptDone("s1", output);
-    const artifacts = rooms.getArtifacts(room.roomId, 10);
-    assert.equal(artifacts.length, 1);
-    const event = artifacts.find((a) => a.kind === "event" && a.action === "command");
+    assert.equal(manager.isRoomTurn("s1"), false);
+    const events = rooms.getEvents(room.roomId, 10);
+    assert.equal(events.length, 1);
+    const event = events.find((e) => e.action === "command");
     assert.equal(event?.summary, "npx tsc --noEmit");
   });
 
@@ -89,7 +92,7 @@ describe("room-modes", () => {
       { sessionId: "s1", name: "coder" },
       { sessionId: "s2", name: "tester" },
     ]);
-    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "文件 a", path: "src/a.ts" })!;
+    const a = rooms.addFile(room.roomId, { author: "s2", summary: "文件 a", path: "src/a.ts" })!;
     const prompts: { sessionId: string; text: string | unknown[] }[] = [];
     const agent: AgentOps = {
       prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
@@ -112,7 +115,7 @@ describe("room-modes", () => {
     ]);
     room.mode = "conductor";
     room.conductorId = "s1";
-    const a = rooms.addArtifact(room.roomId, { kind: "file", author: "s2", summary: "需要继续的文件", path: "src/a.ts" })!;
+    const a = rooms.addFile(room.roomId, { author: "s2", summary: "需要继续的文件", path: "src/a.ts" })!;
     const prompts: { sessionId: string; text: string | unknown[] }[] = [];
     const agent: AgentOps = {
       prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },

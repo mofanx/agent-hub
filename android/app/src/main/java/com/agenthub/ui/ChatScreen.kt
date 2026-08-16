@@ -136,6 +136,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import com.agenthub.ArtifactInfo
 import com.agenthub.BlackboardEntry
+import com.agenthub.EventInfo
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
 import com.agenthub.ChatViewModel
@@ -397,14 +398,14 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         WindowInsets.ime.exclude(WindowInsets.navigationBars),
                     ),
             ) {
-                if (isRoom) {
-                    var expandedTop by remember { mutableStateOf<String?>(null) }
-                    ChatTopCapsules(vm, expandedTop) { expandedTop = it }
+                if (isRoom || vm.currentSession != null) {
+                    var expandedTop by remember(sessionKey) { mutableStateOf<String?>(null) }
+                    ChatTopCapsules(vm, expandedTop, showRoomExtras = isRoom) { expandedTop = it }
                     when (expandedTop) {
-                        "flow" -> FlowPanel(vm.flow, vm.currentRoom!!.mode)
-                        "blackboard" -> BlackboardPanel(vm)
-                        "artifact" -> ArtifactPanel(vm.currentArtifacts.filter { it.kind == "file" }, vm)
-                        "event" -> EventPanel(vm.currentArtifacts.filter { it.kind != "file" }, vm)
+                        "flow" -> if (isRoom) FlowPanel(vm.flow, vm.currentRoom!!.mode)
+                        "blackboard" -> if (isRoom) BlackboardPanel(vm)
+                        "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
+                        "event" -> EventPanel(vm.currentEvents, vm)
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -664,7 +665,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 }
                             } else {
                                 artifactMatches.forEach { artifact ->
-                                    val label = "${artifact.path?.let { "$it · " } ?: ""}${artifact.summary.take(60)} · @${artifact.author}"
+                                    val label = "${artifact.path?.let { "$it · " } ?: ""}${artifact.summary.take(60)} · @${vm.sessionName(artifact.author)}"
                                     DropdownMenuItem(
                                         text = { Text(label) },
                                         onClick = {
@@ -1534,23 +1535,9 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     var managing by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<ArtifactInfo>() }
     var confirmRemoveSelected by remember { mutableStateOf(false) }
-    val groups = artifacts.groupBy { it.kind }
-    val kindLabel = { kind: String ->
-        when (kind) {
-            "file" -> "文件"
-            "command" -> "命令"
-            "test" -> "测试"
-            "note" -> "笔记"
-            else -> "全部"
-        }
-    }
-    val kindColors = mapOf(
-        "file" to MaterialTheme.colorScheme.primary,
-        "command" to MaterialTheme.colorScheme.tertiary,
-        "test" to MaterialTheme.colorScheme.secondary,
-        "note" to MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    val kindColor = { kind: String -> kindColors[kind] ?: Color.Gray }
+    val groups = mapOf("file" to artifacts)
+    val kindLabel = { _: String -> "文件" }
+    val fileColor = MaterialTheme.colorScheme.primary
     val scroll = rememberScrollState()
     Card(
         modifier = Modifier
@@ -1626,13 +1613,13 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
-                                    .background(kindColor(kind), CircleShape)
+                                    .background(fileColor, CircleShape)
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 "${kindLabel(kind)} (${list.size})",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = kindColor(kind),
+                                color = fileColor,
                             )
                         }
                         list.forEach { artifact ->
@@ -1665,10 +1652,10 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                             modifier = Modifier
                                                 .width(4.dp)
                                                 .height(20.dp)
-                                                .background(kindColor(artifact.kind))
+                                                .background(fileColor)
                                         )
                                         Text(
-                                            "@${artifact.author} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
+                                            "@${vm.sessionName(artifact.author)} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
                                             style = MaterialTheme.typography.bodySmall,
                                             modifier = Modifier.weight(1f).padding(start = 6.dp),
                                         )
@@ -1685,10 +1672,10 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                             modifier = Modifier
                                                 .width(4.dp)
                                                 .height(20.dp)
-                                                .background(kindColor(artifact.kind))
+                                                .background(fileColor)
                                         )
                                         Text(
-                                            "@${artifact.author} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
+                                            "@${vm.sessionName(artifact.author)} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
                                             style = MaterialTheme.typography.bodySmall,
                                             modifier = Modifier.weight(1f).padding(start = 6.dp, end = 6.dp),
                                         )
@@ -1702,16 +1689,14 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                                     modifier = Modifier.size(22.dp),
                                                 )
                                             }
-                                            if (artifact.kind == "file") {
-                                                IconButton(
-                                                    onClick = { vm.downloadArtifactFile(artifact) },
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Download,
-                                                        contentDescription = "下载",
-                                                        modifier = Modifier.size(22.dp),
-                                                    )
-                                                }
+                                            IconButton(
+                                                onClick = { vm.downloadArtifactFile(artifact) },
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Download,
+                                                    contentDescription = "下载",
+                                                    modifier = Modifier.size(22.dp),
+                                                )
                                             }
                                             IconButton(
                                                 onClick = {
@@ -1805,28 +1790,30 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
 }
 
 @Composable
-private fun EventPanel(events: List<ArtifactInfo>, vm: ChatViewModel) {
+private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     if (events.isEmpty()) return
     val context = LocalContext.current
     var collapsed by remember { mutableStateOf(false) }
     val scroll = rememberScrollState()
     val actionLabel = { action: String? ->
         when (action) {
+            "add" -> "新增"
+            "modify" -> "修改"
             "delete" -> "删除"
             "rename" -> "重命名"
             "command" -> "命令"
             "test" -> "测试"
-            "note" -> "笔记"
             else -> "事件"
         }
     }
     val colorScheme = MaterialTheme.colorScheme
     val actionColors = mapOf(
+        "add" to colorScheme.primary,
+        "modify" to colorScheme.tertiary,
         "delete" to colorScheme.error,
         "rename" to colorScheme.tertiary,
         "command" to colorScheme.primary,
         "test" to colorScheme.secondary,
-        "note" to colorScheme.onSurfaceVariant,
     )
     val actionColor = { action: String? -> actionColors[action] ?: Color.Gray }
     Card(
@@ -1875,7 +1862,7 @@ private fun EventPanel(events: List<ArtifactInfo>, vm: ChatViewModel) {
                         Spacer(Modifier.width(6.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                "${actionLabel(event.action)} · @${event.author} · ${formatArtifactTime(event.at)}",
+                                "${actionLabel(event.action)} · @${vm.sessionName(event.author)} · ${formatArtifactTime(event.at)}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = actionColor(event.action),
                             )
@@ -1888,10 +1875,10 @@ private fun EventPanel(events: List<ArtifactInfo>, vm: ChatViewModel) {
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
-                        if (event.kind == "event" && (event.action == "command" || event.action == "test")) {
+                        if (event.action == "command" || event.action == "test") {
                             IconButton(
                                 onClick = {
-                                    vm.quoteArtifact(event)
+                                    vm.quoteEvent(event)
                                     Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
                                 },
                             ) {
@@ -1910,14 +1897,12 @@ private fun EventPanel(events: List<ArtifactInfo>, vm: ChatViewModel) {
 }
 
 @Composable
-private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, onExpand: (String?) -> Unit) {
+private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras: Boolean = true, onExpand: (String?) -> Unit) {
     val flow = vm.flow
-    val flowCount = flow?.tasks?.size ?: 0
-    val blackboardCount = vm.blackboard.size
-    val fileArtifacts = vm.currentArtifacts.filter { it.kind == "file" }
-    val eventArtifacts = vm.currentArtifacts.filter { it.kind != "file" }
-    val artifactCount = fileArtifacts.size
-    val eventCount = eventArtifacts.size
+    val flowCount = if (showRoomExtras) flow?.tasks?.size ?: 0 else 0
+    val blackboardCount = if (showRoomExtras) vm.blackboard.size else 0
+    val artifactCount = vm.currentArtifacts.size
+    val eventCount = vm.currentEvents.size
     if (flowCount == 0 && blackboardCount == 0 && artifactCount == 0 && eventCount == 0) return
     val flowProgress = flow?.progress
     val flowLabel = if (flowProgress != null) {
