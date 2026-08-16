@@ -104,6 +104,7 @@ export class AcpAgent {
     private readonly process?: ChildProcess,
     private readonly onTurnEnd?: (sessionId: string, text: string) => void,
     private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
+    private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
   ) {}
 
   get isReady(): boolean {
@@ -206,6 +207,8 @@ export class AcpAgent {
       entry.turnText += u.content.text ?? "";
     } else if (u.sessionUpdate === "agent_message" && u.content?.type === "text") {
       entry.turnText = u.content.text ?? "";
+    } else if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
+      this.handleToolCall(params.sessionId, u as Record<string, unknown>);
     }
     this.emit({
       method: "session.update",
@@ -304,6 +307,34 @@ export class AcpAgent {
     const base = entry?.cwd ?? process.cwd();
     if (path.isAbsolute(filePath)) return filePath;
     return path.resolve(base, filePath);
+  }
+
+  private handleToolCall(sessionId: string, u: Record<string, unknown>): void {
+    const status = String(u.status ?? "");
+    if (status && status !== "completed" && status !== "in_progress") return;
+
+    const kind = String(u.kind ?? "other");
+    const title = String(u.title ?? kind);
+
+    const locations = Array.isArray(u.locations) ? u.locations : [];
+    const paths = locations
+      .filter((loc) => typeof loc === "object" && loc != null && "path" in loc)
+      .map((loc) => String((loc as { path: string }).path));
+
+    if (!paths.length && typeof u.rawInput === "object" && u.rawInput != null) {
+      const raw = u.rawInput as Record<string, unknown>;
+      if (raw.path) paths.push(String(raw.path));
+      if (raw.from) paths.push(String(raw.from));
+      if (raw.to) paths.push(String(raw.to));
+    }
+
+    if (paths.length) {
+      const entry = this.sessions.get(sessionId);
+      const relPaths = entry
+        ? paths.map((p) => (path.isAbsolute(p) ? path.relative(entry.cwd, p) : p))
+        : paths;
+      this.onToolCall?.(sessionId, kind, title, relPaths);
+    }
   }
 
   private handleReadTextFile(params: { sessionId: string; path: string }): { content: string } {

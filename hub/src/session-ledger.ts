@@ -125,11 +125,27 @@ export class SessionLedger {
     return n;
   }
 
-  clearEvents(sessionId: string): number {
+  removeEvent(sessionId: string, eventId: string): boolean {
     const list = this.events.get(sessionId);
-    const n = list?.length ?? 0;
-    this.events.set(sessionId, []);
-    return n;
+    if (!list) return false;
+    const next = list.filter((e) => e.id !== eventId);
+    if (next.length === list.length) return false;
+    this.events.set(sessionId, next);
+    return true;
+  }
+
+  clearEvents(sessionId: string, action?: string): number {
+    const list = this.events.get(sessionId);
+    if (!list) return 0;
+    if (!action) {
+      const n = list.length;
+      this.events.set(sessionId, []);
+      return n;
+    }
+    const before = list.length;
+    const next = list.filter((e) => e.action !== action);
+    this.events.set(sessionId, next);
+    return before - next.length;
   }
 
   captureOutput(

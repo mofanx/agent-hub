@@ -315,6 +315,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     proc,
     onTurnEnd,
     onFileWrite,
+    onToolCall,
   );
 
   agents.set(connection.id, a);
@@ -514,6 +515,47 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean): void
   for (const room of rooms.roomsFor(sessionId)) {
     rooms.addFile?.(room.roomId, { author, summary, path: relPath });
     rooms.addEvent?.(room.roomId, { author, action, summary, path: relPath });
+  }
+
+  persistState();
+  broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+  for (const room of rooms.roomsFor(sessionId)) {
+    broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
+  }
+}
+
+function onToolCall(sessionId: string, kind: string, title: string, paths: string[]): void {
+  const meta = sessionMetas.get(sessionId);
+  if (!meta) return;
+
+  const actionMap: Record<string, EventAction> = {
+    read: "command",
+    edit: "modify",
+    delete: "delete",
+    move: "rename",
+    execute: "command",
+    search: "command",
+    fetch: "command",
+    think: "command",
+    switch_mode: "command",
+    other: "command",
+  };
+  const action = actionMap[kind] ?? "command";
+
+  for (const relPath of paths) {
+    const summary = `${title}: ${relPath}`;
+    sessionLedger.addEvent(sessionId, { author: meta.name, action, summary, path: relPath });
+
+    for (const room of rooms.roomsFor(sessionId)) {
+      rooms.addEvent?.(room.roomId, { author: meta.name, action, summary, path: relPath });
+    }
+
+    if (kind === "edit" || kind === "delete" || kind === "move") {
+      sessionLedger.addFile(sessionId, { author: meta.name, summary: title, path: relPath });
+      for (const room of rooms.roomsFor(sessionId)) {
+        rooms.addFile?.(room.roomId, { author: meta.name, summary: title, path: relPath });
+      }
+    }
   }
 
   persistState();
@@ -1247,10 +1289,23 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       }
       return { count };
     }
+    case "session.removeEvent": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const eventId = String(req.params?.eventId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      if (!eventId) throw new Error("eventId required");
+      const removed = sessionLedger.removeEvent(sessionId, eventId);
+      if (removed) {
+        persistState();
+        broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+      }
+      return { removed };
+    }
     case "session.clearEvents": {
       const sessionId = String(req.params?.sessionId ?? "");
+      const action = String(req.params?.action ?? "");
       if (!sessionId) throw new Error("sessionId required");
-      const count = sessionLedger.clearEvents(sessionId);
+      const count = sessionLedger.clearEvents(sessionId, action || undefined);
       if (count > 0) {
         persistState();
         broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
@@ -1320,11 +1375,25 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       }
       return { count };
     }
-    case "room.clearEvents": {
+    case "room.removeEvent": {
       const roomId = String(req.params?.roomId ?? "");
+      const eventId = String(req.params?.eventId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
-      const count = rooms.clearEvents(roomId);
+      if (!eventId) throw new Error("eventId required");
+      const removed = rooms.removeEvent(roomId, eventId);
+      if (removed) {
+        persistState();
+        broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
+      }
+      return { removed };
+    }
+    case "room.clearEvents": {
+      const roomId = String(req.params?.roomId ?? "");
+      const action = String(req.params?.action ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error(`unknown room: ${roomId}`);
+      const count = rooms.clearEvents(roomId, action || undefined);
       if (count > 0) {
         persistState();
         broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
@@ -1648,7 +1717,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   }
   console.log(`[hub] worker connected for ${connection.name} (${connectionId})`);
   const stream = webSocketStream(ws);
-  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite);
+  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall);
   agents.set(connectionId, a);
   a.ensureStarted().catch((err) => {
     logWarn("worker", `${connectionId} start failed: ${String(err)}`);

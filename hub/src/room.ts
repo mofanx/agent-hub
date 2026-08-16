@@ -549,13 +549,27 @@ export class RoomManager {
     return before;
   }
 
-  /** 清空房间的事件时间轴 */
-  clearEvents(roomId: string): number {
+  /** 删除房间时间轴中的单个事件 */
+  removeEvent(roomId: string, eventId: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.events) return false;
+    const before = room.events.length;
+    room.events = room.events.filter((e) => e.id !== eventId);
+    return room.events.length < before;
+  }
+
+  /** 清空房间的事件时间轴；可指定 action 只清空某一类 */
+  clearEvents(roomId: string, action?: string): number {
     const room = this.rooms.get(roomId);
     if (!room || !room.events) return 0;
+    if (!action) {
+      const before = room.events.length;
+      room.events = [];
+      return before;
+    }
     const before = room.events.length;
-    room.events = [];
-    return before;
+    room.events = room.events.filter((e) => e.action !== action);
+    return before - room.events.length;
   }
 
   private resolveAllowedRoots(roomId: string, author?: string): { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] {
