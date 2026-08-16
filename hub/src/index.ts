@@ -502,7 +502,7 @@ function onTurnEnd(sessionId: string, text: string): void {
   }
 }
 
-function onFileWrite(sessionId: string, relPath: string, existed: boolean): void {
+function onFileWrite(sessionId: string, relPath: string, existed: boolean, content?: string): void {
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
   const author = meta.name;
@@ -513,7 +513,7 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean): void
   sessionLedger.addEvent(sessionId, { author, action, summary, path: relPath });
 
   for (const room of rooms.roomsFor(sessionId)) {
-    rooms.addFile?.(room.roomId, { author, summary, path: relPath });
+    rooms.addFile?.(room.roomId, { author, summary, path: relPath, content });
     rooms.addEvent?.(room.roomId, { author, action, summary, path: relPath });
   }
 
@@ -528,17 +528,15 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
 
+  // 读文件、搜索、获取网页、思考等工具调用不产生有价值的事件
+  const ignored = new Set(["read", "search", "fetch", "think", "switch_mode", "other"]);
+  if (ignored.has(kind)) return;
+
   const actionMap: Record<string, EventAction> = {
-    read: "command",
     edit: "modify",
     delete: "delete",
     move: "rename",
     execute: "command",
-    search: "command",
-    fetch: "command",
-    think: "command",
-    switch_mode: "command",
-    other: "command",
   };
   const action = actionMap[kind] ?? "command";
 
@@ -550,12 +548,7 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
       rooms.addEvent?.(room.roomId, { author: meta.name, action, summary, path: relPath });
     }
 
-    if (kind === "edit" || kind === "delete" || kind === "move") {
-      sessionLedger.addFile(sessionId, { author: meta.name, summary: title, path: relPath });
-      for (const room of rooms.roomsFor(sessionId)) {
-        rooms.addFile?.(room.roomId, { author: meta.name, summary: title, path: relPath });
-      }
-    }
+    // tool_call 只记录事件，不生成文件产物；真实文件写入由 fs/write_text_file 捕获
   }
 
   persistState();

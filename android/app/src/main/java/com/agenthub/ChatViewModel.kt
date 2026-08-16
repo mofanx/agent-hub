@@ -2077,6 +2077,83 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun removeEvent(event: EventInfo) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        currentEvents.remove(event)
+        viewModelScope.launch {
+            try {
+                if (roomId != null) {
+                    hub.call("room.removeEvent", buildJsonObject {
+                        put("roomId", roomId)
+                        put("eventId", event.id)
+                    })
+                } else {
+                    hub.call("session.removeEvent", buildJsonObject {
+                        put("sessionId", sessionId!!)
+                        put("eventId", event.id)
+                    })
+                }
+            } catch (e: Exception) {
+                currentEvents.add(event)
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
+            }
+        }
+    }
+
+    fun removeEvents(events: List<EventInfo>) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        currentEvents.removeAll(events)
+        viewModelScope.launch {
+            try {
+                if (roomId != null) {
+                    for (event in events) {
+                        hub.call("room.removeEvent", buildJsonObject {
+                            put("roomId", roomId)
+                            put("eventId", event.id)
+                        })
+                    }
+                } else {
+                    for (event in events) {
+                        hub.call("session.removeEvent", buildJsonObject {
+                            put("sessionId", sessionId!!)
+                            put("eventId", event.id)
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                currentEvents.addAll(events)
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "remove failed"))
+            }
+        }
+    }
+
+    fun clearEvents(action: String? = null) {
+        val roomId = currentRoom?.roomId
+        val sessionId = currentSession?.sessionId
+        if (roomId == null && sessionId == null) return
+        viewModelScope.launch {
+            try {
+                if (roomId != null) {
+                    hub.call("room.clearEvents", buildJsonObject {
+                        put("roomId", roomId)
+                        if (action != null) put("action", action)
+                    })
+                } else {
+                    hub.call("session.clearEvents", buildJsonObject {
+                        put("sessionId", sessionId!!)
+                        if (action != null) put("action", action)
+                    })
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "clear failed"))
+            }
+        }
+    }
+
     fun removeBlackboardEntry(entry: BlackboardEntry) {
         val room = currentRoom ?: return
         viewModelScope.launch {

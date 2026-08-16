@@ -801,10 +801,6 @@ export class RoomManager {
       }
     }
 
-    if (a?.summary) {
-      const name = a.path ? path.basename(a.path) : (a.alias ?? a.id);
-      return { text: a.summary, name, mime: "text/plain" };
-    }
     if (!a) throw new Error("file not found");
     throw new Error("file not readable");
   }

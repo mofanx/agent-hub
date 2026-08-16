@@ -1845,6 +1845,14 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     if (events.isEmpty()) return
     val context = LocalContext.current
     var collapsed by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    var confirmRemove by remember { mutableStateOf<EventInfo?>(null) }
+    var confirmRemoveSelected by remember { mutableStateOf(false) }
+    var managing by remember { mutableStateOf(false) }
+    val selected = remember { mutableStateListOf<EventInfo>() }
+    var selectedEvent by remember { mutableStateOf<EventInfo?>(null) }
+    var clearAction by remember { mutableStateOf<String?>(null) }
+    var showClearMenu by remember { mutableStateOf(false) }
     val scroll = rememberScrollState()
     val actionLabel = { action: String? ->
         when (action) {
@@ -1867,6 +1875,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
         "test" to colorScheme.secondary,
     )
     val actionColor = { action: String? -> actionColors[action] ?: Color.Gray }
+    val actionOptions = remember(events) { events.map { it.action }.distinct().sorted() }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1890,60 +1899,279 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                     "${if (collapsed) "▸" else "▾"} 事件",
                     style = MaterialTheme.typography.labelLarge,
                 )
-                Text(
-                    "${events.size} 条",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (managing) {
+                        Text(
+                            "删除 ${selected.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selected.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                            modifier = Modifier
+                                .clickable(enabled = selected.isNotEmpty()) { confirmRemoveSelected = true }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                        Text(
+                            "取消",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .clickable { managing = false; selected.clear(); selectedEvent = null }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    } else {
+                        Box {
+                            Text(
+                                "清空",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier
+                                    .clickable { showClearMenu = true }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                            )
+                            DropdownMenu(
+                                expanded = showClearMenu,
+                                onDismissRequest = { showClearMenu = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("清空全部") },
+                                    onClick = {
+                                        showClearMenu = false
+                                        clearAction = null
+                                        showClearConfirm = true
+                                    },
+                                )
+                                actionOptions.forEach { action ->
+                                    DropdownMenuItem(
+                                        text = { Text("仅清空「${actionLabel(action)}」") },
+                                        onClick = {
+                                            showClearMenu = false
+                                            clearAction = action
+                                            showClearConfirm = true
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            "管理",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .clickable { managing = true; selectedEvent = null }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                    Text(
+                        "${events.size} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
             }
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
-                events.forEach { event ->
+                selectedEvent?.let { event ->
+                    val activeContainer = MaterialTheme.colorScheme.primaryContainer
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 3.dp),
+                            .background(activeContainer, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(actionColor(event.action), CircleShape)
+                        Text(
+                            event.path ?: event.summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).padding(end = 6.dp),
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "${actionLabel(event.action)} · @${vm.sessionName(event.author)} · ${formatArtifactTime(event.at)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = actionColor(event.action),
-                            )
-                            Text(
-                                buildString {
-                                    if (event.oldPath != null) append("${event.oldPath} → ")
-                                    if (event.path != null) append("${event.path} · ")
-                                    append(event.summary)
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        if (event.action == "command" || event.action == "test") {
+                        Row {
                             IconButton(
                                 onClick = {
                                     vm.quoteEvent(event)
                                     Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
                                 },
+                                modifier = Modifier.size(28.dp),
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.FormatQuote,
                                     contentDescription = "引用",
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier.size(18.dp),
                                 )
+                            }
+                            IconButton(
+                                onClick = { confirmRemove = event; selectedEvent = null },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "删除",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                events.forEach { event ->
+                    val isActive = selectedEvent?.id == event.id
+                    val bg = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+                    Surface(
+                        color = bg,
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp)
+                            .clickable {
+                                if (managing) {
+                                    if (selected.contains(event)) selected.remove(event)
+                                    else selected.add(event)
+                                } else {
+                                    selectedEvent = if (isActive) null else event
+                                }
+                            },
+                    ) {
+                        if (managing) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = selected.contains(event),
+                                    onCheckedChange = {
+                                        if (selected.contains(event)) selected.remove(event)
+                                        else selected.add(event)
+                                    },
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(actionColor(event.action), CircleShape)
+                                )
+                                Text(
+                                    "${actionLabel(event.action)} · @${vm.sessionName(event.author)} · ${formatArtifactTime(event.at)} · ${event.summary}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f).padding(start = 6.dp),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(actionColor(event.action), CircleShape)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "${actionLabel(event.action)} · @${vm.sessionName(event.author)} · ${formatArtifactTime(event.at)}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = actionColor(event.action),
+                                    )
+                                    Text(
+                                        buildString {
+                                            if (event.oldPath != null) append("${event.oldPath} → ")
+                                            if (event.path != null) append("${event.path} · ")
+                                            append(event.summary)
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (event.action == "command" || event.action == "test") {
+                                    IconButton(
+                                        onClick = {
+                                            vm.quoteEvent(event)
+                                            Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.size(28.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.FormatQuote,
+                                            contentDescription = "引用",
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    confirmRemove?.let { event ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text("删除事件") },
+            text = { Text("确定删除该事件？\n${event.summary}") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.removeEvent(event)
+                        confirmRemove = null
+                        selectedEvent = null
+                    },
+                ) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemove = null }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空事件") },
+            text = {
+                Text(
+                    if (clearAction == null) "确定清空全部事件？"
+                    else "确定清空全部「${actionLabel(clearAction)}」事件？"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.clearEvents(clearAction)
+                        showClearConfirm = false
+                        clearAction = null
+                    },
+                ) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (confirmRemoveSelected) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoveSelected = false },
+            title = { Text("删除选中事件") },
+            text = { Text("确定删除 ${selected.size} 条事件？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.removeEvents(selected.toList())
+                        selected.clear()
+                        managing = false
+                        confirmRemoveSelected = false
+                    },
+                ) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoveSelected = false }) { Text("取消") }
+            },
+        )
     }
 }
 
