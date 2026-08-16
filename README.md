@@ -1,18 +1,20 @@
 # Agent Hub
 
-手机（Android）通过局域网连接 PC 上的 Devin（ACP 协议），远程创建会话、下发指令、流式查看输出、审批工具调用。
+Android App / Desktop App 通过局域网或远程连接 PC 上的 Devin（ACP 协议），远程创建会话、下发指令、流式查看输出、审批工具调用。
 
 ## 架构
 
 ```
                     ┌─> worker ──> devin acp
 Android App ──WS──> Hub (Node.js) ──WS──> worker ──> claude-code-acp
-                    └─> worker ──> codex-acp
+Desktop App ──WS──>   ▲              └─> worker ──> codex-acp
+                    └─> worker ──> opencode acp
 ```
 
 - **Hub**：常驻 Node.js WebSocket 网关，管理连接、会话、群聊编排与持久化。
 - **Worker**：在运行 agent 的机器上执行 `npx tsx src/worker.ts`，把本地 agent 的 ACP stdio 桥接到 Hub。
 - **Android App**：通过 `HUB_TOKEN` 连接 Hub，管理连接、创建会话、下发 prompt、审批工具调用。
+- **Desktop App**：Tauri + React 桌面客户端，功能与 Android 端对齐，支持 Windows / Linux。
 
 Hub 内置多 agent 注册表，群聊可混编不同类型的 agent 会话。
 
@@ -38,7 +40,7 @@ cd hub
 HUB_TOKEN=dev-token npx tsx src/index.ts
 # 输出: [hub] phone connect: ws://192.168.x.x:8787/?token=dev-token
 
-# 开启远程中继（cloudflared 快速隧道，手机走蜂窝也能连）
+# 开启远程中继（cloudflared 快速隧道，客户端走蜂窝/公网也能连）
 HUB_TUNNEL=1 npx tsx src/index.ts
 # 输出: [tunnel] remote connect: wss://xxx.trycloudflare.com/?token=dev-token
 ```
@@ -87,7 +89,17 @@ cd android
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### 3. 添加连接并复制 token
+### 3. 安装桌面客户端（Windows / Linux，可选）
+
+```bash
+cd desktop
+pnpm install
+pnpm tauri build
+```
+
+构建产物位于 `src-tauri/target/release/bundle/`（MSI / NSIS / AppImage / deb）。运行后同样填入 Hub 地址和 token 即可连接。
+
+### 4. 添加连接并复制 token
 
 打开 App，**连接**页填入 Hub IP、端口 `8787`、token `dev-token`（即 `HUB_TOKEN`）。
 
@@ -99,7 +111,7 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 > 这个 token 是给 worker 用的，不是 App 连接 Hub 的 `HUB_TOKEN`。
 
-### 4. 启动 Worker（运行 agent 的机器上）
+### 5. 启动 Worker（运行 agent 的机器上）
 
 worker 负责把本地 agent（`devin` / `claude` / `codex` / `opencode`）桥接到 Hub。必须**在 `hub/` 目录下**启动，因为依赖 `hub/node_modules`。
 
@@ -121,12 +133,20 @@ HUB_URL=ws://<hub-ip>:8787/worker \
 
 worker 环境变量：`HUB_URL`、`CONNECTION_TOKEN`、`AGENT`、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`、`CODEX_ACP_BIN/CODEX_ACP_ARGS`、`OPENCODE_BIN/OPENCODE_ARGS`。
 
-### 5. 创建会话/群聊
+### 6. 创建会话/群聊
 
 worker 上线后，回到 App：
 
 - **新建会话**：选择已在线的来源（connection），填写工作目录，开始聊天。
 - **新建群聊**：勾选多个会话，混编多个 worker/agent。
+
+## 产物与事件
+
+- **产物面板**：实时显示 agent 创建/修改的文件，支持引用、预览、下载、删除、清空
+- **事件时间轴**：自动记录文件新增/修改/删除/重命名、工具调用等关键动作
+- **ACP fs 能力捕获**：Hub 通过 `fs/write_text_file`、`fs/read_text_file` 标准 ACP 能力直接感知文件写入
+- **tool_call 捕获**：解析 `session/update` 中的 `tool_call` / `tool_call_update`，记录 edit/delete/move/execute 类事件
+- 事件支持按类型清空、批量删除、单独删除，安卓与桌面端均已同步
 
 ## 持久化与历史
 
@@ -149,21 +169,9 @@ worker 上线后，回到 App：
 
 1. **cloudflared 快速隧道**：`HUB_TUNNEL=1` 启动即可，零配置，地址每次变化
 2. **自建 VPS + 域名**：`deploy/` 内含 Caddy / Nginx 配置 + systemd unit（Hub 常驻 + autossh 反向隧道），固定 `wss://hub.你的域名`
-3. **Tailscale**：PC/手机组网后直接填 Tailscale IP
+3. **Tailscale**：PC/客户端组网后直接填 Tailscale IP
 
 App 连接界面支持保存多个配置档案（局域网/远程随意切换，点一下即连）。
-
-### 2. 安装 App（Android 手机）
-
-```bash
-cd android
-./gradlew assembleDebug
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
-### 3. 连接
-
-App 中输入 Hub IP、端口 8787、token（默认 dev-token）→ 新建会话（填 PC 上的工作目录绝对路径）→ 开始聊天。
 
 ## 群聊
 
@@ -185,7 +193,7 @@ App 中输入 Hub IP、端口 8787、token（默认 dev-token）→ 新建会话
 - 执行中可点「停止」中断当前会话（群内所有忙碌成员）
 - 群聊中发送 `/stop` 可停止当前群内所有生成；`/stop @成员` 只停止指定成员
 
-## 验证（无手机时）
+## 验证（无实体设备时）
 
 ```bash
 cd hub
@@ -214,4 +222,6 @@ npx tsx scripts/claude-check.ts    # claude-code-acp 会话（需先 claude auth
 - ~~会话持久化 + 历史记录 + 离线恢复~~ ✅ 已实现
 - ~~远程中继（cloudflared 隧道 + VPS 自建）~~ ✅ 已实现
 - ~~会话归档/删除 + 历史全文搜索~~ ✅ 已实现
+- ~~桌面客户端（Tauri / Windows / Linux）~~ ✅ 已实现
+- ~~产物/事件面板 + 文件操作捕获~~ ✅ 已实现
 - 推送审批（FCM/ntfy）、命名隧道

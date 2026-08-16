@@ -84,5 +84,8 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 - **Conductor**：指挥家拆解任务为 JSON 工单，Hub 自动派发；完成后汇总。
 - **Flow 状态**：`room.flow` API + `room.flowUpdate` 事件，前后端同步编排进度。
 - **Artifact 自动捕获**：从子任务输出中扫描 ````bash` 块、diff 块、文件路径和显式文件声明。
+- **ACP fs 能力**：Hub 声明 `fs.readTextFile` / `fs.writeTextFile`，直接感知 agent 文件写入并同步产物与事件。
+- **tool_call 捕获**：解析 `session/update` 中的 `tool_call` / `tool_call_update`，记录 edit/delete/move/execute 等关键动作（过滤 read/search 等低价值事件）。
+- **产物/事件面板**：Android 与桌面端均支持文件产物预览、下载、删除，以及事件清空、按类型过滤、批量删除。
 - **角色卡绑定**：房间成员可绑定 `memberRoles`，prompt 注入对应 persona。
 - **持久化**：SQLite（`hub/data/hub.db`），Hub 重启自动恢复。

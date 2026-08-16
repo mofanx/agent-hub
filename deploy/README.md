@@ -6,7 +6,7 @@ Hub 是纯 WebSocket 服务（无 TLS），远程接入的本质都是「给 878
 |------|------|------|------|
 | **cloudflared 快速隧道** | 无 | 零配置，`HUB_TUNNEL=1` 即可 | 地址每次重启变化、无 SLA |
 | **自建 VPS + 域名** | VPS、域名 | 固定地址、完全自控 | 需维护 VPS |
-| **Tailscale** | PC/手机装 Tailscale | 零暴露、端到端加密 | 手机需装客户端 |
+| **Tailscale** | PC/客户端装 Tailscale | 零暴露、端到端加密 | 客户端需装 Tailscale |
 
 ## 方式一：cloudflared 快速隧道
 
@@ -16,11 +16,11 @@ HUB_TUNNEL=1 npx tsx src/index.ts
 # [tunnel] remote connect: wss://xxx.trycloudflare.com/?token=...
 ```
 
-手机 App 地址栏粘贴完整 wss 地址。已有 Cloudflare 账号可改用命名隧道拿固定域名（`cloudflared tunnel create`）。
+客户端地址栏粘贴完整 wss 地址（Android App 或 Desktop App）。已有 Cloudflare 账号可改用命名隧道拿固定域名（`cloudflared tunnel create`）。
 
 ## 方式二：自建 VPS + 域名（推荐生产用）
 
-架构：手机 → `wss://hub.你的域名` → VPS(Caddy 或 Nginx 终结 TLS) → SSH 反向隧道 → 家里 PC(Hub:8787)
+架构：客户端（Android / Desktop）→ `wss://hub.你的域名` → VPS(Caddy 或 Nginx 终结 TLS) → SSH 反向隧道 → 家里 PC(Hub:8787)
 
 VPS 上**任选 Caddy 或 Nginx 一种**即可。
 
@@ -92,9 +92,9 @@ sudo cp deploy/agent-hub.service /etc/systemd/system/
 sudo systemctl enable --now agent-hub
 ```
 
-### 4. 手机连接
+### 4. 客户端连接
 
-App 地址栏填 `wss://hub.你的域名`，Token 填 `HUB_TOKEN` 的值。
+Android App 或 Desktop App 地址栏填 `wss://hub.你的域名`，Token 填 `HUB_TOKEN` 的值。
 
 **安全提醒**：token 是唯一鉴权手段，公网部署务必：
 - 设置强随机 `HUB_TOKEN`（如 `openssl rand -hex 24`）
@@ -103,4 +103,4 @@ App 地址栏填 `wss://hub.你的域名`，Token 填 `HUB_TOKEN` 的值。
 
 ## 方式三：Tailscale（最省心）
 
-PC 和手机都装 Tailscale 并登录同一账号，手机 App 直接填 PC 的 Tailscale IP（100.x.x.x）+ 端口 8787。流量端到端加密，Hub 无需任何改动。
+PC 和客户端都装 Tailscale 并登录同一账号，Android App 或 Desktop App 直接填 PC 的 Tailscale IP（100.x.x.x）+ 端口 8787。流量端到端加密，Hub 无需任何改动。

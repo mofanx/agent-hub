@@ -7,6 +7,7 @@ Tauri 2 + React + TypeScript 桌面客户端，复用 Android 端的 WebSocket J
 - 通过 WebSocket 连接 Hub（支持断线重连、心跳保活）
 - JSON-RPC 请求-响应映射 + 事件流分发
 - 全局状态 store：会话/群聊/角色/连接管理、历史搜索、批量选择、快捷指令、权限审批
+- 产物面板 + 事件时间轴：与 Android 端对齐，支持预览/下载/删除产物、清空/管理事件
 - 原生能力：系统通知、系统托盘、本地配置持久化
 - Windows 安装包输出：MSI / NSIS
 
