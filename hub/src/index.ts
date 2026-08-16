@@ -14,7 +14,7 @@ import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
-import { AGENT_DEFS } from "./agent-defs.js";
+import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager } from "./model.js";
 import { logError, logWarn } from "./logger.js";
 
@@ -279,8 +279,12 @@ function cleanupLocalAgent(connectionId: string): void {
   }
 }
 
-function spawnAgent(bin: string, args: string[]): ChildProcess {
-  return spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+function spawnAgent(def: AgentDef): ChildProcess {
+  return spawn(def.bin, def.args, {
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: def.cwd,
+    env: { ...process.env, ...def.env },
+  });
 }
 
 async function startLocalAgent(connection: Connection): Promise<void> {
@@ -288,7 +292,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
   if (!def) throw new Error(`unknown agent type: ${connection.agent}`);
   localAgentErrors.delete(connection.id);
 
-  const proc = spawnAgent(def.bin, def.args);
+  const proc = spawnAgent(def);
   const stderrChunks: Buffer[] = [];
   proc.stderr!.on("data", (chunk: Buffer) => {
     stderrChunks.push(chunk);
