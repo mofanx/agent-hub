@@ -402,6 +402,20 @@ export class AcpAgent {
     });
   }
 
+  async setConfigOption(
+    sessionId: string,
+    configId: string,
+    value: string | boolean,
+  ): Promise<void> {
+    await this.ensureStarted();
+    const params: { sessionId: string; configId: string; value: string | boolean } = {
+      sessionId,
+      configId,
+      value,
+    };
+    await this.ctx!.request(acp.methods.agent.session.setConfigOption, params as never);
+  }
+
   isBusy(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.busy ?? false;
   }

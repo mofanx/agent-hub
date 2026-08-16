@@ -692,6 +692,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       });
       owners.set(s.sessionId, connection.id);
       persistState();
+
+      // 新建 Devin CLI session 时同步当前模型
+      if (connection.agent === "devin") {
+        const current = modelManager.current();
+        agent
+          .setConfigOption(s.sessionId, "model", current.uid)
+          .catch((err) => logWarn("session.create", `sync model failed: ${String(err)}`));
+      }
+
       if (role) {
         const personaPrompt =
           `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
@@ -735,6 +744,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       });
       owners.set(s.sessionId, connection.id);
       persistState();
+
+      // 新建 Devin CLI session 时同步当前模型
+      if (connection.agent === "devin") {
+        const current = modelManager.current();
+        agent
+          .setConfigOption(s.sessionId, "model", current.uid)
+          .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
+      }
 
       if (source.roleId) {
         const role = store.listRoles().find((r) => r.id === source.roleId);
@@ -795,10 +812,20 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const agent = agents.get(connectionId);
       if (!agent) throw new Error("agent 未连接");
       let ok = await agent.resumeSession(meta.sessionId, meta.cwd, meta.name);
+
       if (!ok) {
         const hasHistory = store.read("session", sessionId).length > 0;
         // 无论是否有历史，agent 已无法恢复该 session，直接用同名/cwd 重建
         const s = await agent.createSession(meta.cwd, meta.name);
+
+        // 重建 Devin CLI session 时同步当前模型
+        if (connection?.agent === "devin") {
+          const current = modelManager.current();
+          agent
+            .setConfigOption(s.sessionId, "model", current.uid)
+            .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
+        }
+
         if (hasHistory) {
           store.renameHistory("session", sessionId, s.sessionId);
         }
@@ -817,6 +844,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         return { resumed: true, sessionId: s.sessionId };
       }
       owners.set(sessionId, connectionId);
+
+      // 恢复 Devin CLI session 时同步当前模型
+      if (connection?.agent === "devin") {
+        const current = modelManager.current();
+        agent
+          .setConfigOption(sessionId, "model", current.uid)
+          .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
+      }
+
       return { resumed: true };
     }
     case "session.rename": {
@@ -1436,6 +1472,22 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const name = String(req.params?.model ?? "").trim();
       if (!name) throw new Error("model name required");
       const model = await modelManager.set(name);
+
+      // 把模型切换同步给所有由 Devin CLI 托管的活跃 session
+      const syncTasks: Promise<void>[] = [];
+      for (const [sessionId, connectionId] of owners.entries()) {
+        const meta = sessionMetas.get(sessionId);
+        if (meta?.agent !== "devin") continue;
+        const agent = agents.get(connectionId);
+        if (!agent) continue;
+        syncTasks.push(
+          agent.setConfigOption(sessionId, "model", model.uid).catch((err) => {
+            logWarn("model.set", `sync to ${sessionId} failed: ${String(err)}`);
+          }),
+        );
+      }
+      await Promise.all(syncTasks);
+
       return { set: true, model };
     }
     default:
