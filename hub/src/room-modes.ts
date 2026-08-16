@@ -487,9 +487,9 @@ export class RoomModeManager {
       this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (room) {
-        this.notice({ roomId: room.roomId, message: "🎛️ 主持人决策失败，已兜底为点名应答" });
-        this.setSubMode(room.roomId, "mention", undefined, undefined);
-        void this.executeMode(room, "mention", autoCtx.text, {
+        this.notice({ roomId: room.roomId, message: "🎛️ 主持人决策失败，已兜底为回答" });
+        this.setSubMode(room.roomId, "self", room.conductorId, undefined);
+        void this.executeMode(room, "self", autoCtx.text, {
           note: autoCtx.note,
           quote: autoCtx.quote,
           content: autoCtx.content,
@@ -1255,7 +1255,7 @@ export class RoomModeManager {
   }
 
   private parseAutoDecision(output: string): AutoDecision {
-    const fallback: AutoDecision = { mode: "mention", reason: "决策输出无法解析，兜底为点名应答" };
+    const fallback: AutoDecision = { mode: "self", reason: "决策输出无法解析，兜底为回答" };
     const text = output.trim();
     if (!text) {
       logWarn("room-modes auto", "决策输出为空");
