@@ -187,7 +187,10 @@ interface Actions {
   clearBlackboard(roomId: string): Promise<void>;
   removeArtifact(roomId: string, artifactId: string): Promise<void>;
   clearArtifacts(roomId: string, kind?: "file" | "event"): Promise<void>;
+  removeEvent(contextId: string, eventId: string): Promise<void>;
+  clearEvents(contextId: string, action?: string): Promise<void>;
   quoteArtifact(artifact: ArtifactInfo): void;
+  quoteEvent(event: EventInfo): void;
   clearFileRef(): void;
   clearNewArtifacts(): void;
   deleteFile(contextId: string, isSession: boolean, path: string): Promise<void>;
@@ -1824,6 +1827,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
+    removeEvent: async (contextId: string, eventId: string) => {
+      const client = get().client;
+      if (!client) return;
+      const isSession = !get().currentRoom && !!get().currentSession;
+      try {
+        await client.call(
+          isSession ? "session.removeEvent" : "room.removeEvent",
+          isSession ? { sessionId: contextId, eventId } : { roomId: contextId, eventId },
+        );
+      } catch (err) {
+        alert(`删除失败：${err}`);
+      }
+    },
+
+    clearEvents: async (contextId: string, action?: string) => {
+      const client = get().client;
+      if (!client) return;
+      const isSession = !get().currentRoom && !!get().currentSession;
+      try {
+        const method = isSession ? "session.clearEvents" : "room.clearEvents";
+        const params = isSession ? { sessionId: contextId } : { roomId: contextId };
+        if (action) (params as Record<string, unknown>)["action"] = action;
+        await client.call(method, params);
+      } catch (err) {
+        alert(`清空失败：${err}`);
+      }
+    },
+
     deleteFile: async (contextId: string, isSession: boolean, filePath: string) => {
       const client = get().client;
       if (!client) return;
@@ -1851,6 +1882,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
     quoteArtifact: (artifact: ArtifactInfo) => {
       const ref = artifact.path ? `#${artifact.path}` : `@${artifact.alias ?? artifact.id}`;
       set({ fileRefToInsert: `${ref} `, quote: [get().sessionName(artifact.author), artifact.summary] });
+    },
+    quoteEvent: (event: EventInfo) => {
+      set({ quote: [get().sessionName(event.author), `[${event.action}] ${event.summary}`] });
     },
     clearFileRef: () => set({ fileRefToInsert: null }),
     clearNewArtifacts: () => set({ hasNewArtifacts: false }),

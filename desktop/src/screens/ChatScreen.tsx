@@ -1712,15 +1712,140 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
 
 function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?: boolean }) {
   const store = useHubStore();
+  const roomId = store.currentRoom?.roomId;
+  const sessionId = store.currentSession?.sessionId;
+  const contextId = roomId ?? sessionId;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("eventPanelCollapsed") === "1");
+  const [managing, setManaging] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [clearAction, setClearAction] = useState<string | null>(null);
+  const active = activeId ? events.find((e) => e.id === activeId) ?? null : null;
   useEffect(() => {
     localStorage.setItem("eventPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
 
+  const actionOptions = useMemo(
+    () => events.map((e) => e.action).filter((v, i, a) => a.indexOf(v) === i).sort(),
+    [events],
+  );
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const onDeleteSelected = async () => {
+    if (!contextId || selected.size === 0) return;
+    const list = Array.from(selected);
+    if (!window.confirm(`确认删除选中的 ${list.length} 条事件？`)) return;
+    await Promise.all(list.map((id) => store.removeEvent(contextId, id)));
+    setSelected(new Set());
+    setManaging(false);
+  };
+
+  const onClear = async () => {
+    if (!contextId) return;
+    const label = clearAction ? `「${eventLabel(clearAction)}」` : "全部";
+    if (!window.confirm(`确认清空 ${label} 事件？`)) return;
+    await store.clearEvents(contextId, clearAction ?? undefined);
+    setSelected(new Set());
+    setManaging(false);
+    setActiveId(null);
+  };
+
+  const onRemoveActive = async () => {
+    if (!contextId || !active) return;
+    if (!window.confirm(`确认删除该事件？\n${active.summary}`)) return;
+    await store.removeEvent(contextId, active.id);
+    setActiveId(null);
+  };
+
+  const onQuote = () => active && store.quoteEvent(active);
+
+  const clearMenu = (
+    <select
+      className="context-action event-clear-select"
+      value={clearAction ?? ""}
+      onChange={(e) => setClearAction(e.target.value || null)}
+      onClick={(e) => e.stopPropagation()}
+      title="选择要清空的事件类型"
+    >
+      <option value="">清空全部</option>
+      {actionOptions.map((a) => (
+        <option key={a} value={a}>仅清空「{eventLabel(a)}」</option>
+      ))}
+    </select>
+  );
+
+  const manageActions = (
+    <div className="artifact-header-actions" onClick={(e) => e.stopPropagation()}>
+      {!managing ? (
+        <>
+          {clearMenu}
+          <button className="context-action" onClick={onClear}>清空</button>
+          <button className="context-action" onClick={() => { setManaging(true); setActiveId(null); }}>管理</button>
+        </>
+      ) : (
+        <>
+          <button className="context-action danger" onClick={onDeleteSelected} disabled={selected.size === 0}>
+            删除选中{selected.size > 0 ? ` (${selected.size})` : ""}
+          </button>
+          <button
+            className="context-action"
+            onClick={() => {
+              setManaging(false);
+              setSelected(new Set());
+            }}
+          >
+            完成
+          </button>
+        </>
+      )}
+    </div>
+  );
+
+  const activeToolbar = active ? (
+    <div className="artifact-active-toolbar" onClick={(e) => e.stopPropagation()}>
+      <span className="artifact-active-name" title={active.summary}>
+        {active.path || active.summary}
+      </span>
+      <button className="artifact-action" title="引用" onClick={onQuote}>引</button>
+      <button className="artifact-action danger" title="删除" onClick={onRemoveActive}>删</button>
+    </div>
+  ) : null;
+
   const list = (
     <div className="artifact-list event-list">
       {events.map((e) => (
-        <div key={e.id} className="artifact-item artifact-kind-event" title={e.summary}>
+        <div
+          key={e.id}
+          onClick={() => {
+            if (managing) toggleSelected(e.id);
+            else setActiveId(e.id === activeId ? null : e.id);
+          }}
+          className={`artifact-item artifact-kind-event ${managing ? "managing" : ""} ${managing && selected.has(e.id) ? "selected" : ""} ${!managing && e.id === activeId ? "active" : ""}`}
+          title={e.summary}
+        >
+          {managing && (
+            <input
+              type="checkbox"
+              checked={selected.has(e.id)}
+              onChange={(ev) => {
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  if (ev.target.checked) next.add(e.id);
+                  else next.delete(e.id);
+                  return next;
+                });
+              }}
+              onClick={(ev) => ev.stopPropagation()}
+            />
+          )}
           <div className="artifact-info">
             <span className="artifact-kind-badge">{eventIcon(e.action)}</span>
             <span className="artifact-author">@{store.sessionName(e.author)}</span>
@@ -1738,22 +1863,34 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
   const countText = `${events.length} 条`;
   const listContent = events.length > 0 ? list : <div className="context-empty">没有事件</div>;
 
-  return minimal ? (
-    <div className="context-content">
-      <div className="context-content-header">
-        <span className="context-content-title">事件</span>
-        <span className="artifact-count">{countText}</span>
-      </div>
-      {listContent}
-    </div>
-  ) : (
-    <div className="artifact-panel">
-      <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
-        <span className="artifact-title">{collapsed ? "▸ " : "▾ "}事件</span>
-        <span className="artifact-count">{countText}</span>
-      </div>
-      {!collapsed && listContent}
-    </div>
+  return (
+    <>
+      {minimal ? (
+        <div className="context-content">
+          <div className="context-content-header">
+            <span className="context-content-title">事件</span>
+            <span className="artifact-count">{countText}</span>
+            {manageActions}
+          </div>
+          {activeToolbar}
+          {listContent}
+        </div>
+      ) : (
+        <div className="artifact-panel">
+          <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
+            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}事件</span>
+            <span className="artifact-count">{countText}</span>
+            {manageActions}
+          </div>
+          {!collapsed && (
+            <>
+              {activeToolbar}
+              {listContent}
+            </>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
