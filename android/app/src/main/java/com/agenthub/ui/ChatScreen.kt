@@ -1535,6 +1535,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     var managing by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<ArtifactInfo>() }
     var confirmRemoveSelected by remember { mutableStateOf(false) }
+    var selectedArtifact by remember { mutableStateOf<ArtifactInfo?>(null) }
     val groups = mapOf("file" to artifacts)
     val kindLabel = { _: String -> "文件" }
     val fileColor = MaterialTheme.colorScheme.primary
@@ -1591,7 +1592,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             "管理",
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier
-                                .clickable { managing = true }
+                                .clickable { managing = true; selectedArtifact = null }
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                     }
@@ -1605,6 +1606,71 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             }
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
+                selectedArtifact?.let { artifact ->
+                    val activeContainer = MaterialTheme.colorScheme.primaryContainer
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(activeContainer, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            artifact.path ?: artifact.alias ?: artifact.id,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).padding(end = 6.dp),
+                        )
+                        Row {
+                            IconButton(
+                                onClick = {
+                                    vm.quoteArtifact(artifact)
+                                    Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.FormatQuote,
+                                    contentDescription = "引用",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            IconButton(
+                                onClick = { vm.loadArtifactPreview(artifact) },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Visibility,
+                                    contentDescription = "预览",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            IconButton(
+                                onClick = { vm.downloadArtifactFile(artifact) },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Download,
+                                    contentDescription = "下载",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            IconButton(
+                                onClick = { confirmRemove = artifact; selectedArtifact = null },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "删除",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
                 groups.forEach { (kind, list) ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1623,12 +1689,22 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             )
                         }
                         list.forEach { artifact ->
+                            val isActive = selectedArtifact?.id == artifact.id
+                            val bg = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
                             Surface(
-                                color = MaterialTheme.colorScheme.surface,
+                                color = bg,
                                 shape = RoundedCornerShape(4.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 2.dp),
+                                    .padding(vertical = 2.dp)
+                                    .clickable {
+                                        if (managing) {
+                                            if (selected.contains(artifact)) selected.remove(artifact)
+                                            else selected.add(artifact)
+                                        } else {
+                                            selectedArtifact = if (isActive) null else artifact
+                                        }
+                                    },
                             ) {
                                 if (managing) {
                                     Row(
@@ -1666,7 +1742,6 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                             .fillMaxWidth()
                                             .padding(horizontal = 8.dp, vertical = 6.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
                                     ) {
                                         Box(
                                             modifier = Modifier
@@ -1677,49 +1752,8 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                         Text(
                                             "@${vm.sessionName(artifact.author)} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
                                             style = MaterialTheme.typography.bodySmall,
-                                            modifier = Modifier.weight(1f).padding(start = 6.dp, end = 6.dp),
+                                            modifier = Modifier.weight(1f).padding(start = 6.dp),
                                         )
-                                        Row {
-                                            IconButton(
-                                                onClick = { vm.loadArtifactPreview(artifact) },
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Filled.Visibility,
-                                                    contentDescription = "预览",
-                                                    modifier = Modifier.size(22.dp),
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { vm.downloadArtifactFile(artifact) },
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Download,
-                                                    contentDescription = "下载",
-                                                    modifier = Modifier.size(22.dp),
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = {
-                                                    vm.quoteArtifact(artifact)
-                                                    Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
-                                                },
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Filled.FormatQuote,
-                                                    contentDescription = "引用",
-                                                    modifier = Modifier.size(22.dp),
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { confirmRemove = artifact },
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Delete,
-                                                    contentDescription = "删除",
-                                                    modifier = Modifier.size(22.dp),
-                                                )
-                                            }
-                                        }
                                     }
                                 }
                             }

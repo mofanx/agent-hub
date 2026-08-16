@@ -1459,6 +1459,8 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   const [preview, setPreview] = useState<(FileGetResult & { name: string }) | null>(null);
   const [managing, setManaging] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const active = activeId ? artifacts.find((a) => a.id === activeId) ?? null : null;
   useEffect(() => {
     localStorage.setItem("artifactPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
@@ -1543,12 +1545,24 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     await store.clearArtifacts(contextId);
     setSelected(new Set());
     setManaging(false);
+    setActiveId(null);
   };
+
+  const onRemoveActive = async () => {
+    if (!contextId || !active) return;
+    if (!window.confirm(`确认删除产物 ${active.path ?? active.alias ?? active.id}？`)) return;
+    await store.removeArtifact(contextId, active.id);
+    setActiveId(null);
+  };
+
+  const onQuote = () => active && store.quoteArtifact(active);
+  const onPreview = () => active && handlePreview(active);
+  const onDownload = () => active && handleDownload(active);
 
   const manageActions = (
     <div className="artifact-header-actions" onClick={(e) => e.stopPropagation()}>
       {!managing ? (
-        <button className="context-action" onClick={() => setManaging(true)}>管理</button>
+        <button className="context-action" onClick={() => { setManaging(true); setActiveId(null); }}>管理</button>
       ) : (
         <>
           <button className="context-action danger" onClick={onClearAll}>清空</button>
@@ -1569,12 +1583,28 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     </div>
   );
 
+  const activeToolbar = active ? (
+    <div className="artifact-active-toolbar" onClick={(e) => e.stopPropagation()}>
+      <span className="artifact-active-name" title={active.summary}>
+        {active.path ?? active.alias ?? active.id}
+      </span>
+      <button className="artifact-action" title="引用" onClick={onQuote}>引</button>
+      <button className="artifact-action" title="预览" onClick={onPreview}>看</button>
+      <button className="artifact-action" title="下载" onClick={onDownload}>↓</button>
+      <button className="artifact-action danger" title="删除" onClick={onRemoveActive}>删</button>
+    </div>
+  ) : null;
+
   const list = (
     <div className="artifact-list">
       {artifacts.map((a) => (
         <div
           key={a.id}
-          className={`artifact-item artifact-kind-file ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""}`}
+          onClick={() => {
+            if (managing) toggleSelected(a.id);
+            else setActiveId(a.id === activeId ? null : a.id);
+          }}
+          className={`artifact-item artifact-kind-file ${managing ? "managing" : ""} ${managing && selected.has(a.id) ? "selected" : ""} ${!managing && a.id === activeId ? "active" : ""}`}
           title={a.path ? `${a.path}\n${a.summary}` : a.summary}
         >
           {managing && (
@@ -1592,38 +1622,13 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
               onClick={(e) => e.stopPropagation()}
             />
           )}
-          <div className="artifact-info" onClick={() => managing && toggleSelected(a.id)}>
+          <div className="artifact-info">
             <span className="artifact-kind-badge">{kindIcon("file")}</span>
             <span className="artifact-path">{a.path ?? a.alias ?? a.id}</span>
             <span className="artifact-author">@{store.sessionName(a.author)}</span>
             <span className="artifact-time">{formatArtifactTime(a.at)}</span>
             <span className="artifact-summary">{a.summary}</span>
           </div>
-          {!managing && (
-            <div className="artifact-actions">
-              <button
-                className="artifact-action"
-                title="引用"
-                onClick={() => store.quoteArtifact(a)}
-              >
-                引
-              </button>
-              <button
-                className="artifact-action"
-                title="预览"
-                onClick={() => handlePreview(a)}
-              >
-                看
-              </button>
-              <button
-                className="artifact-action"
-                title="下载"
-                onClick={() => handleDownload(a)}
-              >
-                ↓
-              </button>
-            </div>
-          )}
         </div>
       ))}
     </div>
@@ -1641,6 +1646,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
             <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
+          {activeToolbar}
           {listContent}
         </div>
       ) : (
@@ -1652,6 +1658,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
           </div>
           {!collapsed && (
             <>
+              {activeToolbar}
               {listContent}
             </>
           )}
