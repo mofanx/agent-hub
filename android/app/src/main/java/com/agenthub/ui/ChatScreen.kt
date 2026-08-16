@@ -1746,14 +1746,31 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                         Box(
                                             modifier = Modifier
                                                 .width(4.dp)
-                                                .height(20.dp)
+                                                .height(36.dp)
                                                 .background(fileColor)
                                         )
-                                        Text(
-                                            "@${vm.sessionName(artifact.author)} ${formatArtifactTime(artifact.at)} ${artifact.path?.let { "$it · " } ?: ""}${artifact.summary}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            modifier = Modifier.weight(1f).padding(start = 6.dp),
-                                        )
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .padding(start = 6.dp)
+                                                .fillMaxWidth(),
+                                        ) {
+                                            Text(
+                                                artifact.path ?: artifact.alias ?: artifact.id,
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                "@${vm.sessionName(artifact.author)} · ${formatArtifactTime(artifact.at)} · ${artifact.summary}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                     }
                                 }
                             }
