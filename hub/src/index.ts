@@ -314,6 +314,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     },
     proc,
     onTurnEnd,
+    onFileWrite,
   );
 
   agents.set(connection.id, a);
@@ -497,6 +498,28 @@ function onTurnEnd(sessionId: string, text: string): void {
         text,
       });
     }
+  }
+}
+
+function onFileWrite(sessionId: string, relPath: string, existed: boolean): void {
+  const meta = sessionMetas.get(sessionId);
+  if (!meta) return;
+  const author = meta.name;
+  const summary = existed ? `modified ${relPath}` : `created ${relPath}`;
+  const action = existed ? "modify" : "add";
+
+  sessionLedger.addFile(sessionId, { author, summary, path: relPath });
+  sessionLedger.addEvent(sessionId, { author, action, summary, path: relPath });
+
+  for (const room of rooms.roomsFor(sessionId)) {
+    rooms.addFile?.(room.roomId, { author, summary, path: relPath });
+    rooms.addEvent?.(room.roomId, { author, action, summary, path: relPath });
+  }
+
+  persistState();
+  broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
+  for (const room of rooms.roomsFor(sessionId)) {
+    broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
   }
 }
 
@@ -1625,7 +1648,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   }
   console.log(`[hub] worker connected for ${connection.name} (${connectionId})`);
   const stream = webSocketStream(ws);
-  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd);
+  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite);
   agents.set(connectionId, a);
   a.ensureStarted().catch((err) => {
     logWarn("worker", `${connectionId} start failed: ${String(err)}`);

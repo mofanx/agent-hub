@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Stream } from "@agentclientprotocol/sdk";
 import type { ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { logWarn } from "./logger.js";
 
 export type TokenUsage = {
@@ -101,6 +103,7 @@ export class AcpAgent {
     private readonly onClose?: () => void,
     private readonly process?: ChildProcess,
     private readonly onTurnEnd?: (sessionId: string, text: string) => void,
+    private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
   ) {}
 
   get isReady(): boolean {
@@ -128,6 +131,12 @@ export class AcpAgent {
       .onRequest(acp.methods.client.session.requestPermission, (ctx) =>
         this.handlePermission(ctx.params),
       )
+      .onRequest(acp.methods.client.fs.readTextFile, (ctx) =>
+        this.handleReadTextFile(ctx.params),
+      )
+      .onRequest(acp.methods.client.fs.writeTextFile, (ctx) =>
+        this.handleWriteTextFile(ctx.params),
+      )
       .onNotification(acp.methods.client.session.update, (ctx) =>
         this.routeUpdate(ctx.params),
       );
@@ -141,7 +150,12 @@ export class AcpAgent {
 
     const init = await this.ctx.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
-      clientCapabilities: {},
+      clientCapabilities: {
+        fs: {
+          readTextFile: true,
+          writeTextFile: true,
+        },
+      },
       clientInfo: { name: "agent-hub", version: "0.2.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
@@ -283,6 +297,41 @@ export class AcpAgent {
     if (!resolve) return false;
     resolve(optionId);
     return true;
+  }
+
+  private resolveSessionPath(sessionId: string, filePath: string): string {
+    const entry = this.sessions.get(sessionId);
+    const base = entry?.cwd ?? process.cwd();
+    if (path.isAbsolute(filePath)) return filePath;
+    return path.resolve(base, filePath);
+  }
+
+  private handleReadTextFile(params: { sessionId: string; path: string }): { content: string } {
+    const target = this.resolveSessionPath(params.sessionId, params.path);
+    const content = fs.readFileSync(target, "utf-8");
+    return { content };
+  }
+
+  private handleWriteTextFile(params: {
+    sessionId: string;
+    path: string;
+    content: string;
+  }): Record<string, never> {
+    const target = this.resolveSessionPath(params.sessionId, params.path);
+    const dir = path.dirname(target);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const existed = fs.existsSync(target);
+    fs.writeFileSync(target, params.content, "utf-8");
+
+    const entry = this.sessions.get(params.sessionId);
+    if (entry) {
+      const relPath = path.isAbsolute(params.path)
+        ? path.relative(entry.cwd, target)
+        : params.path;
+      this.onFileWrite?.(params.sessionId, relPath, existed, params.content);
+    }
+
+    return {};
   }
 
   async createSession(
