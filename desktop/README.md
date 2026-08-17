@@ -31,8 +31,8 @@ pnpm tauri build
 
 产物位于 `src-tauri/target/release/bundle/`：
 
-- `msi/Agent Hub_0.2.0_x64_en-US.msi`
-- `nsis/Agent Hub_0.2.0_x64-setup.exe`
+- `msi/Agent Hub_0.3.0_x64_en-US.msi`
+- `nsis/Agent Hub_0.3.0_x64-setup.exe`
 
 ## 目录
 

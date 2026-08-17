@@ -157,7 +157,7 @@ export class AcpAgent {
           writeTextFile: true,
         },
       },
-      clientInfo: { name: "agent-hub", version: "0.2.0" },
+      clientInfo: { name: "agent-hub", version: "0.3.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
     this.ready = true;
