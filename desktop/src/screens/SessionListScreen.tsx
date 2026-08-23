@@ -130,13 +130,13 @@ export function SessionListScreen() {
       const t = setTimeout(() => void store.search(query.trim()), 200);
       return () => clearTimeout(t);
     } else {
-      store.search("");
+      useHubStore.setState({ searchQuery: "", searchGroups: [] });
     }
-  }, [query, store]);
+  }, [query]);
 
   useEffect(() => {
     if (!batch) store.clearSelection();
-  }, [batch, store]);
+  }, [batch]);
 
   const availableAgents = useMemo(() => {
     const set = new Set<string>();
