@@ -802,7 +802,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       client.connect(
         url,
         () => {
-          set({ connecting: false, connectError: null });
+          set({ connecting: false, connectError: null, agentStatus: stringsFor(get().lang).connected });
           get().saveProfileAndConnect(address, token, name);
         },
         (msg) => {

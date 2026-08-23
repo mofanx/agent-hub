@@ -10,6 +10,7 @@ export interface Strings {
   connectError: string;
   agentDisconnected: string;
   notConnected: string;
+  connected: string;
   permissionRequest: string;
   modelSwitched: string;
   modelUnknown: string;
@@ -37,6 +38,7 @@ const zh: Strings = {
   connectError: "连接失败",
   agentDisconnected: "连接已断开",
   notConnected: "未连接",
+  connected: "已连接",
   permissionRequest: "工具调用",
   modelSwitched: "已切换到 %s（%s）",
   modelUnknown: "未知模型: %s",
@@ -64,6 +66,7 @@ const en: Strings = {
   connectError: "Connection failed",
   agentDisconnected: "Disconnected",
   notConnected: "Not connected",
+  connected: "Connected",
   permissionRequest: "Tool call",
   modelSwitched: "Switched to %s (%s)",
   modelUnknown: "Unknown model: %s",
