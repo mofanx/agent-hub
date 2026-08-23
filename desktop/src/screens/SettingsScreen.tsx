@@ -1,51 +1,61 @@
 import { useState } from "react";
+import { Bot, Copy, Drama, ExternalLink, LogOut, RefreshCw, Settings2 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import type { ConnectionInfo, RoleInfo } from "../hub/types";
 import { version } from "../../package.json";
+import { FormRow } from "../components/FormRow";
+
+type Tab = "general" | "connections" | "roles";
 
 export function SettingsScreen() {
   const store = useHubStore();
-  const [tab, setTab] = useState<"general" | "connections" | "roles">("general");
+  const [tab, setTab] = useState<Tab>("general");
 
   return (
     <div className="settings-screen">
-      <div className="tabs">
-        {(["general", "connections", "roles"] as const).map((t) => (
-          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-            {tabLabel(t)}
-          </button>
-        ))}
-        <button onClick={() => void store.refreshAll()}>刷新</button>
-      </div>
-
-      {tab === "general" && <GeneralSettings />}
-      {tab === "connections" && <ConnectionsSettings />}
-      {tab === "roles" && <RolesSettings />}
-
-      <div className="card" style={{ marginTop: "auto" }}>
-        <button className="danger" onClick={store.disconnect}>
-          断开连接并返回
+      <nav className="settings-nav">
+        <div className="nav-heading">设置</div>
+        <button className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>
+          <Settings2 size={15} /> 通用
         </button>
+        <button className={tab === "connections" ? "active" : ""} onClick={() => setTab("connections")}>
+          <Bot size={15} /> Agent 来源
+        </button>
+        <button className={tab === "roles" ? "active" : ""} onClick={() => setTab("roles")}>
+          <Drama size={15} /> 角色
+        </button>
+        <span className="spacer" />
+        <button onClick={() => void store.refreshAll()}>
+          <RefreshCw size={15} /> 刷新状态
+        </button>
+        <button className="danger" onClick={store.disconnect}>
+          <LogOut size={15} /> 断开连接
+        </button>
+      </nav>
+
+      <div className="settings-content">
+        <div className="settings-inner">
+          {tab === "general" && <GeneralSettings />}
+          {tab === "connections" && <ConnectionsSettings />}
+          {tab === "roles" && <RolesSettings />}
+        </div>
       </div>
     </div>
   );
 }
 
-function tabLabel(t: "general" | "connections" | "roles") {
-  return { general: "通用", connections: "Agent 来源", roles: "角色" }[t];
-}
-
 function GeneralSettings() {
   const { themeMode, lang, toggleBypass } = useHubStore();
   return (
-    <div className="settings-section">
+    <>
       <div className="card">
         <h3>主题</h3>
-        <div className="form-row">
+        <p className="card-desc">界面外观，默认跟随系统</p>
+        <div className="seg-control">
           {(["system", "light", "dark"] as const).map((m) => (
             <button
               key={m}
-              className={themeMode === m ? "active" : "secondary"}
+              className={themeMode === m ? "active" : ""}
               onClick={() => useHubStore.getState().updateThemeMode(m)}
             >
               {m === "system" ? "跟随系统" : m === "light" ? "浅色" : "深色"}
@@ -56,14 +66,15 @@ function GeneralSettings() {
 
       <div className="card">
         <h3>语言</h3>
-        <div className="form-row">
+        <p className="card-desc">界面语言</p>
+        <div className="seg-control">
           {[
             { key: "zh", label: "中文" },
             { key: "en", label: "English" },
           ].map(({ key, label }) => (
             <button
               key={key}
-              className={lang === key ? "active" : "secondary"}
+              className={lang === key ? "active" : ""}
               onClick={() => useHubStore.getState().updateLang(key)}
             >
               {label}
@@ -74,26 +85,21 @@ function GeneralSettings() {
 
       <div className="card">
         <h3>权限绕过</h3>
-        <p className="subtitle">开启后自动审批工具调用请求。</p>
-        <div className="form-row">
+        <p className="card-desc">开启后自动审批工具调用请求</p>
+        <div className="seg-control">
           <button onClick={() => toggleBypass("on")}>开启</button>
-          <button className="secondary" onClick={() => toggleBypass("off")}>
-            关闭
-          </button>
-          <button onClick={() => toggleBypass()}>切换</button>
+          <button onClick={() => toggleBypass("off")}>关闭</button>
         </div>
       </div>
 
       <div className="card">
         <h3>关于</h3>
-        <p className="subtitle">版本 {version}</p>
-        <div className="form-row">
-          <button onClick={() => window.open("https://github.com/mofanx/agent-hub", "_blank")}>
-            打开仓库
-          </button>
-        </div>
+        <p className="card-desc">Agent Hub 桌面端 · 版本 {version}</p>
+        <button onClick={() => window.open("https://github.com/mofanx/agent-hub", "_blank")}>
+          <ExternalLink size={14} /> 打开仓库
+        </button>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -114,13 +120,15 @@ function ConnectionsSettings() {
   };
 
   return (
-    <div className="settings-section">
+    <>
       {store.connections.map((c) => (
         <ConnectionCard key={c.id} c={c} />
       ))}
 
       {!showAdd ? (
-        <button onClick={() => setShowAdd(true)}>＋ 添加 Agent 来源</button>
+        <button onClick={() => setShowAdd(true)} style={{ alignSelf: "flex-start" }}>
+          ＋ 添加 Agent 来源
+        </button>
       ) : (
         <div className="card">
           <h3>添加 Agent 来源</h3>
@@ -151,43 +159,57 @@ function ConnectionsSettings() {
               <option value="true">是</option>
             </select>
           </FormRow>
-          <div className="form-row" style={{ justifyContent: "flex-end" }}>
+          <div className="form-actions">
             <button className="secondary" onClick={() => setShowAdd(false)}>
               取消
             </button>
-            <button onClick={submit}>创建</button>
+            <button className="primary" onClick={submit}>创建</button>
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
 function ConnectionCard({ c }: { c: ConnectionInfo }) {
   const store = useHubStore();
-  const statusColor = c.error ? "#ef4444" : c.local ? "#3b82f6" : c.online ? "#22c55e" : "#9ca3af";
-  const statusLabel = c.error ? "启动失败" : c.local ? "本机" : c.online ? "在线" : "离线";
+  const badge = c.error ? (
+    <span className="status-badge err">启动失败</span>
+  ) : c.local ? (
+    <span className="status-badge local">本机</span>
+  ) : c.online ? (
+    <span className="status-badge ok">在线</span>
+  ) : (
+    <span className="status-badge off">离线</span>
+  );
   return (
-    <div className="card connection-card" style={{ borderLeft: `4px solid ${statusColor}` }}>
-      <div className="form-row" style={{ justifyContent: "space-between" }}>
-        <span className="title" style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-          <span className="dot" style={{ color: statusColor }}>●</span>
-          {c.name} · {c.agent} · {statusLabel}
+    <div className="card connection-card">
+      <div className="card-head">
+        <span className="card-title">
+          <span
+            className="dot"
+            style={{
+              background: c.error ? "var(--danger)" : c.local ? "var(--info)" : c.online ? "var(--success)" : "var(--muted)",
+            }}
+          />
+          {c.name} · {c.agent} {badge}
         </span>
-        <button className="danger" onClick={() => void store.deleteConnection(c.id)}>
+        <button className="danger tiny" onClick={() => void store.deleteConnection(c.id)}>
           删除
         </button>
       </div>
-      <div className="subtitle">
+      <div className="card-meta">
         {c.local ? "本地直接启动" : `Token: ${c.token}`}
         {c.address && ` · ${c.address}`}
         {c.cwd && ` · ${c.cwd}`}
       </div>
       {c.error && <div className="error">启动失败: {c.error}</div>}
       {!c.local && (
-        <button className="secondary" onClick={() => void navigator.clipboard.writeText(c.token)}>
-          复制 Token
-        </button>
+        <div>
+          <button className="secondary tiny" onClick={() => void navigator.clipboard.writeText(c.token)}>
+            <Copy size={11} /> 复制 Token
+          </button>
+        </div>
       )}
     </div>
   );
@@ -207,13 +229,15 @@ function RolesSettings() {
   };
 
   return (
-    <div className="settings-section">
+    <>
       {store.roles.map((r) => (
         <RoleCard key={r.id} r={r} />
       ))}
 
       {!showAdd ? (
-        <button onClick={() => setShowAdd(true)}>＋ 添加角色</button>
+        <button onClick={() => setShowAdd(true)} style={{ alignSelf: "flex-start" }}>
+          ＋ 添加角色
+        </button>
       ) : (
         <div className="card">
           <h3>添加角色</h3>
@@ -243,15 +267,15 @@ function RolesSettings() {
               ))}
             </select>
           </FormRow>
-          <div className="form-row" style={{ justifyContent: "flex-end" }}>
+          <div className="form-actions">
             <button className="secondary" onClick={() => setShowAdd(false)}>
               取消
             </button>
-            <button onClick={submit}>创建</button>
+            <button className="primary" onClick={submit}>创建</button>
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -259,29 +283,18 @@ function RoleCard({ r }: { r: RoleInfo }) {
   const store = useHubStore();
   return (
     <div className="card role-card">
-      <div className="form-row" style={{ justifyContent: "space-between" }}>
-        <span className="title">
-          {r.name} {r.builtin ? "(内置)" : ""}
+      <div className="card-head">
+        <span className="card-title">
+          {r.name} {r.builtin && <span className="status-badge off">内置</span>}
         </span>
         {!r.builtin && (
-          <button className="danger" onClick={() => void store.deleteRole(r.id)}>
+          <button className="danger tiny" onClick={() => void store.deleteRole(r.id)}>
             删除
           </button>
         )}
       </div>
-      <div className="subtitle" style={{ whiteSpace: "pre-wrap" }}>
-        {r.persona}
-      </div>
-      {r.cwd && <div className="subtitle">默认目录: {r.cwd}</div>}
-    </div>
-  );
-}
-
-function FormRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="form-row">
-      <label>{label}</label>
-      {children}
+      <div className="card-meta persona">{r.persona}</div>
+      {r.cwd && <div className="card-meta">默认目录: {r.cwd}</div>}
     </div>
   );
 }

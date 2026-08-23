@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowUp, FileText, Folder, RefreshCw, X } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import type { FileTreeRoot, FileTreeNode } from "../hub/types";
 
@@ -263,20 +264,21 @@ export function FileTreePanel({
         <h4 title={rootName ?? undefined}>{rootName ?? "项目文件"}</h4>
         <div className="file-tree-actions">
           <button
-            className="secondary tiny"
+            className="icon-btn"
             onClick={() => load(currentPath ?? undefined)}
             disabled={loading}
+            title="刷新"
           >
-            刷新
+            <RefreshCw size={13} />
           </button>
-          <button className="secondary tiny" onClick={onClose}>
-            关闭
+          <button className="icon-btn" onClick={onClose} title="关闭">
+            <X size={14} />
           </button>
         </div>
       </div>
       {currentPath && (
         <div className="file-tree-up" onClick={up}>
-          ↑ 返回上级
+          <ArrowUp size={12} /> 返回上级
         </div>
       )}
       <div className="file-tree-list">
@@ -293,7 +295,9 @@ export function FileTreePanel({
               }}
               onContextMenu={(e) => handleContextMenu(e, r)}
             >
-              <span className="file-tree-icon">📁</span>
+              <span className="file-tree-icon">
+                <Folder size={14} />
+              </span>
               <span className="file-tree-name" title={r.name}>
                 {r.name}
               </span>
@@ -310,7 +314,7 @@ export function FileTreePanel({
               onClick={() => handleClick(n)}
               onContextMenu={(e) => handleContextMenu(e, n)}
             >
-              <span className="file-tree-icon">{n.kind === "dir" ? "📁" : "🗎"}</span>
+              <span className="file-tree-icon">{n.kind === "dir" ? <Folder size={14} /> : <FileText size={14} />}</span>
               <span className="file-tree-name" title={n.name}>
                 {n.name}
               </span>

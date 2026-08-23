@@ -1,11 +1,11 @@
 import { useEffect } from "react";
+import { X } from "lucide-react";
 import { useHubStore } from "./hub/store";
 import { HubConfigScreen } from "./screens/HubConfigScreen";
-import { HubDrawer } from "./screens/HubDrawer";
-import { SessionListScreen } from "./screens/SessionListScreen";
+import { HomeScreen } from "./screens/HomeScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import "./App.css";
+import { Sidebar } from "./components/Sidebar";
 
 function App() {
   const store = useHubStore();
@@ -24,45 +24,41 @@ function App() {
 
   const clearError = () => useHubStore.setState({ connectError: null });
 
+  if (store.screen === "connect") {
+    return (
+      <div className="app">
+        {store.connectError && (
+          <div className="error-banner">
+            <span>{store.connectError}</span>
+            <button className="icon-btn" onClick={clearError}>
+              <X size={13} />
+            </button>
+          </div>
+        )}
+        <HubConfigScreen />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       {store.connectError && (
         <div className="error-banner">
           <span>{store.connectError}</span>
-          <button className="tiny secondary" onClick={clearError}>
-            ✕
+          <button className="icon-btn" onClick={clearError}>
+            <X size={13} />
           </button>
         </div>
       )}
-      <div className="toolbar">
-        <button className="secondary menu-btn" onClick={store.toggleDrawer}>
-          ☰
-        </button>
-        <h1>Agent Hub</h1>
-        <span className="subtitle">{store.agentStatus}</span>
-        {store.screen !== "connect" && (
-          <>
-            <button
-              className={store.screen === "sessions" ? "active" : "secondary"}
-              onClick={() => useHubStore.setState({ screen: "sessions" })}
-            >
-              会话
-            </button>
-            <button
-              className={store.screen === "settings" ? "active" : "secondary"}
-              onClick={() => useHubStore.setState({ screen: "settings" })}
-            >
-              设置
-            </button>
-          </>
-        )}
-      </div>
-      <HubDrawer />
-      <div key={store.screen} className="screen">
-        {store.screen === "connect" && <HubConfigScreen />}
-        {store.screen === "sessions" && <SessionListScreen />}
-        {(store.screen === "chat" || store.screen === "room") && <ChatScreen />}
-        {store.screen === "settings" && <SettingsScreen />}
+      <div className="shell">
+        <Sidebar />
+        <main className="main">
+          <div key={store.screen} className="screen">
+            {store.screen === "sessions" && <HomeScreen />}
+            {(store.screen === "chat" || store.screen === "room") && <ChatScreen />}
+            {store.screen === "settings" && <SettingsScreen />}
+          </div>
+        </main>
       </div>
     </div>
   );

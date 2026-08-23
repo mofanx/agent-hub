@@ -1,9 +1,40 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
+import {
+  Activity,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Circle,
+  Cpu,
+  FileCode,
+  FolderTree,
+  ImagePlus,
+  ListTodo,
+  Loader2,
+  NotebookText,
+  Package,
+  Pencil,
+  Plus,
+  Search,
+  ShieldAlert,
+  SlashSquare,
+  Square,
+  Trash2,
+  Wrench,
+  X,
+  Zap,
+} from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
+import { Avatar, agentColorClass } from "../components/Avatar";
+
+type SidePanelKind = "files" | "flow" | "blackboard" | "artifact" | "event" | null;
 
 function escapeHtml(text: string): string {
   return text
@@ -130,10 +161,9 @@ export function ChatScreen() {
   const [suggestOpen, setSuggestOpen] = useState(true);
   const [suggestIndex, setSuggestIndex] = useState(0);
   const [lightbox, setLightbox] = useState<{ src: string; name?: string } | null>(null);
-  const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const [sidePanel, setSidePanel] = useState<SidePanelKind>(null);
   const [fileTreeInitialPath, setFileTreeInitialPath] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<{ name: string; text?: string; data?: string; mime?: string } | null>(null);
-  const [activeContext, setActiveContext] = useState<"flow" | "blackboard" | "artifact" | "event" | null>(null);
   const [fileRef, setFileRef] = useState<{
     query: { at: number; q: string; dir: string; filter: string };
     candidates: (FileTreeRoot | FileTreeNode)[];
@@ -243,7 +273,7 @@ export function ChatScreen() {
     const onDocKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
-        setFileTreeOpen((open) => !open);
+        setSidePanel((p) => (p === "files" ? null : "files"));
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "f" && !e.shiftKey) {
         e.preventDefault();
@@ -257,9 +287,9 @@ export function ChatScreen() {
         if (lightbox) {
           e.preventDefault();
           setLightbox(null);
-        } else if (fileTreeOpen) {
+        } else if (sidePanel) {
           e.preventDefault();
-          setFileTreeOpen(false);
+          setSidePanel(null);
         } else if (searchOpen) {
           e.preventDefault();
           setSearchOpen(false);
@@ -279,7 +309,7 @@ export function ChatScreen() {
     };
     document.addEventListener("keydown", onDocKeyDown);
     return () => document.removeEventListener("keydown", onDocKeyDown);
-  }, [searchOpen, suggestOpen, cmdOpen, lightbox, fileTreeOpen, store]);
+  }, [searchOpen, suggestOpen, cmdOpen, lightbox, sidePanel, store]);
 
   useLayoutEffect(() => {
     const el = inputRef.current;
@@ -473,14 +503,14 @@ export function ChatScreen() {
       }
       const parent = ref.split("/").slice(0, -1).join("/") || null;
       setFileTreeInitialPath(parent);
-      setFileTreeOpen(true);
+      setSidePanel("files");
     } catch {
       try {
         const method = isSession ? "session.file.list" : "room.file.list";
         const params = isSession ? { sessionId: contextId, path: ref } : { roomId: contextId, path: ref };
         await client.call(method, params);
         setFileTreeInitialPath(ref);
-        setFileTreeOpen(true);
+        setSidePanel("files");
       } catch {}
     }
   };
@@ -571,20 +601,38 @@ export function ChatScreen() {
     }
   };
 
+  const artifactCount = store.currentArtifacts?.length ?? 0;
+  const eventCount = store.currentEvents?.length ?? 0;
+  const flowCount = store.flow?.tasks?.length ?? 0;
+  const blackboardCount = store.blackboard?.length ?? 0;
+  const isContextPanel =
+    sidePanel === "flow" || sidePanel === "blackboard" || sidePanel === "artifact" || sidePanel === "event";
+
+  const openContextPanel = () => {
+    if (isContextPanel) {
+      setSidePanel(null);
+      return;
+    }
+    if (isRoom && flowCount > 0) setSidePanel("flow");
+    else if (artifactCount > 0) {
+      store.clearNewArtifacts();
+      setSidePanel("artifact");
+    } else if (eventCount > 0) setSidePanel("event");
+    else if (isRoom && blackboardCount > 0) setSidePanel("blackboard");
+    else setSidePanel("artifact");
+  };
+
   return (
     <div className="chat-screen">
       <div className="chat-header">
-        <button className="secondary icon" onClick={store.backToList}>
-          ←
-        </button>
         {!searchOpen ? (
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="title-block">
             <div className="chat-title">{title}</div>
             {subtitle && <div className="chat-subtitle">{subtitle}</div>}
             {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage)}</div>}
           </div>
         ) : (
-          <div className="chat-search-bar" style={{ flex: 1 }}>
+          <div className="chat-search-bar">
             <input
               ref={searchInputRef}
               value={inChatSearchQuery}
@@ -608,14 +656,14 @@ export function ChatScreen() {
             <span className="chat-search-count">
               {chatSearchMatchCount > 0 ? `${chatSearchMatchIndex + 1} / ${chatSearchMatchCount}` : "0"}
             </span>
-            <button className="secondary" onClick={prevMatch} disabled={chatSearchMatchCount === 0} title="上一个 (Shift+Enter)">
-              ▲
+            <button className="icon-btn" onClick={prevMatch} disabled={chatSearchMatchCount === 0} title="上一个 (Shift+Enter)">
+              <ChevronUp size={14} />
             </button>
-            <button className="secondary" onClick={nextMatch} disabled={chatSearchMatchCount === 0} title="下一个 (Enter)">
-              ▼
+            <button className="icon-btn" onClick={nextMatch} disabled={chatSearchMatchCount === 0} title="下一个 (Enter)">
+              <ChevronDown size={14} />
             </button>
             <button
-              className="secondary"
+              className="icon-btn"
               onClick={() => {
                 setSearchOpen(false);
                 setInChatSearchQuery("");
@@ -623,191 +671,133 @@ export function ChatScreen() {
               }}
               title="关闭 (Esc)"
             >
-              ✕
+              <X size={14} />
             </button>
           </div>
         )}
         {!searchOpen && (
-          <button className="secondary" onClick={() => setSearchOpen(true)} title="搜索 (Ctrl+F)">
-            搜索
-          </button>
-        )}
-        {(store.currentRoom || store.currentSession) && (
-          <button className="secondary" onClick={() => setFileTreeOpen(true)} title="项目文件">
-            文件
-          </button>
-        )}
-        <button className="secondary" onClick={() => void store.showModelPickerDialog()}>
-          模型
-        </button>
-        {store.isGenerating() && (
-          <button className="danger" onClick={store.stopCurrent}>
-            停止
-          </button>
-        )}
-      </div>
-
-      {store.currentRoom && (
-        <RoomContextPanel
-          flow={store.flow}
-          blackboard={store.blackboard}
-          artifacts={store.currentArtifacts ?? []}
-          events={store.currentEvents ?? []}
-          roomMode={store.currentRoom.mode}
-          active={activeContext}
-          onChange={setActiveContext}
-        />
-      )}
-      {!store.currentRoom && store.currentSession && (
-        <SessionContextPanel
-          artifacts={store.currentArtifacts ?? []}
-          events={store.currentEvents ?? []}
-          active={activeContext === "artifact" || activeContext === "event" ? activeContext : null}
-          onChange={(next) => setActiveContext(next)}
-        />
-      )}
-
-      <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
-        {store.historyLoading && (
-          <div className="history-loading">加载更多历史…</div>
-        )}
-        {store.chatItems.map((item, i) => {
-          const isQuoted = store.quote
-            ? store.quote[0] === (item.author || "我") &&
-              "text" in item &&
-              item.text.startsWith(store.quote[1])
-            : false;
-          return (
-            <ChatMessage
-              key={i}
-              item={item}
-              showAuthor={isRoom}
-              expanded={showThought[i] ?? false}
-              isQuoted={isQuoted}
-              onToggleThought={() =>
-                setShowThought({ ...showThought, [i]: !showThought[i] })
-              }
-              highlight={inChatSearchQuery}
-              isCurrentMatch={currentMatchIndex === i}
-              onImageClick={(src, name) => setLightbox({ src, name })}
-              onFilePillClick={handleFilePillClick}
-            />
-          );
-        })}
-        <div ref={bottomRef} />
-        {!isAtBottom && (
-          <button
-            className="scroll-to-bottom"
-            onClick={scrollToBottom}
-            title="回到底部"
-            type="button"
-          >
-            ↓
-          </button>
-        )}
-      </div>
-
-      {store.quote && (
-        <div className="quote-bar">
-          <span className="subtitle">
-            引用 @{store.quote[0]}: {store.quote[1].slice(0, 80)}
-          </span>
-          <button className="secondary" onClick={() => store.setQuote(null)}>
-            取消
-          </button>
-        </div>
-      )}
-
-      {store.isGenerating() && (
-        <div className="generating-bar">
-          <span>执行中…</span>
-          <button className="danger" onClick={store.stopCurrent}>
-            停止
-          </button>
-        </div>
-      )}
-
-      {contextUsage && (
-        <div className="usage-bar">
-          <span className="pill">{formatContextUsage(contextUsage)}</span>
-        </div>
-      )}
-
-      <div className="compose">
-        {store.pendingAttachments.length > 0 && (
-          <div className="attachments-bar">
-            {store.pendingAttachments.map((a, i) => (
-              <span key={i} className="attachment-chip">
-                <img
-                    src={`data:${a.mimeType};base64,${a.base64}`}
-                    alt=""
-                    onClick={() => setLightbox({ src: `data:${a.mimeType};base64,${a.base64}`, name: a.name })}
-                  />
-                {a.name}
-                <button className="tiny secondary" onClick={() => store.removeAttachment(a)}>
-                  ✕
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="compose-toolbar">
-          <button className="secondary" onClick={() => setCmdOpen(!cmdOpen)} title="快捷指令">
-            指令
-          </button>
-          <button className="secondary" onClick={onPickImage} title="添加图片">
-            图片
-          </button>
-          <button className="secondary" onClick={() => store.showModelPickerDialog()} title="切换模型">
-            模型 {store.modelCurrent}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            style={{ display: "none" }}
-            onChange={onFileChange}
-          />
-        </div>
-
-        {cmdOpen && (
-          <div className="dropdown-menu" style={{ position: "relative", bottom: "auto", top: "0.25rem" }}>
-            {store.defaultCommands.map((c) => (
-              <div key={c} className="dropdown-item" onClick={() => insertCommand(c)}>
-                {c}
-              </div>
-            ))}
-            {store.customCommands.map((c) => (
-              <div key={c} className="dropdown-item with-del">
-                <span onClick={() => insertCommand(c)}>{c}</span>
-                <button
-                  className="danger tiny"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    store.removeCommand(c);
-                  }}
-                >
-                  删除
-                </button>
-              </div>
-            ))}
-            <div
-              className="dropdown-item"
-              onClick={() => {
-                if (input.trim()) {
-                  store.addCommand(input.trim());
-                  setCmdOpen(false);
-                }
-              }}
+          <>
+            <button className="icon-btn" onClick={() => setSearchOpen(true)} title="搜索聊天内容 (Ctrl+F)">
+              <Search size={15} />
+            </button>
+            <button
+              className={`icon-btn ${sidePanel === "files" ? "active" : ""}`}
+              onClick={() => setSidePanel(sidePanel === "files" ? null : "files")}
+              title="项目文件 (Ctrl+Shift+F)"
             >
-              ＋ 保存当前输入为指令
-            </div>
-          </div>
+              <FolderTree size={15} />
+            </button>
+            <button
+              className={`icon-btn ${isContextPanel ? "active" : ""}`}
+              onClick={openContextPanel}
+              title="任务 / 产物 / 事件面板"
+            >
+              <Activity size={15} />
+              {store.hasNewArtifacts && sidePanel !== "artifact" && <span className="new-dot" />}
+            </button>
+            <button className="secondary model-btn" onClick={() => void store.showModelPickerDialog()} title="切换模型">
+              <Cpu size={13} />
+              <span>{store.modelCurrent || "模型"}</span>
+            </button>
+            {store.isGenerating() && (
+              <button className="danger" onClick={store.stopCurrent} title="停止生成">
+                <Square size={11} />
+                停止
+              </button>
+            )}
+          </>
         )}
+      </div>
 
-        <div className="compose-row">
+      <div className="chat-body">
+        <div className="chat-main">
+          <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
+            <div className="chat-column">
+              {store.historyLoading && (
+                <div className="history-loading">加载更多历史…</div>
+              )}
+              {store.chatItems.map((item, i) => {
+                const isQuoted = store.quote
+                  ? store.quote[0] === (item.author || "我") &&
+                    "text" in item &&
+                    item.text.startsWith(store.quote[1])
+                  : false;
+                return (
+                  <ChatMessage
+                    key={i}
+                    item={item}
+                    showAuthor={isRoom}
+                    expanded={showThought[i] ?? false}
+                    isQuoted={isQuoted}
+                    onToggleThought={() =>
+                      setShowThought({ ...showThought, [i]: !showThought[i] })
+                    }
+                    highlight={inChatSearchQuery}
+                    isCurrentMatch={currentMatchIndex === i}
+                    onImageClick={(src, name) => setLightbox({ src, name })}
+                    onFilePillClick={handleFilePillClick}
+                  />
+                );
+              })}
+              <div ref={bottomRef} />
+            </div>
+            {!isAtBottom && (
+              <button
+                className="scroll-to-bottom"
+                onClick={scrollToBottom}
+                title="回到底部"
+                type="button"
+              >
+                <ArrowDown size={15} />
+              </button>
+            )}
+          </div>
+
+          <div className="compose-wrap">
+            {store.quote && (
+              <div className="quote-bar">
+                <span className="subtitle">
+                  引用 @{store.quote[0]}: {store.quote[1].slice(0, 80)}
+                </span>
+                <button className="icon-btn" onClick={() => store.setQuote(null)} title="取消引用">
+                  <X size={13} />
+                </button>
+              </div>
+            )}
+
+            {store.isGenerating() && (
+              <div className="generating-bar">
+                <span className="gen-label">
+                  <span className="gen-spinner" />
+                  执行中…
+                </span>
+                <span style={{ flex: 1 }} />
+                <button className="tiny danger" onClick={store.stopCurrent}>
+                  <Square size={10} /> 停止
+                </button>
+              </div>
+            )}
+
+            <div className="compose">
+              {store.pendingAttachments.length > 0 && (
+                <div className="attachments-bar">
+                  {store.pendingAttachments.map((a, i) => (
+                    <span key={i} className="attachment-chip">
+                      <img
+                        src={`data:${a.mimeType};base64,${a.base64}`}
+                        alt=""
+                        onClick={() => setLightbox({ src: `data:${a.mimeType};base64,${a.base64}`, name: a.name })}
+                      />
+                      {a.name}
+                      <button className="icon-btn" style={{ width: "1.3rem", height: "1.3rem" }} onClick={() => store.removeAttachment(a)}>
+                        <X size={11} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="compose-row">
           <div className="input-wrap">
             <textarea
               ref={inputRef}
@@ -870,7 +860,7 @@ export function ChatScreen() {
                       onClick={() => insertFileRef(c)}
                       onMouseEnter={() => setSuggestIndex(i)}
                     >
-                      <span className="suggest-icon">{isDir ? "📁" : "🗎"}</span>
+                      <span className="suggest-icon">{isDir ? <FolderTree size={12} /> : <FileCode size={12} />}</span>
                       <span className="suggest-name">{c.name}</span>
                       <span className="suggest-meta" title={c.path}>{c.path}</span>
                     </div>
@@ -880,40 +870,168 @@ export function ChatScreen() {
             )}
           </div>
 
-          <button onClick={send} disabled={(!input.trim() && !store.pendingAttachments.length) || store.isGenerating()}>
-            发送
-          </button>
-        </div>
-      </div>
+              <button
+                className="send-btn"
+                onClick={send}
+                disabled={(!input.trim() && !store.pendingAttachments.length) || store.isGenerating()}
+                title="发送 (Ctrl+Enter)"
+              >
+                <ArrowUp size={16} />
+              </button>
+              </div>
 
-      {fileTreeOpen && store.currentRoom && (
-        <FileTreePanel
-          contextId={store.currentRoom.roomId}
-          isSession={false}
-          onClose={() => setFileTreeOpen(false)}
-          initialPath={fileTreeInitialPath}
-          onQuote={(filePath) => {
-            setFileTreeOpen(false);
-            setInput((prev) => `${prev}#${filePath.endsWith("/") ? filePath.slice(0, -1) : filePath} `);
-            inputRef.current?.focus();
-          }}
-          onPreview={(file) => setFilePreview(file)}
-        />
-      )}
-      {fileTreeOpen && !store.currentRoom && store.currentSession && (
-        <FileTreePanel
-          contextId={store.currentSession.sessionId}
-          isSession
-          onClose={() => setFileTreeOpen(false)}
-          initialPath={fileTreeInitialPath}
-          onQuote={(filePath) => {
-            setFileTreeOpen(false);
-            setInput((prev) => `${prev}#${filePath.endsWith("/") ? filePath.slice(0, -1) : filePath} `);
-            inputRef.current?.focus();
-          }}
-          onPreview={(file) => setFilePreview(file)}
-        />
-      )}
+              {cmdOpen && (
+                <div className="dropdown-menu">
+                  {store.defaultCommands.map((c) => (
+                    <div key={c} className="dropdown-item" onClick={() => insertCommand(c)}>
+                      {c}
+                    </div>
+                  ))}
+                  {store.customCommands.map((c) => (
+                    <div key={c} className="dropdown-item">
+                      <span onClick={() => insertCommand(c)} style={{ flex: 1 }}>{c}</span>
+                      <button
+                        className="icon-btn danger"
+                        style={{ width: "1.4rem", height: "1.4rem" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          store.removeCommand(c);
+                        }}
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  ))}
+                  <div
+                    className="dropdown-item"
+                    onClick={() => {
+                      if (input.trim()) {
+                        store.addCommand(input.trim());
+                        setCmdOpen(false);
+                      }
+                    }}
+                  >
+                    <Plus size={12} style={{ color: "var(--muted)" }} /> 保存当前输入为指令
+                  </div>
+                </div>
+              )}
+
+              <div className="compose-toolbar">
+                <button className={`icon-btn ${cmdOpen ? "active" : ""}`} onClick={() => setCmdOpen(!cmdOpen)} title="快捷指令">
+                  <SlashSquare size={14} />
+                </button>
+                <button className="icon-btn" onClick={onPickImage} title="添加图片">
+                  <ImagePlus size={14} />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={onFileChange}
+                />
+                <span className="spacer" />
+                {contextUsage && <span className="usage-pill">{formatContextUsage(contextUsage)}</span>}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {sidePanel && (
+          <aside className="chat-side">
+            <div className="chat-side-tabs">
+              <button
+                className={`icon-btn ${sidePanel === "files" ? "active" : ""}`}
+                title="项目文件"
+                onClick={() => setSidePanel("files")}
+              >
+                <FolderTree size={14} />
+              </button>
+              {isRoom && (
+                <>
+                  <button
+                    className={`icon-btn ${sidePanel === "flow" ? "active" : ""}`}
+                    title={`任务编排 · ${flowCount} 项`}
+                    disabled={flowCount === 0 && sidePanel !== "flow"}
+                    onClick={() => setSidePanel("flow")}
+                  >
+                    <ListTodo size={14} />
+                  </button>
+                  <button
+                    className={`icon-btn ${sidePanel === "blackboard" ? "active" : ""}`}
+                    title={`共享黑板 · ${blackboardCount} 条`}
+                    disabled={blackboardCount === 0 && sidePanel !== "blackboard"}
+                    onClick={() => setSidePanel("blackboard")}
+                  >
+                    <NotebookText size={14} />
+                  </button>
+                </>
+              )}
+              <button
+                className={`icon-btn ${sidePanel === "artifact" ? "active" : ""}`}
+                title={`产物 · ${artifactCount} 条`}
+                disabled={artifactCount === 0 && sidePanel !== "artifact"}
+                onClick={() => {
+                  store.clearNewArtifacts();
+                  setSidePanel("artifact");
+                }}
+              >
+                <Package size={14} />
+                {store.hasNewArtifacts && sidePanel !== "artifact" && <span className="new-dot" />}
+              </button>
+              <button
+                className={`icon-btn ${sidePanel === "event" ? "active" : ""}`}
+                title={`事件 · ${eventCount} 条`}
+                disabled={eventCount === 0 && sidePanel !== "event"}
+                onClick={() => setSidePanel("event")}
+              >
+                <Zap size={14} />
+              </button>
+              <span className="spacer" />
+              <button className="icon-btn" onClick={() => setSidePanel(null)} title="关闭面板 (Esc)">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="chat-side-body">
+              {sidePanel === "files" && store.currentRoom && (
+                <FileTreePanel
+                  contextId={store.currentRoom.roomId}
+                  isSession={false}
+                  onClose={() => setSidePanel(null)}
+                  initialPath={fileTreeInitialPath}
+                  onQuote={(filePath) => {
+                    setSidePanel(null);
+                    setInput((prev) => `${prev}#${filePath.endsWith("/") ? filePath.slice(0, -1) : filePath} `);
+                    inputRef.current?.focus();
+                  }}
+                  onPreview={(file) => setFilePreview(file)}
+                />
+              )}
+              {sidePanel === "files" && !store.currentRoom && store.currentSession && (
+                <FileTreePanel
+                  contextId={store.currentSession.sessionId}
+                  isSession
+                  onClose={() => setSidePanel(null)}
+                  initialPath={fileTreeInitialPath}
+                  onQuote={(filePath) => {
+                    setSidePanel(null);
+                    setInput((prev) => `${prev}#${filePath.endsWith("/") ? filePath.slice(0, -1) : filePath} `);
+                    inputRef.current?.focus();
+                  }}
+                  onPreview={(file) => setFilePreview(file)}
+                />
+              )}
+              {sidePanel === "flow" && (
+                <FlowPanel flow={store.flow} roomMode={store.currentRoom?.mode ?? ""} minimal />
+              )}
+              {sidePanel === "blackboard" && <BlackboardPanel blackboard={store.blackboard} />}
+              {sidePanel === "artifact" && <ArtifactPanel artifacts={store.currentArtifacts ?? []} minimal />}
+              {sidePanel === "event" && <EventPanel events={store.currentEvents ?? []} minimal />}
+            </div>
+          </aside>
+        )}
+      </div>
 
       {filePreview && (
         <div className="dialog-backdrop" onClick={() => setFilePreview(null)}>
@@ -963,7 +1081,7 @@ export function ChatScreen() {
         <div className="image-lightbox" onClick={() => setLightbox(null)}>
           <img src={lightbox.src} alt={lightbox.name} onClick={(e) => e.stopPropagation()} />
           <button className="lightbox-close" onClick={() => setLightbox(null)}>
-            ✕
+            <X size={16} />
           </button>
         </div>
       )}
@@ -1061,8 +1179,8 @@ function ChatMessage({
 
   const usageText =
     item.kind === "assistant" && item.usage ? (
-      <div className="usage-bar" style={{ padding: 0 }}>
-        <span className="pill">{formatTokenUsage(item.usage)}</span>
+      <div>
+        <span className="usage-pill">{formatTokenUsage(item.usage)}</span>
       </div>
     ) : null;
 
@@ -1122,15 +1240,18 @@ function ChatMessage({
 
     case "assistant":
       return (
-        <div className={`message assistant ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          {showAuthor && item.author && <div className="author">{item.author}</div>}
-          {item.quoteAuthor && (
-            <div className="quote-preview">
-              引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
-            </div>
-          )}
-          <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
-          {usageText}
+        <div className={`message assistant ${agentColorClass(item.author || "AI")} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
+          <Avatar name={item.author || "AI"} />
+          <div className="msg-body">
+            {item.author && <div className="author">{item.author}</div>}
+            {item.quoteAuthor && (
+              <div className="quote-preview">
+                引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+              </div>
+            )}
+            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
+            {usageText}
+          </div>
           {menuEl}
           {selectModal}
         </div>
@@ -1138,19 +1259,21 @@ function ChatMessage({
 
     case "thought":
       return (
-        <div className={`message thought ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          {showAuthor && item.author && <div className="author">{item.author}</div>}
-          {item.quoteAuthor && (
-            <div className="quote-preview">
-              引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
-            </div>
-          )}
-          <button className="thought-toggle" onClick={onToggleThought}>
-            {expanded ? "▾ " : "▸ "}思考过程
-          </button>
-          {expanded && (
-            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
-          )}
+        <div className={`message thought ${agentColorClass(item.author || "AI")} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
+          <div className="msg-body">
+            {showAuthor && item.author && <div className="author">{item.author}</div>}
+            {item.quoteAuthor && (
+              <div className="quote-preview">
+                引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+              </div>
+            )}
+            <button className="thought-toggle" onClick={onToggleThought}>
+              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} 思考过程
+            </button>
+            {expanded && (
+              <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
+            )}
+          </div>
           {menuEl}
           {selectModal}
         </div>
@@ -1159,10 +1282,15 @@ function ChatMessage({
     case "tool":
       return (
         <div className={`message tool ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          {showAuthor && item.author && <div className="author">{item.author}</div>}
-          <div className="tool-row">
-            <span>{highlight ? highlightText(`🔧 ${item.title}`, highlight) : `🔧 ${item.title}`}</span>
-            <span className="subtitle">{item.status}</span>
+          <div className="msg-body">
+            {showAuthor && item.author && <div className="author">{item.author}</div>}
+            <div className="tool-row">
+              <span className="tool-icon">
+                <Wrench size={12} />
+              </span>
+              <span>{highlight ? highlightText(item.title, highlight) : item.title}</span>
+              <span className="tool-status">{item.status}</span>
+            </div>
           </div>
           {menuEl}
           {selectModal}
@@ -1172,13 +1300,17 @@ function ChatMessage({
     case "plan":
       return (
         <div className={`message plan ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          {showAuthor && item.author && <div className="author">{item.author}</div>}
-          <div className="text" style={{ fontWeight: 600 }}>计划</div>
-          {item.entries.map((e, i) => (
-            <div key={i} className="text">
-              {highlight ? highlightText(e, highlight) : e}
+          <div className="msg-body">
+            {showAuthor && item.author && <div className="author">{item.author}</div>}
+            <div className="plan-head">
+              <ListTodo size={12} /> 计划
             </div>
-          ))}
+            {item.entries.map((e, i) => (
+              <div key={i} className="text">
+                {highlight ? highlightText(e, highlight) : e}
+              </div>
+            ))}
+          </div>
           {menuEl}
           {selectModal}
         </div>
@@ -1187,8 +1319,10 @@ function ChatMessage({
     case "error":
       return (
         <div className={`message error ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          <div className="text">
-            {item.author ? `[${item.author}] ` : ""}错误: {highlight ? highlightText(item.text, highlight) : item.text}
+          <div className="msg-body">
+            <div className="text">
+              {item.author ? `[${item.author}] ` : ""}错误: {highlight ? highlightText(item.text, highlight) : item.text}
+            </div>
           </div>
           {menuEl}
           {selectModal}
@@ -1198,9 +1332,14 @@ function ChatMessage({
     case "permission":
       return (
         <div className={`message permission ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          {showAuthor && item.author && <div className="author">{item.author}</div>}
-          <div className="text">
-            审批请求: {highlight ? highlightText(item.title, highlight) : item.title}
+          <div className="msg-body">
+            <div className="permission-head">
+              <ShieldAlert size={14} />
+              {showAuthor && item.author ? `${item.author} · ` : ""}审批请求
+            </div>
+            <div className="text">
+              {highlight ? highlightText(item.title, highlight) : item.title}
+            </div>
             {item.answered ? (
               <div className="subtitle">已选择: {item.answered}</div>
             ) : (
@@ -1224,131 +1363,6 @@ function ChatMessage({
     default:
       return null;
   }
-}
-
-function SessionContextPanel({
-  artifacts,
-  events,
-  active,
-  onChange,
-}: {
-  artifacts: ArtifactInfo[];
-  events: EventInfo[];
-  active: "artifact" | "event" | null;
-  onChange: (active: "artifact" | "event" | null) => void;
-}) {
-  const store = useHubStore();
-  const artifactCount = artifacts.length;
-  const eventCount = events.length;
-  const toggle = (key: "artifact" | "event") => {
-    if (key === "artifact") store.clearNewArtifacts();
-    onChange(active === key ? null : key);
-  };
-  return (
-    <div className="context-panel">
-      <div className="context-bar">
-        <button
-          className={`context-capsule ${active === "artifact" ? "active" : ""}`}
-          onClick={() => toggle("artifact")}
-          disabled={artifactCount === 0}
-          title="产物"
-        >
-          {active === "artifact" ? "▾ " : "▸ "}产物
-          {artifactCount > 0 ? ` · ${artifactCount}` : ""}
-          {store.hasNewArtifacts && active !== "artifact" && <span className="new-dot" />}
-        </button>
-        <button
-          className={`context-capsule ${active === "event" ? "active" : ""}`}
-          onClick={() => toggle("event")}
-          disabled={eventCount === 0}
-          title="事件"
-        >
-          {active === "event" ? "▾ " : "▸ "}事件
-          {eventCount > 0 ? ` · ${eventCount}` : ""}
-        </button>
-      </div>
-      {active === "artifact" && <ArtifactPanel artifacts={artifacts} minimal />}
-      {active === "event" && <EventPanel events={events} minimal />}
-    </div>
-  );
-}
-
-function RoomContextPanel({
-  flow,
-  blackboard,
-  artifacts,
-  events,
-  roomMode,
-  active,
-  onChange,
-}: {
-  flow: FlowInfo | null;
-  blackboard: BlackboardInfo[] | null;
-  artifacts: ArtifactInfo[];
-  events: EventInfo[];
-  roomMode: string;
-  active: "flow" | "blackboard" | "artifact" | "event" | null;
-  onChange: (active: "flow" | "blackboard" | "artifact" | "event" | null) => void;
-}) {
-  const store = useHubStore();
-  const flowCount = flow?.tasks?.length ?? 0;
-  const blackboardCount = blackboard?.length ?? 0;
-  const artifactCount = artifacts.length;
-  const eventCount = events.length;
-  const progress = flow?.progress;
-
-  const toggle = (key: "flow" | "blackboard" | "artifact" | "event") => {
-    if (key === "artifact") store.clearNewArtifacts();
-    onChange(active === key ? null : key);
-  };
-
-  return (
-    <div className="context-panel">
-      <div className="context-bar">
-        <button
-          className={`context-capsule ${active === "flow" ? "active" : ""}`}
-          onClick={() => toggle("flow")}
-          disabled={flowCount === 0}
-          title="任务编排"
-        >
-          {active === "flow" ? "▾ " : "▸ "}任务
-          {progress ? ` · ${progress.done}/${progress.total}` : ""}
-        </button>
-        <button
-          className={`context-capsule ${active === "blackboard" ? "active" : ""}`}
-          onClick={() => toggle("blackboard")}
-          disabled={blackboardCount === 0}
-          title="共享黑板"
-        >
-          {active === "blackboard" ? "▾ " : "▸ "}黑板
-          {blackboardCount > 0 ? ` · ${blackboardCount}` : ""}
-        </button>
-        <button
-          className={`context-capsule ${active === "artifact" ? "active" : ""}`}
-          onClick={() => toggle("artifact")}
-          disabled={artifactCount === 0}
-          title="产物"
-        >
-          {active === "artifact" ? "▾ " : "▸ "}产物
-          {artifactCount > 0 ? ` · ${artifactCount}` : ""}
-          {store.hasNewArtifacts && active !== "artifact" && <span className="new-dot" />}
-        </button>
-        <button
-          className={`context-capsule ${active === "event" ? "active" : ""}`}
-          onClick={() => toggle("event")}
-          disabled={eventCount === 0}
-          title="事件"
-        >
-          {active === "event" ? "▾ " : "▸ "}事件
-          {eventCount > 0 ? ` · ${eventCount}` : ""}
-        </button>
-      </div>
-      {active === "flow" && <FlowPanel flow={flow} roomMode={roomMode} minimal />}
-      {active === "blackboard" && <BlackboardPanel blackboard={blackboard} />}
-      {active === "artifact" && <ArtifactPanel artifacts={artifacts} minimal />}
-      {active === "event" && <EventPanel events={events} minimal />}
-    </div>
-  );
 }
 
 function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }) {
@@ -1894,19 +1908,19 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
   );
 }
 
-function kindIcon(kind: string): string {
-  if (kind === "file") return "▤";
-  return "✎";
+function kindIcon(kind: string): ReactNode {
+  if (kind === "file") return <FileCode size={13} />;
+  return <Pencil size={13} />;
 }
 
-function eventIcon(action?: string): string {
-  if (action === "delete") return "🗑";
-  if (action === "rename") return "➡";
-  if (action === "command") return "⚡";
-  if (action === "test") return "✓";
-  if (action === "add") return "+";
-  if (action === "modify") return "✎";
-  return "✎";
+function eventIcon(action?: string): ReactNode {
+  if (action === "delete") return <Trash2 size={12} />;
+  if (action === "rename") return <Pencil size={12} />;
+  if (action === "command") return <Zap size={12} />;
+  if (action === "test") return <Check size={12} />;
+  if (action === "add") return <Plus size={12} />;
+  if (action === "modify") return <Pencil size={12} />;
+  return <Pencil size={12} />;
 }
 
 function eventLabel(action?: string): string {
@@ -1938,7 +1952,15 @@ function renderMarkdown(text: string): string {
 
 function FlowTaskItem({ task }: { task: FlowTask }) {
   const statusIcon =
-    task.status === "done" ? "✓" : task.status === "running" ? "▶" : task.status === "failed" ? "✗" : "○";
+    task.status === "done" ? (
+      <Check size={12} />
+    ) : task.status === "running" ? (
+      <Loader2 size={12} className="spin" />
+    ) : task.status === "failed" ? (
+      <X size={12} />
+    ) : (
+      <Circle size={11} />
+    );
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
@@ -1998,8 +2020,11 @@ function ModelPicker() {
   return (
     <div className="model-picker-backdrop" onClick={store.closeModelPicker}>
       <div className="model-picker" onClick={(e) => e.stopPropagation()}>
-        <div className="model-picker-header">
-          {S.modelListTitle} · {store.modelCurrent}
+        <div className="model-picker-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span>{S.modelListTitle} · {store.modelCurrent}</span>
+          <button className="icon-btn" onClick={store.closeModelPicker} title="关闭">
+            <X size={15} />
+          </button>
         </div>
         <div className="model-picker-search">
           <input

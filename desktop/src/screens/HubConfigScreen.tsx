@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import { Globe, Laptop, Pencil, PlugZap, Trash2 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import type { ConnProfile } from "../hub/types";
+import { FormRow } from "../components/FormRow";
 
 function profileKey(p: ConnProfile) {
   return p.address;
@@ -61,86 +63,90 @@ export function HubConfigScreen() {
   };
 
   return (
-    <div className="card connect-card">
-      <h2>{editing ? "编辑 Hub 配置" : "添加 / 连接 Hub"}</h2>
-      <form onSubmit={onSubmit}>
-        <div className="form-row">
-          <label>名称</label>
-          <input
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="例如 本机 / 公网 VPS"
-            required
-          />
-        </div>
-        <div className="form-row">
-          <label>地址</label>
-          <input
-            value={host}
-            onChange={(e) => setHost(e.currentTarget.value)}
-            placeholder="例如 localhost:8787 或 wss://hub.example.com"
-            required
-          />
-        </div>
-        <div className="form-row">
-          <label>Token</label>
-          <input
-            value={token}
-            onChange={(e) => setToken(e.currentTarget.value)}
-            placeholder="HUB_TOKEN"
-            required
-          />
-        </div>
-        {store.connectError && <div className="error">{store.connectError}</div>}
-        <div className="form-row" style={{ justifyContent: "flex-end" }}>
-          {editing && (
-            <button type="button" className="secondary" onClick={reset}>
-              取消编辑
+    <div className="connect-screen">
+      <div className="connect-brand">
+        <img src="/logo.svg" alt="Agent Hub" />
+        <h1>Agent Hub</h1>
+        <p>连接一个 Hub，统一调度你的所有 Agent</p>
+      </div>
+
+      <div className="card connect-card">
+        <h2>{editing ? "编辑 Hub 配置" : "添加 / 连接 Hub"}</h2>
+        <form onSubmit={onSubmit}>
+          <FormRow label="名称">
+            <input
+              value={name}
+              onChange={(e) => setName(e.currentTarget.value)}
+              placeholder="例如 本机 / 公网 VPS"
+              required
+            />
+          </FormRow>
+          <FormRow label="地址">
+            <input
+              value={host}
+              onChange={(e) => setHost(e.currentTarget.value)}
+              placeholder="例如 localhost:8787 或 wss://hub.example.com"
+              required
+            />
+          </FormRow>
+          <FormRow label="Token">
+            <input
+              value={token}
+              onChange={(e) => setToken(e.currentTarget.value)}
+              placeholder="HUB_TOKEN"
+              required
+            />
+          </FormRow>
+          {store.connectError && <div className="error">{store.connectError}</div>}
+          <div className="form-actions">
+            {editing && (
+              <button type="button" className="secondary" onClick={reset}>
+                取消编辑
+              </button>
+            )}
+            <button type="submit" className="primary" disabled={store.connecting}>
+              {store.connecting ? "连接中…" : editing ? "保存并连接" : "添加并连接"}
             </button>
-          )}
-          <button type="submit" disabled={store.connecting}>
-            {store.connecting ? "连接中..." : editing ? "保存并连接" : "添加并连接"}
-          </button>
-        </div>
-      </form>
+          </div>
+        </form>
+      </div>
 
       {store.profiles.length > 0 && (
-        <>
-          <h3>已保存的配置</h3>
-          <div className="list">
+        <div className="card connect-card">
+          <h3>已保存的 Hub</h3>
+          <div className="profile-list">
             {store.profiles.map((p) => {
               const active = store.currentProfile && profileKey(store.currentProfile) === profileKey(p);
               return (
-                <div
-                  key={profileKey(p)}
-                  className={`list-item profile-card ${active ? "selected" : ""}`}
-                >
-                  <span className="title">
-                    {isRemote(p) ? "🌐" : "📡"} {p.name}
-                  </span>
-                  <span className="subtitle">
-                    {isRemote(p) ? "远程 (wss)" : "局域网"} · {p.address}
-                  </span>
+                <div key={profileKey(p)} className={`profile-item ${active ? "selected" : ""}`}>
+                  <span className="profile-icon">{isRemote(p) ? <Globe size={15} /> : <Laptop size={15} />}</span>
+                  <div className="title-wrap">
+                    <span className="title">{p.name}</span>
+                    <span className="subtitle">
+                      {isRemote(p) ? "远程 (wss)" : "局域网"} · {p.address}
+                    </span>
+                  </div>
                   <div className="actions" onClick={(e) => e.stopPropagation()}>
-                    <button className="tiny" onClick={() => fill(p, true)}>
-                      编辑
+                    <button className="icon-btn" title="编辑" onClick={() => fill(p, true)}>
+                      <Pencil size={13} />
                     </button>
                     <button
-                      className="tiny"
+                      className="icon-btn"
+                      title="连接"
                       onClick={() => store.switchProfile(p)}
                       disabled={!!active}
                     >
-                      连接
+                      <PlugZap size={13} />
                     </button>
-                    <button className="danger tiny" onClick={() => onDelete(p)}>
-                      删除
+                    <button className="icon-btn danger" title="删除" onClick={() => onDelete(p)}>
+                      <Trash2 size={13} />
                     </button>
                   </div>
                 </div>
               );
             })}
           </div>
-        </>
+        </div>
       )}
     </div>
   );
