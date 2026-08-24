@@ -1930,7 +1930,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     refreshModelList: async () => {
       try {
-        const result = await getOrCall<Record<string, unknown>>("model.list");
+        const backend = get().currentSession?.agent ?? "devin";
+        const result = await getOrCall<Record<string, unknown>>("model.list", { backend });
         const current = String(result.current ?? "");
         const list = ((result.models as unknown[] | undefined) ?? []).map((it) =>
           parseModelInfo({ ...(it as Record<string, unknown>), isCurrent: (it as Record<string, unknown>).uid === current }),

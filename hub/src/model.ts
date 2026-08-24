@@ -102,43 +102,41 @@ export class ModelManager {
 
   /**
    * 当前生效的模型 uid
-   * 优先级：agent-hub 偏好 > acp-model.json（兼容旧版） > config.json
+   * @param backend 后端类型，按后端分别读取偏好
+   * 优先级：agent-hub 偏好[backend] > acp-model.json（devin 兼容旧版） > config.json（devin） > 默认
    */
-  current(): { uid: string; label?: string } {
-    if (existsSync(HUB_MODEL_PREF_PATH)) {
-      try {
-        const raw = JSON.parse(readFileSync(HUB_MODEL_PREF_PATH, "utf8"));
-        if (raw.model) return { uid: String(raw.model) };
-      } catch {
-        // fallthrough
+  current(backend: ModelBackend = "devin"): { uid: string; label?: string } {
+    const prefs = this.loadModelPreferences();
+    if (prefs[backend]) return { uid: prefs[backend] };
+    // devin 后端回退到旧版兼容文件
+    if (backend === "devin") {
+      if (existsSync(ACP_MODEL_PATH)) {
+        try {
+          const raw = JSON.parse(readFileSync(ACP_MODEL_PATH, "utf8"));
+          if (raw.model) return { uid: String(raw.model) };
+        } catch {
+          // fallthrough
+        }
+      }
+      if (existsSync(CONFIG_PATH)) {
+        try {
+          const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+          const model = raw?.agent?.model;
+          if (model) return { uid: String(model) };
+        } catch {
+          // fallthrough
+        }
       }
     }
-    if (existsSync(ACP_MODEL_PATH)) {
-      try {
-        const raw = JSON.parse(readFileSync(ACP_MODEL_PATH, "utf8"));
-        if (raw.model) return { uid: String(raw.model) };
-      } catch {
-        // fallthrough
-      }
-    }
-    if (existsSync(CONFIG_PATH)) {
-      try {
-        const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-        const model = raw?.agent?.model;
-        if (model) return { uid: String(model) };
-      } catch {
-        // fallthrough
-      }
-    }
-    return { uid: "swe-1-7" };
+    return { uid: this.defaultModel(backend) };
   }
 
-  /** 切换到指定模型，写入 agent-hub 自己的配置（不侵入 Agent 配置） */
+  /** 切换到指定模型，按后端写入 agent-hub 自己的配置 */
   async set(name: string): Promise<ModelInfo> {
     await this.list();
     const match = this.find(name);
     if (!match) throw new Error(`unknown model: ${name}`);
-    this.writeModelPreference(match.uid);
+    this.writeModelPreference(match.backend, match.uid);
     return match;
   }
 
@@ -166,11 +164,40 @@ export class ModelManager {
     return this.lastError;
   }
 
-  private writeModelPreference(model: string): void {
+  private defaultModel(backend: ModelBackend): string {
+    switch (backend) {
+      case "devin": return "swe-1-7";
+      case "opencode": return "opencode/big-pickle";
+      case "claude": return "claude-sonnet-4-20250514";
+      case "codex": return "codex-gpt-4-turbo";
+      default: return "swe-1-7";
+    }
+  }
+
+  private loadModelPreferences(): Record<string, string> {
+    if (existsSync(HUB_MODEL_PREF_PATH)) {
+      try {
+        const raw = JSON.parse(readFileSync(HUB_MODEL_PREF_PATH, "utf8"));
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          // 新格式: { devin: "uid", opencode: "uid", ... }
+          if (raw.models && typeof raw.models === "object") return raw.models as Record<string, string>;
+          // 旧格式兼容: { model: "uid", updatedAt: ... }
+          if (raw.model) return { devin: String(raw.model) };
+        }
+      } catch {
+        // fallthrough
+      }
+    }
+    return {};
+  }
+
+  private writeModelPreference(backend: ModelBackend, model: string): void {
     if (!existsSync(HUB_CONFIG_DIR)) mkdirSync(HUB_CONFIG_DIR, { recursive: true });
+    const prefs = this.loadModelPreferences();
+    prefs[backend] = model;
     writeFileSync(
       HUB_MODEL_PREF_PATH,
-      JSON.stringify({ model, updatedAt: Date.now() }, null, 2),
+      JSON.stringify({ models: prefs, updatedAt: Date.now() }, null, 2),
     );
   }
 

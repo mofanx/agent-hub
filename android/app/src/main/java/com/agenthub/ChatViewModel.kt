@@ -706,7 +706,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadModelList() {
         viewModelScope.launch {
             try {
-                val result = hub.call("model.list")
+                val backend = currentSession?.agent ?: "devin"
+                val result = hub.call("model.list", buildJsonObject {
+                    put("backend", backend)
+                })
                 val current = result["current"]?.jsonPrimitive?.content ?: ""
                 modelCurrent = current
                 modelList.clear()
@@ -744,7 +747,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshModelList() {
         viewModelScope.launch {
             try {
-                val result = hub.call("model.refresh")
+                val backend = currentSession?.agent ?: "devin"
+                val result = hub.call("model.refresh", buildJsonObject {
+                    put("backend", backend)
+                })
                 val current = result["current"]?.jsonPrimitive?.content ?: ""
                 modelCurrent = current
                 modelList.clear()
