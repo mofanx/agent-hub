@@ -15,7 +15,7 @@ import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
-import { ModelManager, type ModelInfo, type BackendConfig } from "./model.js";
+import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import { logError, logWarn } from "./logger.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -763,6 +763,10 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       // 新建 session 时同步当前模型
       if (connection.agent) {
+        const configOptions = agent.getConfigOptions();
+        if (configOptions) {
+          modelManager.injectConfigOptions(connection.agent as ModelBackend, configOptions);
+        }
         const current = modelManager.current();
         agent
           .setConfigOption(s.sessionId, "model", current.uid)

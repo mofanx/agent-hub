@@ -37,6 +37,7 @@ export class ModelManager {
   private backends: BackendConfig[] = [];
   private loading: Promise<void> | null = null;
   private lastError: string | null = null;
+  private injectedModels = new Map<ModelBackend, ModelInfo[]>();
 
   /** 返回可用模型列表，首次调用会拉取并缓存 */
   async list(): Promise<ModelInfo[]> {
@@ -148,6 +149,19 @@ export class ModelManager {
     return this.list();
   }
 
+  /**
+   * 从 ACP agent 的 configOptions 注入模型列表（用于 Claude/Codex 等无 CLI list 命令的后端）
+   * 注入后需要 refresh 才会生效
+   */
+  injectConfigOptions(backend: ModelBackend, configOptions: unknown[]): void {
+    const models = parseConfigOptionsModels(configOptions, backend);
+    if (models.length > 0) {
+      this.injectedModels.set(backend, models);
+      this.all = null;
+      this.loading = null;
+    }
+  }
+
   lastLoadError(): string | null {
     return this.lastError;
   }
@@ -233,66 +247,25 @@ export class ModelManager {
   }
 
   private async loadClaudeModels(config?: Record<string, string>): Promise<ModelInfo[]> {
-    // TODO: 实现 Claude Code 模型列表获取
-    // 可能通过 Anthropic API 或 Claude Code CLI
-    return [
-      {
-        uid: "claude-sonnet-4-20250514",
-        label: "Claude Sonnet 4",
-        family: "Claude",
-        familyUid: "claude",
-        slug: "claude-sonnet-4",
-        aliases: ["sonnet-4", "claude-3-5-sonnet"],
-        costTier: "med",
-        costSummary: "$3 / 1M Input · $15 / 1M Output",
-        backend: "claude",
-      },
-      {
-        uid: "claude-opus-4-20250514",
-        label: "Claude Opus 4",
-        family: "Claude",
-        familyUid: "claude",
-        slug: "claude-opus-4",
-        aliases: ["opus-4", "claude-3-5-opus"],
-        costTier: "high",
-        costSummary: "$15 / 1M Input · $75 / 1M Output",
-        backend: "claude",
-      },
-    ];
+    const injected = this.injectedModels.get("claude");
+    if (injected && injected.length > 0) return injected;
+    return [];
   }
 
   private async loadCodexModels(config?: Record<string, string>): Promise<ModelInfo[]> {
-    // TODO: 实现 Codex 模型列表获取
-    return [
-      {
-        uid: "codex-gpt-4-turbo",
-        label: "Codex GPT-4 Turbo",
-        family: "OpenAI",
-        familyUid: "openai",
-        slug: "codex-gpt-4-turbo",
-        aliases: ["gpt-4-turbo"],
-        costTier: "med",
-        costSummary: "$0.01 / 1K tokens",
-        backend: "codex",
-      },
-    ];
+    const injected = this.injectedModels.get("codex");
+    if (injected && injected.length > 0) return injected;
+    return [];
   }
 
   private async loadOpenCodeModels(config?: Record<string, string>): Promise<ModelInfo[]> {
-    // TODO: 实现 OpenCode 模型列表获取
-    return [
-      {
-        uid: "opencode-gpt-4",
-        label: "OpenCode GPT-4",
-        family: "OpenAI",
-        familyUid: "openai",
-        slug: "opencode-gpt-4",
-        aliases: ["gpt-4"],
-        costTier: "med",
-        costSummary: "$0.03 / 1K tokens",
-        backend: "opencode",
-      },
-    ];
+    try {
+      const stdout = await runOpenCodeModelsList();
+      return parseOpenCodeModels(stdout);
+    } catch (err) {
+      logError("opencode models load", err);
+      return [];
+    }
   }
 
   private async loadCustomModels(config?: Record<string, string>): Promise<ModelInfo[]> {
@@ -370,6 +343,114 @@ function parseModels(json: string): ModelInfo[] {
       };
       if (v.cost_summary !== undefined) m.costSummary = String(v.cost_summary);
       models.push(m);
+    }
+  }
+  return models;
+}
+
+function runOpenCodeModelsList(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("opencode", ["models", "--verbose"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout!.on("data", (chunk) => (stdout += String(chunk)));
+    proc.stderr!.on("data", (chunk) => (stderr += String(chunk)));
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error("opencode models timeout"));
+    }, 30000);
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`opencode models exited ${code}: ${stderr.trim()}`));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+function parseOpenCodeModels(stdout: string): ModelInfo[] {
+  const models: ModelInfo[] = [];
+  const lines = stdout.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!.trim();
+    if (!line || !/^[a-z]+\//.test(line)) { i++; continue; }
+    const uid = line;
+    i++;
+    const jsonStart = lines.slice(i).findIndex((l) => l.trim().startsWith("{"));
+    if (jsonStart < 0) break;
+    i += jsonStart;
+    let jsonStr = "";
+    let depth = 0;
+    while (i < lines.length) {
+      const l = lines[i]!;
+      jsonStr += l + "\n";
+      for (const ch of l) {
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
+      }
+      if (depth <= 0 && jsonStr.trim()) { i++; break; }
+      i++;
+    }
+    try {
+      const data = JSON.parse(jsonStr.trim());
+      const provider = String(data.providerID ?? uid.split("/")[0] ?? "");
+      const id = String(data.id ?? uid.split("/")[1] ?? "");
+      const cost = data.cost;
+      const costSummary = cost
+        ? `$${Number(cost.input ?? 0) / 1_000_000}/1M in · $${Number(cost.output ?? 0) / 1_000_000}/1M out`
+        : undefined;
+      const tier = cost && (Number(cost.input) > 0 || Number(cost.output) > 0) ? "paid" : "free";
+      models.push({
+        uid,
+        label: String(data.name ?? id),
+        family: String(data.family ?? provider),
+        familyUid: provider,
+        slug: id,
+        aliases: [],
+        costTier: tier,
+        ...(costSummary ? { costSummary } : {}),
+        backend: "opencode",
+      });
+    } catch {
+      // skip unparseable
+    }
+  }
+  return models;
+}
+
+function parseConfigOptionsModels(configOptions: unknown[], backend: ModelBackend): ModelInfo[] {
+  const models: ModelInfo[] = [];
+  for (const opt of configOptions) {
+    if (typeof opt !== "object" || opt === null) continue;
+    const o = opt as Record<string, unknown>;
+    if (o.id !== "model" || o.category !== "model") continue;
+    const options = Array.isArray(o.options) ? o.options : [];
+    for (const option of options) {
+      if (typeof option !== "object" || option === null) continue;
+      const op = option as Record<string, unknown>;
+      const uid = String(op.value ?? "");
+      if (!uid) continue;
+      const label = String(op.name ?? uid);
+      const family = String(op.family ?? backend);
+      models.push({
+        uid,
+        label,
+        family,
+        familyUid: family.toLowerCase(),
+        slug: uid,
+        aliases: [],
+        costTier: String(op.costTier ?? "unknown"),
+        backend,
+      });
     }
   }
   return models;

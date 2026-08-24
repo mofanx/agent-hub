@@ -95,6 +95,7 @@ export class AcpAgent {
   private pendingPermissions = new Map<string, (optionId: string) => void>();
   private starting: Promise<void> | null = null;
   private ready = false;
+  private cachedConfigOptions: unknown[] | null = null;
 
   constructor(
     private readonly name: string,
@@ -374,6 +375,9 @@ export class AcpAgent {
       cwd,
       mcpServers: [],
     });
+    if (Array.isArray(resp.configOptions)) {
+      this.cachedConfigOptions = resp.configOptions;
+    }
     const sessionName = name?.trim() || resp.sessionId;
     this.sessions.set(resp.sessionId, {
       cwd,
@@ -383,6 +387,11 @@ export class AcpAgent {
       turnText: "",
     });
     return { sessionId: resp.sessionId, name: sessionName };
+  }
+
+  /** 返回最近一次 session.new 的 configOptions（含模型列表等） */
+  getConfigOptions(): unknown[] | null {
+    return this.cachedConfigOptions;
   }
 
   /** 恢复历史会话：优先 session/resume，回退 session/load */

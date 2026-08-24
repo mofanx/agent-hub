@@ -88,11 +88,12 @@
 - ModelPicker 按后端分组显示
 - 后端筛选标签栏
 
-### 🚧 阶段 4：其他后端真实接入
-- Claude Code：通过 Anthropic API 或 Claude Code CLI 获取真实模型列表
-- Codex：通过 OpenAI API 获取
-- OpenCode：通过 OpenCode CLI 获取
-- Custom：通过配置的 endpoint 获取（OpenAI 兼容 API）
+### ✅ 阶段 4：其他后端真实接入
+- **OpenCode**：通过 `opencode models --verbose` CLI 获取真实模型列表（102 个模型，4 个 provider）
+- **Claude/Codex**：通过 ACP `session.new` 返回的 `configOptions` 动态获取模型列表
+  - `AcpAgent.createSession` 缓存 `configOptions`
+  - `ModelManager.injectConfigOptions(backend, configOptions)` 注入并刷新
+  - Hub 在 session 创建后自动注入
 
 ---
 
@@ -105,8 +106,16 @@
 - ✅ Devin CLI 日志确认 `apply_model_change` 执行
 - ✅ 配置隔离：`acp-model.json` 和 `config.json` 不被修改
 
-### 4.2 其他后端（待验证）
-- 需要配置对应 Agent 的 API Key 后测试
+### 4.2 OpenCode 后端（已验证）
+- ✅ 通过 `opencode models --verbose` 获取 102 个真实模型
+- ✅ 支持 4 个 provider（google/openai/opencode/xai）
+- ✅ 自动解析模型元信息（名称、family、cost）
+
+### 4.3 Claude/Codex 后端（已实现，待实际连接验证）
+- ✅ AcpAgent.createSession 缓存 configOptions
+- ✅ ModelManager.injectConfigOptions 从 configOptions 解析模型
+- ✅ Hub 在 session 创建后自动注入
+- ⏳ 需要实际连接 Claude/Codex agent 后验证模型列表
 
 ---
 
