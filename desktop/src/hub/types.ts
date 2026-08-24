@@ -197,7 +197,7 @@ export interface ModelInfo {
   costTier: string;
   costSummary?: string;
   isCurrent?: boolean;
-  backend?: "devin" | "claude" | "codex" | "opencode" | "custom";
+  backend: ModelBackend;
 }
 
 export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "custom";

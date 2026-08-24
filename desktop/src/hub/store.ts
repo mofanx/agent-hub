@@ -11,6 +11,7 @@ import type {
   EventInfo,
   FlowInfo,
   ModelInfo,
+  ModelBackend,
   Attachment,
   RoomInfo,
   RoomModeConfig,
@@ -637,12 +638,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
     uid: String(o.uid ?? ""),
     label: String(o.label ?? ""),
     family: String(o.family ?? ""),
-    vendor: String(o.vendor ?? ""),
+    vendor: String(o.familyUid ?? o.vendor ?? ""),
     slug: String(o.slug ?? ""),
     aliases: ((o.aliases as unknown[] | undefined) ?? []).map((it) => String(it)).filter(Boolean),
     costTier: String(o.costTier ?? ""),
     costSummary: typeof o.costSummary === "string" ? o.costSummary : undefined,
     isCurrent: o.isCurrent === true,
+    backend: (o.backend as ModelBackend | undefined) ?? "devin",
   });
 
   const store: State & Actions = {

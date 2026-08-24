@@ -49,11 +49,12 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
     if (!vm.showModelPicker) return
 
     val all = vm.modelList
+    val selectedBackends = remember { mutableStateListOf<String>() }
     val selectedTiers = remember { mutableStateListOf<String>() }
     val selectedVendors = remember { mutableStateListOf<String>() }
 
     val filter = vm.modelFilter
-    val filtered by remember(all, filter, selectedTiers, selectedVendors) {
+    val filtered by remember(all, filter, selectedBackends, selectedTiers, selectedVendors) {
         derivedStateOf {
             all.filter { m ->
                 val textOk = filter.isBlank() ||
@@ -62,23 +63,25 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     m.family.contains(filter, ignoreCase = true) ||
                     m.vendor.contains(filter, ignoreCase = true) ||
                     m.aliases.any { it.contains(filter, ignoreCase = true) }
+                val backendOk = selectedBackends.isEmpty() || selectedBackends.contains(m.backend)
                 val tierOk = selectedTiers.isEmpty() || selectedTiers.contains(m.costTier)
                 val vendorOk = selectedVendors.isEmpty() || selectedVendors.contains(m.vendor)
-                textOk && tierOk && vendorOk
+                textOk && backendOk && tierOk && vendorOk
             }
         }
     }
 
     val grouped by remember(filtered) {
         derivedStateOf {
-            val order = listOf("Free", "Low cost", "Med cost", "High cost")
-            filtered.groupBy { it.costTier }
+            val order = listOf("devin", "claude", "codex", "opencode", "custom")
+            filtered.groupBy { it.backend }
                 .toList()
-                .sortedBy { (tier, _) -> order.indexOf(tier).takeIf { it >= 0 } ?: Int.MAX_VALUE }
+                .sortedBy { (backend, _) -> order.indexOf(backend).takeIf { it >= 0 } ?: Int.MAX_VALUE }
         }
     }
 
     val costOrder = listOf("Free", "Low cost", "Med cost", "High cost")
+    val availableBackends = remember(all) { all.map { it.backend }.toSet().sorted() }
     val availableTiers = remember(all) { all.map { it.costTier }.toSet().sortedBy { costOrder.indexOf(it) } }
     val availableVendors = remember(all) { all.map { it.vendor }.toSet().sorted() }
 
@@ -118,7 +121,7 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     shape = RoundedCornerShape(24.dp),
                 )
 
-                if (selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()) {
+                if (selectedBackends.isNotEmpty() || selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -128,10 +131,30 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                         TextButton(
                             onClick = {
                                 vm.modelFilter = ""
+                                selectedBackends.clear()
                                 selectedTiers.clear()
                                 selectedVendors.clear()
                             },
                         ) { Text(S.modelClearFilters) }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 2.dp),
+                ) {
+                    items(availableBackends, key = { "backend:$it" }) { backend ->
+                        FilterChip(
+                            selected = selectedBackends.contains(backend),
+                            onClick = {
+                                if (selectedBackends.contains(backend)) selectedBackends.remove(backend)
+                                else selectedBackends.add(backend)
+                            },
+                            label = { Text(backendDisplayName(backend)) },
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
                     }
                 }
 
@@ -179,12 +202,12 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
-                    grouped.forEach { (tier, models) ->
-                        item(key = "header:$tier") {
+                    grouped.forEach { (backend, models) ->
+                        item(key = "header:$backend") {
                             Text(
-                                tierName(S, tier),
+                                backendDisplayName(backend),
                                 style = MaterialTheme.typography.titleSmall,
-                                color = costColor(tier),
+                                color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(vertical = 8.dp),
                             )
                         }
@@ -279,6 +302,15 @@ private fun tierName(S: Strings, tier: String): String = when (tier) {
     "Med cost" -> S.costTierMed
     "High cost" -> S.costTierHigh
     else -> tier
+}
+
+private fun backendDisplayName(backend: String): String = when (backend) {
+    "devin" -> "Devin"
+    "claude" -> "Claude Code"
+    "codex" -> "Codex"
+    "opencode" -> "OpenCode"
+    "custom" -> "自定义"
+    else -> backend
 }
 
 @Composable

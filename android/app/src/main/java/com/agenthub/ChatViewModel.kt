@@ -53,6 +53,7 @@ data class ModelInfo(
     val costTier: String,
     val costSummary: String?,
     val isCurrent: Boolean = false,
+    val backend: String = "devin",
 )
 
 sealed class ChatItem {
@@ -2821,16 +2822,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun JsonObject.toModelInfo(current: String): ModelInfo {
         val uid = this["uid"]?.jsonPrimitive?.content ?: ""
         val family = this["family"]?.jsonPrimitive?.content ?: ""
+        val familyUid = this["familyUid"]?.jsonPrimitive?.content ?: ""
         return ModelInfo(
             uid = uid,
             label = this["label"]?.jsonPrimitive?.content ?: "",
             family = family,
-            vendor = family.split(Regex("[-.\\s]")).firstOrNull { it.isNotBlank() } ?: family,
+            vendor = familyUid.ifBlank { family.split(Regex("[-.\\s]")).firstOrNull { it.isNotBlank() } ?: family },
             slug = this["slug"]?.jsonPrimitive?.content ?: "",
             aliases = this["aliases"]?.jsonArray?.map { it.jsonPrimitive.content }?.filter { it.isNotBlank() } ?: emptyList(),
             costTier = this["costTier"]?.jsonPrimitive?.content ?: "",
             costSummary = this["costSummary"]?.jsonPrimitive?.content,
             isCurrent = uid == current,
+            backend = this["backend"]?.jsonPrimitive?.content ?: "devin",
         )
     }
 }
