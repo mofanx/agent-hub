@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { logError } from "./logger.js";
 
+export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "custom";
+
 export type ModelInfo = {
   uid: string;
   label: string;
@@ -13,13 +15,24 @@ export type ModelInfo = {
   aliases: string[];
   costTier: string;
   costSummary?: string;
+  backend: ModelBackend;
+};
+
+export type BackendConfig = {
+  id: string;
+  name: string;
+  type: ModelBackend;
+  enabled: boolean;
+  config?: Record<string, string>;
 };
 
 const ACP_MODEL_PATH = path.join(homedir(), ".config/devin/acp-model.json");
 const CONFIG_PATH = path.join(homedir(), ".config/devin/config.json");
+const BACKENDS_CONFIG_PATH = path.join(homedir(), ".config/devin/backends.json");
 
 export class ModelManager {
   private all: ModelInfo[] | null = null;
+  private backends: BackendConfig[] = [];
   private loading: Promise<void> | null = null;
   private lastError: string | null = null;
 
@@ -29,6 +42,41 @@ export class ModelManager {
     if (!this.loading) this.loading = this.load();
     await this.loading;
     return this.all ?? [];
+  }
+
+  /** 返回启用的后端列表 */
+  async listBackends(): Promise<BackendConfig[]> {
+    this.loadBackends();
+    return this.backends.filter(b => b.enabled);
+  }
+
+  /** 添加自定义后端配置 */
+  addBackend(config: BackendConfig): void {
+    this.loadBackends();
+    const existing = this.backends.findIndex(b => b.id === config.id);
+    if (existing >= 0) {
+      this.backends[existing] = config;
+    } else {
+      this.backends.push(config);
+    }
+    this.saveBackends();
+  }
+
+  /** 移除后端配置 */
+  removeBackend(id: string): void {
+    this.loadBackends();
+    this.backends = this.backends.filter(b => b.id !== id);
+    this.saveBackends();
+  }
+
+  /** 切换后端启用状态 */
+  toggleBackend(id: string): void {
+    this.loadBackends();
+    const backend = this.backends.find(b => b.id === id);
+    if (backend) {
+      backend.enabled = !backend.enabled;
+      this.saveBackends();
+    }
   }
 
   /** 根据 uid / slug / alias 查找模型，不区分大小写 */
@@ -41,6 +89,12 @@ export class ModelManager {
       if (m.aliases.some((a) => a.toLowerCase() === q)) return true;
       return false;
     });
+  }
+
+  /** 根据 uid / slug / alias 查找模型，不区分大小写 */
+  findByBackend(backend: ModelBackend): ModelInfo[] {
+    if (!this.all) return [];
+    return this.all.filter(m => m.backend === backend);
   }
 
   /** 当前生效的模型 uid，优先 acp-model.json，再回退 config.json */
@@ -94,18 +148,166 @@ export class ModelManager {
     );
   }
 
+  private loadBackends(): void {
+    if (this.backends.length > 0) return;
+    const defaults: BackendConfig[] = [
+      { id: "devin", name: "Devin", type: "devin", enabled: true },
+      { id: "claude", name: "Claude Code", type: "claude", enabled: false },
+      { id: "codex", name: "Codex", type: "codex", enabled: false },
+      { id: "opencode", name: "OpenCode", type: "opencode", enabled: false },
+    ];
+    if (existsSync(BACKENDS_CONFIG_PATH)) {
+      try {
+        const raw = JSON.parse(readFileSync(BACKENDS_CONFIG_PATH, "utf8"));
+        this.backends = Array.isArray(raw) ? raw : defaults;
+      } catch {
+        this.backends = defaults;
+      }
+    } else {
+      this.backends = defaults;
+    }
+  }
+
+  private saveBackends(): void {
+    const dir = path.dirname(BACKENDS_CONFIG_PATH);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(BACKENDS_CONFIG_PATH, JSON.stringify(this.backends, null, 2));
+  }
+
   private async load(): Promise<void> {
     try {
-      const json = await runDevinModelsList();
-      const parsed = parseModels(json);
-      this.all = parsed;
+      const models: ModelInfo[] = [];
+      const enabledBackends = await this.listBackends();
+      
+      for (const backend of enabledBackends) {
+        try {
+          const backendModels = await this.loadBackendModels(backend);
+          models.push(...backendModels);
+        } catch (err) {
+          logError(`backend ${backend.id} load error`, err);
+        }
+      }
+      
+      this.all = models;
       this.lastError = null;
-      console.log(`[model] loaded ${parsed.length} models`);
+      console.log(`[model] loaded ${models.length} models from ${enabledBackends.length} backends`);
     } catch (err) {
       this.lastError = String(err);
       logError("model load", err);
     } finally {
       this.loading = null;
+    }
+  }
+
+  private async loadBackendModels(backend: BackendConfig): Promise<ModelInfo[]> {
+    switch (backend.type) {
+      case "devin":
+        return this.loadDevinModels();
+      case "claude":
+        return this.loadClaudeModels(backend.config);
+      case "codex":
+        return this.loadCodexModels(backend.config);
+      case "opencode":
+        return this.loadOpenCodeModels(backend.config);
+      case "custom":
+        return this.loadCustomModels(backend.config);
+      default:
+        return [];
+    }
+  }
+
+  private async loadDevinModels(): Promise<ModelInfo[]> {
+    const json = await runDevinModelsList();
+    const parsed = parseModels(json);
+    return parsed.map(m => ({ ...m, backend: "devin" as ModelBackend }));
+  }
+
+  private async loadClaudeModels(config?: Record<string, string>): Promise<ModelInfo[]> {
+    // TODO: 实现 Claude Code 模型列表获取
+    // 可能通过 Anthropic API 或 Claude Code CLI
+    return [
+      {
+        uid: "claude-sonnet-4-20250514",
+        label: "Claude Sonnet 4",
+        family: "Claude",
+        familyUid: "claude",
+        slug: "claude-sonnet-4",
+        aliases: ["sonnet-4", "claude-3-5-sonnet"],
+        costTier: "med",
+        costSummary: "$3 / 1M Input · $15 / 1M Output",
+        backend: "claude",
+      },
+      {
+        uid: "claude-opus-4-20250514",
+        label: "Claude Opus 4",
+        family: "Claude",
+        familyUid: "claude",
+        slug: "claude-opus-4",
+        aliases: ["opus-4", "claude-3-5-opus"],
+        costTier: "high",
+        costSummary: "$15 / 1M Input · $75 / 1M Output",
+        backend: "claude",
+      },
+    ];
+  }
+
+  private async loadCodexModels(config?: Record<string, string>): Promise<ModelInfo[]> {
+    // TODO: 实现 Codex 模型列表获取
+    return [
+      {
+        uid: "codex-gpt-4-turbo",
+        label: "Codex GPT-4 Turbo",
+        family: "OpenAI",
+        familyUid: "openai",
+        slug: "codex-gpt-4-turbo",
+        aliases: ["gpt-4-turbo"],
+        costTier: "med",
+        costSummary: "$0.01 / 1K tokens",
+        backend: "codex",
+      },
+    ];
+  }
+
+  private async loadOpenCodeModels(config?: Record<string, string>): Promise<ModelInfo[]> {
+    // TODO: 实现 OpenCode 模型列表获取
+    return [
+      {
+        uid: "opencode-gpt-4",
+        label: "OpenCode GPT-4",
+        family: "OpenAI",
+        familyUid: "openai",
+        slug: "opencode-gpt-4",
+        aliases: ["gpt-4"],
+        costTier: "med",
+        costSummary: "$0.03 / 1K tokens",
+        backend: "opencode",
+      },
+    ];
+  }
+
+  private async loadCustomModels(config?: Record<string, string>): Promise<ModelInfo[]> {
+    // 支持通过 cc-switch 等方式接入的自定义模型
+    // 配置可能包含 API endpoint、API key 等
+    if (!config?.endpoint) return [];
+    
+    try {
+      // 这里可以调用自定义 API 获取模型列表
+      // 示例：通过 cc-switch 或直接调用 OpenAI 兼容 API
+      return [
+        {
+          uid: `custom-${config.id}`,
+          label: config.name || "Custom Model",
+          family: "Custom",
+          familyUid: "custom",
+          slug: config.id,
+          aliases: [],
+          costTier: "free",
+          costSummary: "Custom API",
+          backend: "custom",
+        },
+      ];
+    } catch {
+      return [];
     }
   }
 }

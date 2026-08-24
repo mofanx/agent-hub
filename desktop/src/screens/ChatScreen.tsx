@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
-import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
@@ -2027,6 +2027,7 @@ function ModelPicker() {
   const store = useHubStore();
   const S = stringsFor(store.lang);
   const [filter, setFilter] = useState(store.modelFilter);
+  const [selectedBackend, setSelectedBackend] = useState<string>("all");
 
   useEffect(() => {
     setFilter(store.modelFilter);
@@ -2034,15 +2035,45 @@ function ModelPicker() {
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return store.modelList;
-    return store.modelList.filter(
-      (m) =>
-        m.uid.toLowerCase().includes(q) ||
-        m.label.toLowerCase().includes(q) ||
-        m.family.toLowerCase().includes(q) ||
-        m.aliases.some((a) => a.toLowerCase().includes(q)),
-    );
-  }, [filter, store.modelList]);
+    let models = store.modelList;
+    
+    // 按后端过滤
+    if (selectedBackend !== "all") {
+      models = models.filter(m => m.backend === selectedBackend);
+    }
+    
+    // 按搜索词过滤
+    if (q) {
+      models = models.filter(
+        (m) =>
+          m.uid.toLowerCase().includes(q) ||
+          m.label.toLowerCase().includes(q) ||
+          m.family.toLowerCase().includes(q) ||
+          m.aliases.some((a) => a.toLowerCase().includes(q)),
+      );
+    }
+    
+    return models;
+  }, [filter, store.modelList, selectedBackend]);
+
+  // 按后端分组
+  const groupedByBackend = useMemo(() => {
+    const groups: Record<string, ModelInfo[]> = {};
+    filtered.forEach(m => {
+      const backend = m.backend || "devin";
+      if (!groups[backend]) groups[backend] = [];
+      groups[backend].push(m);
+    });
+    return groups;
+  }, [filtered]);
+
+  const backendNames: Record<string, string> = {
+    devin: "Devin",
+    claude: "Claude Code",
+    codex: "Codex",
+    opencode: "OpenCode",
+    custom: "自定义",
+  };
 
   return (
     <div className="model-picker-backdrop" onClick={store.closeModelPicker}>
@@ -2060,24 +2091,46 @@ function ModelPicker() {
             placeholder={S.modelFilterHint}
           />
         </div>
+        <div className="model-picker-backends">
+          <button
+            className={selectedBackend === "all" ? "active" : ""}
+            onClick={() => setSelectedBackend("all")}
+          >
+            全部
+          </button>
+          {Object.entries(backendNames).map(([key, name]) => (
+            <button
+              key={key}
+              className={selectedBackend === key ? "active" : ""}
+              onClick={() => setSelectedBackend(key)}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
         <div className="model-picker-list">
           {filtered.length === 0 && <div className="empty">{S.modelNoResults}</div>}
-          {filtered.map((m) => (
-            <div
-              key={m.uid}
-              className={`model-option ${m.isCurrent ? "active" : ""}`}
-              onClick={() => store.switchModel(m)}
-            >
-              <div className="model-option-title">
-                <span>
-                  {m.label || m.uid} {m.isCurrent ? ` · ${S.modelCurrentLabel}` : ""}
-                </span>
-                <span className={`subtitle ${costTierClass(m.costTier)}`}>{m.costTier}</span>
-              </div>
-              <div className="model-option-subtitle">
-                {m.uid} · {m.family} · {m.aliases.join(", ")}
-              </div>
-              {m.costSummary && <div className="model-option-subtitle">{m.costSummary}</div>}
+          {Object.entries(groupedByBackend).map(([backend, models]) => (
+            <div key={backend} className="model-backend-group">
+              <div className="model-backend-name">{backendNames[backend] || backend}</div>
+              {models.map((m) => (
+                <div
+                  key={m.uid}
+                  className={`model-option ${m.isCurrent ? "active" : ""}`}
+                  onClick={() => store.switchModel(m)}
+                >
+                  <div className="model-option-title">
+                    <span>
+                      {m.label || m.uid} {m.isCurrent ? ` · ${S.modelCurrentLabel}` : ""}
+                    </span>
+                    <span className={`subtitle ${costTierClass(m.costTier)}`}>{m.costTier}</span>
+                  </div>
+                  <div className="model-option-subtitle">
+                    {m.uid} · {m.family} · {m.aliases.join(", ")}
+                  </div>
+                  {m.costSummary && <div className="model-option-subtitle">{m.costSummary}</div>}
+                </div>
+              ))}
             </div>
           ))}
         </div>

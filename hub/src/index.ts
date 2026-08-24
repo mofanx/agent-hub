@@ -15,7 +15,7 @@ import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
-import { ModelManager } from "./model.js";
+import { ModelManager, type ModelInfo, type BackendConfig } from "./model.js";
 import { logError, logWarn } from "./logger.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -1676,6 +1676,30 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       await Promise.all(syncTasks);
 
       return { set: true, model };
+    }
+    case "model.backends.list": {
+      const backends = await modelManager.listBackends();
+      return { backends };
+    }
+    case "model.backends.add": {
+      const backend = req.params?.backend as Record<string, unknown>;
+      if (!backend || !backend.id || !backend.name || !backend.type) {
+        throw new Error("backend config missing required fields (id, name, type)");
+      }
+      modelManager.addBackend(backend as BackendConfig);
+      return { added: true };
+    }
+    case "model.backends.remove": {
+      const id = String(req.params?.id ?? "");
+      if (!id) throw new Error("backend id required");
+      modelManager.removeBackend(id);
+      return { removed: true };
+    }
+    case "model.backends.toggle": {
+      const id = String(req.params?.id ?? "");
+      if (!id) throw new Error("backend id required");
+      modelManager.toggleBackend(id);
+      return { toggled: true };
     }
     default:
       throw new Error(`unknown method: ${req.method}`);

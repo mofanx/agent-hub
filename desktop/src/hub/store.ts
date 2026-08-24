@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AppConfig,
   ArtifactInfo,
+  BackendConfig,
   BlackboardInfo,
   ChatItem,
   ConnProfile,
@@ -80,6 +81,7 @@ interface State {
   modelCurrent: string;
   modelFilter: string;
   showModelPicker: boolean;
+  backends: BackendConfig[];
   pendingAttachments: Attachment[];
   historyCache: Record<string, ChatItem[]>;
   historyCacheKeys: string[];
@@ -202,6 +204,10 @@ interface Actions {
   refreshModelList(): Promise<void>;
   switchModel(model: ModelInfo): Promise<void>;
   closeModelPicker(): void;
+  listBackends(): Promise<void>;
+  addBackend(backend: BackendConfig): Promise<void>;
+  removeBackend(id: string): Promise<void>;
+  toggleBackend(id: string): Promise<void>;
 
   addAttachment(attachment: Attachment): void;
   removeAttachment(attachment: Attachment): void;
@@ -690,6 +696,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     modelCurrent: "",
     modelFilter: "",
     showModelPicker: false,
+    backends: [],
     pendingAttachments: [],
     historyCache: {},
     historyCacheKeys: [],
@@ -1927,6 +1934,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           parseModelInfo({ ...(it as Record<string, unknown>), isCurrent: (it as Record<string, unknown>).uid === current }),
         );
         set({ modelList: list, modelCurrent: current, modelFilter: "" });
+        await get().listBackends();
       } catch (e) {
         set({ connectError: String(e) });
       }
@@ -1948,6 +1956,54 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     closeModelPicker: () => set({ showModelPicker: false, modelFilter: "" }),
+
+    listBackends: async () => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        const result = await client.call("model.backends.list", {});
+        const backends = (result as { backends?: BackendConfig[] }).backends ?? [];
+        set({ backends });
+      } catch (e) {
+        console.error("Failed to list backends:", e);
+      }
+    },
+
+    addBackend: async (backend: BackendConfig) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("model.backends.add", { backend });
+        await get().listBackends();
+      } catch (e) {
+        console.error("Failed to add backend:", e);
+        throw e;
+      }
+    },
+
+    removeBackend: async (id: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("model.backends.remove", { id });
+        await get().listBackends();
+      } catch (e) {
+        console.error("Failed to remove backend:", e);
+        throw e;
+      }
+    },
+
+    toggleBackend: async (id: string) => {
+      const client = get().client;
+      if (!client) return;
+      try {
+        await client.call("model.backends.toggle", { id });
+        await get().listBackends();
+      } catch (e) {
+        console.error("Failed to toggle backend:", e);
+        throw e;
+      }
+    },
 
     addAttachment: (attachment: Attachment) => {
       set({ pendingAttachments: [...get().pendingAttachments, attachment] });

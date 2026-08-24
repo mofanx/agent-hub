@@ -197,6 +197,17 @@ export interface ModelInfo {
   costTier: string;
   costSummary?: string;
   isCurrent?: boolean;
+  backend?: "devin" | "claude" | "codex" | "opencode" | "custom";
+}
+
+export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "custom";
+
+export interface BackendConfig {
+  id: string;
+  name: string;
+  type: ModelBackend;
+  enabled: boolean;
+  config?: Record<string, string>;
 }
 
 export type ChatItem =

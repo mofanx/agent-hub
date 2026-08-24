@@ -1683,3 +1683,48 @@
   align-items: center;
   gap: 0.25rem;
 }
+
+/* ================= Model Picker Backends ================= */
+.model-picker-backends {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.model-picker-backends button {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--r-sm);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.model-picker-backends button:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.model-picker-backends button.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.model-backend-group {
+  margin-bottom: 0.5rem;
+}
+
+.model-backend-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.5rem 0.75rem 0.25rem;
+}
