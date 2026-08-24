@@ -33,6 +33,7 @@ import { stringsFor } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
+import { FilePicker } from "../components/FilePicker";
 
 type SidePanelKind = "files" | "flow" | "blackboard" | "artifact" | "event" | null;
 
@@ -169,6 +170,7 @@ export function ChatScreen() {
     candidates: (FileTreeRoot | FileTreeNode)[];
     loading: boolean;
   } | null>(null);
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -538,6 +540,11 @@ export function ChatScreen() {
 
   const onPickImage = () => fileInputRef.current?.click();
 
+  const handleFileSelect = (path: string) => {
+    setInput(prev => `${prev}#${path} `);
+    inputRef.current?.focus();
+  };
+
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
@@ -554,6 +561,12 @@ export function ChatScreen() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 打开文件选择器
+    if (e.key === "#" && !mention && !(slash && slash.length > 0) && !fileRef) {
+      setFilePickerOpen(true);
+      return;
+    }
+
     const active = mention || (slash && slash.length > 0) || (fileRef && fileRef.candidates.length > 0);
     if (active && suggestOpen) {
       const items = mention
@@ -1084,6 +1097,12 @@ export function ChatScreen() {
       )}
 
       {store.showModelPicker && <ModelPicker />}
+
+      <FilePicker
+        open={filePickerOpen}
+        onClose={() => setFilePickerOpen(false)}
+        onSelect={handleFileSelect}
+      />
 
       {lightbox && (
         <div className="image-lightbox" onClick={() => setLightbox(null)}>

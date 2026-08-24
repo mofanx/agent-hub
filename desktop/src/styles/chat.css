@@ -1530,3 +1530,156 @@
 .tier-low { color: var(--accent); }
 .tier-med { color: var(--warn); }
 .tier-high { color: var(--danger); }
+
+/* ================= File Picker ================= */
+.file-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.file-picker {
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  width: min(600px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  outline: none;
+}
+
+.file-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.file-picker-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.file-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.file-picker-search .search-icon {
+  color: var(--muted);
+}
+
+.file-picker-search input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 0.9rem;
+}
+
+.file-picker-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.breadcrumb {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--r-sm);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.breadcrumb:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.breadcrumb.active {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.file-picker-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.file-picker-loading,
+.file-picker-empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.file-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.file-picker-item:hover {
+  background: var(--surface-2);
+}
+
+.file-picker-item.selected {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.file-icon {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.file-name {
+  flex: 1;
+  font-size: 0.9rem;
+}
+
+.file-arrow {
+  color: var(--muted);
+  font-size: 1.2rem;
+}
+
+.file-picker-footer {
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.shortcut-hint {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.shortcut-hint span {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
