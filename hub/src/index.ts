@@ -769,7 +769,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           modelManager.injectConfigOptions(backend, configOptions);
         }
         const current = modelManager.current(backend);
-        agent
+        await agent
           .setConfigOption(s.sessionId, "model", current.uid)
           .catch((err) => logWarn("session.create", `sync model failed: ${String(err)}`));
       }
@@ -821,7 +821,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       // 新建 session 时同步对应后端的当前模型
       if (connection.agent) {
         const current = modelManager.current(connection.agent as ModelBackend);
-        agent
+        await agent
           .setConfigOption(s.sessionId, "model", current.uid)
           .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
       }
@@ -894,7 +894,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         // 重建 session 时同步对应后端的当前模型
         if (connection?.agent) {
           const current = modelManager.current(connection.agent as ModelBackend);
-          agent
+          await agent
             .setConfigOption(s.sessionId, "model", current.uid)
             .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
         }
@@ -1672,6 +1672,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const model = await modelManager.set(name);
 
       // 只同步给与模型后端匹配的活跃 session
+      const syncErrors: { sessionId: string; error: string }[] = [];
       const syncTasks: Promise<void>[] = [];
       for (const [sessionId, connectionId] of owners.entries()) {
         const meta = sessionMetas.get(sessionId);
@@ -1680,13 +1681,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         if (!agent) continue;
         syncTasks.push(
           agent.setConfigOption(sessionId, "model", model.uid).catch((err) => {
-            logWarn("model.set", `sync to ${sessionId} failed: ${String(err)}`);
+            const msg = String(err);
+            logWarn("model.set", `sync to ${sessionId} failed: ${msg}`);
+            syncErrors.push({ sessionId, error: msg });
           }),
         );
       }
       await Promise.all(syncTasks);
 
-      return { set: true, model };
+      return { set: true, model, syncErrors };
     }
     case "model.backends.list": {
       const backends = await modelManager.listBackends();
