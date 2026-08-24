@@ -269,28 +269,12 @@ export class ModelManager {
   }
 
   private async loadCustomModels(config?: Record<string, string>): Promise<ModelInfo[]> {
-    // 支持通过 cc-switch 等方式接入的自定义模型
-    // 配置可能包含 API endpoint、API key 等
     if (!config?.endpoint) return [];
-    
     try {
-      // 这里可以调用自定义 API 获取模型列表
-      // 示例：通过 cc-switch 或直接调用 OpenAI 兼容 API
-      const id = config.id ?? "custom";
-      return [
-        {
-          uid: `custom-${id}`,
-          label: config.name || "Custom Model",
-          family: "Custom",
-          familyUid: "custom",
-          slug: id,
-          aliases: [],
-          costTier: "free",
-          costSummary: "Custom API",
-          backend: "custom",
-        },
-      ];
-    } catch {
+      const models = await fetchOpenAICompatibleModels(config.endpoint, config.apiKey, config.id ?? "custom");
+      return models;
+    } catch (err) {
+      logError("custom models load", err);
       return [];
     }
   }
@@ -454,4 +438,32 @@ function parseConfigOptionsModels(configOptions: unknown[], backend: ModelBacken
     }
   }
   return models;
+}
+
+async function fetchOpenAICompatibleModels(
+  endpoint: string,
+  apiKey?: string,
+  backendId?: string,
+): Promise<ModelInfo[]> {
+  const url = endpoint.replace(/\/+$/, "") + "/models";
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) throw new Error(`custom API ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json() as { data?: Array<{ id: string; owned_by?: string }> };
+  const list = Array.isArray(data?.data) ? data.data : [];
+  return list.map((m) => {
+    const uid = `custom/${m.id}`;
+    const owner = String(m.owned_by ?? backendId ?? "custom");
+    return {
+      uid,
+      label: String(m.id),
+      family: owner,
+      familyUid: owner.toLowerCase(),
+      slug: String(m.id),
+      aliases: [],
+      costTier: "unknown",
+      backend: "custom" as ModelBackend,
+    };
+  });
 }
