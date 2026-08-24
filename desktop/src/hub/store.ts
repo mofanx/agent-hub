@@ -43,6 +43,7 @@ interface State {
   screen: Screen;
   themeMode: string;
   lang: string;
+  sendKey: "enter" | "ctrl-enter";
   connecting: boolean;
   connectError: string | null;
   agentStatus: string;
@@ -98,6 +99,7 @@ interface Actions {
   deleteProfile(p: ConnProfile): void;
   updateThemeMode(mode: string): void;
   updateLang(lang: string): void;
+  updateSendKey(key: "enter" | "ctrl-enter"): void;
 
   connect(address: string, token: string, name?: string): void;
   disconnect(): void;
@@ -265,7 +267,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   const persist = async () => {
-    const { profiles, pinnedIds, recentCwds, customCommands, themeMode, lang } = get();
+    const { profiles, pinnedIds, recentCwds, customCommands, themeMode, lang, sendKey } = get();
     const cfg: AppConfig = {
       profiles,
       pinned: pinnedIds,
@@ -273,6 +275,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       commands: customCommands,
       theme: themeMode,
       lang,
+      sendKey,
       last: defaultConfig.last,
     };
     try {
@@ -650,6 +653,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     screen: "connect",
     themeMode: "system",
     lang: "zh",
+    sendKey: "enter",
     connecting: false,
     connectError: null,
     agentStatus: stringsFor("zh").notConnected,
@@ -720,6 +724,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           customCommands: cfg.commands ?? [],
           themeMode: cfg.theme ?? "system",
           lang: cfg.lang ?? "zh",
+          sendKey: cfg.sendKey ?? "enter",
           agentStatus: S.notConnected,
         });
       } catch {
@@ -779,6 +784,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     updateLang: (lang: string) => {
       set({ lang });
+      persist();
+    },
+
+    updateSendKey: (key: "enter" | "ctrl-enter") => {
+      set({ sendKey: key });
       persist();
     },
 

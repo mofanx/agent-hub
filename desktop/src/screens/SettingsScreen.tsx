@@ -45,7 +45,7 @@ export function SettingsScreen() {
 }
 
 function GeneralSettings() {
-  const { themeMode, lang, toggleBypass } = useHubStore();
+  const { themeMode, lang, sendKey, toggleBypass } = useHubStore();
   return (
     <>
       <div className="card">
@@ -76,6 +76,25 @@ function GeneralSettings() {
               key={key}
               className={lang === key ? "active" : ""}
               onClick={() => useHubStore.getState().updateLang(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>发送快捷键</h3>
+        <p className="card-desc">发送消息的快捷键</p>
+        <div className="seg-control">
+          {[
+            { key: "enter" as const, label: "Enter 发送" },
+            { key: "ctrl-enter" as const, label: "Ctrl+Enter 发送" },
+          ].map(({ key, label }) => (
+            <button
+              key={key}
+              className={sendKey === key ? "active" : ""}
+              onClick={() => useHubStore.getState().updateSendKey(key)}
             >
               {label}
             </button>

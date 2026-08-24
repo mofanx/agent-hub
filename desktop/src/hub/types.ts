@@ -232,5 +232,6 @@ export interface AppConfig {
   commands: string[];
   theme: string;
   lang: string;
+  sendKey?: "enter" | "ctrl-enter";
   last: { address: string; token: string } | null;
 }

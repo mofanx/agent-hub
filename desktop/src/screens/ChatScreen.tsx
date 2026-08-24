@@ -592,9 +592,17 @@ export function ChatScreen() {
         return;
       }
     }
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      send();
+    const { sendKey } = useHubStore.getState();
+    if (sendKey === "ctrl-enter") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        send();
+      }
+    } else {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
     }
     if (e.key === "Escape") {
       setCmdOpen(false);
@@ -874,7 +882,7 @@ export function ChatScreen() {
                 className="send-btn"
                 onClick={send}
                 disabled={(!input.trim() && !store.pendingAttachments.length) || store.isGenerating()}
-                title="发送 (Ctrl+Enter)"
+                title={`发送 (${store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter"})`}
               >
                 <ArrowUp size={16} />
               </button>
