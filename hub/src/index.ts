@@ -761,8 +761,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       owners.set(s.sessionId, connection.id);
       persistState();
 
-      // 新建 Devin CLI session 时同步当前模型
-      if (connection.agent === "devin") {
+      // 新建 session 时同步当前模型
+      if (connection.agent) {
         const current = modelManager.current();
         agent
           .setConfigOption(s.sessionId, "model", current.uid)
@@ -813,8 +813,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       owners.set(s.sessionId, connection.id);
       persistState();
 
-      // 新建 Devin CLI session 时同步当前模型
-      if (connection.agent === "devin") {
+      // 新建 session 时同步当前模型
+      if (connection.agent) {
         const current = modelManager.current();
         agent
           .setConfigOption(s.sessionId, "model", current.uid)
@@ -886,8 +886,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         // 无论是否有历史，agent 已无法恢复该 session，直接用同名/cwd 重建
         const s = await agent.createSession(meta.cwd, meta.name);
 
-        // 重建 Devin CLI session 时同步当前模型
-        if (connection?.agent === "devin") {
+        // 重建 session 时同步当前模型
+        if (connection?.agent) {
           const current = modelManager.current();
           agent
             .setConfigOption(s.sessionId, "model", current.uid)
@@ -913,8 +913,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       }
       owners.set(sessionId, connectionId);
 
-      // 恢复 Devin CLI session 时同步当前模型
-      if (connection?.agent === "devin") {
+      // 恢复 session 时同步当前模型
+      if (connection?.agent) {
         const current = modelManager.current();
         agent
           .setConfigOption(sessionId, "model", current.uid)
@@ -1660,11 +1660,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!name) throw new Error("model name required");
       const model = await modelManager.set(name);
 
-      // 把模型切换同步给所有由 Devin CLI 托管的活跃 session
+      // 把模型切换同步给所有活跃 session（ACP 标准，所有后端通用）
       const syncTasks: Promise<void>[] = [];
       for (const [sessionId, connectionId] of owners.entries()) {
-        const meta = sessionMetas.get(sessionId);
-        if (meta?.agent !== "devin") continue;
         const agent = agents.get(connectionId);
         if (!agent) continue;
         syncTasks.push(

@@ -33,3 +33,6 @@ Thumbs.db
 
 # local PM2 config, copy from ecosystem.config.cjs.example
 ecosystem.config.cjs
+
+# playwright-cli skill artifacts
+.playwright-cli/
