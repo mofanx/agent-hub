@@ -31,14 +31,14 @@ export const AGENT_DEFS: Record<string, AgentDef> = {
     bin: process.env.CLAUDE_ACP_BIN ?? "npx",
     args: process.env.CLAUDE_ACP_ARGS?.split(" ") ?? [
       "-y",
-      "@zed-industries/claude-code-acp",
+      "@agentclientprotocol/claude-agent-acp",
     ],
   },
   codex: {
     bin: process.env.CODEX_ACP_BIN ?? "npx",
     args: process.env.CODEX_ACP_ARGS?.split(" ") ?? [
       "-y",
-      "@zed-industries/codex-acp",
+      "@agentclientprotocol/codex-acp",
     ],
   },
   opencode: {
