@@ -152,6 +152,10 @@ interface Actions {
   deleteSessions(sessionIds: string[]): Promise<void>;
   deleteRooms(roomIds: string[]): Promise<void>;
   batchDelete(sessionIds: string[], roomIds: string[]): Promise<void>;
+  renameSession(session: SessionInfo, name: string): Promise<void>;
+  cloneSession(session: SessionInfo): Promise<SessionInfo | null>;
+  renameRoom(room: RoomInfo, name: string): Promise<void>;
+  cloneRoom(room: RoomInfo, newName: string): Promise<RoomInfo | null>;
 
   sendPrompt(text: string): void;
   sendRoomMessage(text: string): void;
@@ -1138,6 +1142,46 @@ export const useHubStore = create<State & Actions>((set, get) => {
         await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });
+      }
+    },
+
+    renameSession: async (session, name) => {
+      try {
+        await getOrCall("session.rename", { sessionId: session.sessionId, name });
+        await get().refreshAll();
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    cloneSession: async (session) => {
+      try {
+        const result = await getOrCall<SessionInfo>("session.clone", { sessionId: session.sessionId });
+        await get().refreshAll();
+        return result;
+      } catch (e) {
+        set({ connectError: String(e) });
+        return null;
+      }
+    },
+
+    renameRoom: async (room, name) => {
+      try {
+        await getOrCall("room.rename", { roomId: room.roomId, name });
+        await get().refreshAll();
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    cloneRoom: async (room, newName) => {
+      try {
+        const result = await getOrCall<RoomInfo>("room.clone", { roomId: room.roomId, newName });
+        await get().refreshAll();
+        return result;
+      } catch (e) {
+        set({ connectError: String(e) });
+        return null;
       }
     },
 

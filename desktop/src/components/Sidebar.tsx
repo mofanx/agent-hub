@@ -4,11 +4,13 @@ import {
   ArchiveRestore,
   CheckSquare,
   ChevronsUpDown,
+  Copy,
   ListFilter,
   Monitor,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Pin,
   Plus,
   RefreshCw,
@@ -536,6 +538,8 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
   const selected = store.selectedIds.sessions.includes(s.sessionId);
   const active = store.currentSession?.sessionId === s.sessionId;
   const pinned = store.pinnedIds.includes(s.sessionId);
+  const [renaming, setRenaming] = useState(false);
+  const [name, setName] = useState(s.name);
 
   return (
     <div
@@ -555,22 +559,49 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
         style={{ background: s.busy ? "var(--warn)" : s.offline ? "var(--muted)" : "var(--success)" }}
       />
       <div className="nav-text">
-        <span className="nav-title">
-          {pinned && (
-            <span className="pin-mark">
-              <Pin size={10} />
+        {renaming ? (
+          <input
+            className="rename-input"
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                void store.renameSession(s, name.trim() || s.name);
+                setRenaming(false);
+              } else if (e.key === "Escape") {
+                setName(s.name);
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <>
+            <span className="nav-title">
+              {pinned && (
+                <span className="pin-mark">
+                  <Pin size={10} />
+                </span>
+              )}
+              {store.displayName(s)}
+              {s.busy && <span className="busy-tag">执行中</span>}
+              {s.offline && <span className="offline-tag">离线</span>}
             </span>
-          )}
-          {store.displayName(s)}
-          {s.busy && <span className="busy-tag">执行中</span>}
-          {s.offline && <span className="offline-tag">离线</span>}
-        </span>
-        <span className="nav-sub">{truncatePath(s.cwd, 34)}</span>
+            <span className="nav-sub">{truncatePath(s.cwd, 34)}</span>
+          </>
+        )}
       </div>
-      {!batch && (
+      {!batch && !renaming && (
         <div className="nav-actions" onClick={(e) => e.stopPropagation()}>
           <button className="icon-btn" title={pinned ? "取消置顶" : "置顶"} onClick={() => store.togglePin(s.sessionId)}>
             <Pin size={12} />
+          </button>
+          <button className="icon-btn" title="重命名" onClick={() => { setName(s.name); setRenaming(true); }}>
+            <Pencil size={12} />
+          </button>
+          <button className="icon-btn" title="克隆" onClick={() => void store.cloneSession(s)}>
+            <Copy size={12} />
           </button>
           <button
             className="icon-btn"
@@ -597,6 +628,8 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
   const store = useHubStore();
   const selected = store.selectedIds.rooms.includes(r.roomId);
   const active = store.currentRoom?.roomId === r.roomId;
+  const [renaming, setRenaming] = useState(false);
+  const [name, setName] = useState(r.name);
 
   return (
     <div
@@ -613,16 +646,43 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
       )}
       <Users size={13} style={{ color: "var(--muted)", flexShrink: 0 }} />
       <div className="nav-text">
-        <span className="nav-title">
-          {r.name}
-          {r.archived && <span className="offline-tag">已归档</span>}
-        </span>
-        <span className="nav-sub">
-          {MODE_LABELS[r.mode] ?? r.mode} · {r.members.map((m) => m[1]).join("、")}
-        </span>
+        {renaming ? (
+          <input
+            className="rename-input"
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                void store.renameRoom(r, name.trim() || r.name);
+                setRenaming(false);
+              } else if (e.key === "Escape") {
+                setName(r.name);
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <>
+            <span className="nav-title">
+              {r.name}
+              {r.archived && <span className="offline-tag">已归档</span>}
+            </span>
+            <span className="nav-sub">
+              {MODE_LABELS[r.mode] ?? r.mode} · {r.members.map((m) => m[1]).join("、")}
+            </span>
+          </>
+        )}
       </div>
-      {!batch && (
+      {!batch && !renaming && (
         <div className="nav-actions" onClick={(e) => e.stopPropagation()}>
+          <button className="icon-btn" title="重命名" onClick={() => { setName(r.name); setRenaming(true); }}>
+            <Pencil size={12} />
+          </button>
+          <button className="icon-btn" title="克隆" onClick={() => void store.cloneRoom(r, `${r.name} (副本)`)}>
+            <Copy size={12} />
+          </button>
           <button
             className="icon-btn"
             title={r.archived ? "取消归档" : "归档"}

@@ -340,6 +340,17 @@
   background: var(--surface-2);
 }
 
+.nav-item .rename-input {
+  font-size: 0.82rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: 0.1rem 0.3rem;
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+  outline: none;
+}
+
 .nav-item .pin-mark {
   color: var(--muted);
   display: inline-flex;
