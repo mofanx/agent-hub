@@ -9,10 +9,15 @@ Android App / Desktop App 通过局域网或远程连接 PC 上的 Devin（ACP �
 Android App ──WS──> Hub (Node.js) ──WS──> worker ──> claude-code-acp
 Desktop App ──WS──>   ▲              └─> worker ──> codex-acp
                     └─> worker ──> opencode acp
+
+                    ┌─> devin acp
+Hub ──WS(multiplex)──> multiplex-worker ──┼─> opencode acp
+                    └─> claude acp
 ```
 
 - **Hub**：常驻 Node.js WebSocket 网关，管理连接、会话、群聊编排与持久化。
 - **Worker**：在运行 agent 的机器上执行 `npx tsx src/worker.ts`，把本地 agent 的 ACP stdio 桥接到 Hub。
+- **Multiplex Worker**：执行 `npx tsx src/multiplex-worker.ts`，一条 WebSocket 连接复用多个本地 agent，适合多 agent 机器（详见下文）。
 - **Android App**：通过 `HUB_TOKEN` 连接 Hub，管理连接、创建会话、下发 prompt、审批工具调用。
 - **Desktop App**：Tauri + React 桌面客户端，功能与 Android 端对齐，支持 Windows / Linux。
 
@@ -132,6 +137,59 @@ HUB_URL=ws://<hub-ip>:8787/worker \
 - **不要**在项目根目录执行 `npx tsx worker.js` 或 `npx tsx hub/src/worker.ts`；根目录没有 `tsx` 等依赖，`npx` 会重新下载一个孤立的 tsx，找不到 `worker.ts` 也会找不到 `ws` 等包。
 
 worker 环境变量：`HUB_URL`、`CONNECTION_TOKEN`、`AGENT`、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`、`CODEX_ACP_BIN/CODEX_ACP_ARGS`、`OPENCODE_BIN/OPENCODE_ARGS`。
+
+### 5b. 启动 Multiplex Worker（单连接复用多 agent，可选）
+
+上面的普通 worker 一个进程只桥接一个 agent。如果一台机器上同时跑了多个 agent（如 devin + opencode + claude），可以用 **multiplex worker** 把它们合并到一条 WebSocket 连接里，只需一个 token、一个进程：
+
+```
+                    ┌─> devin acp
+Hub ──WS(multiplex)──> multiplex-worker ──┼─> opencode acp
+                    └─> claude acp
+```
+
+Hub 会为每个 agent 自动创建虚拟 connection（ID 格式 `<base>::<agent>`，如 `local-devin::opencode`），客户端像使用独立 connection 一样创建会话、发 prompt。
+
+**启动命令：**
+
+```bash
+cd /path/to/agent-hub/hub
+HUB_URL=ws://<hub-ip>:8787/worker \
+  CONNECTION_TOKEN=<从 App 复制的 token> \
+  npx tsx src/multiplex-worker.ts
+```
+
+不设置 `AGENTS` 时，worker 自动检测本地 PATH 中哪些 agent CLI 可用，只启动检测到的。也可以显式指定：
+
+```bash
+# 只启动 devin 和 opencode
+AGENTS=devin,opencode npx tsx src/multiplex-worker.ts
+
+# 自动检测但排除 codex
+EXCLUDE_AGENTS=codex npx tsx src/multiplex-worker.ts
+```
+
+**环境变量：**
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `HUB_URL` | 是 | Hub 的 WebSocket 地址，路径必须是 `/worker` |
+| `CONNECTION_TOKEN` | 是 | App 中为来源生成的 token |
+| `AGENTS` | 否 | 要启动的 agent 列表，逗号分隔；不设置则自动检测 |
+| `EXCLUDE_AGENTS` | 否 | 要排除的 agent，逗号分隔 |
+
+**自动检测规则：**
+
+| Agent | 检测方式 | 前提 |
+|-------|---------|------|
+| `devin` | `command -v devin` | `devin auth login` |
+| `opencode` | `command -v opencode` | `npm i -g opencode-ai` |
+| `claude` | `npx -y`（视为可用） | `claude auth login` |
+| `codex` | `npx -y`（视为可用） | `codex login` |
+
+查看完整帮助：`npx tsx src/multiplex-worker.ts --help`
+
+> **与普通 worker 的关系**：multiplex worker 是普通 worker 的超集——如果只检测到一个 agent，效果等同于普通 worker。两种 worker 可以混用（不同机器各跑各的），但同一台机器上同一 agent 不要同时跑两种 worker，会重复注册。
 
 ### 6. 创建会话/群聊
 
