@@ -113,7 +113,6 @@
 }
 
 .chat-column {
-  max-width: 1100px;
   margin: 0 auto;
   padding: 1.2rem 1.4rem 0.8rem;
   display: flex;
@@ -369,7 +368,6 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  max-width: 1100px;
   margin: 0 auto 0.4rem;
   padding: 0.35rem 0.6rem;
   background: var(--accent-soft);
@@ -655,7 +653,6 @@
 }
 
 .compose {
-  max-width: 1100px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;

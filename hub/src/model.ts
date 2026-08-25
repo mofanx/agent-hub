@@ -165,12 +165,12 @@ export class ModelManager {
   }
 
   private defaultModel(backend: ModelBackend): string {
+    // 返回空字符串表示"使用 agent 默认模型"，不硬编码具体模型名
+    // 实际模型列表由 ACP agent 上报的 configOptions 注入
     switch (backend) {
       case "devin": return "swe-1-7";
       case "opencode": return "opencode/big-pickle";
-      case "claude": return "claude-sonnet-4-20250514";
-      case "codex": return "codex-gpt-4-turbo";
-      default: return "swe-1-7";
+      default: return "";
     }
   }
 
@@ -205,14 +205,20 @@ export class ModelManager {
     if (this.backends.length > 0) return;
     const defaults: BackendConfig[] = [
       { id: "devin", name: "Devin", type: "devin", enabled: true },
-      { id: "claude", name: "Claude Code", type: "claude", enabled: false },
-      { id: "codex", name: "Codex", type: "codex", enabled: false },
-      { id: "opencode", name: "OpenCode", type: "opencode", enabled: false },
+      { id: "claude", name: "Claude Code", type: "claude", enabled: true },
+      { id: "codex", name: "Codex", type: "codex", enabled: true },
+      { id: "opencode", name: "OpenCode", type: "opencode", enabled: true },
     ];
     if (existsSync(HUB_BACKENDS_PATH)) {
       try {
         const raw = JSON.parse(readFileSync(HUB_BACKENDS_PATH, "utf8"));
-        this.backends = Array.isArray(raw) ? raw : defaults;
+        const loaded = Array.isArray(raw) ? raw : defaults;
+        // 合并：确保已知标准后端存在
+        const knownIds = new Set(loaded.map((b: BackendConfig) => b.id));
+        for (const d of defaults) {
+          if (!knownIds.has(d.id)) loaded.push(d);
+        }
+        this.backends = loaded;
       } catch {
         this.backends = defaults;
       }
