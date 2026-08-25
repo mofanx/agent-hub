@@ -13,7 +13,7 @@ import { Store, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
-import { webSocketStream } from "./stream.js";
+import { webSocketStream, multiplexWebSocketStream, isControlFrame, type ControlFrame } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import { logError, logWarn } from "./logger.js";
@@ -1727,13 +1727,20 @@ function getConnectionByToken(token: string): Connection | undefined {
 function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void {
   const url = new URL(req.url ?? WORKER_PATH, "http://localhost");
   const token = url.searchParams.get("token") ?? "";
-  const reportedAgent = url.searchParams.get("agent") ?? undefined;
+  const multiplex = url.searchParams.get("multiplex") === "1";
   const connection = getConnectionByToken(token);
   if (!connection) {
     logWarn("worker", "rejected: unknown token");
     ws.close(4001, "unauthorized");
     return;
   }
+
+  if (multiplex) {
+    handleMultiplexWorker(ws, connection);
+    return;
+  }
+
+  const reportedAgent = url.searchParams.get("agent") ?? undefined;
   if (reportedAgent && reportedAgent !== connection.agent) {
     logWarn(
       "worker",
@@ -1761,6 +1768,116 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
     for (const [sid, cid] of [...owners.entries()]) {
       if (cid === connectionId) owners.delete(sid);
     }
+  });
+}
+
+/**
+ * 处理 multiplex worker：一个 WebSocket 连接复用多个后端 agent。
+ *
+ * 协议：
+ * 1. worker 连接后发送 announce 控制帧声明可用通道
+ * 2. Hub 为每个通道创建/复用虚拟 connection + AcpAgent
+ * 3. 后续消息按 channel 路由
+ */
+function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void {
+  console.log(`[hub] multiplex worker connected for ${baseConnection.name} (${baseConnection.id})`);
+
+  const virtualAgents: Map<string, AcpAgent> = new Map();
+
+  // 先用单 listener 等待 announce，收到后切换到 multiplex 模式
+  let multiplexed: Map<string, import("@agentclientprotocol/sdk").Stream> | null = null;
+
+  const pendingHandler = (data: Buffer | ArrayBuffer | Buffer[]) => {
+    if (multiplexed) return; // 已切换，忽略
+    const text = Buffer.isBuffer(data)
+      ? data.toString("utf8")
+      : Array.isArray(data)
+        ? Buffer.concat(data).toString("utf8")
+        : Buffer.from(data).toString("utf8");
+    let msg: unknown;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!isControlFrame(msg)) {
+      logWarn("worker", "multiplex: expected announce frame first, got " + text.slice(0, 100));
+      return;
+    }
+
+    ws.off("message", pendingHandler);
+
+    const channels = msg.channels;
+    console.log(`[hub] multiplex announce: ${channels.map(c => `${c.id}(${c.agent})`).join(", ")}`);
+
+    // 为每个通道创建虚拟 connection（如不存在）
+    const channelIds: string[] = [];
+    for (const ch of channels) {
+      const virtualId = `${baseConnection.id}::${ch.id}`;
+      channelIds.push(ch.id);
+
+      let virtualConn = store.listConnections().find(c => c.id === virtualId);
+      if (!virtualConn) {
+        store.addConnection({
+          id: virtualId,
+          name: ch.name ?? `${baseConnection.name} · ${ch.id}`,
+          agent: ch.agent,
+          token: baseConnection.token,
+          local: false,
+        });
+        console.log(`[hub] created virtual connection: ${virtualId} (agent=${ch.agent})`);
+      }
+    }
+
+    // 创建子通道 Stream（注册新的 message listener）
+    multiplexed = multiplexWebSocketStream(ws, channelIds);
+
+    // 为每个通道创建 AcpAgent
+    for (const ch of channels) {
+      const virtualId = `${baseConnection.id}::${ch.id}`;
+      const stream = multiplexed.get(ch.id);
+      if (!stream) continue;
+
+      const old = agents.get(virtualId);
+      if (old) {
+        old.close();
+        agents.delete(virtualId);
+      }
+
+      const virtualConn = store.listConnections().find(c => c.id === virtualId)!;
+      const a = new AcpAgent(
+        virtualConn.name,
+        stream,
+        onAgentEvent,
+        undefined,
+        undefined,
+        onTurnEnd,
+        onFileWrite,
+        onToolCall,
+      );
+      agents.set(virtualId, a);
+      virtualAgents.set(ch.id, a);
+
+      a.ensureStarted().catch((err) => {
+        logWarn("worker", `multiplex channel ${ch.id} start failed: ${String(err)}`);
+        agents.delete(virtualId);
+        virtualAgents.delete(ch.id);
+      });
+    }
+  };
+
+  ws.on("message", pendingHandler);
+  ws.on("close", () => {
+    console.log(`[hub] multiplex worker disconnected ${baseConnection.id}`);
+    for (const [ch, a] of virtualAgents) {
+      a.close();
+      const connId = `${baseConnection.id}::${ch}`;
+      agents.delete(connId);
+      for (const [sid, cid] of [...owners.entries()]) {
+        if (cid === connId) owners.delete(sid);
+      }
+    }
+    virtualAgents.clear();
   });
 }
 
