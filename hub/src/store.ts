@@ -255,6 +255,20 @@ export class Store {
       .run(c.id, c.name, c.agent, c.token, c.address ?? null, c.cwd ?? null, c.local ? 1 : 0);
   }
 
+  updateConnection(id: string, patch: Partial<Omit<Connection, "id">>): void {
+    const sets: string[] = [];
+    const vals: (string | number | null)[] = [];
+    if (patch.name !== undefined) { sets.push("name = ?"); vals.push(patch.name); }
+    if (patch.agent !== undefined) { sets.push("agent = ?"); vals.push(patch.agent); }
+    if (patch.token !== undefined) { sets.push("token = ?"); vals.push(patch.token); }
+    if (patch.address !== undefined) { sets.push("address = ?"); vals.push(patch.address ?? null); }
+    if (patch.cwd !== undefined) { sets.push("cwd = ?"); vals.push(patch.cwd ?? null); }
+    if (patch.local !== undefined) { sets.push("local = ?"); vals.push(patch.local ? 1 : 0); }
+    if (sets.length === 0) return;
+    vals.push(id);
+    this.db.prepare(`UPDATE connections SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  }
+
   deleteConnection(id: string): boolean {
     const res = this.db.prepare("DELETE FROM connections WHERE id = ?").run(id);
     return res.changes > 0;

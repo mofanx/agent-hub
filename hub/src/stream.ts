@@ -66,6 +66,7 @@ export type MultiplexFrame = {
 export type ControlFrame = {
   channel: "__control__";
   method: "announce";
+  hostname?: string;
   channels: { id: string; agent: string; name?: string }[];
 };
 

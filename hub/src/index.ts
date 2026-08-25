@@ -1808,24 +1808,28 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
     ws.off("message", pendingHandler);
 
     const channels = msg.channels;
-    console.log(`[hub] multiplex announce: ${channels.map(c => `${c.id}(${c.agent})`).join(", ")}`);
+    const hostname = String(msg.hostname ?? baseConnection.name);
+    console.log(`[hub] multiplex announce: ${channels.map(c => `${c.id}(${c.agent})`).join(", ")} from ${hostname}`);
 
     // 为每个通道创建虚拟 connection（如不存在）
     const channelIds: string[] = [];
     for (const ch of channels) {
       const virtualId = `${baseConnection.id}::${ch.id}`;
       channelIds.push(ch.id);
+      const virtualName = ch.name ?? `${ch.agent} · ${hostname}`;
 
       let virtualConn = store.listConnections().find(c => c.id === virtualId);
       if (!virtualConn) {
         store.addConnection({
           id: virtualId,
-          name: ch.name ?? `${baseConnection.name} · ${ch.id}`,
+          name: virtualName,
           agent: ch.agent,
           token: baseConnection.token,
           local: false,
         });
         console.log(`[hub] created virtual connection: ${virtualId} (agent=${ch.agent})`);
+      } else if (virtualConn.name !== virtualName) {
+        store.updateConnection(virtualId, { name: virtualName });
       }
     }
 

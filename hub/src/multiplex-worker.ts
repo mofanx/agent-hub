@@ -30,6 +30,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import * as os from "node:os";
 import { Readable, Writable } from "node:stream";
 import { WebSocket } from "ws";
 import * as acp from "@agentclientprotocol/sdk";
@@ -61,6 +62,9 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
                      例：AGENTS=devin,opencode,claude
   EXCLUDE_AGENTS     要排除的 agent，逗号分隔（可选）
                      例：EXCLUDE_AGENTS=codex
+  MUX_HOSTNAME       机器名（可选，默认自动检测）
+                     用于 Hub 侧虚拟 connection 命名：<agent> · <hostname>
+                     跨平台自动取短主机名（截取 . 之前的部分）
 
 支持的 agent：
   devin      devin acp              （需 devin auth login）
@@ -87,7 +91,15 @@ Hub 侧会为每个通道自动创建虚拟 connection（ID: <base>::<agent>）�
 if (!HUB_URL) throw new Error("[mux-worker] HUB_URL required");
 if (!TOKEN) throw new Error("[mux-worker] CONNECTION_TOKEN required");
 
-/** 检查可执行文件是否在 PATH 中（npx 始终可用） */
+/** 获取短主机名：跨平台兼容，截取 FQDN 第一个 . 之前的部分 */
+function getShortHostname(): string {
+  const raw = (process.env.MUX_HOSTNAME ?? os.hostname() ?? "").trim();
+  if (!raw) return "unknown";
+  // Windows/macOS 可能返回 FQDN（如 DESKTOP-ABC.example.com），取短名
+  return raw.split(".")[0]!.trim() || raw;
+}
+
+
 function isBinAvailable(bin: string): boolean {
   if (bin === "npx") return true; // npx 是 Node 自带
   try {
@@ -193,6 +205,7 @@ async function runOnce(channels: Channel[]): Promise<{ code: number; permanent: 
       const announce = {
         channel: "__control__",
         method: "announce",
+        hostname: getShortHostname(),
         channels: channels.map((c) => ({ id: c.id, agent: c.agent })),
       };
       ws.send(JSON.stringify(announce));
