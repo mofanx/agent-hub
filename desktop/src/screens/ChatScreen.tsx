@@ -720,12 +720,6 @@ export function ChatScreen() {
               <Cpu size={13} />
               <span>{store.modelCurrent || "模型"}</span>
             </button>
-            {store.isGenerating() && (
-              <button className="danger" onClick={store.stopCurrent} title="停止生成">
-                <Square size={11} />
-                停止
-              </button>
-            )}
           </>
         )}
       </div>
@@ -782,19 +776,6 @@ export function ChatScreen() {
                 </span>
                 <button className="icon-btn" onClick={() => store.setQuote(null)} title="取消引用">
                   <X size={13} />
-                </button>
-              </div>
-            )}
-
-            {store.isGenerating() && (
-              <div className="generating-bar">
-                <span className="gen-label">
-                  <span className="gen-spinner" />
-                  执行中…
-                </span>
-                <span style={{ flex: 1 }} />
-                <button className="tiny danger" onClick={store.stopCurrent}>
-                  <Square size={10} /> 停止
                 </button>
               </div>
             )}
@@ -891,14 +872,24 @@ export function ChatScreen() {
             )}
           </div>
 
-              <button
-                className="send-btn"
-                onClick={send}
-                disabled={(!input.trim() && !store.pendingAttachments.length) || store.isGenerating()}
-                title={`发送 (${store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter"})`}
-              >
-                <ArrowUp size={16} />
-              </button>
+              {store.isGenerating() ? (
+                <button
+                  className="send-btn danger"
+                  onClick={store.stopCurrent}
+                  title="停止生成"
+                >
+                  <Square size={14} />
+                </button>
+              ) : (
+                <button
+                  className="send-btn"
+                  onClick={send}
+                  disabled={!input.trim() && !store.pendingAttachments.length}
+                  title={`发送 (${store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter"})`}
+                >
+                  <ArrowUp size={16} />
+                </button>
+              )}
               </div>
 
               {cmdOpen && (
@@ -953,7 +944,6 @@ export function ChatScreen() {
                   onChange={onFileChange}
                 />
                 <span className="spacer" />
-                {contextUsage && <span className="usage-pill">{formatContextUsage(contextUsage)}</span>}
               </div>
             </div>
           </div>
