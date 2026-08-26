@@ -1221,15 +1221,18 @@ export class RoomModeManager {
       "- debate：需要对某一观点进行正反方辩论，最后由裁判总结",
       "- self：你自己就能直接回答，不需要其他成员",
       "",
-      "输出要求：",
-      "- 仅输出一个 JSON 对象，不要有任何解释文字、markdown 标题或代码块外的内容",
-      "- 不要调用任何工具，仅做选择",
-      "- JSON 格式（params 可省略）：",
-      "```json",
-      '{ "mode": "conductor", "reason": "任务复杂，需要拆解成子任务" }',
-      "```",
+      "⚠️ 输出要求（极其重要，违反将导致系统故障）：",
+      "1. 只能输出一个 JSON 代码块，不能有任何其他文字",
+      "2. 不要调用任何工具",
+      "3. 不要输出思考过程、解释、前言、总结",
+      "4. JSON 必须包含 mode 字段，值为上述七种模式之一",
       "",
-      "params 说明（可选）：",
+      "示例（直接输出，不要模仿思考过程）：",
+      "简单问候 → ```json\n{ \"mode\": \"self\", \"reason\": \"简单对话，主持人直接回答\" }\n```",
+      "复杂编码任务 → ```json\n{ \"mode\": \"conductor\", \"reason\": \"需要拆解为编码和测试子任务\", \"params\": { \"tasks\": [{\"to\":\"成员名\",\"task\":\"具体任务\",\"id\":\"t1\",\"dependsOn\":[]}] } }\n```",
+      "征求意见 → ```json\n{ \"mode\": \"parallel\", \"reason\": \"需要多人独立给出方案后汇总\" }\n```",
+      "",
+      "params 说明（可选，不确定时可省略）：",
       '- mention: { "targets": ["sessionId", ...] }',
       '- roundrobin: { "speaker": "sessionId" }',
       '- parallel: { "summarizer": "sessionId" }',
@@ -1250,7 +1253,7 @@ export class RoomModeManager {
       noteText,
       sessionNoteText,
       "",
-      "注意：你必须且只能输出一个上面格式的 JSON code block，不要加任何解释、前缀或后缀。",
+      "现在请直接输出 JSON 代码块，不要有任何其他内容：",
     ].join("\n");
   }
 
@@ -1278,6 +1281,13 @@ export class RoomModeManager {
     if (loose) {
       logWarn("room-modes auto", `决策未输出严格 JSON，通过文本识别 mode：${loose.mode}`);
       return loose;
+    }
+
+    // 兜底前最后检查：输出内容是否包含明确的编排意图关键词
+    const intent = this.detectOrchestrationIntent(text);
+    if (intent) {
+      logWarn("room-modes auto", `决策输出无法解析为 JSON，但检测到编排意图关键词，修正为 ${intent}`);
+      return { mode: intent, reason: "从输出内容中检测到编排意图，自动修正" };
     }
 
     logWarn("room-modes auto", `决策输出无法解析，原始内容：\n${text.slice(0, 800)}`);
@@ -1334,6 +1344,36 @@ export class RoomModeManager {
     if (match?.[1]) {
       const mode = aliases[match[1]!]!;
       return { mode, reason: "从中文回答中识别到模式名称" };
+    }
+    return null;
+  }
+
+  /** 从无法解析的输出中检测编排意图关键词，返回推断的模式或 null */
+  private detectOrchestrationIntent(text: string): AutoDecisionMode | null {
+    const lower = text.toLowerCase();
+    // conductor 意图：任务拆解、派工、分工
+    if (/(?:拆解|拆分|派工|派发|分工|子任务|分步骤|分阶段|tasks?\s*=|assign|dispatch)/i.test(text)) {
+      return "conductor";
+    }
+    // parallel 意图：并行、集思广益、各自独立
+    if (/(?:并行|集思广益|各自独立|分别给出|多人.*观点|brainstorm|parallel)/i.test(text)) {
+      return "parallel";
+    }
+    // pipeline 意图：流水线、串行、按顺序
+    if (/(?:流水线|串行|按顺序|依次|先.*后.*再|pipeline)/i.test(text)) {
+      return "pipeline";
+    }
+    // debate 意图：辩论、正反方
+    if (/(?:辩论|正反方|正方|反方|debate)/i.test(text)) {
+      return "debate";
+    }
+    // roundrobin 意图：轮流、轮询
+    if (/(?:轮流|轮询|依次发言|roundrobin|round.?robin)/i.test(text)) {
+      return "roundrobin";
+    }
+    // mention 意图：@某人、指定某人
+    if (/(?:指定.*回答|@.*成员|点名|mention)/i.test(text)) {
+      return "mention";
     }
     return null;
   }
