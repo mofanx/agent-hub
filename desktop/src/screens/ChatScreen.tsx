@@ -561,12 +561,6 @@ export function ChatScreen() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 打开文件选择器
-    if (e.key === "#" && !mention && !(slash && slash.length > 0) && !fileRef) {
-      setFilePickerOpen(true);
-      return;
-    }
-
     const active = mention || (slash && slash.length > 0) || (fileRef && fileRef.candidates.length > 0);
     if (active && suggestOpen) {
       const items = mention
@@ -931,6 +925,9 @@ export function ChatScreen() {
               <div className="compose-toolbar">
                 <button className={`icon-btn ${cmdOpen ? "active" : ""}`} onClick={() => setCmdOpen(!cmdOpen)} title="快捷指令">
                   <SlashSquare size={14} />
+                </button>
+                <button className="icon-btn" onClick={() => setFilePickerOpen(true)} title="选择文件引用 (#)">
+                  <FileCode size={14} />
                 </button>
                 <button className="icon-btn" onClick={onPickImage} title="添加图片">
                   <ImagePlus size={14} />

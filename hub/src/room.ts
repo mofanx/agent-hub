@@ -861,15 +861,12 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return [];
     const roots = new Map<string, FileTreeRoot>();
-    const add = (root: FileTreeRoot) => {
-      if (!roots.has(root.path)) roots.set(root.path, root);
-    };
-    add({ name: "项目根目录", path: PROJECT_ROOT, kind: "project" });
-    add({ name: "工作区根目录", path: WORKSPACE_ROOT, kind: "workspace" });
     if (this.getCwd) {
       for (const member of room.members) {
         const cwd = this.getCwd(member.sessionId);
-        if (cwd) add({ name: `@${member.name}`, path: cwd, kind: "cwd", sessionId: member.sessionId });
+        if (cwd && !roots.has(cwd)) {
+          roots.set(cwd, { name: `@${member.name}`, path: cwd, kind: "cwd", sessionId: member.sessionId });
+        }
       }
     }
     return [...roots.values()];
@@ -907,17 +904,12 @@ export class RoomManager {
     return this.buildFileTreeNodes(found.real, found.root);
   }
 
-  /** 获取指定 session 可用的文件树根目录 */
+  /** 获取指定 session 可用的文件树根目录（只显示会话 cwd，不暴露项目/工作区根目录） */
   sessionFileRoots(sessionId: string): FileTreeRoot[] {
     const roots = new Map<string, FileTreeRoot>();
-    const add = (root: FileTreeRoot) => {
-      if (!roots.has(root.path)) roots.set(root.path, root);
-    };
-    add({ name: "项目根目录", path: PROJECT_ROOT, kind: "project" });
-    add({ name: "工作区根目录", path: WORKSPACE_ROOT, kind: "workspace" });
     if (this.getCwd) {
       const cwd = this.getCwd(sessionId);
-      if (cwd) add({ name: "当前工作目录", path: cwd, kind: "cwd", sessionId });
+      if (cwd) roots.set(cwd, { name: "当前工作目录", path: cwd, kind: "cwd", sessionId });
     }
     return [...roots.values()];
   }
