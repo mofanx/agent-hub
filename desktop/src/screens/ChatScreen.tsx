@@ -598,6 +598,19 @@ export function ChatScreen() {
         setSuggestOpen(false);
         return;
       }
+      // 文件引用：Backspace 退出子目录
+      if (e.key === "Backspace" && fileRef && fileRef.candidates.length > 0 && fileRef.query.dir) {
+        const el = e.currentTarget;
+        if (el.selectionStart === el.selectionEnd && el.selectionStart === fileRef.query.at + 1 + fileRef.query.q.length) {
+          e.preventDefault();
+          const dir = fileRef.query.dir.replace(/\/+$/, "");
+          const parent = dir.slice(0, dir.lastIndexOf("/") + 1);
+          const before = input.slice(0, fileRef.query.at);
+          setInput(`${before}#${parent}`);
+          setSuggestOpen(true);
+          return;
+        }
+      }
     }
     const { sendKey } = useHubStore.getState();
     if (sendKey === "ctrl-enter") {
