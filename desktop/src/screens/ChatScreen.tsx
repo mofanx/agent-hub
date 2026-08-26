@@ -598,17 +598,28 @@ export function ChatScreen() {
         setSuggestOpen(false);
         return;
       }
-      // 文件引用：Backspace 退出子目录
-      if (e.key === "Backspace" && fileRef && fileRef.candidates.length > 0 && fileRef.query.dir) {
+      // 文件引用：→ 进入子目录，← 退出子目录
+      if (fileRef && fileRef.candidates.length > 0) {
         const el = e.currentTarget;
-        if (el.selectionStart === el.selectionEnd && el.selectionStart === fileRef.query.at + 1 + fileRef.query.q.length) {
-          e.preventDefault();
-          const dir = fileRef.query.dir.replace(/\/+$/, "");
-          const parent = dir.slice(0, dir.lastIndexOf("/") + 1);
-          const before = input.slice(0, fileRef.query.at);
-          setInput(`${before}#${parent}`);
-          setSuggestOpen(true);
-          return;
+        const atEnd = el.selectionStart === el.selectionEnd && el.selectionStart === fileRef.query.at + 1 + fileRef.query.q.length;
+        if (atEnd) {
+          if (e.key === "ArrowRight") {
+            const selected = fileRef.candidates[suggestIndex] ?? fileRef.candidates[0];
+            if ((selected as FileTreeNode).kind === "dir") {
+              e.preventDefault();
+              insertFileRef(selected);
+              return;
+            }
+          }
+          if (e.key === "ArrowLeft" && fileRef.query.dir) {
+            e.preventDefault();
+            const dir = fileRef.query.dir.replace(/\/+$/, "");
+            const parent = dir.slice(0, dir.lastIndexOf("/") + 1);
+            const before = input.slice(0, fileRef.query.at);
+            setInput(`${before}#${parent}`);
+            setSuggestOpen(true);
+            return;
+          }
         }
       }
     }
