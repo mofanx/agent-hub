@@ -458,7 +458,8 @@
 .message .text table {
   border-collapse: collapse;
   margin: 0.5rem 0;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   font-size: 0.82rem;
 }
 
@@ -479,12 +480,12 @@
   border: 1px solid var(--border);
   padding: 0.32rem 0.55rem;
   text-align: left;
+  white-space: nowrap;
 }
 
 .message .text th {
   background: var(--surface-2);
   font-weight: 600;
-  white-space: nowrap;
 }
 
 .message .text code {
