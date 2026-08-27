@@ -108,12 +108,12 @@ export function discoverSkills(cwd?: string, agentType?: string): SkillInfo[] {
       [path.join(home, ".claude", "skills")],
     ],
     codex: [
-      cwd ? [path.join(cwd, ".codex", "skills")] : [],
-      [path.join(home, ".codex", "skills")],
+      cwd ? [path.join(cwd, ".codex", "skills"), path.join(cwd, ".agents", "skills"), path.join(cwd, ".claude", "skills")] : [],
+      [path.join(home, ".codex", "skills"), path.join(home, ".agents", "skills"), path.join(home, ".claude", "skills")],
     ],
     opencode: [
-      cwd ? [path.join(cwd, ".opencode", "skills")] : [],
-      [path.join(home, ".opencode", "skills")],
+      cwd ? [path.join(cwd, ".opencode", "skills"), path.join(cwd, ".claude", "skills")] : [],
+      [path.join(home, ".config", "opencode", "skills"), path.join(home, ".claude", "skills")],
     ],
   };
 
