@@ -236,6 +236,13 @@ export interface SlashCommand {
   description: string;
 }
 
+export interface SkillInfo {
+  name: string;
+  description: string;
+  location: string;
+  scope: "project" | "user";
+}
+
 export interface AppConfig {
   profiles: ConnProfile[];
   pinned: string[];

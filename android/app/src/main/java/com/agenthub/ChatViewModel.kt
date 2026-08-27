@@ -318,6 +318,13 @@ data class RoleInfo(
     val builtin: Boolean,
 )
 
+data class SkillInfo(
+    val name: String,
+    val description: String,
+    val location: String,
+    val scope: String,
+)
+
 enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings }
 
 data class ConnProfile(
@@ -412,6 +419,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessions = mutableStateListOf<SessionInfo>()
     val rooms = mutableStateListOf<RoomInfo>()
     val roles = mutableStateListOf<RoleInfo>()
+    val skills = mutableStateListOf<SkillInfo>()
     val connections = mutableStateListOf<ConnectionInfo>()
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
@@ -781,12 +789,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val slashCommands: List<SlashCommand>
         get() {
             val S = stringsFor(lang)
-            return listOf(
+            val local = listOf(
                 SlashCommand("help", S.slashHelpHelp),
                 SlashCommand("stop", S.slashHelpStop),
                 SlashCommand("bypass", S.slashHelpBypass),
                 SlashCommand("model", S.slashHelpModel),
             )
+            val skillCmds = skills.map { SlashCommand(it.name, it.description) }
+            return local + skillCmds
         }
 
     private fun showSlashHelp() {
@@ -811,10 +821,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "bypass" -> toggleBypass(arg)
             "stop" -> stopCurrent()
             "model", "models" -> handleModelSlash(arg)
-            else -> {
-                val S = stringsFor(lang)
-                chatItems.add(ChatItem.Error(++itemSeq, "/$command\n${S.unknownCommandHint}"))
-            }
+            else -> return false // 不匹配本地命令，透传给 agent（可能是 agent skill）
         }
         return true
     }
@@ -869,6 +876,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sessions.clear()
         rooms.clear()
         roles.clear()
+        skills.clear()
         connections.clear()
         chatItems.clear()
         busyIds.clear()
@@ -953,6 +961,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["address"]?.jsonPrimitive?.content,
                         o["connectionId"]?.jsonPrimitive?.content,
                         o["builtin"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                    ))
+                }
+            } catch (_: Exception) {
+            }
+            try {
+                val connId = connections.firstOrNull()?.id
+                val result = if (connId != null) hub.call("skill.list", buildJsonObject { put("connectionId", connId) }) else hub.call("skill.list")
+                val list = result["skills"]?.jsonArray ?: return
+                skills.clear()
+                for (s in list) {
+                    val o = s.jsonObject
+                    skills.add(SkillInfo(
+                        o["name"]?.jsonPrimitive?.content ?: "",
+                        o["description"]?.jsonPrimitive?.content ?: "",
+                        o["location"]?.jsonPrimitive?.content ?: "",
+                        o["scope"]?.jsonPrimitive?.content ?: "user",
                     ))
                 }
             } catch (_: Exception) {

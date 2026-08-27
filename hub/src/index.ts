@@ -17,6 +17,7 @@ import { webSocketStream, multiplexWebSocketStream, isControlFrame, type Control
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import { logError, logWarn } from "./logger.js";
+import { discoverSkills } from "./skills.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -845,6 +846,16 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "role.list":
       return { roles: store.listRoles() };
+    case "skill.list": {
+      const sessionId = typeof req.params?.sessionId === "string" ? req.params.sessionId : undefined;
+      const connectionId = typeof req.params?.connectionId === "string" ? req.params.connectionId : undefined;
+      const meta = sessionId ? sessionMetas.get(sessionId) : undefined;
+      const connId = connectionId ?? meta?.connectionId;
+      const connection = connId ? getConnectionById(connId) : undefined;
+      const cwd = meta?.cwd;
+      const agentType = connection?.agent;
+      return { skills: discoverSkills(cwd, agentType) };
+    }
     case "role.create": {
       const name = String(req.params?.name ?? "").trim();
       const persona = String(req.params?.persona ?? "").trim();

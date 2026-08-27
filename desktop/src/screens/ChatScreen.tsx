@@ -854,17 +854,57 @@ export function ChatScreen() {
             )}
 
             {suggestOpen && slash && slash.length > 0 && (
-              <div className="suggest-popup">
-                {slash.map((c, i) => (
-                  <div
-                    key={c.name}
-                    className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
-                    onClick={() => insertSlash(c.name)}
-                    onMouseEnter={() => setSuggestIndex(i)}
-                  >
-                    /{c.name} — {c.description}
-                  </div>
-                ))}
+              <div className="suggest-popup slash-popup">
+                {(() => {
+                  const skillNames = new Set(store.skills.map((s) => s.name));
+                  const local = slash.filter((c) => !skillNames.has(c.name));
+                  const skills = slash.filter((c) => skillNames.has(c.name));
+                  let idx = 0;
+                  return (
+                    <>
+                      {local.length > 0 && (
+                        <>
+                          <div className="slash-group">命令</div>
+                          {local.map((c) => {
+                            const i = idx++;
+                            return (
+                              <div
+                                key={c.name}
+                                className={`suggest-item slash-item ${i === suggestIndex ? "active" : ""}`}
+                                onClick={() => insertSlash(c.name)}
+                                onMouseEnter={() => setSuggestIndex(i)}
+                              >
+                                <span className="slash-cmd">/{c.name}</span>
+                                <span className="slash-desc"> — {c.description}</span>
+                              </div>
+                            );
+                          })}
+                        </>
+                      )}
+                      {skills.length > 0 && (
+                        <>
+                          {local.length > 0 && <div className="slash-divider" />}
+                          <div className="slash-group">Skill</div>
+                          {skills.map((c) => {
+                            const i = idx++;
+                            return (
+                              <div
+                                key={c.name}
+                                className={`suggest-item slash-item ${i === suggestIndex ? "active" : ""}`}
+                                onClick={() => insertSlash(c.name)}
+                                onMouseEnter={() => setSuggestIndex(i)}
+                              >
+                                <span className="slash-cmd">/{c.name}</span>
+                                <span className="slash-tag">skill</span>
+                                <span className="slash-desc"> — {c.description}</span>
+                              </div>
+                            );
+                          })}
+                        </>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             )}
 

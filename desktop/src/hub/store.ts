@@ -20,6 +20,7 @@ import type {
   SearchGroup,
   SearchHit,
   SessionInfo,
+  SkillInfo,
   SlashCommand,
 } from "./types";
 import { HubClient } from "./client";
@@ -52,6 +53,7 @@ interface State {
   sessions: SessionInfo[];
   rooms: RoomInfo[];
   roles: RoleInfo[];
+  skills: SkillInfo[];
   connections: ConnectionInfo[];
   currentSession: SessionInfo | null;
   currentRoom: RoomInfo | null;
@@ -672,6 +674,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     sessions: [],
     rooms: [],
     roles: [],
+    skills: [],
     connections: [],
     currentSession: null,
     currentRoom: null,
@@ -841,6 +844,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         sessions: [],
         rooms: [],
         roles: [],
+        skills: [],
         connections: [],
         currentSession: null,
         currentRoom: null,
@@ -915,6 +919,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
           parseRole(it as Record<string, unknown>),
         );
         set({ roles: list });
+      } catch {}
+
+      try {
+        const conns = get().connections;
+        const connId = conns.length ? conns[0].id : undefined;
+        const sList = (await client.call("skill.list", connId ? { connectionId: connId } : {})) as Record<string, unknown>;
+        const skills = ((sList.skills as unknown[] | undefined) ?? []).map((it) => {
+          const s = it as Record<string, unknown>;
+          return {
+            name: String(s.name ?? ""),
+            description: String(s.description ?? ""),
+            location: String(s.location ?? ""),
+            scope: (s.scope === "project" ? "project" : "user") as "project" | "user",
+          } as SkillInfo;
+        });
+        set({ skills });
       } catch {}
 
       try {
@@ -1729,13 +1749,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           }
           return true;
         default: {
-          set({
-            chatItems: [
-              ...get().chatItems,
-              { kind: "error", text: `/${command}\n${S.unknownCommandHint}`, author: "" },
-            ],
-          });
-          return true;
+          // 不匹配本地命令，透传给 agent（可能是 agent skill 如 /snap2md）
+          return false;
         }
       }
     },
@@ -2067,12 +2082,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
   Object.defineProperty(store, "slashCommands", {
     get: () => {
       const S = stringsFor(get().lang);
-      return [
+      const local = [
         { name: "help", description: S.slashHelpHelp },
         { name: "stop", description: S.slashHelpStop },
         { name: "bypass", description: S.slashHelpBypass },
         { name: "model", description: S.slashHelpModel },
       ];
+      const skills = get().skills.map((s) => ({ name: s.name, description: s.description }));
+      return [...local, ...skills];
     },
   });
 

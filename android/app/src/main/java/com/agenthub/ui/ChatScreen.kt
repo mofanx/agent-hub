@@ -92,6 +92,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Badge
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -683,19 +684,97 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         input.substring(1)
                     }
                     if (slashQuery != null) {
-                        val matches = vm.slashCommands.filter {
+                        val allMatches = vm.slashCommands.filter {
                             it.name.startsWith(slashQuery, ignoreCase = true)
                         }
+                        val skillNames = vm.skills.map { it.name }.toSet()
+                        val localMatches = allMatches.filter { it.name !in skillNames }
+                        val skillMatches = allMatches.filter { it.name in skillNames }
                         DropdownMenu(
-                            expanded = matches.isNotEmpty(),
+                            expanded = allMatches.isNotEmpty(),
                             onDismissRequest = { },
                             properties = PopupProperties(focusable = false),
                         ) {
-                            matches.forEach { cmd ->
-                                DropdownMenuItem(
-                                    text = { Text("/${cmd.name} — ${cmd.description}") },
-                                    onClick = { input = "/${cmd.name} " },
-                                )
+                            Column(
+                                modifier = Modifier
+                                    .heightIn(max = 320.dp)
+                                    .verticalScroll(rememberScrollState()),
+                            ) {
+                                if (localMatches.isNotEmpty()) {
+                                    Text(
+                                        "命令",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                    )
+                                    localMatches.forEach { cmd ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        "/${cmd.name}",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Bold,
+                                                    )
+                                                    Spacer(Modifier.width(6.dp))
+                                                    Text(
+                                                        cmd.description,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f),
+                                                    )
+                                                }
+                                            },
+                                            onClick = { input = "/${cmd.name} " },
+                                        )
+                                    }
+                                }
+                                if (skillMatches.isNotEmpty()) {
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+                                    Text(
+                                        "Skill",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                    )
+                                    skillMatches.forEach { cmd ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        "/${cmd.name}",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Bold,
+                                                    )
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text(
+                                                        "skill",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier
+                                                            .background(
+                                                                MaterialTheme.colorScheme.primaryContainer,
+                                                                RoundedCornerShape(3.dp)
+                                                            )
+                                                            .padding(horizontal = 3.dp, vertical = 1.dp),
+                                                    )
+                                                    Spacer(Modifier.width(6.dp))
+                                                    Text(
+                                                        cmd.description,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f),
+                                                    )
+                                                }
+                                            },
+                                            onClick = { input = "/${cmd.name} " },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
