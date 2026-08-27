@@ -1503,7 +1503,7 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  width: 560px;
+  width: 640px;
   max-width: 92vw;
   max-height: 80vh;
   display: flex;
@@ -1730,10 +1730,12 @@
 /* ================= Model Picker Backends ================= */
 .model-picker-backends {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.5rem 1rem;
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
+  max-height: 5.5rem;
+  overflow-y: auto;
 }
 
 .model-picker-backends button {
