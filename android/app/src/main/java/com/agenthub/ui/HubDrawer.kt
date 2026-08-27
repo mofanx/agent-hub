@@ -97,10 +97,11 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
         )
     }
 
-    ModalDrawerSheet {
+    ModalDrawerSheet(
+        modifier = Modifier.fillMaxWidth(0.75f),
+    ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
                 .fillMaxHeight()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
