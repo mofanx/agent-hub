@@ -2123,6 +2123,7 @@ function ModelPicker() {
     claude: "Claude Code",
     codex: "Codex",
     opencode: "OpenCode",
+    openclaw: "OpenClaw",
     custom: "自定义",
   };
 

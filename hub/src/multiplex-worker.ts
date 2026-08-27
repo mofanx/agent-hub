@@ -69,6 +69,7 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
 支持的 agent：
   devin      devin acp              （需 devin auth login）
   opencode   opencode acp           （需 npm i -g opencode-ai）
+  openclaw   openclaw acp           （需 npm i -g openclaw）
   claude     npx ...claude-agent-acp（需 claude auth login）
   codex      npx ...codex-acp       （需 codex login）
 
@@ -112,7 +113,7 @@ function isBinAvailable(bin: string): boolean {
 
 /** 检测本地可用的 agent：显式指定 或 自动检测 PATH */
 function detectAgents(): string[] {
-  const allKnown = ["devin", "opencode", "claude", "codex"];
+  const allKnown = ["devin", "opencode", "openclaw", "claude", "codex"];
   const candidates = AGENTS_ENV
     ? AGENTS_ENV.split(",").map((s) => s.trim()).filter(Boolean)
     : allKnown;

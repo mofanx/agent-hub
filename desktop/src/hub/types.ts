@@ -200,7 +200,7 @@ export interface ModelInfo {
   backend: ModelBackend;
 }
 
-export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "custom";
+export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "custom";
 
 export interface BackendConfig {
   id: string;

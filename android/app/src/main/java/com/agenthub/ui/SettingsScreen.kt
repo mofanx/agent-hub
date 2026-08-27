@@ -154,6 +154,7 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     val agentTypes = listOf(
                         "devin" to "Devin", "claude" to "Claude",
                         "codex" to "Codex", "opencode" to "OpenCode",
+                        "openclaw" to "OpenClaw",
                     )
                     OutlinedButton(
                         onClick = { showAdd = true },

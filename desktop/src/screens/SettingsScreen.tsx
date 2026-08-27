@@ -156,7 +156,7 @@ function ConnectionsSettings() {
           </FormRow>
           <FormRow label="类型">
             <select value={form.agent ?? "devin"} onChange={(e) => setForm({ ...form, agent: e.currentTarget.value })}>
-              {["devin", "claude", "codex", "opencode"].map((a) => (
+              {["devin", "claude", "codex", "opencode", "openclaw"].map((a) => (
                 <option key={a} value={a}>
                   {a}
                 </option>

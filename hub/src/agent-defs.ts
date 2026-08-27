@@ -45,6 +45,10 @@ export const AGENT_DEFS: Record<string, AgentDef> = {
     bin: process.env.OPENCODE_BIN ?? "opencode",
     args: process.env.OPENCODE_ARGS?.split(" ") ?? ["acp"],
   },
+  openclaw: {
+    bin: process.env.OPENCLAW_BIN ?? "openclaw",
+    args: process.env.OPENCLAW_ARGS?.split(" ") ?? ["acp"],
+  },
   ...(process.env.DSH_ACP_BIN || process.env.DSH_ROOT ? { deepseek: getDeepseekDef()! } : {}),
 };
 

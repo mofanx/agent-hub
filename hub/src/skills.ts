@@ -115,6 +115,10 @@ export function discoverSkills(cwd?: string, agentType?: string): SkillInfo[] {
       cwd ? [path.join(cwd, ".opencode", "skills"), path.join(cwd, ".claude", "skills")] : [],
       [path.join(home, ".config", "opencode", "skills"), path.join(home, ".claude", "skills")],
     ],
+    openclaw: [
+      cwd ? [path.join(cwd, "skills"), path.join(cwd, ".agents", "skills")] : [],
+      [path.join(home, ".openclaw", "skills"), path.join(home, ".agents", "skills")],
+    ],
   };
 
   if (agentType && clientMap[agentType]) {

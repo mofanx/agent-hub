@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { logError } from "./logger.js";
 
-export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "custom";
+export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "custom";
 
 export type ModelInfo = {
   uid: string;
@@ -208,6 +208,7 @@ export class ModelManager {
       { id: "claude", name: "Claude Code", type: "claude", enabled: true },
       { id: "codex", name: "Codex", type: "codex", enabled: true },
       { id: "opencode", name: "OpenCode", type: "opencode", enabled: true },
+      { id: "openclaw", name: "OpenClaw", type: "openclaw", enabled: true },
     ];
     if (existsSync(HUB_BACKENDS_PATH)) {
       try {
@@ -267,6 +268,8 @@ export class ModelManager {
         return this.loadCodexModels(backend.config);
       case "opencode":
         return this.loadOpenCodeModels(backend.config);
+      case "openclaw":
+        return this.loadOpenClawModels(backend.config);
       case "custom":
         return this.loadCustomModels(backend.config);
       default:
@@ -297,6 +300,16 @@ export class ModelManager {
       return parseOpenCodeModels(stdout);
     } catch (err) {
       logError("opencode models load", err);
+      return [];
+    }
+  }
+
+  private async loadOpenClawModels(config?: Record<string, string>): Promise<ModelInfo[]> {
+    try {
+      const stdout = await runOpenClawModelsList();
+      return parseOpenClawModels(stdout);
+    } catch (err) {
+      logError("openclaw models load", err);
       return [];
     }
   }
@@ -442,6 +455,55 @@ function parseOpenCodeModels(stdout: string): ModelInfo[] {
     }
   }
   return models;
+}
+
+function runOpenClawModelsList(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("openclaw", ["models", "list", "--json"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout!.on("data", (chunk) => (stdout += String(chunk)));
+    proc.stderr!.on("data", (chunk) => (stderr += String(chunk)));
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error("openclaw models timeout"));
+    }, 30000);
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`openclaw models list exited ${code}: ${stderr.trim()}`));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+function parseOpenClawModels(stdout: string): ModelInfo[] {
+  const data = JSON.parse(stdout) as { models?: Array<Record<string, unknown>> };
+  const list = Array.isArray(data?.models) ? data.models : [];
+  return list.map((m) => {
+    const key = String(m.key ?? "");
+    const [provider, ...rest] = key.split("/");
+    const id = rest.join("/") || key;
+    const tags = Array.isArray(m.tags) ? m.tags : [];
+    return {
+      uid: key,
+      label: String(m.name ?? id),
+      family: String(provider ?? key),
+      familyUid: String(provider ?? "").toLowerCase(),
+      slug: id,
+      aliases: [],
+      costTier: tags.includes("default") ? "default" : "unknown",
+      backend: "openclaw" as ModelBackend,
+    };
+  });
 }
 
 function parseConfigOptionsModels(configOptions: unknown[], backend: ModelBackend): ModelInfo[] {

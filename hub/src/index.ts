@@ -257,10 +257,11 @@ async function cloneSessionWithName(
 }
 
 function ensureDefaultLocalConnections(): void {
-  if (store.getMeta("default-connections-seeded") === "1") return;
+  const existing = store.listConnections();
+  let created = false;
   for (const agent of Object.keys(AGENT_DEFS)) {
     const id = `local-${agent}`;
-    if (store.listConnections().some((c) => c.id === id)) continue;
+    if (existing.some((c) => c.id === id)) continue;
     store.addConnection({
       id,
       name: `本地 ${agent}`,
@@ -269,8 +270,9 @@ function ensureDefaultLocalConnections(): void {
       local: true,
     });
     console.log(`[hub] created default local connection: ${id}`);
+    created = true;
   }
-  store.setMeta("default-connections-seeded", "1");
+  if (created) store.setMeta("default-connections-seeded", "1");
 }
 
 function cleanupLocalAgent(connectionId: string): void {
