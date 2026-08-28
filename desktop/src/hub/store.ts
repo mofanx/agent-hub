@@ -149,9 +149,10 @@ interface Actions {
   ): Promise<void>;
 
   openChat(session: SessionInfo, anchorAt?: number): void;
-  openRoom(room: RoomInfo, anchorAt?: number): void;
+  openRoom(room: RoomInfo, anchorAt?: number): Promise<void>;
   clearJumpToAt(): void;
-  resumeSession(session: SessionInfo): Promise<void>;
+  resumeSession(session: SessionInfo, autoOpen?: boolean): Promise<void>;
+  resumeOne(session: SessionInfo): Promise<SessionInfo | null>;
   archiveSession(session: SessionInfo, archived: boolean): Promise<void>;
   archiveRoom(room: RoomInfo, archived: boolean): Promise<void>;
   deleteSession(session: SessionInfo): Promise<void>;
@@ -194,6 +195,7 @@ interface Actions {
   syncBusyIds(): Promise<void>;
   handleSlashCommand(text: string): boolean;
   saveProfileAndConnect(address: string, token: string, name?: string): void;
+  restoreCurrentScreen(): Promise<void>;
   refreshFlow(roomId: string): Promise<void>;
   setFlow(flow: FlowInfo | null): void;
   refreshArtifacts(scope: { roomId: string } | { sessionId: string }): Promise<void>;
@@ -1081,11 +1083,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().refreshArtifacts({ sessionId: session.sessionId });
     },
 
-    openRoom: (room: RoomInfo, anchorAt?: number) => {
+    openRoom: async (room: RoomInfo, anchorAt?: number) => {
+      await get().refreshAll();
+      const latestRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? room;
+      const toResume = latestRoom.members
+        .map(([sid]) => get().sessions.find((s) => s.sessionId === sid && s.offline))
+        .filter((s): s is SessionInfo => s != null);
+      for (const s of toResume) {
+        try { await get().resumeOne(s); } catch {}
+      }
+      if (toResume.length > 0) await get().refreshAll();
+      const updatedRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? latestRoom;
+
       saveCurrentHistoryCache();
-      const cached = getHistoryCache("room", room.roomId);
+      const cached = getHistoryCache("room", updatedRoom.roomId);
       set({
-        currentRoom: room,
+        currentRoom: updatedRoom,
         currentSession: null,
         currentArtifacts: null,
         currentEvents: null,
@@ -1101,35 +1114,52 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historyLoading: false,
         historySearchContext: anchorAt != null,
       });
-      get().loadHistory("room.history", "roomId", room.roomId, anchorAt);
-      get().refreshFlow(room.roomId);
-      get().refreshArtifacts({ roomId: room.roomId });
-      get().refreshBlackboard(room.roomId);
+      get().loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt);
+      get().refreshFlow(updatedRoom.roomId);
+      get().refreshArtifacts({ roomId: updatedRoom.roomId });
+      get().refreshBlackboard(updatedRoom.roomId);
     },
 
     clearJumpToAt: () => {
       set({ jumpToAt: null, jumpQuery: "" });
     },
 
-    resumeSession: async (session: SessionInfo) => {
+    resumeSession: async (session: SessionInfo, autoOpen = true) => {
       try {
-        const result = (await getOrCall("session.resume", { sessionId: session.sessionId })) as Record<
-          string,
-          unknown
-        >;
-        if (result.resumed === true) {
-          set({
-            sessions: get().sessions.map((s) =>
-              s.sessionId === session.sessionId ? { ...s, offline: false } : s,
-            ),
-          });
-          get().openChat({ ...session, offline: false });
-        } else {
+        const updated = await get().resumeOne(session);
+        if (updated && autoOpen) {
+          get().openChat(updated);
+        } else if (!updated) {
           set({ connectError: "恢复失败：agent 不支持或会话已失效" });
         }
       } catch (e) {
         set({ connectError: String(e) });
       }
+    },
+
+    resumeOne: async (session: SessionInfo): Promise<SessionInfo | null> => {
+      const result = (await getOrCall("session.resume", { sessionId: session.sessionId })) as Record<
+        string,
+        unknown
+      >;
+      if (result.resumed !== true) return null;
+      const newSessionId = result.sessionId ? String(result.sessionId) : null;
+      if (newSessionId && newSessionId !== session.sessionId) {
+        const newSession: SessionInfo = { ...session, sessionId: newSessionId, offline: false };
+        set({
+          sessions: [
+            newSession,
+            ...get().sessions.filter((s) => s.sessionId !== session.sessionId),
+          ],
+        });
+        return newSession;
+      }
+      set({
+        sessions: get().sessions.map((s) =>
+          s.sessionId === session.sessionId ? { ...s, offline: false } : s,
+        ),
+      });
+      return { ...session, offline: false };
     },
 
     archiveSession: async (session, archived) => {
@@ -2021,7 +2051,25 @@ export const useHubStore = create<State & Actions>((set, get) => {
       persist();
       saveLastProfile(address, token).catch(() => {});
       set({ screen: "sessions" });
-      get().refreshAll();
+      get().refreshAll().then(() => get().restoreCurrentScreen());
+    },
+
+    restoreCurrentScreen: async () => {
+      const room = get().currentRoom;
+      if (room) {
+        const latest = get().rooms.find((r) => r.roomId === room.roomId);
+        if (latest) get().openRoom(latest);
+        return;
+      }
+      const session = get().currentSession;
+      if (session) {
+        const latest = get().sessions.find((s) => s.sessionId === session.sessionId) ?? session;
+        if (latest.offline) {
+          await get().resumeSession(latest, true);
+        } else {
+          get().openChat(latest);
+        }
+      }
     },
 
     showModelPickerDialog: async () => {
