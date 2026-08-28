@@ -312,7 +312,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     BackHandler {
         if (vm.multiSelectMode) vm.exitMultiSelect()
-        else if (vm.textSelectId != null) vm.textSelectId = null
         else vm.backToList()
     }
 
@@ -339,13 +338,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     },
                 )
                 if (vm.longPressCanSelect) {
-                    DropdownMenuItem(
-                        text = { Text(S.selectText) },
-                        onClick = {
-                            vm.textSelectId = vm.longPressItemId
-                            vm.showLongPressMenu = false
-                        },
-                    )
                     DropdownMenuItem(
                         text = { Text("多选") },
                         onClick = {
@@ -1024,81 +1016,86 @@ private fun MessageBubbleBox(
     content: @Composable () -> Unit,
 ) {
     val S = LocalStrings.current
-    val clipboard = LocalClipboard.current
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     val selected = vm.selectedMessageIds.contains(itemId)
-    val textSelectId = vm.textSelectId
-    val inTextSelect = textSelectId == itemId
 
     Box(modifier = modifier) {
-        when {
-            vm.multiSelectMode -> {
-                Box(
-                    Modifier.combinedClickable(
-                        onClick = { vm.toggleMessageSelection(itemId) },
-                        onLongClick = { vm.toggleMessageSelection(itemId) },
-                    ),
-                ) { content() }
-                if (selected) {
-                    Box(
-                        Modifier
-                            .matchParentSize()
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f), RoundedCornerShape(12.dp)),
-                    )
-                    Icon(
-                        Icons.Filled.CheckCircle,
-                        contentDescription = null,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            }
-            inTextSelect -> {
-                SelectionContainer { content() }
+        if (vm.multiSelectMode) {
+            // 多选模式：点击勾选，不用 SelectionContainer
+            Box(
+                Modifier.combinedClickable(
+                    onClick = { vm.toggleMessageSelection(itemId) },
+                    onLongClick = { vm.toggleMessageSelection(itemId) },
+                ),
+            ) { content() }
+            if (selected) {
                 Box(
                     Modifier
                         .matchParentSize()
-                        .pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                    val change = event.changes.firstOrNull { it.pressed && !it.previousPressed }
-                                    if (change != null) {
-                                        vm.textSelectId = null
-                                        change.consume()
-                                        break
-                                    }
-                                }
-                            }
-                        },
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f), RoundedCornerShape(12.dp)),
+                )
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
                 )
             }
-            else -> {
+        } else {
+            // 正常模式：SelectionContainer 始终包裹，长按同时弹自定义菜单
+            SelectionContainer {
                 Box(
-                    Modifier.combinedClickable(
-                        onClick = {},
-                        onLongClick = {
-                            vm.longPressItemId = itemId
-                            vm.longPressCanSelect = canSelect
-                            vm.longPressCopyText = copyText
-                            vm.longPressQuote = quote
-                            vm.showLongPressMenu = true
-                        },
-                    ),
+                    Modifier.pointerInput(itemId) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val down = event.changes.firstOrNull {
+                                    it.pressed && !it.previousPressed
+                                } ?: continue
+                                // 检测长按但不消费事件，让 SelectionContainer 正常启动选择
+                                val longPress = withTimeoutOrNull(
+                                    viewConfiguration.longPressTimeoutMillis,
+                                ) {
+                                    var canceled = false
+                                    while (!canceled) {
+                                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                        val change = ev.changes.firstOrNull { it.id == down.id }
+                                        if (change == null || change.isConsumed) {
+                                            canceled = true
+                                        } else if (!change.pressed && change.previousPressed) {
+                                            canceled = true
+                                        } else if (change.pressed && change.previousPressed) {
+                                            val dx = change.position.x - down.position.x
+                                            val dy = change.position.y - down.position.y
+                                            if (dx * dx + dy * dy > viewConfiguration.touchSlop * viewConfiguration.touchSlop) {
+                                                canceled = true
+                                            }
+                                        }
+                                    }
+                                    false
+                                } == null
+                                if (longPress) {
+                                    vm.longPressItemId = itemId
+                                    vm.longPressCanSelect = canSelect
+                                    vm.longPressCopyText = copyText
+                                    vm.longPressQuote = quote
+                                    vm.showLongPressMenu = true
+                                }
+                            }
+                        }
+                    },
                 ) { content() }
-                if (quote != null) {
-                    IconButton(
-                        onClick = { vm.quote = quote },
-                        modifier = Modifier.align(Alignment.BottomEnd).size(20.dp),
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Reply,
-                            contentDescription = S.quoting,
-                            modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+            }
+            if (quote != null) {
+                IconButton(
+                    onClick = { vm.quote = quote },
+                    modifier = Modifier.align(Alignment.BottomEnd).size(20.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Reply,
+                        contentDescription = S.quoting,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
