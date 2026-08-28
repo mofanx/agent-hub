@@ -953,7 +953,7 @@ private fun MessageBubbleBox(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
-    var showSelectText by remember { mutableStateOf(false) }
+    var selectMode by remember { mutableStateOf(false) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     Box(
         modifier = modifier
@@ -1017,7 +1017,11 @@ private fun MessageBubbleBox(
                 }
             },
     ) {
-        content()
+        if (selectMode) {
+            SelectionContainer { content() }
+        } else {
+            content()
+        }
         Box(
             Modifier
                 .offset { menuOffset }
@@ -1041,7 +1045,7 @@ private fun MessageBubbleBox(
                 text = { Text(S.selectText) },
                 onClick = {
                     expanded = false
-                    showSelectText = true
+                    selectMode = true
                 },
             )
             quote?.let { (author, text) ->
@@ -1055,51 +1059,24 @@ private fun MessageBubbleBox(
             }
             }
         }
-        if (showSelectText) {
-            Dialog(
-                onDismissRequest = { showSelectText = false },
-                properties = DialogProperties(usePlatformDefaultWidth = false),
-            ) {
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth(0.9f)
-                        .widthIn(max = 520.dp)
-                        .padding(24.dp),
-                ) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                    ) {
-                        Text(
-                            S.selectText,
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.padding(bottom = 12.dp),
-                        )
-                        SelectionContainer {
-                            Text(
-                                copyText,
-                                style = MaterialTheme.typography.bodyLarge,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 360.dp)
-                                    .verticalScroll(rememberScrollState()),
-                            )
+        if (selectMode) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull { it.pressed && !it.previousPressed }
+                                if (change != null) {
+                                    selectMode = false
+                                    change.consume()
+                                    break
+                                }
+                            }
                         }
-                        Spacer(Modifier.height(12.dp))
-                        TextButton(
-                            onClick = { showSelectText = false },
-                            modifier = Modifier.align(Alignment.End),
-                        ) {
-                            Text(S.ok)
-                        }
-                    }
-                }
-            }
+                    },
+            )
         }
     }
 }
