@@ -1335,13 +1335,15 @@
 }
 
 .artifact-path {
+  flex-basis: 100%;
   min-width: 0;
   font-weight: 600;
   font-size: 0.78rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: help;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  line-height: 1.4;
+  word-break: break-all;
 }
 
 .artifact-author {
