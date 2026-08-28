@@ -311,10 +311,61 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     }
 
     BackHandler {
-        vm.backToList()
+        if (vm.multiSelectMode) vm.exitMultiSelect()
+        else if (vm.textSelectId != null) vm.textSelectId = null
+        else vm.backToList()
     }
 
     ModelPickerDialog(vm)
+
+    Box {
+        Box(Modifier.size(1.dp).align(Alignment.Center)) {
+            DropdownMenu(
+                expanded = vm.showLongPressMenu,
+                onDismissRequest = { vm.showLongPressMenu = false },
+            ) {
+                val S = LocalStrings.current
+                val clipboard = LocalClipboard.current
+                val context = LocalContext.current
+                val scope = rememberCoroutineScope()
+                DropdownMenuItem(
+                    text = { Text(S.copy) },
+                    onClick = {
+                        scope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, vm.longPressCopyText)))
+                        }
+                        vm.showLongPressMenu = false
+                        Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
+                    },
+                )
+                if (vm.longPressCanSelect) {
+                    DropdownMenuItem(
+                        text = { Text(S.selectText) },
+                        onClick = {
+                            vm.textSelectId = vm.longPressItemId
+                            vm.showLongPressMenu = false
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("多选") },
+                        onClick = {
+                            vm.enterMultiSelect(vm.longPressItemId)
+                            vm.showLongPressMenu = false
+                        },
+                    )
+                }
+                vm.longPressQuote?.let { (author, text) ->
+                    DropdownMenuItem(
+                        text = { Text(S.quoting) },
+                        onClick = {
+                            vm.quote = author to text
+                            vm.showLongPressMenu = false
+                        },
+                    )
+                }
+            }
+        }
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
@@ -973,59 +1024,81 @@ private fun MessageBubbleBox(
     content: @Composable () -> Unit,
 ) {
     val S = LocalStrings.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val selected = vm.selectedMessageIds.contains(itemId)
+    val textSelectId = vm.textSelectId
+    val inTextSelect = textSelectId == itemId
+
     Box(modifier = modifier) {
-        if (vm.multiSelectMode) {
-            Box(
-                Modifier.combinedClickable(
-                    onClick = { vm.toggleMessageSelection(itemId) },
-                    onLongClick = { vm.toggleMessageSelection(itemId) },
-                ),
-            ) {
-                content()
+        when {
+            vm.multiSelectMode -> {
+                Box(
+                    Modifier.combinedClickable(
+                        onClick = { vm.toggleMessageSelection(itemId) },
+                        onLongClick = { vm.toggleMessageSelection(itemId) },
+                    ),
+                ) { content() }
+                if (selected) {
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f), RoundedCornerShape(12.dp)),
+                    )
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
-            if (selected) {
+            inTextSelect -> {
+                SelectionContainer { content() }
                 Box(
                     Modifier
                         .matchParentSize()
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f), RoundedCornerShape(12.dp)),
-                )
-                Icon(
-                    Icons.Filled.CheckCircle,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(4.dp)
-                        .size(18.dp),
-                    tint = MaterialTheme.colorScheme.primary,
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes.firstOrNull { it.pressed && !it.previousPressed }
+                                    if (change != null) {
+                                        vm.textSelectId = null
+                                        change.consume()
+                                        break
+                                    }
+                                }
+                            }
+                        },
                 )
             }
-        } else {
-            SelectionContainer {
+            else -> {
                 Box(
                     Modifier.combinedClickable(
                         onClick = {},
                         onLongClick = {
-                            if (canSelect) vm.enterMultiSelect(itemId)
+                            vm.longPressItemId = itemId
+                            vm.longPressCanSelect = canSelect
+                            vm.longPressCopyText = copyText
+                            vm.longPressQuote = quote
+                            vm.showLongPressMenu = true
                         },
                     ),
-                ) {
-                    content()
-                }
-            }
-            if (quote != null) {
-                IconButton(
-                    onClick = { vm.quote = quote },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(20.dp),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Reply,
-                        contentDescription = S.quoting,
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                ) { content() }
+                if (quote != null) {
+                    IconButton(
+                        onClick = { vm.quote = quote },
+                        modifier = Modifier.align(Alignment.BottomEnd).size(20.dp),
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Reply,
+                            contentDescription = S.quoting,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }

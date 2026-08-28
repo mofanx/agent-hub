@@ -441,6 +441,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var quote by mutableStateOf<Pair<String, String>?>(null)
     var multiSelectMode by mutableStateOf(false)
     val selectedMessageIds = mutableStateListOf<Long>()
+    var textSelectId by mutableStateOf<Long?>(null)
+    var showLongPressMenu by mutableStateOf(false)
+    var longPressItemId by mutableStateOf(0L)
+    var longPressCanSelect by mutableStateOf(false)
+    var longPressCopyText by mutableStateOf("")
+    var longPressQuote by mutableStateOf<Pair<String, String>?>(null)
     var fileRefToInsert by mutableStateOf<String?>(null)
     var pendingDownload by mutableStateOf<DownloadRequest?>(null)
 
