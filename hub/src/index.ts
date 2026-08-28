@@ -287,6 +287,7 @@ function spawnAgent(def: AgentDef): ChildProcess {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: def.cwd,
     env: { ...process.env, ...def.env },
+    windowsHide: true,
   });
 }
 

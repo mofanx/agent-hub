@@ -6,7 +6,7 @@ export function startTunnel(port: number, token: string): void {
   const proc = spawn(
     bin,
     ["tunnel", "--url", `http://127.0.0.1:${port}`, "--protocol", "http2"],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
   );
   let announced = false;
   const onData = (chunk: Buffer) => {

@@ -104,7 +104,7 @@ function getShortHostname(): string {
 function isBinAvailable(bin: string): boolean {
   if (bin === "npx") return true; // npx 是 Node 自带
   try {
-    const r = spawnSync("command", ["-v", bin], { stdio: "ignore", shell: true });
+    const r = spawnSync("command", ["-v", bin], { stdio: "ignore", shell: true, windowsHide: true });
     return r.status === 0;
   } catch {
     return false;
@@ -155,6 +155,7 @@ function spawnAgent(agent: string): Channel | null {
   try {
     const proc = spawn(def.bin, def.args, {
       stdio: ["pipe", "pipe", "inherit"],
+      windowsHide: true,
     });
 
     const localStream = acp.ndJsonStream(

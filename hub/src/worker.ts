@@ -98,6 +98,7 @@ async function main(): Promise<void> {
 
   const proc = spawn(def!.bin, def!.args, {
     stdio: ["pipe", "pipe", "inherit"],
+    windowsHide: true,
   });
 
   const localStream = acp.ndJsonStream(

@@ -364,6 +364,7 @@ function runDevinModelsList(): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn("devin", ["models", "list", "--format", "json"], {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
@@ -416,6 +417,7 @@ function runOpenCodeModelsList(): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn("opencode", ["models", "--verbose"], {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
@@ -495,6 +497,7 @@ function runOpenClawModelsList(): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn("openclaw", ["models", "list", "--json"], {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
