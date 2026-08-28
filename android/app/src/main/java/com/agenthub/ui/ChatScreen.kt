@@ -56,6 +56,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.contextmenu.modifier.appendTextContextMenuComponents
+import androidx.compose.foundation.text.contextmenu.builder.item
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -317,48 +319,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     ModelPickerDialog(vm)
 
-    Box {
-        Box(Modifier.size(1.dp).align(Alignment.Center)) {
-            DropdownMenu(
-                expanded = vm.showLongPressMenu,
-                onDismissRequest = { vm.showLongPressMenu = false },
-            ) {
-                val S = LocalStrings.current
-                val clipboard = LocalClipboard.current
-                val context = LocalContext.current
-                val scope = rememberCoroutineScope()
-                DropdownMenuItem(
-                    text = { Text(S.copy) },
-                    onClick = {
-                        scope.launch {
-                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, vm.longPressCopyText)))
-                        }
-                        vm.showLongPressMenu = false
-                        Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
-                    },
-                )
-                if (vm.longPressCanSelect) {
-                    DropdownMenuItem(
-                        text = { Text("多选") },
-                        onClick = {
-                            vm.enterMultiSelect(vm.longPressItemId)
-                            vm.showLongPressMenu = false
-                        },
-                    )
-                }
-                vm.longPressQuote?.let { (author, text) ->
-                    DropdownMenuItem(
-                        text = { Text(S.quoting) },
-                        onClick = {
-                            vm.quote = author to text
-                            vm.showLongPressMenu = false
-                        },
-                    )
-                }
-            }
-        }
-    }
-
     Scaffold(
         contentWindowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
         topBar = {
@@ -490,6 +450,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 LazyColumn(
                     reverseLayout = true,
                     state = listState,
+                    overscrollEffect = null,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = 12.dp)
@@ -1016,11 +977,13 @@ private fun MessageBubbleBox(
     content: @Composable () -> Unit,
 ) {
     val S = LocalStrings.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val selected = vm.selectedMessageIds.contains(itemId)
 
     Box(modifier = modifier) {
         if (vm.multiSelectMode) {
-            // 多选模式：点击勾选，不用 SelectionContainer
             Box(
                 Modifier.combinedClickable(
                     onClick = { vm.toggleMessageSelection(itemId) },
@@ -1041,63 +1004,22 @@ private fun MessageBubbleBox(
                 )
             }
         } else {
-            // 正常模式：SelectionContainer 始终包裹，长按同时弹自定义菜单
-            SelectionContainer {
-                Box(
-                    Modifier.pointerInput(itemId) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val down = event.changes.firstOrNull {
-                                    it.pressed && !it.previousPressed
-                                } ?: continue
-                                // 检测长按但不消费事件，让 SelectionContainer 正常启动选择
-                                val longPress = withTimeoutOrNull(
-                                    viewConfiguration.longPressTimeoutMillis,
-                                ) {
-                                    var canceled = false
-                                    while (!canceled) {
-                                        val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                        val change = ev.changes.firstOrNull { it.id == down.id }
-                                        if (change == null || change.isConsumed) {
-                                            canceled = true
-                                        } else if (!change.pressed && change.previousPressed) {
-                                            canceled = true
-                                        } else if (change.pressed && change.previousPressed) {
-                                            val dx = change.position.x - down.position.x
-                                            val dy = change.position.y - down.position.y
-                                            if (dx * dx + dy * dy > viewConfiguration.touchSlop * viewConfiguration.touchSlop) {
-                                                canceled = true
-                                            }
-                                        }
-                                    }
-                                    false
-                                } == null
-                                if (longPress) {
-                                    vm.longPressItemId = itemId
-                                    vm.longPressCanSelect = canSelect
-                                    vm.longPressCopyText = copyText
-                                    vm.longPressQuote = quote
-                                    vm.showLongPressMenu = true
-                                }
-                            }
+            SelectionContainer(
+                modifier = Modifier.appendTextContextMenuComponents {
+                    if (canSelect) {
+                        item(key = "multi_select", label = "多选") {
+                            vm.enterMultiSelect(itemId)
+                            close()
                         }
-                    },
-                ) { content() }
-            }
-            if (quote != null) {
-                IconButton(
-                    onClick = { vm.quote = quote },
-                    modifier = Modifier.align(Alignment.BottomEnd).size(20.dp),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Reply,
-                        contentDescription = S.quoting,
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+                    }
+                    quote?.let { (author, text) ->
+                        item(key = "quote", label = S.quoting) {
+                            vm.quote = author to text
+                            close()
+                        }
+                    }
+                },
+            ) { content() }
         }
     }
 }
