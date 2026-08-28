@@ -1592,7 +1592,7 @@ private fun FlowTaskRow(task: FlowTask) {
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 task.artifacts.forEach { artifact ->
-                    val copyText = artifact.path?.let { "$it\n${artifact.summary}" } ?: artifact.summary
+                    val copyText = artifact.path ?: artifact.summary
                     Surface(
                         color = MaterialTheme.colorScheme.surface,
                         shape = RoundedCornerShape(4.dp),
@@ -1856,9 +1856,9 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                                 overflow = TextOverflow.Ellipsis,
                                             )
                                             Text(
-                                                "@${vm.sessionName(artifact.author)} · ${formatArtifactTime(artifact.at)} · ${artifact.summary}",
+                                                "@${vm.sessionName(artifact.author)} · ${formatArtifactTime(artifact.at)}",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                maxLines = 2,
+                                                maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
                                         }

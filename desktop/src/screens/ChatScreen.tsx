@@ -1719,7 +1719,6 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
             <span className="artifact-path">{a.path ?? a.alias ?? a.id}</span>
             <span className="artifact-author">@{store.sessionName(a.author)}</span>
             <span className="artifact-time">{formatArtifactTime(a.at)}</span>
-            <span className="artifact-summary">{a.summary}</span>
           </div>
         </div>
       ))}
