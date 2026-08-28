@@ -439,6 +439,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
+    var multiSelectMode by mutableStateOf(false)
+    val selectedMessageIds = mutableStateListOf<Long>()
     var fileRefToInsert by mutableStateOf<String?>(null)
     var pendingDownload by mutableStateOf<DownloadRequest?>(null)
 
@@ -2216,6 +2218,44 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun quoteEvent(event: EventInfo) {
         quote = sessionName(event.author) to "[${event.action}] ${event.summary}"
+    }
+
+    fun toggleMessageSelection(id: Long) {
+        if (selectedMessageIds.contains(id)) selectedMessageIds.remove(id) else selectedMessageIds.add(id)
+    }
+
+    fun enterMultiSelect(id: Long) {
+        multiSelectMode = true
+        selectedMessageIds.clear()
+        selectedMessageIds.add(id)
+    }
+
+    fun exitMultiSelect() {
+        multiSelectMode = false
+        selectedMessageIds.clear()
+    }
+
+    fun quoteSelectedMessages() {
+        if (selectedMessageIds.isEmpty()) return
+        val items = chatItems.filter { it.id in selectedMessageIds }
+        if (items.isEmpty()) return
+        val combined = items.joinToString("\n\n") { "@${it.author}: ${it.text.take(500)}" }
+        quote = items.joinToString(", ") { it.author } to combined
+        exitMultiSelect()
+    }
+
+    fun copySelectedMessages() {
+        if (selectedMessageIds.isEmpty()) return
+        val items = chatItems.filter { it.id in selectedMessageIds }
+        val text = items.joinToString("\n\n") { "@${it.author}: ${it.text}" }
+        viewModelScope.launch {
+            // 复制到剪贴板
+            val ctx = getApplication<Application>().applicationContext
+            val clipboard = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText(null, text))
+            android.widget.Toast.makeText(ctx, "已复制 ${items.size} 条消息", android.widget.Toast.LENGTH_SHORT).show()
+        }
+        exitMultiSelect()
     }
 
     fun removeArtifact(artifact: ArtifactInfo) {

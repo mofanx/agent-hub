@@ -65,7 +65,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
@@ -317,6 +319,24 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     Scaffold(
         contentWindowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
         topBar = {
+            if (vm.multiSelectMode) {
+                TopAppBar(
+                    title = { Text("已选 ${vm.selectedMessageIds.size} 条") },
+                    navigationIcon = {
+                        IconButton(onClick = { vm.exitMultiSelect() }) {
+                            Icon(Icons.Filled.Close, contentDescription = S.cancel)
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { vm.copySelectedMessages() }) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = S.copy)
+                        }
+                        IconButton(onClick = { vm.quoteSelectedMessages() }) {
+                            Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = S.quoting)
+                        }
+                    },
+                )
+            } else {
             TopAppBar(
                 title = {
                     Column {
@@ -398,6 +418,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 },
             )
+            }
         },
     ) { padding ->
         Box(
@@ -946,30 +967,66 @@ private fun MessageBubbleBox(
     copyText: String,
     quote: Pair<String, String>?,
     vm: ChatViewModel,
+    itemId: Long,
+    canSelect: Boolean,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
     val S = LocalStrings.current
-    val clipboard = LocalClipboard.current
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
+    val selected = vm.selectedMessageIds.contains(itemId)
     Box(modifier = modifier) {
-        SelectionContainer { content() }
-        if (quote != null) {
-            IconButton(
-                onClick = {
-                    vm.quote = quote
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .size(20.dp),
+        if (vm.multiSelectMode) {
+            Box(
+                Modifier.combinedClickable(
+                    onClick = { vm.toggleMessageSelection(itemId) },
+                    onLongClick = { vm.toggleMessageSelection(itemId) },
+                ),
             ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Reply,
-                    contentDescription = S.quoting,
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                content()
+            }
+            if (selected) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f), RoundedCornerShape(12.dp)),
                 )
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        } else {
+            SelectionContainer {
+                Box(
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClick = {
+                            if (canSelect) vm.enterMultiSelect(itemId)
+                        },
+                    ),
+                ) {
+                    content()
+                }
+            }
+            if (quote != null) {
+                IconButton(
+                    onClick = { vm.quote = quote },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(20.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Reply,
+                        contentDescription = S.quoting,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -1076,6 +1133,8 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = null,
                 vm = vm,
+                itemId = item.id,
+                canSelect = false,
                 modifier = bubbleModifier,
             ) {
                 Surface(
@@ -1102,6 +1161,8 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
+                itemId = item.id,
+                canSelect = true,
                 modifier = bubbleModifier.padding(vertical = 4.dp),
             ) {
                 Surface(
@@ -1154,6 +1215,8 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
+                itemId = item.id,
+                canSelect = true,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Surface(
@@ -1188,6 +1251,8 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = null,
                 vm = vm,
+                itemId = item.id,
+                canSelect = true,
                 modifier = bubbleModifier.padding(vertical = 2.dp),
             ) {
                 Column {
@@ -1236,6 +1301,8 @@ fun ChatBubble(
                 copyText = "[${item.title}] ${item.status}",
                 quote = null,
                 vm = vm,
+                itemId = item.id,
+                canSelect = false,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Surface(
@@ -1278,6 +1345,8 @@ fun ChatBubble(
                 copyText = "${S.plan}\n${item.entries.joinToString("\n")}",
                 quote = null,
                 vm = vm,
+                itemId = item.id,
+                canSelect = false,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Card(
@@ -1315,6 +1384,8 @@ fun ChatBubble(
                 copyText = text,
                 quote = null,
                 vm = vm,
+                itemId = item.id,
+                canSelect = false,
                 modifier = bubbleModifier.padding(vertical = 4.dp),
             ) {
                 Surface(
@@ -1343,6 +1414,8 @@ fun ChatBubble(
                 copyText = item.title,
                 quote = null,
                 vm = vm,
+                itemId = item.id,
+                canSelect = false,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Card(
