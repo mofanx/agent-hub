@@ -59,6 +59,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
@@ -952,131 +953,24 @@ private fun MessageBubbleBox(
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    var expanded by remember { mutableStateOf(false) }
-    var selectMode by remember { mutableStateOf(false) }
-    var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
-    Box(
-        modifier = modifier
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val down = event.changes.firstOrNull {
-                            it.pressed && !it.previousPressed && !it.isConsumed
-                        } ?: continue
-
-                        if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
-                            menuOffset = IntOffset(
-                                down.position.x.toInt(),
-                                down.position.y.toInt(),
-                            )
-                            expanded = true
-                            event.changes.forEach { it.consume() }
-                            continue
-                        }
-
-                        val longPress = withTimeoutOrNull(
-                            viewConfiguration.longPressTimeoutMillis,
-                        ) {
-                            var canceled = false
-                            while (!canceled) {
-                                val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                val change = ev.changes.firstOrNull { it.id == down.id }
-                                if (change == null || change.isConsumed) {
-                                    canceled = true
-                                } else if (!change.pressed && change.previousPressed) {
-                                    canceled = true
-                                } else if (change.pressed && change.previousPressed) {
-                                    val dx = change.position.x - down.position.x
-                                    val dy = change.position.y - down.position.y
-                                    if (dx * dx + dy * dy > viewConfiguration.touchSlop * viewConfiguration.touchSlop) {
-                                        canceled = true
-                                    }
-                                }
-                            }
-                            false
-                        } == null
-
-                        if (longPress) {
-                            menuOffset = IntOffset(
-                                down.position.x.toInt(),
-                                down.position.y.toInt(),
-                            )
-                            expanded = true
-                            down.consume()
-                            while (true) {
-                                val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                val change = ev.changes.firstOrNull { it.id == down.id }
-                                if (change != null) {
-                                    change.consume()
-                                    if (!change.pressed) break
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-    ) {
-        if (selectMode) {
-            SelectionContainer { content() }
-        } else {
-            content()
-        }
-        Box(
-            Modifier
-                .offset { menuOffset }
-                .size(1.dp),
-        ) {
-            DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
+    Box(modifier = modifier) {
+        SelectionContainer { content() }
+        if (quote != null) {
+            IconButton(
+                onClick = {
+                    vm.quote = quote
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(20.dp),
             ) {
-            DropdownMenuItem(
-                text = { Text(S.copy) },
-                onClick = {
-                    scope.launch {
-                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, copyText)))
-                    }
-                    expanded = false
-                    Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(S.selectText) },
-                onClick = {
-                    expanded = false
-                    selectMode = true
-                },
-            )
-            quote?.let { (author, text) ->
-                DropdownMenuItem(
-                    text = { Text(S.quoting) },
-                    onClick = {
-                        vm.quote = author to text
-                        expanded = false
-                    },
+                Icon(
+                    Icons.AutoMirrored.Filled.Reply,
+                    contentDescription = S.quoting,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            }
-        }
-        if (selectMode) {
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val change = event.changes.firstOrNull { it.pressed && !it.previousPressed }
-                                if (change != null) {
-                                    selectMode = false
-                                    change.consume()
-                                    break
-                                }
-                            }
-                        }
-                    },
-            )
         }
     }
 }
