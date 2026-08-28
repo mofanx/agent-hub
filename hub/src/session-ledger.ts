@@ -190,7 +190,7 @@ export class SessionLedger {
     this.addEvent(sessionId, {
       author: sessionId,
       action: "delete",
-      summary: `删除 ${rel}`,
+      summary: "删除",
       path: rel,
     });
   }
@@ -205,7 +205,7 @@ export class SessionLedger {
     this.addEvent(sessionId, {
       author: sessionId,
       action: "rename",
-      summary: `${fromRel} → ${toRel}`,
+      summary: "重命名",
       path: toRel,
       oldPath: fromRel,
     });

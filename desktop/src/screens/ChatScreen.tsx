@@ -1944,7 +1944,7 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
             <span className="artifact-time">{formatArtifactTime(e.at)}</span>
             <span className="artifact-summary">
               {eventLabel(e.action)} · {e.oldPath ? `${e.oldPath} → ` : ""}
-              {e.path ? `${e.path} · ` : ""}{e.summary}
+              {e.path ?? ""}{e.summary && (!e.path || !e.summary.includes(e.path)) ? ` · ${e.summary}` : ""}
             </span>
           </div>
         </div>

@@ -509,7 +509,7 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
   const author = meta.name;
-  const summary = existed ? `modified ${relPath}` : `created ${relPath}`;
+  const summary = existed ? "修改" : "新增";
 
   // fs.writeTextFile 只更新产物，不生成事件；事件由 tool_call / 输出扫描产生
   sessionLedger.addFile(sessionId, { author, summary, path: relPath });
@@ -542,7 +542,7 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
   const action = actionMap[kind] ?? "command";
 
   for (const relPath of paths) {
-    const summary = `${title}: ${relPath}`;
+    const summary = title;
     sessionLedger.addEvent(sessionId, { author: meta.name, action, summary, path: relPath });
 
     for (const room of rooms.roomsFor(sessionId)) {

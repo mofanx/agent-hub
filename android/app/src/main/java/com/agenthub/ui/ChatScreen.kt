@@ -89,8 +89,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.Badge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
@@ -126,6 +124,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
@@ -2171,8 +2170,10 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                                     Text(
                                         buildString {
                                             if (event.oldPath != null) append("${event.oldPath} → ")
-                                            if (event.path != null) append("${event.path} · ")
-                                            append(event.summary)
+                                            if (event.path != null) append(event.path)
+                                            if (!event.summary.isNullOrEmpty() && (event.path == null || !event.summary.contains(event.path))) {
+                                                append(" · ${event.summary}")
+                                            }
                                         },
                                         style = MaterialTheme.typography.bodySmall,
                                     )
@@ -2325,15 +2326,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
                     previousCount = artifactCount
                 }
             }
-            BadgedBox(
-                badge = {
-                    if (unread > 0) {
-                        Badge(
-                            containerColor = MaterialTheme.colorScheme.error,
-                        ) { Text(unread.toString(), style = MaterialTheme.typography.labelSmall) }
-                    }
-                },
-            ) {
+            Box {
                 AssistChip(
                     onClick = { onExpand(if (expanded == "artifact") null else "artifact") },
                     label = { Text("产物 $artifactCount", style = MaterialTheme.typography.labelMedium) },
@@ -2344,6 +2337,28 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
                         )
                     },
                 )
+                if (unread > 0) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = (-2).dp, y = (-2).dp)
+                            .size(if (unread > 9) 16.dp else 10.dp)
+                            .background(
+                                MaterialTheme.colorScheme.error,
+                                CircleShape,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (unread > 9) {
+                            Text(
+                                unread.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onError,
+                                fontSize = 9.sp,
+                            )
+                        }
+                    }
+                }
             }
         }
         if (eventCount > 0) {

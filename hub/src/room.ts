@@ -833,7 +833,7 @@ export class RoomManager {
     this.addEvent(roomId, {
       action: "delete",
       author: author ?? "系统",
-      summary: `删除 ${rel}`,
+      summary: "删除",
       path: rel,
     });
     return true;
@@ -859,7 +859,7 @@ export class RoomManager {
     this.addEvent(roomId, {
       action: "rename",
       author: author ?? "系统",
-      summary: `${oldRel} → ${newRel}`,
+      summary: "重命名",
       path: newRel,
       oldPath: oldRel,
     });
