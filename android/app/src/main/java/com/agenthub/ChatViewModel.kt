@@ -446,6 +446,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val modelList = mutableStateListOf<ModelInfo>()
     var modelFilter by mutableStateOf("")
     var modelCurrent by mutableStateOf("")
+    /** 群聊模式：成员模型信息 sessionId -> (name, backend, model) */
+    val roomMemberModels = mutableStateMapOf<String, Triple<String, String, String>>()
+    /** 群聊模式：当前选中的成员 sessionId */
+    var selectedMemberSession by mutableStateOf<String?>(null)
 
     init {
         prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
@@ -694,15 +698,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (arg.isNullOrBlank()) {
                     loadModelList()
                 } else {
-                    val result = hub.call("model.set", buildJsonObject { put("model", arg) })
-                    val model = result["model"]?.jsonObject
-                    if (model != null) {
-                        val uid = model["uid"]?.jsonPrimitive?.content ?: arg
-                        val label = model["label"]?.jsonPrimitive?.content ?: ""
-                        val cost = formatModelCost(S, model)
-                        chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                    val room = currentRoom
+                    if (room != null) {
+                        // 群聊模式：需要 @成员名 前缀
+                        val mentionMatch = Regex("^@(\\S+)\\s+(.+)$").find(arg)
+                        if (mentionMatch == null) {
+                            chatItems.add(ChatItem.Error(++itemSeq, "群聊中切换模型请指定成员：/model @成员名 模型名"))
+                            return@launch
+                        }
+                        val memberName = mentionMatch.groupValues[1]
+                        val modelName = mentionMatch.groupValues[2]
+                        val member = room.members.find { it.second == memberName }
+                        if (member == null) {
+                            chatItems.add(ChatItem.Error(++itemSeq, "未找到成员 @$memberName"))
+                            return@launch
+                        }
+                        val result = hub.call("model.set", buildJsonObject {
+                            put("model", modelName)
+                            put("sessionId", member.first)
+                        })
+                        val model = result["model"]?.jsonObject
+                        if (model != null) {
+                            val uid = model["uid"]?.jsonPrimitive?.content ?: modelName
+                            val label = model["label"]?.jsonPrimitive?.content ?: ""
+                            chatItems.add(ChatItem.System(++itemSeq, "@$memberName 模型已切换为 ${label.ifBlank { uid }}"))
+                        } else {
+                            chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(modelName)))
+                        }
                     } else {
-                        chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(arg)))
+                        // 单聊模式
+                        val sid = currentSession?.sessionId
+                        val result = hub.call("model.set", buildJsonObject {
+                            put("model", arg)
+                            if (!sid.isNullOrBlank()) put("sessionId", sid)
+                        })
+                        val model = result["model"]?.jsonObject
+                        if (model != null) {
+                            val uid = model["uid"]?.jsonPrimitive?.content ?: arg
+                            val label = model["label"]?.jsonPrimitive?.content ?: ""
+                            val cost = formatModelCost(S, model)
+                            chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                        } else {
+                            chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(arg)))
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -713,24 +751,82 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadModelList() {
         viewModelScope.launch {
-            try {
-                val backend = currentSession?.agent ?: "devin"
-                val sid = currentSession?.sessionId
-                val result = hub.call("model.list", buildJsonObject {
-                    put("backend", backend)
-                    if (!sid.isNullOrBlank()) put("sessionId", sid)
-                })
-                val current = result["current"]?.jsonPrimitive?.content ?: ""
-                modelCurrent = current
-                modelList.clear()
-                val list = result["models"]?.jsonArray ?: emptyList()
-                modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
-                modelFilter = ""
-                showModelPicker = true
-            } catch (e: Exception) {
-                val S = stringsFor(lang)
-                chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+            val room = currentRoom
+            if (room != null) {
+                // 群聊模式：加载成员模型，默认选第一个成员
+                loadRoomMemberModels(room.roomId)
+            } else {
+                // 单聊模式
+                try {
+                    val backend = currentSession?.agent ?: "devin"
+                    val sid = currentSession?.sessionId
+                    val result = hub.call("model.list", buildJsonObject {
+                        put("backend", backend)
+                        if (!sid.isNullOrBlank()) put("sessionId", sid)
+                    })
+                    val current = result["current"]?.jsonPrimitive?.content ?: ""
+                    modelCurrent = current
+                    modelList.clear()
+                    val list = result["models"]?.jsonArray ?: emptyList()
+                    modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
+                    modelFilter = ""
+                    selectedMemberSession = null
+                    showModelPicker = true
+                } catch (e: Exception) {
+                    val S = stringsFor(lang)
+                    chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+                }
             }
+        }
+    }
+
+    private suspend fun loadRoomMemberModels(roomId: String) {
+        try {
+            val result = hub.call("room.memberModels", buildJsonObject { put("roomId", roomId) })
+            val members = result["members"]?.jsonArray ?: emptyList()
+            roomMemberModels.clear()
+            for (m in members) {
+                val obj = m.jsonObject
+                val sid = obj["sessionId"]?.jsonPrimitive?.content ?: continue
+                val name = obj["name"]?.jsonPrimitive?.content ?: sid
+                val backend = obj["backend"]?.jsonPrimitive?.content ?: "devin"
+                val model = obj["model"]?.jsonPrimitive?.content ?: ""
+                roomMemberModels[sid] = Triple(name, backend, model)
+            }
+            // 默认选第一个成员
+            val firstSid = roomMemberModels.keys.firstOrNull()
+            selectedMemberSession = firstSid
+            if (firstSid != null) loadModelListForMember(firstSid)
+            modelFilter = ""
+            showModelPicker = true
+        } catch (e: Exception) {
+            val S = stringsFor(lang)
+            chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+        }
+    }
+
+    fun selectMemberForModel(sessionId: String?) {
+        selectedMemberSession = sessionId
+        modelFilter = ""
+        if (sessionId != null) viewModelScope.launch { loadModelListForMember(sessionId) }
+    }
+
+    private suspend fun loadModelListForMember(sessionId: String) {
+        val info = roomMemberModels[sessionId] ?: return
+        val backend = info.second
+        try {
+            val result = hub.call("model.list", buildJsonObject {
+                put("backend", backend)
+                put("sessionId", sessionId)
+            })
+            val current = result["current"]?.jsonPrimitive?.content ?: ""
+            modelCurrent = current
+            modelList.clear()
+            val list = result["models"]?.jsonArray ?: emptyList()
+            modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
+        } catch (e: Exception) {
+            val S = stringsFor(lang)
+            chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
         }
     }
 
@@ -738,17 +834,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val S = stringsFor(lang)
             try {
-                val sid = currentSession?.sessionId
-                val result = hub.call("model.set", buildJsonObject {
-                    put("model", model.uid)
-                    if (!sid.isNullOrBlank()) put("sessionId", sid)
-                })
-                val m = result["model"]?.jsonObject
-                if (m != null) {
-                    val uid = m["uid"]?.jsonPrimitive?.content ?: model.uid
-                    val label = m["label"]?.jsonPrimitive?.content ?: ""
-                    val cost = formatModelCost(S, m)
-                    chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                val room = currentRoom
+                val selectedMember = selectedMemberSession
+                if (room != null && selectedMember != null) {
+                    // 群聊模式：切指定成员的模型
+                    val result = hub.call("model.set", buildJsonObject {
+                        put("model", model.uid)
+                        put("sessionId", selectedMember)
+                    })
+                    val m = result["model"]?.jsonObject
+                    val uid = m?.get("uid")?.jsonPrimitive?.content ?: model.uid
+                    val memberName = roomMemberModels[selectedMember]?.first ?: selectedMember
+                    roomMemberModels[selectedMember] = Triple(memberName, roomMemberModels[selectedMember]?.second ?: "devin", uid)
+                    modelCurrent = uid
+                    modelList.forEachIndexed { i, item -> modelList[i] = item.copy(isCurrent = item.uid == uid) }
+                    chatItems.add(ChatItem.System(++itemSeq, "@$memberName 模型已切换为 ${model.label.ifBlank { model.uid }}"))
+                } else {
+                    // 单聊模式
+                    val sid = currentSession?.sessionId
+                    val result = hub.call("model.set", buildJsonObject {
+                        put("model", model.uid)
+                        if (!sid.isNullOrBlank()) put("sessionId", sid)
+                    })
+                    val m = result["model"]?.jsonObject
+                    if (m != null) {
+                        val uid = m["uid"]?.jsonPrimitive?.content ?: model.uid
+                        val label = m["label"]?.jsonPrimitive?.content ?: ""
+                        val cost = formatModelCost(S, m)
+                        chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                    }
                 }
                 showModelPicker = false
                 modelFilter = ""

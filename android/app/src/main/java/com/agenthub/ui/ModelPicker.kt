@@ -48,13 +48,17 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
     val S = LocalStrings.current
     if (!vm.showModelPicker) return
 
+    val isRoom = vm.currentRoom != null
+    val memberModels = vm.roomMemberModels
+    val selectedMember = vm.selectedMemberSession
+
     val all = vm.modelList
     val selectedBackends = remember { mutableStateListOf<String>() }
     val selectedTiers = remember { mutableStateListOf<String>() }
     val selectedVendors = remember { mutableStateListOf<String>() }
 
     val filter = vm.modelFilter
-    val filtered by remember(all, filter, selectedBackends, selectedTiers, selectedVendors) {
+    val filtered by remember(all, filter, selectedBackends, selectedTiers, selectedVendors, isRoom) {
         derivedStateOf {
             all.filter { m ->
                 val textOk = filter.isBlank() ||
@@ -63,20 +67,25 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     m.family.contains(filter, ignoreCase = true) ||
                     m.vendor.contains(filter, ignoreCase = true) ||
                     m.aliases.any { it.contains(filter, ignoreCase = true) }
-                val backendOk = selectedBackends.isEmpty() || selectedBackends.contains(m.backend)
-                val tierOk = selectedTiers.isEmpty() || selectedTiers.contains(m.costTier)
-                val vendorOk = selectedVendors.isEmpty() || selectedVendors.contains(m.vendor)
+                val backendOk = isRoom || selectedBackends.isEmpty() || selectedBackends.contains(m.backend)
+                val tierOk = isRoom || selectedTiers.isEmpty() || selectedTiers.contains(m.costTier)
+                val vendorOk = isRoom || selectedVendors.isEmpty() || selectedVendors.contains(m.vendor)
                 textOk && backendOk && tierOk && vendorOk
             }
         }
     }
 
-    val grouped by remember(filtered) {
+    val grouped by remember(filtered, isRoom) {
         derivedStateOf {
-            val order = listOf("devin", "claude", "codex", "opencode", "openclaw", "custom")
-            filtered.groupBy { it.backend }
-                .toList()
-                .sortedBy { (backend, _) -> order.indexOf(backend).takeIf { it >= 0 } ?: Int.MAX_VALUE }
+            if (isRoom) {
+                // 群聊模式：不分组，直接列表
+                listOf("" to filtered)
+            } else {
+                val order = listOf("devin", "claude", "codex", "opencode", "openclaw", "custom")
+                filtered.groupBy { it.backend }
+                    .toList()
+                    .sortedBy { (backend, _) -> order.indexOf(backend).takeIf { it >= 0 } ?: Int.MAX_VALUE }
+            }
         }
     }
 
@@ -121,78 +130,97 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     shape = RoundedCornerShape(24.dp),
                 )
 
-                if (selectedBackends.isNotEmpty() || selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()) {
-                    Spacer(Modifier.height(4.dp))
-                    Row(
+                if (isRoom) {
+                    // 群聊模式：成员标签栏
+                    Spacer(Modifier.height(8.dp))
+                    LazyRow(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                        contentPadding = PaddingValues(horizontal = 2.dp),
                     ) {
-                        Spacer(Modifier.weight(1f))
-                        TextButton(
-                            onClick = {
-                                vm.modelFilter = ""
-                                selectedBackends.clear()
-                                selectedTiers.clear()
-                                selectedVendors.clear()
-                            },
-                        ) { Text(S.modelClearFilters) }
+                        items(memberModels.entries.toList(), key = { it.key }) { entry ->
+                            FilterChip(
+                                selected = selectedMember == entry.key,
+                                onClick = { vm.selectMemberForModel(entry.key) },
+                                label = { Text("@${entry.value.first}") },
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                        }
                     }
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 2.dp),
-                ) {
-                    items(availableBackends, key = { "backend:$it" }) { backend ->
-                        FilterChip(
-                            selected = selectedBackends.contains(backend),
-                            onClick = {
-                                if (selectedBackends.contains(backend)) selectedBackends.remove(backend)
-                                else selectedBackends.add(backend)
-                            },
-                            label = { Text(backendDisplayName(backend)) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
+                } else {
+                    // 单聊模式：后端/tier/vendor 筛选
+                    if (selectedBackends.isNotEmpty() || selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Spacer(Modifier.weight(1f))
+                            TextButton(
+                                onClick = {
+                                    vm.modelFilter = ""
+                                    selectedBackends.clear()
+                                    selectedTiers.clear()
+                                    selectedVendors.clear()
+                                },
+                            ) { Text(S.modelClearFilters) }
+                        }
                     }
-                }
 
-                Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(8.dp))
 
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 2.dp),
-                ) {
-                    items(availableTiers, key = { "tier:$it" }) { tier ->
-                        FilterChip(
-                            selected = selectedTiers.contains(tier),
-                            onClick = {
-                                if (selectedTiers.contains(tier)) selectedTiers.remove(tier)
-                                else selectedTiers.add(tier)
-                            },
-                            label = { Text(tierName(S, tier)) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 2.dp),
+                    ) {
+                        items(availableBackends, key = { "backend:$it" }) { backend ->
+                            FilterChip(
+                                selected = selectedBackends.contains(backend),
+                                onClick = {
+                                    if (selectedBackends.contains(backend)) selectedBackends.remove(backend)
+                                    else selectedBackends.add(backend)
+                                },
+                                label = { Text(backendDisplayName(backend)) },
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                        }
                     }
-                }
 
-                Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(8.dp))
 
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 2.dp),
-                ) {
-                    items(availableVendors, key = { "vendor:$it" }) { vendor ->
-                        FilterChip(
-                            selected = selectedVendors.contains(vendor),
-                            onClick = {
-                                if (selectedVendors.contains(vendor)) selectedVendors.remove(vendor)
-                                else selectedVendors.add(vendor)
-                            },
-                            label = { Text(vendor) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 2.dp),
+                    ) {
+                        items(availableTiers, key = { "tier:$it" }) { tier ->
+                            FilterChip(
+                                selected = selectedTiers.contains(tier),
+                                onClick = {
+                                    if (selectedTiers.contains(tier)) selectedTiers.remove(tier)
+                                    else selectedTiers.add(tier)
+                                },
+                                label = { Text(tierName(S, tier)) },
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 2.dp),
+                    ) {
+                        items(availableVendors, key = { "vendor:$it" }) { vendor ->
+                            FilterChip(
+                                selected = selectedVendors.contains(vendor),
+                                onClick = {
+                                    if (selectedVendors.contains(vendor)) selectedVendors.remove(vendor)
+                                    else selectedVendors.add(vendor)
+                                },
+                                label = { Text(vendor) },
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                        }
                     }
                 }
 
@@ -203,13 +231,15 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
                     grouped.forEach { (backend, models) ->
-                        item(key = "header:$backend") {
-                            Text(
-                                backendDisplayName(backend),
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(vertical = 8.dp),
-                            )
+                        if (!isRoom) {
+                            item(key = "header:$backend") {
+                                Text(
+                                    backendDisplayName(backend),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp),
+                                )
+                            }
                         }
                         items(models, key = { it.uid }) { m ->
                             ModelItem(S, m, vm.modelCurrent) {
@@ -217,7 +247,7 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                             }
                         }
                     }
-                    if (grouped.isEmpty()) {
+                    if (grouped.isEmpty() || filtered.isEmpty()) {
                         item {
                             Text(
                                 S.modelNoResults,

@@ -736,7 +736,7 @@ export function ChatScreen() {
             </button>
             <button className="secondary model-btn" onClick={() => void store.showModelPickerDialog()} title="切换模型">
               <Cpu size={13} />
-              <span>{store.modelCurrent || "模型"}</span>
+              <span>{isRoom ? "成员模型" : (store.modelCurrent || "模型")}</span>
             </button>
           </>
         )}
@@ -2080,6 +2080,10 @@ function ModelPicker() {
   const [filter, setFilter] = useState(store.modelFilter);
   const [selectedBackend, setSelectedBackend] = useState<string>("all");
 
+  const isRoom = !!store.currentRoom;
+  const memberModels = store.roomMemberModels;
+  const selectedMember = store.selectedMemberSession;
+
   useEffect(() => {
     setFilter(store.modelFilter);
   }, [store.modelFilter]);
@@ -2087,12 +2091,12 @@ function ModelPicker() {
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     let models = store.modelList;
-    
-    // 按后端过滤
-    if (selectedBackend !== "all") {
+
+    // 按后端过滤（仅单聊模式）
+    if (!isRoom && selectedBackend !== "all") {
       models = models.filter(m => m.backend === selectedBackend);
     }
-    
+
     // 按搜索词过滤
     if (q) {
       models = models.filter(
@@ -2103,11 +2107,11 @@ function ModelPicker() {
           m.aliases.some((a) => a.toLowerCase().includes(q)),
       );
     }
-    
-    return models;
-  }, [filter, store.modelList, selectedBackend]);
 
-  // 按后端分组
+    return models;
+  }, [filter, store.modelList, selectedBackend, isRoom]);
+
+  // 按后端分组（仅单聊模式）
   const groupedByBackend = useMemo(() => {
     const groups: Record<string, ModelInfo[]> = {};
     filtered.forEach(m => {
@@ -2127,6 +2131,14 @@ function ModelPicker() {
     custom: "自定义",
   };
 
+  const handleSwitch = (m: ModelInfo) => {
+    if (isRoom && selectedMember) {
+      void store.switchModelForMember(selectedMember, m);
+    } else {
+      void store.switchModel(m);
+    }
+  };
+
   return (
     <div className="model-picker-backdrop" onClick={store.closeModelPicker}>
       <div className="model-picker" onClick={(e) => e.stopPropagation()}>
@@ -2143,48 +2155,88 @@ function ModelPicker() {
             placeholder={S.modelFilterHint}
           />
         </div>
-        <div className="model-picker-backends">
-          <button
-            className={selectedBackend === "all" ? "active" : ""}
-            onClick={() => setSelectedBackend("all")}
-          >
-            全部
-          </button>
-          {Object.entries(backendNames).map(([key, name]) => (
+        {isRoom ? (
+          // 群聊模式：成员标签栏
+          <div className="model-picker-backends">
+            {Object.entries(memberModels).map(([sid, info]) => (
+              <button
+                key={sid}
+                className={selectedMember === sid ? "active" : ""}
+                onClick={() => store.selectMemberForModel(sid)}
+                title={info.backend}
+              >
+                @{info.name}
+              </button>
+            ))}
+          </div>
+        ) : (
+          // 单聊模式：后端标签栏
+          <div className="model-picker-backends">
             <button
-              key={key}
-              className={selectedBackend === key ? "active" : ""}
-              onClick={() => setSelectedBackend(key)}
+              className={selectedBackend === "all" ? "active" : ""}
+              onClick={() => setSelectedBackend("all")}
             >
-              {name}
+              全部
             </button>
-          ))}
-        </div>
+            {Object.entries(backendNames).map(([key, name]) => (
+              <button
+                key={key}
+                className={selectedBackend === key ? "active" : ""}
+                onClick={() => setSelectedBackend(key)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="model-picker-list">
           {filtered.length === 0 && <div className="empty">{S.modelNoResults}</div>}
-          {Object.entries(groupedByBackend).map(([backend, models]) => (
-            <div key={backend} className="model-backend-group">
-              <div className="model-backend-name">{backendNames[backend] || backend}</div>
-              {models.map((m) => (
-                <div
-                  key={m.uid}
-                  className={`model-option ${m.isCurrent ? "active" : ""}`}
-                  onClick={() => store.switchModel(m)}
-                >
-                  <div className="model-option-title">
-                    <span>
-                      {m.label || m.uid} {m.isCurrent ? ` · ${S.modelCurrentLabel}` : ""}
-                    </span>
-                    <span className={`subtitle ${costTierClass(m.costTier)}`}>{m.costTier}</span>
-                  </div>
-                  <div className="model-option-subtitle">
-                    {m.uid} · {m.family} · {m.aliases.join(", ")}
-                  </div>
-                  {m.costSummary && <div className="model-option-subtitle">{m.costSummary}</div>}
+          {isRoom ? (
+            // 群聊模式：直接列表（已按成员后端过滤）
+            filtered.map((m) => (
+              <div
+                key={m.uid}
+                className={`model-option ${m.isCurrent ? "active" : ""}`}
+                onClick={() => handleSwitch(m)}
+              >
+                <div className="model-option-title">
+                  <span>
+                    {m.label || m.uid} {m.isCurrent ? ` · ${S.modelCurrentLabel}` : ""}
+                  </span>
+                  <span className={`subtitle ${costTierClass(m.costTier)}`}>{m.costTier}</span>
                 </div>
-              ))}
-            </div>
-          ))}
+                <div className="model-option-subtitle">
+                  {m.uid} · {m.family} · {m.aliases.join(", ")}
+                </div>
+                {m.costSummary && <div className="model-option-subtitle">{m.costSummary}</div>}
+              </div>
+            ))
+          ) : (
+            // 单聊模式：按后端分组
+            Object.entries(groupedByBackend).map(([backend, models]) => (
+              <div key={backend} className="model-backend-group">
+                <div className="model-backend-name">{backendNames[backend] || backend}</div>
+                {models.map((m) => (
+                  <div
+                    key={m.uid}
+                    className={`model-option ${m.isCurrent ? "active" : ""}`}
+                    onClick={() => handleSwitch(m)}
+                  >
+                    <div className="model-option-title">
+                      <span>
+                        {m.label || m.uid} {m.isCurrent ? ` · ${S.modelCurrentLabel}` : ""}
+                      </span>
+                      <span className={`subtitle ${costTierClass(m.costTier)}`}>{m.costTier}</span>
+                    </div>
+                    <div className="model-option-subtitle">
+                      {m.uid} · {m.family} · {m.aliases.join(", ")}
+                    </div>
+                    {m.costSummary && <div className="model-option-subtitle">{m.costSummary}</div>}
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>

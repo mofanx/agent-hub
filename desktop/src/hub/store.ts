@@ -84,6 +84,10 @@ interface State {
   modelCurrent: string;
   modelFilter: string;
   showModelPicker: boolean;
+  /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
+  roomMemberModels: Record<string, { name: string; backend: string; model: string }>;
+  /** 群聊模式：当前选中的成员标签 sessionId */
+  selectedMemberSession: string | null;
   backends: BackendConfig[];
   pendingAttachments: Attachment[];
   historyCache: Record<string, ChatItem[]>;
@@ -209,7 +213,11 @@ interface Actions {
 
   showModelPickerDialog(): Promise<void>;
   refreshModelList(): Promise<void>;
+  refreshRoomMemberModels(): Promise<void>;
+  refreshModelListForMember(sessionId: string): Promise<void>;
   switchModel(model: ModelInfo): Promise<void>;
+  switchModelForMember(sessionId: string, model: ModelInfo): Promise<void>;
+  selectMemberForModel(sessionId: string | null): void;
   closeModelPicker(): void;
   listBackends(): Promise<void>;
   addBackend(backend: BackendConfig): Promise<void>;
@@ -705,6 +713,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     modelCurrent: "",
     modelFilter: "",
     showModelPicker: false,
+    roomMemberModels: {},
+    selectedMemberSession: null,
     backends: [],
     pendingAttachments: [],
     historyCache: {},
@@ -876,6 +886,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         modelCurrent: "",
         modelFilter: "",
         showModelPicker: false,
+        roomMemberModels: {},
+        selectedMemberSession: null,
         pendingAttachments: [],
         fileUpdateAt: 0,
       });
@@ -1721,15 +1733,44 @@ export const useHubStore = create<State & Actions>((set, get) => {
           get().stopCurrent();
           return true;
         case "model":
-        case "models":
-          if (arg) {
+        case "models": {
+          const room = get().currentRoom;
+          if (room && arg) {
+            // 群聊模式：需要 @成员名 前缀
+            const mentionMatch = arg.match(/^@(\S+)\s+(.+)$/);
+            if (!mentionMatch) {
+              set({ chatItems: [...get().chatItems, { kind: "error", text: "群聊中切换模型请指定成员：/model @成员名 模型名", author: "" }] });
+              return true;
+            }
+            const memberName = mentionMatch[1];
+            const modelName = mentionMatch[2];
+            const member = room.members.find((m) => m[1] === memberName);
+            if (!member) {
+              set({ chatItems: [...get().chatItems, { kind: "error", text: `未找到成员 @${memberName}`, author: "" }] });
+              return true;
+            }
+            void getOrCall("model.set", { model: modelName, sessionId: member[0] })
+              .then((res) => {
+                const model = (res as Record<string, unknown>).model as Record<string, unknown> | undefined;
+                if (model) {
+                  const uid = String(model.uid ?? modelName);
+                  const label = String(model.label ?? "");
+                  set({ chatItems: [...get().chatItems, { kind: "system", text: `@${memberName} 模型已切换为 ${label || uid}`, author: "" }] });
+                } else {
+                  set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelUnknown.replace("%s", modelName), author: "" }] });
+                }
+              })
+              .catch((e) => {
+                set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelListError.replace("%s", String(e.message ?? e)), author: "" }] });
+              });
+          } else if (arg) {
+            // 单聊模式：直接切
             void getOrCall("model.set", { model: arg })
               .then((res) => {
                 const model = (res as Record<string, unknown>).model as Record<string, unknown> | undefined;
                 if (model) {
                   const uid = String(model.uid ?? arg);
                   const label = String(model.label ?? "");
-                  const S = stringsFor(get().lang);
                   const costTier = String(model.costTier ?? "");
                   const costSummary = typeof model.costSummary === "string" ? model.costSummary : "";
                   const cost = [costTier, costSummary].filter(Boolean).join(" · ");
@@ -1748,6 +1789,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             void get().showModelPickerDialog();
           }
           return true;
+        }
         default: {
           // 不匹配本地命令，透传给 agent（可能是 agent skill 如 /snap2md）
           return false;
@@ -1983,8 +2025,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     showModelPickerDialog: async () => {
-      await get().refreshModelList();
-      set({ showModelPicker: true });
+      const room = get().currentRoom;
+      if (room) {
+        // 群聊模式：加载成员模型信息，默认选中第一个成员
+        await get().refreshRoomMemberModels();
+        const first = get().roomMemberModels;
+        const firstSid = Object.keys(first)[0] ?? null;
+        set({ showModelPicker: true, selectedMemberSession: firstSid });
+        if (firstSid) await get().refreshModelListForMember(firstSid);
+      } else {
+        await get().refreshModelList();
+        set({ showModelPicker: true, selectedMemberSession: null });
+      }
     },
 
     refreshModelList: async () => {
@@ -2003,6 +2055,40 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
+    refreshRoomMemberModels: async () => {
+      const room = get().currentRoom;
+      if (!room) { set({ roomMemberModels: {} }); return; }
+      try {
+        const result = await getOrCall<Record<string, unknown>>("room.memberModels", { roomId: room.roomId });
+        const members = (result.members as Array<{ sessionId: string; name: string; backend: string; model: string }>) ?? [];
+        const map: Record<string, { name: string; backend: string; model: string }> = {};
+        for (const m of members) map[m.sessionId] = { name: m.name, backend: m.backend, model: m.model };
+        set({ roomMemberModels: map });
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    refreshModelListForMember: async (sessionId: string) => {
+      const info = get().roomMemberModels[sessionId];
+      if (!info) return;
+      try {
+        const result = await getOrCall<Record<string, unknown>>("model.list", { backend: info.backend, sessionId });
+        const current = String(result.current ?? "");
+        const list = ((result.models as unknown[] | undefined) ?? []).map((it) =>
+          parseModelInfo({ ...(it as Record<string, unknown>), isCurrent: (it as Record<string, unknown>).uid === current }),
+        );
+        set({ modelList: list, modelCurrent: current, modelFilter: "" });
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    selectMemberForModel: (sessionId: string | null) => {
+      set({ selectedMemberSession: sessionId, modelFilter: "" });
+      if (sessionId) void get().refreshModelListForMember(sessionId);
+    },
+
     switchModel: async (model: ModelInfo) => {
       try {
         const sessionId = get().currentSession?.sessionId;
@@ -2019,7 +2105,24 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    closeModelPicker: () => set({ showModelPicker: false, modelFilter: "" }),
+    switchModelForMember: async (sessionId: string, model: ModelInfo) => {
+      try {
+        await getOrCall("model.set", { model: model.uid, sessionId });
+        const info = get().roomMemberModels[sessionId];
+        const memberName = info?.name ?? sessionId;
+        // 更新成员模型信息
+        set({
+          roomMemberModels: { ...get().roomMemberModels, [sessionId]: { ...info!, model: model.uid } },
+          modelCurrent: model.uid,
+          modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === model.uid })),
+        });
+        set({ chatItems: [...get().chatItems, { kind: "system", text: `@${memberName} 模型已切换为 ${model.label || model.uid}`, author: "" }] });
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    closeModelPicker: () => set({ showModelPicker: false, modelFilter: "", selectedMemberSession: null }),
 
     listBackends: async () => {
       const client = get().client;

@@ -1225,6 +1225,23 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "room.list":
       return { rooms: rooms.list().map(enrichRoom) };
+    case "room.memberModels": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const members = room.members.map((m) => {
+        const meta = sessionMetas.get(m.sessionId);
+        const backend = (meta?.agent ?? "devin") as ModelBackend;
+        const current = modelManager.current(backend, m.sessionId);
+        return {
+          sessionId: m.sessionId,
+          name: m.name,
+          backend,
+          model: current.uid,
+        };
+      });
+      return { members };
+    }
     case "room.blackboard": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
