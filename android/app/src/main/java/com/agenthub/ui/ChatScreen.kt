@@ -169,6 +169,17 @@ internal fun formatArtifactTime(at: Long): String {
     return formatter.format(java.util.Date.from(instant))
 }
 
+internal fun shortenPath(p: String, max: Int = 42): String {
+    if (p.length <= max) return p
+    val parts = p.split("/")
+    if (parts.size <= 3) return p
+    val head = parts[0]
+    val tail = parts.takeLast(2).joinToString("/")
+    val result = "$head/…/$tail"
+    if (result.length <= max) return result
+    return "…/${parts.last()}"
+}
+
 private fun TokenUsage.format(): String = buildString {
     append("输入 ${formatNumber(inputTokens)} · 输出 ${formatNumber(outputTokens)}")
     if (cachedReadTokens != null && cachedReadTokens > 0) append(" · 缓存 ${formatNumber(cachedReadTokens)}")
@@ -1847,7 +1858,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                                 .fillMaxWidth(),
                                         ) {
                                             Text(
-                                                artifact.path ?: artifact.alias ?: artifact.id,
+                                                shortenPath(artifact.path ?: artifact.alias ?: artifact.id),
                                                 style = MaterialTheme.typography.bodySmall.copy(
                                                     fontWeight = FontWeight.SemiBold,
                                                     color = MaterialTheme.colorScheme.primary,
@@ -2169,8 +2180,8 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                                     )
                                     Text(
                                         buildString {
-                                            if (event.oldPath != null) append("${event.oldPath} → ")
-                                            if (event.path != null) append(event.path)
+                                            if (event.oldPath != null) append("${shortenPath(event.oldPath)} → ")
+                                            if (event.path != null) append(shortenPath(event.path))
                                             if (!event.summary.isNullOrEmpty() && (event.path == null || !event.summary.contains(event.path))) {
                                                 append(" · ${event.summary}")
                                             }

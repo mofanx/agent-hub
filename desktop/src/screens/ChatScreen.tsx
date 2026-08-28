@@ -89,6 +89,19 @@ function formatArtifactTime(at: number): string {
   return `${date} ${time}`;
 }
 
+function shortenPath(p: string, max = 42): string {
+  if (p.length <= max) return p;
+  const parts = p.split("/");
+  if (parts.length <= 3) return p;
+  // 保留首尾，中间省略：android/…/ui/ChatScreen.kt
+  const head = parts[0];
+  const tail = parts.slice(-2).join("/");
+  const result = `${head}/…/${tail}`;
+  if (result.length <= max) return result;
+  // 还是太长就只保留文件名
+  return `…/${parts[parts.length - 1]}`;
+}
+
 function formatTokenUsage(u: TokenUsage): string {
   const parts = [`输入 ${formatNumber(u.inputTokens)} · 输出 ${formatNumber(u.outputTokens)}`];
   if (u.cachedReadTokens) parts.push(`缓存 ${formatNumber(u.cachedReadTokens)}`);
@@ -1716,7 +1729,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
           )}
           <div className="artifact-info">
             <span className="artifact-kind-badge">{kindIcon("file")}</span>
-            <span className="artifact-path">{a.path ?? a.alias ?? a.id}</span>
+            <span className="artifact-path" title={a.path ?? a.alias ?? a.id}>{shortenPath(a.path ?? a.alias ?? a.id)}</span>
             <span className="artifact-author">@{store.sessionName(a.author)}</span>
             <span className="artifact-time">{formatArtifactTime(a.at)}</span>
           </div>
@@ -1942,8 +1955,8 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
             <span className="artifact-author">@{store.sessionName(e.author)}</span>
             <span className="artifact-time">{formatArtifactTime(e.at)}</span>
             <span className="artifact-summary">
-              {eventLabel(e.action)} · {e.oldPath ? `${e.oldPath} → ` : ""}
-              {e.path ?? ""}{e.summary && (!e.path || !e.summary.includes(e.path)) ? ` · ${e.summary}` : ""}
+              {eventLabel(e.action)} · {e.oldPath ? `${shortenPath(e.oldPath)} → ` : ""}
+              {e.path ? shortenPath(e.path) : ""}{e.summary && (!e.path || !e.summary.includes(e.path)) ? ` · ${e.summary}` : ""}
             </span>
           </div>
         </div>
