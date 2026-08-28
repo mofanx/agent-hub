@@ -771,7 +771,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         if (configOptions) {
           modelManager.injectConfigOptions(backend, configOptions);
         }
-        const current = modelManager.current(backend);
+        const current = modelManager.current(backend, s.sessionId);
         await agent
           .setConfigOption(s.sessionId, "model", current.uid)
           .catch((err) => logWarn("session.create", `sync model failed: ${String(err)}`));
@@ -823,7 +823,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       // 新建 session 时同步对应后端的当前模型
       if (connection.agent) {
-        const current = modelManager.current(connection.agent as ModelBackend);
+        const current = modelManager.current(connection.agent as ModelBackend, s.sessionId);
         await agent
           .setConfigOption(s.sessionId, "model", current.uid)
           .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
@@ -906,7 +906,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
         // 重建 session 时同步对应后端的当前模型
         if (connection?.agent) {
-          const current = modelManager.current(connection.agent as ModelBackend);
+          const current = modelManager.current(connection.agent as ModelBackend, s.sessionId);
           await agent
             .setConfigOption(s.sessionId, "model", current.uid)
             .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
@@ -933,7 +933,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       // 恢复 session 时同步对应后端的当前模型
       if (connection?.agent) {
-        const current = modelManager.current(connection.agent as ModelBackend);
+        const current = modelManager.current(connection.agent as ModelBackend, sessionId);
         agent
           .setConfigOption(sessionId, "model", current.uid)
           .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
@@ -1663,28 +1663,52 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "model.list": {
       const backend = String(req.params?.backend ?? "") as ModelBackend;
+      const sessionId = String(req.params?.sessionId ?? "").trim() || undefined;
       const models = await modelManager.list();
       const filtered = backend ? models.filter(m => m.backend === backend) : models;
-      const current = modelManager.current(backend || "devin");
+      const current = modelManager.current(backend || "devin", sessionId);
       return { current: current.uid, models: filtered };
     }
     case "model.current": {
       const backend = String(req.params?.backend ?? "devin") as ModelBackend;
-      return modelManager.current(backend);
+      const sessionId = String(req.params?.sessionId ?? "").trim() || undefined;
+      return modelManager.current(backend, sessionId);
     }
     case "model.refresh": {
       const backend = String(req.params?.backend ?? "") as ModelBackend;
+      const sessionId = String(req.params?.sessionId ?? "").trim() || undefined;
       const models = await modelManager.refresh();
       const filtered = backend ? models.filter(m => m.backend === backend) : models;
-      const current = modelManager.current(backend || "devin");
+      const current = modelManager.current(backend || "devin", sessionId);
       return { current: current.uid, models: filtered };
     }
     case "model.set": {
       const name = String(req.params?.model ?? "").trim();
       if (!name) throw new Error("model name required");
-      const model = await modelManager.set(name);
+      const targetSessionId = String(req.params?.sessionId ?? "").trim() || undefined;
 
-      // 只同步给与模型后端匹配的活跃 session
+      // 指定 sessionId：只切该 session（per-session 模型）
+      if (targetSessionId) {
+        const model = await modelManager.setForSession(name, targetSessionId);
+        const connectionId = owners.get(targetSessionId);
+        const agent = connectionId ? agents.get(connectionId) : undefined;
+        if (!agent) {
+          return { set: true, model, syncErrors: [], sessionScoped: true };
+        }
+        const syncErrors: { sessionId: string; error: string }[] = [];
+        try {
+          await agent.setConfigOption(targetSessionId, "model", model.uid);
+          console.log(`[model] session ${targetSessionId} switched to ${model.uid}`);
+        } catch (err) {
+          const msg = String(err);
+          logWarn("model.set", `sync to ${targetSessionId} failed: ${msg}`);
+          syncErrors.push({ sessionId: targetSessionId, error: msg });
+        }
+        return { set: true, model, syncErrors, sessionScoped: true };
+      }
+
+      // 未指定 sessionId：保持原有批量行为（后端级全局切换）
+      const model = await modelManager.set(name);
       const syncErrors: { sessionId: string; error: string }[] = [];
       const syncTasks: Promise<void>[] = [];
       for (const [sessionId, connectionId] of owners.entries()) {

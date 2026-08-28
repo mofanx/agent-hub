@@ -715,8 +715,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val backend = currentSession?.agent ?: "devin"
+                val sid = currentSession?.sessionId
                 val result = hub.call("model.list", buildJsonObject {
                     put("backend", backend)
+                    if (!sid.isNullOrBlank()) put("sessionId", sid)
                 })
                 val current = result["current"]?.jsonPrimitive?.content ?: ""
                 modelCurrent = current
@@ -736,7 +738,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val S = stringsFor(lang)
             try {
-                val result = hub.call("model.set", buildJsonObject { put("model", model.uid) })
+                val sid = currentSession?.sessionId
+                val result = hub.call("model.set", buildJsonObject {
+                    put("model", model.uid)
+                    if (!sid.isNullOrBlank()) put("sessionId", sid)
+                })
                 val m = result["model"]?.jsonObject
                 if (m != null) {
                     val uid = m["uid"]?.jsonPrimitive?.content ?: model.uid
@@ -756,8 +762,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val backend = currentSession?.agent ?: "devin"
+                val sid = currentSession?.sessionId
                 val result = hub.call("model.refresh", buildJsonObject {
                     put("backend", backend)
+                    if (!sid.isNullOrBlank()) put("sessionId", sid)
                 })
                 val current = result["current"]?.jsonPrimitive?.content ?: ""
                 modelCurrent = current

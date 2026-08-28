@@ -1990,7 +1990,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     refreshModelList: async () => {
       try {
         const backend = get().currentSession?.agent ?? "devin";
-        const result = await getOrCall<Record<string, unknown>>("model.list", { backend });
+        const sessionId = get().currentSession?.sessionId;
+        const result = await getOrCall<Record<string, unknown>>("model.list", { backend, ...(sessionId ? { sessionId } : {}) });
         const current = String(result.current ?? "");
         const list = ((result.models as unknown[] | undefined) ?? []).map((it) =>
           parseModelInfo({ ...(it as Record<string, unknown>), isCurrent: (it as Record<string, unknown>).uid === current }),
@@ -2004,7 +2005,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     switchModel: async (model: ModelInfo) => {
       try {
-        await getOrCall("model.set", { model: model.uid });
+        const sessionId = get().currentSession?.sessionId;
+        await getOrCall("model.set", { model: model.uid, ...(sessionId ? { sessionId } : {}) });
         set({
           showModelPicker: false,
           modelCurrent: model.uid,

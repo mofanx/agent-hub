@@ -28,6 +28,7 @@ export type BackendConfig = {
 
 const HUB_CONFIG_DIR = path.join(homedir(), ".config/agent-hub");
 const HUB_MODEL_PREF_PATH = path.join(HUB_CONFIG_DIR, "model-preference.json");
+const HUB_SESSION_PREF_PATH = path.join(HUB_CONFIG_DIR, "session-model-preferences.json");
 const HUB_BACKENDS_PATH = path.join(HUB_CONFIG_DIR, "backends.json");
 const ACP_MODEL_PATH = path.join(homedir(), ".config/devin/acp-model.json");
 const CONFIG_PATH = path.join(homedir(), ".config/devin/config.json");
@@ -103,10 +104,13 @@ export class ModelManager {
   /**
    * 当前生效的模型 uid
    * @param backend 后端类型，按后端分别读取偏好
-   * 优先级：agent-hub 偏好[backend] > acp-model.json（devin 兼容旧版） > config.json（devin） > 默认
+   * @param sessionId 可选，指定 session 时优先读 session 级偏好
+   * 优先级：session 偏好 > 后端偏好 > acp-model.json（devin 兼容旧版） > config.json（devin） > 默认
    */
-  current(backend: ModelBackend = "devin"): { uid: string; label?: string } {
+  current(backend: ModelBackend = "devin", sessionId?: string): { uid: string; label?: string } {
     const prefs = this.loadModelPreferences();
+    const sessionPrefs = this.loadSessionPreferences();
+    if (sessionId && sessionPrefs[sessionId]) return { uid: sessionPrefs[sessionId] };
     if (prefs[backend]) return { uid: prefs[backend] };
     // devin 后端回退到旧版兼容文件
     if (backend === "devin") {
@@ -137,6 +141,15 @@ export class ModelManager {
     const match = this.find(name);
     if (!match) throw new Error(`unknown model: ${name}`);
     this.writeModelPreference(match.backend, match.uid);
+    return match;
+  }
+
+  /** 按 session 切换模型，只影响该 session，不影响同后端其他 session */
+  async setForSession(name: string, sessionId: string): Promise<ModelInfo> {
+    await this.list();
+    const match = this.find(name);
+    if (!match) throw new Error(`unknown model: ${name}`);
+    this.writeSessionPreference(sessionId, match.uid);
     return match;
   }
 
@@ -199,6 +212,27 @@ export class ModelManager {
       HUB_MODEL_PREF_PATH,
       JSON.stringify({ models: prefs, updatedAt: Date.now() }, null, 2),
     );
+  }
+
+  private loadSessionPreferences(): Record<string, string> {
+    if (existsSync(HUB_SESSION_PREF_PATH)) {
+      try {
+        const raw = JSON.parse(readFileSync(HUB_SESSION_PREF_PATH, "utf8"));
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          return raw as Record<string, string>;
+        }
+      } catch {
+        // fallthrough
+      }
+    }
+    return {};
+  }
+
+  private writeSessionPreference(sessionId: string, model: string): void {
+    if (!existsSync(HUB_CONFIG_DIR)) mkdirSync(HUB_CONFIG_DIR, { recursive: true });
+    const prefs = this.loadSessionPreferences();
+    prefs[sessionId] = model;
+    writeFileSync(HUB_SESSION_PREF_PATH, JSON.stringify(prefs, null, 2));
   }
 
   private loadBackends(): void {
