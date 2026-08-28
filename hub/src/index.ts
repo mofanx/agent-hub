@@ -510,14 +510,12 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
   if (!meta) return;
   const author = meta.name;
   const summary = existed ? `modified ${relPath}` : `created ${relPath}`;
-  const action = existed ? "modify" : "add";
 
+  // fs.writeTextFile 只更新产物，不生成事件；事件由 tool_call / 输出扫描产生
   sessionLedger.addFile(sessionId, { author, summary, path: relPath });
-  sessionLedger.addEvent(sessionId, { author, action, summary, path: relPath });
 
   for (const room of rooms.roomsFor(sessionId)) {
     rooms.addFile?.(room.roomId, { author, summary, path: relPath, content });
-    rooms.addEvent?.(room.roomId, { author, action, summary, path: relPath });
   }
 
   persistState();

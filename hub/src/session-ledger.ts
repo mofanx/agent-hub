@@ -90,6 +90,15 @@ export class SessionLedger {
   addEvent(sessionId: string, event: Omit<RoomEvent, "id" | "at">): RoomEvent {
     const list = this.events.get(sessionId) ?? [];
     this.events.set(sessionId, list);
+    // 去重：同 (action, path, author) 的最后一条在 5 秒内则合并更新
+    if (event.path) {
+      const last = list.at(-1);
+      if (last && last.action === event.action && last.path === event.path && last.author === event.author && Date.now() - last.at < 5000) {
+        last.summary = event.summary;
+        last.at = Date.now();
+        return last;
+      }
+    }
     const item: RoomEvent = {
       ...event,
       action: isEventAction(event.action) ? event.action : "command",

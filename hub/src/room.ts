@@ -472,9 +472,19 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
     const list = (room.events ??= []);
+    const author = this.resolveMember(room, event.author)?.sessionId ?? event.author;
+    // 去重：同 (action, path, author) 的最后一条在 5 秒内则合并更新
+    if (event.path) {
+      const last = list.at(-1);
+      if (last && last.action === event.action && last.path === event.path && last.author === author && Date.now() - last.at < 5000) {
+        last.summary = event.summary;
+        last.at = Date.now();
+        return last;
+      }
+    }
     const item: RoomEvent = {
       ...event,
-      author: this.resolveMember(room, event.author)?.sessionId ?? event.author,
+      author,
       id: randomUUID().slice(0, 8),
       at: Date.now(),
     };
