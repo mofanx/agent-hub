@@ -671,6 +671,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun refreshCurrentModel() {
+        viewModelScope.launch {
+            if (!hub.isConnected) return@launch
+            try {
+                val room = currentRoom
+                if (room != null) {
+                    // 群聊：加载所有成员模型
+                    val result = hub.call("room.memberModels", buildJsonObject { put("roomId", room.roomId) })
+                    val members = result["members"]?.jsonArray ?: emptyList()
+                    roomMemberModels.clear()
+                    for (m in members) {
+                        val obj = m.jsonObject
+                        val sid = obj["sessionId"]?.jsonPrimitive?.content ?: continue
+                        val name = obj["name"]?.jsonPrimitive?.content ?: sid
+                        val backend = obj["backend"]?.jsonPrimitive?.content ?: "devin"
+                        val model = obj["model"]?.jsonPrimitive?.content ?: ""
+                        roomMemberModels[sid] = Triple(name, backend, model)
+                    }
+                    // 显示第一个成员的模型作为概览
+                    modelCurrent = roomMemberModels.values.firstOrNull()?.third ?: ""
+                } else {
+                    val session = currentSession ?: return@launch
+                    val backend = session.agent ?: "devin"
+                    val result = hub.call("model.current", buildJsonObject {
+                        put("backend", backend)
+                        put("sessionId", session.sessionId)
+                    })
+                    modelCurrent = result["uid"]?.jsonPrimitive?.content ?: ""
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     fun toggleBypass(arg: String? = null) {
         viewModelScope.launch {
             try {
@@ -1474,6 +1507,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.Chat
         loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
         viewModelScope.launch { refreshSessionArtifacts(session.sessionId) }
+        refreshCurrentModel()
     }
 
     fun openRoom(room: RoomInfo, anchorAt: Long? = null) {
@@ -1513,6 +1547,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 refreshFlow(updatedRoom.roomId)
                 refreshArtifacts(updatedRoom.roomId)
                 refreshBlackboard(updatedRoom.roomId)
+                refreshCurrentModel()
             } catch (e: Exception) {
                 connectError = e.message
             }

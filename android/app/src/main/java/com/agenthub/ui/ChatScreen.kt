@@ -346,6 +346,19 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 color = MaterialTheme.colorScheme.outline,
                             )
                         }
+                        if (vm.modelCurrent.isNotBlank()) {
+                            val modelLabel = if (isRoom) {
+                                val count = vm.currentRoom?.members?.size ?: 0
+                                "成员模型 · ${count}人"
+                            } else {
+                                vm.modelCurrent
+                            }
+                            Text(
+                                modelLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
                     }
                 },
                 navigationIcon = {
