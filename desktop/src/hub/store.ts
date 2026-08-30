@@ -1916,21 +1916,29 @@ export const useHubStore = create<State & Actions>((set, get) => {
           : get().blackboard;
         const maxAt = artifacts.length ? Math.max(...artifacts.map((a) => a.at)) : 0;
         const maxEventAt = events.length ? Math.max(...events.map((e) => e.at)) : 0;
+        const board = isRoom ? (blackboard ?? []) : [];
+        const maxBoardAt = board.length ? Math.max(...board.map((b) => b.at)) : 0;
         const last = get().lastArtifactAt;
         const lastEvent = get().lastEventAt;
+        const lastBoard = get().lastBlackboardAt;
         const prev = get().newCounts;
         const newArtifacts = last === 0 ? 0 : artifacts.filter((a) => a.at > last).length;
         const newEvents = lastEvent === 0 ? 0 : events.filter((e) => e.at > lastEvent).length;
+        const newBoard = isRoom && lastBoard !== 0 ? board.filter((b) => b.at > lastBoard).length : 0;
         set({
           currentArtifacts: artifacts,
           currentEvents: events,
           ...(isRoom ? { blackboard } : {}),
           lastArtifactAt: last === 0 ? maxAt : Math.max(last, maxAt),
           lastEventAt: lastEvent === 0 ? maxEventAt : Math.max(lastEvent, maxEventAt),
+          ...(isRoom
+            ? { lastBlackboardAt: lastBoard === 0 ? maxBoardAt : Math.max(lastBoard, maxBoardAt) }
+            : {}),
           newCounts: {
             ...prev,
             artifact: prev.artifact + newArtifacts,
             event: prev.event + newEvents,
+            blackboard: prev.blackboard + newBoard,
           },
         });
       } catch {

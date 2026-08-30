@@ -325,8 +325,23 @@ export class AcpAgent {
     if (!paths.length && typeof u.rawInput === "object" && u.rawInput != null) {
       const raw = u.rawInput as Record<string, unknown>;
       if (raw.path) paths.push(String(raw.path));
+      if (raw.file_path) paths.push(String(raw.file_path));
+      if (raw.notebook_path) paths.push(String(raw.notebook_path));
       if (raw.from) paths.push(String(raw.from));
       if (raw.to) paths.push(String(raw.to));
+      if (raw.old_path) paths.push(String(raw.old_path));
+      if (raw.new_path) paths.push(String(raw.new_path));
+      if (raw.source) paths.push(String(raw.source));
+      if (raw.destination) paths.push(String(raw.destination));
+    }
+
+    // content 中的 diff 块也携带 path（Devin CLI 等不上报 locations 时兜底）
+    if (!paths.length && Array.isArray(u.content)) {
+      for (const c of u.content) {
+        if (typeof c === "object" && c != null && "path" in c) {
+          paths.push(String((c as { path: string }).path));
+        }
+      }
     }
 
     if (paths.length) {
@@ -334,7 +349,14 @@ export class AcpAgent {
       const relPaths = entry
         ? paths.map((p) => (path.isAbsolute(p) ? path.relative(entry.cwd, p) : p))
         : paths;
-      this.onToolCall?.(sessionId, kind, title, relPaths);
+      // title 中的绝对路径替换为相对路径，避免摘要冗长
+      let relTitle = title;
+      if (entry) {
+        for (let i = 0; i < paths.length; i++) {
+          if (paths[i] !== relPaths[i]) relTitle = relTitle.split(paths[i]!).join(relPaths[i]!);
+        }
+      }
+      this.onToolCall?.(sessionId, kind, relTitle, relPaths);
     }
   }
 

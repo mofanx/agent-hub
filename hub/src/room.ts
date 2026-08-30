@@ -442,6 +442,9 @@ export class RoomManager {
             // 缓存写入失败不阻塞 artifact 更新
           }
         }
+        // 移到末尾，保持数组顺序与时间顺序一致（getArtifacts 倒序后最新在前）
+        list.splice(list.indexOf(existing), 1);
+        list.push(existing);
         return existing;
       }
     }
@@ -491,6 +494,24 @@ export class RoomManager {
     list.push(item);
     if (list.length > EVENT_LIMIT) list.shift();
     return item;
+  }
+
+  /** fs 写入事件：5 秒窗口内同路径的 modify 事件（tool_call edit 先到）被修正为准确 action，避免重复 */
+  addFileEvent(roomId: string, event: Omit<RoomEvent, "id" | "at">): RoomEvent | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const list = (room.events ??= []);
+    const author = this.resolveMember(room, event.author)?.sessionId ?? event.author;
+    if (event.path) {
+      const last = list.at(-1);
+      if (last && last.action === "modify" && last.path === event.path && last.author === author && Date.now() - last.at < 5000) {
+        last.action = event.action;
+        last.summary = event.summary;
+        last.at = Date.now();
+        return last;
+      }
+    }
+    return this.addEvent(roomId, event);
   }
 
   /** 兼容旧 API：根据 kind 分发到 addFile / addEvent */

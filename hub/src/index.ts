@@ -512,11 +512,13 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
   const author = meta.name;
   const summary = existed ? "修改" : "新增";
 
-  // fs.writeTextFile 只更新产物，不生成事件；事件由 tool_call / 输出扫描产生
   sessionLedger.addFile(sessionId, { author, summary, path: relPath });
+  // fs 通道掌握准确的 existed 信息，由它修正/产生 add/modify 事件（与 tool_call edit 去重）
+  sessionLedger.addFileEvent(sessionId, { author, action: existed ? "modify" : "add", summary, path: relPath });
 
   for (const room of rooms.roomsFor(sessionId)) {
     rooms.addFile?.(room.roomId, { author, summary, path: relPath, content });
+    rooms.addFileEvent?.(room.roomId, { author, action: existed ? "modify" : "add", summary, path: relPath });
   }
 
   persistState();

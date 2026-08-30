@@ -73,6 +73,9 @@ export class SessionLedger {
         existing.summary = file.summary;
         existing.at = Date.now();
         if (file.taskId) existing.taskId = file.taskId;
+        // 移到末尾，保持数组顺序与时间顺序一致（getArtifacts 倒序后最新在前）
+        list.splice(list.indexOf(existing), 1);
+        list.push(existing);
         return existing;
       }
     }
@@ -108,6 +111,24 @@ export class SessionLedger {
     list.push(item);
     if (list.length > EVENT_LIMIT) list.shift();
     return item;
+  }
+
+  /**
+   * fs 写入事件：5 秒窗口内同路径同作者的 modify 事件（tool_call edit 先到）会被修正为准确的 action，
+   * 避免与 tool_call 通道重复；不走 fs 通道的后端则保留 tool_call 事件本身
+   */
+  addFileEvent(sessionId: string, event: Omit<RoomEvent, "id" | "at">): RoomEvent {
+    const list = this.events.get(sessionId);
+    if (list && event.path) {
+      const last = list.at(-1);
+      if (last && last.action === "modify" && last.path === event.path && last.author === event.author && Date.now() - last.at < 5000) {
+        last.action = event.action;
+        last.summary = event.summary;
+        last.at = Date.now();
+        return last;
+      }
+    }
+    return this.addEvent(sessionId, event);
   }
 
   getArtifacts(sessionId: string, limit = ARTIFACT_LIMIT): Artifact[] {

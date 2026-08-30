@@ -2224,7 +2224,8 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 2.dp),
+            .padding(horizontal = 12.dp)
+            .padding(top = 8.dp, bottom = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (flowCount > 0) {
