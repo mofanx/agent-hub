@@ -30,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -58,6 +59,11 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
     val selectedVendors = remember { mutableStateListOf<String>() }
 
     val filter = vm.modelFilter
+    // 切换成员时清空筛选（模型列表已换为成员后端）
+    LaunchedEffect(selectedMember) {
+        selectedTiers.clear()
+        selectedVendors.clear()
+    }
     val filtered by remember(all, filter, selectedBackends, selectedTiers, selectedVendors, isRoom) {
         derivedStateOf {
             all.filter { m ->
@@ -67,9 +73,10 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     m.family.contains(filter, ignoreCase = true) ||
                     m.vendor.contains(filter, ignoreCase = true) ||
                     m.aliases.any { it.contains(filter, ignoreCase = true) }
+                // 群聊模式模型列表已按成员后端加载，无需再按 backend 过滤
                 val backendOk = isRoom || selectedBackends.isEmpty() || selectedBackends.contains(m.backend)
-                val tierOk = isRoom || selectedTiers.isEmpty() || selectedTiers.contains(m.costTier)
-                val vendorOk = isRoom || selectedVendors.isEmpty() || selectedVendors.contains(m.vendor)
+                val tierOk = selectedTiers.isEmpty() || selectedTiers.contains(m.costTier)
+                val vendorOk = selectedVendors.isEmpty() || selectedVendors.contains(m.vendor)
                 textOk && backendOk && tierOk && vendorOk
             }
         }
@@ -130,8 +137,8 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     shape = RoundedCornerShape(24.dp),
                 )
 
+                // 群聊模式：成员标签栏
                 if (isRoom) {
-                    // 群聊模式：成员标签栏
                     Spacer(Modifier.height(8.dp))
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
@@ -146,28 +153,33 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                             )
                         }
                     }
-                } else {
-                    // 单聊模式：后端/tier/vendor 筛选
-                    if (selectedBackends.isNotEmpty() || selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()) {
-                        Spacer(Modifier.height(4.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Spacer(Modifier.weight(1f))
-                            TextButton(
-                                onClick = {
-                                    vm.modelFilter = ""
-                                    selectedBackends.clear()
-                                    selectedTiers.clear()
-                                    selectedVendors.clear()
-                                },
-                            ) { Text(S.modelClearFilters) }
-                        }
+                }
+
+                // 清空筛选按钮（单聊/群聊通用）
+                if ((if (!isRoom) selectedBackends.isNotEmpty() else false) ||
+                    selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()
+                ) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = {
+                                vm.modelFilter = ""
+                                selectedBackends.clear()
+                                selectedTiers.clear()
+                                selectedVendors.clear()
+                            },
+                        ) { Text(S.modelClearFilters) }
                     }
+                }
 
-                    Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(8.dp))
 
+                // 单聊模式：后端筛选（群聊已按成员后端加载，无需再筛）
+                if (!isRoom) {
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 2.dp),
@@ -184,43 +196,44 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                             )
                         }
                     }
-
                     Spacer(Modifier.height(8.dp))
+                }
 
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 2.dp),
-                    ) {
-                        items(availableTiers, key = { "tier:$it" }) { tier ->
-                            FilterChip(
-                                selected = selectedTiers.contains(tier),
-                                onClick = {
-                                    if (selectedTiers.contains(tier)) selectedTiers.remove(tier)
-                                    else selectedTiers.add(tier)
-                                },
-                                label = { Text(tierName(S, tier)) },
-                                modifier = Modifier.padding(end = 8.dp),
-                            )
-                        }
+                // tier 筛选（单聊/群聊通用）
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 2.dp),
+                ) {
+                    items(availableTiers, key = { "tier:$it" }) { tier ->
+                        FilterChip(
+                            selected = selectedTiers.contains(tier),
+                            onClick = {
+                                if (selectedTiers.contains(tier)) selectedTiers.remove(tier)
+                                else selectedTiers.add(tier)
+                            },
+                            label = { Text(tierName(S, tier)) },
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
                     }
+                }
 
-                    Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(8.dp))
 
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 2.dp),
-                    ) {
-                        items(availableVendors, key = { "vendor:$it" }) { vendor ->
-                            FilterChip(
-                                selected = selectedVendors.contains(vendor),
-                                onClick = {
-                                    if (selectedVendors.contains(vendor)) selectedVendors.remove(vendor)
-                                    else selectedVendors.add(vendor)
-                                },
-                                label = { Text(vendor) },
-                                modifier = Modifier.padding(end = 8.dp),
-                            )
-                        }
+                // vendor 筛选（单聊/群聊通用）
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 2.dp),
+                ) {
+                    items(availableVendors, key = { "vendor:$it" }) { vendor ->
+                        FilterChip(
+                            selected = selectedVendors.contains(vendor),
+                            onClick = {
+                                if (selectedVendors.contains(vendor)) selectedVendors.remove(vendor)
+                                else selectedVendors.add(vendor)
+                            },
+                            label = { Text(vendor) },
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
                     }
                 }
 

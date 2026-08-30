@@ -2126,6 +2126,14 @@ function ModelPicker() {
     setFilter(store.modelFilter);
   }, [store.modelFilter]);
 
+  // 群聊模式切换成员时清空 tier/vendor 筛选（模型列表已换为成员后端）
+  useEffect(() => {
+    if (isRoom) {
+      setSelectedTiers([]);
+      setSelectedVendors([]);
+    }
+  }, [selectedMember, isRoom]);
+
   const costOrder = ["Free", "Low cost", "Med cost", "High cost"];
   const availableVendors = useMemo(
     () => [...new Set(store.modelList.map((m) => m.vendor).filter(Boolean))].sort(),
@@ -2143,16 +2151,16 @@ function ModelPicker() {
     const q = filter.trim().toLowerCase();
     let models = store.modelList;
 
-    // 按后端过滤（仅单聊模式）
+    // 按后端过滤（仅单聊模式，群聊已按成员后端加载）
     if (!isRoom && selectedBackend !== "all") {
       models = models.filter(m => m.backend === selectedBackend);
     }
-    // 按费用层级过滤（多选）
-    if (!isRoom && selectedTiers.length > 0) {
+    // 按费用层级过滤（多选，单聊/群聊通用）
+    if (selectedTiers.length > 0) {
       models = models.filter((m) => selectedTiers.includes(m.costTier));
     }
-    // 按供应商过滤（多选）
-    if (!isRoom && selectedVendors.length > 0) {
+    // 按供应商过滤（多选，单聊/群聊通用）
+    if (selectedVendors.length > 0) {
       models = models.filter((m) => selectedVendors.includes(m.vendor));
     }
 
@@ -2260,7 +2268,7 @@ function ModelPicker() {
             ))}
           </div>
         )}
-        {!isRoom && (availableTiers.length > 1 || availableVendors.length > 1) && (
+        {(availableTiers.length > 1 || availableVendors.length > 1) && (
           <div className="model-picker-filters">
             {availableTiers.length > 1 && (
               <div className="model-picker-chip-row">
