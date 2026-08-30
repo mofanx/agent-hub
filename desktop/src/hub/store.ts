@@ -64,8 +64,11 @@ interface State {
   busyIds: string[];
   quote: [string, string] | null;
   fileRefToInsert: string | null;
-  hasNewArtifacts: boolean;
+  /** 各类新增内容计数（打开对应面板时清零） */
+  newCounts: { artifact: number; event: number; blackboard: number };
   lastArtifactAt: number;
+  lastEventAt: number;
+  lastBlackboardAt: number;
   searchQuery: string;
   searchResults: SearchHit[];
   searchGroups: SearchGroup[];
@@ -208,8 +211,9 @@ interface Actions {
   clearEvents(contextId: string, action?: string): Promise<void>;
   quoteArtifact(artifact: ArtifactInfo): void;
   quoteEvent(event: EventInfo): void;
+  quoteBlackboard(entry: BlackboardInfo): void;
   clearFileRef(): void;
-  clearNewArtifacts(): void;
+  clearNewCounts(kind?: "artifact" | "event" | "blackboard"): void;
   deleteFile(contextId: string, isSession: boolean, path: string): Promise<void>;
   renameFile(contextId: string, isSession: boolean, from: string, to: string): Promise<void>;
 
@@ -481,7 +485,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
               at: typeof e.at === "number" ? e.at : 0,
             } as BlackboardInfo;
           });
-          set({ blackboard });
+          const maxAt = blackboard.length ? Math.max(...blackboard.map((b) => b.at)) : 0;
+          const last = get().lastBlackboardAt;
+          const prev = get().newCounts;
+          const added = last === 0 ? 0 : blackboard.filter((b) => b.at > last).length;
+          set({
+            blackboard,
+            lastBlackboardAt: last === 0 ? maxAt : Math.max(last, maxAt),
+            newCounts: { ...prev, blackboard: prev.blackboard + added },
+          });
         }
         break;
       }
@@ -695,8 +707,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
     busyIds: [],
     quote: null,
     fileRefToInsert: null,
-    hasNewArtifacts: false,
+    newCounts: { artifact: 0, event: 0, blackboard: 0 },
     lastArtifactAt: 0,
+    lastEventAt: 0,
+    lastBlackboardAt: 0,
     searchQuery: "",
     searchResults: [],
     searchGroups: [],
@@ -867,8 +881,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         busyIds: [],
         quote: null,
     fileRefToInsert: null,
-    hasNewArtifacts: false,
+    newCounts: { artifact: 0, event: 0, blackboard: 0 },
     lastArtifactAt: 0,
+    lastEventAt: 0,
+    lastBlackboardAt: 0,
         searchQuery: "",
         searchResults: [],
         searchGroups: [],
@@ -1072,8 +1088,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
-        hasNewArtifacts: false,
+        newCounts: { artifact: 0, event: 0, blackboard: 0 },
         lastArtifactAt: 0,
+        lastEventAt: 0,
+        lastBlackboardAt: 0,
         screen: "chat",
         historyHasMore: false,
         historyLoading: false,
@@ -1106,8 +1124,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
-        hasNewArtifacts: false,
+        newCounts: { artifact: 0, event: 0, blackboard: 0 },
         lastArtifactAt: 0,
+        lastEventAt: 0,
+        lastBlackboardAt: 0,
         screen: "room",
         flow: null,
         historyHasMore: false,
@@ -1895,13 +1915,23 @@ export const useHubStore = create<State & Actions>((set, get) => {
             })
           : get().blackboard;
         const maxAt = artifacts.length ? Math.max(...artifacts.map((a) => a.at)) : 0;
+        const maxEventAt = events.length ? Math.max(...events.map((e) => e.at)) : 0;
         const last = get().lastArtifactAt;
+        const lastEvent = get().lastEventAt;
+        const prev = get().newCounts;
+        const newArtifacts = last === 0 ? 0 : artifacts.filter((a) => a.at > last).length;
+        const newEvents = lastEvent === 0 ? 0 : events.filter((e) => e.at > lastEvent).length;
         set({
           currentArtifacts: artifacts,
           currentEvents: events,
           ...(isRoom ? { blackboard } : {}),
           lastArtifactAt: last === 0 ? maxAt : Math.max(last, maxAt),
-          hasNewArtifacts: last !== 0 && maxAt > last,
+          lastEventAt: lastEvent === 0 ? maxEventAt : Math.max(lastEvent, maxEventAt),
+          newCounts: {
+            ...prev,
+            artifact: prev.artifact + newArtifacts,
+            event: prev.event + newEvents,
+          },
         });
       } catch {
         /* ignore */
@@ -1923,7 +1953,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
             at: typeof e.at === "number" ? e.at : 0,
           } as BlackboardInfo;
         });
-        set({ blackboard });
+        const maxAt = blackboard.length ? Math.max(...blackboard.map((b) => b.at)) : 0;
+        const last = get().lastBlackboardAt;
+        set({
+          blackboard,
+          lastBlackboardAt: last === 0 ? maxAt : Math.max(last, maxAt),
+        });
       } catch {
         /* ignore */
       }
@@ -2036,8 +2071,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
     quoteEvent: (event: EventInfo) => {
       set({ quote: [get().sessionName(event.author), `[${event.action}] ${event.summary}`] });
     },
+    quoteBlackboard: (entry: BlackboardInfo) => {
+      set({ quote: [get().sessionName(entry.from), entry.text] });
+    },
     clearFileRef: () => set({ fileRefToInsert: null }),
-    clearNewArtifacts: () => set({ hasNewArtifacts: false }),
+    clearNewCounts: (kind?: "artifact" | "event" | "blackboard") => {
+      const prev = get().newCounts;
+      if (!kind) {
+        set({ newCounts: { artifact: 0, event: 0, blackboard: 0 } });
+      } else {
+        set({ newCounts: { ...prev, [kind]: 0 } });
+      }
+    },
 
     saveProfileAndConnect: (address: string, token: string, name?: string) => {
       const derived = address

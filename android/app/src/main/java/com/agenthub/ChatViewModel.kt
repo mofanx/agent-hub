@@ -427,6 +427,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val currentArtifacts = mutableStateListOf<ArtifactInfo>()
     val currentEvents = mutableStateListOf<EventInfo>()
     val blackboard = mutableStateListOf<BlackboardEntry>()
+    /** 各类新增内容计数（展开对应面板时清零） */
+    var newArtifactCount by mutableStateOf(0)
+    var newEventCount by mutableStateOf(0)
+    var newBlackboardCount by mutableStateOf(0)
+    private var lastArtifactAt = 0L
+    private var lastEventAt = 0L
+    private var lastBlackboardAt = 0L
     var fileTreeRoots by mutableStateOf<List<FileTreeRoot>>(emptyList())
     var fileTreePath by mutableStateOf<String?>(null)
     var fileTreeRootPath by mutableStateOf<String?>(null)
@@ -1495,6 +1502,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentArtifacts.clear()
         currentEvents.clear()
         blackboard.clear()
+        resetNewCounts()
         flow = null
         quote = null
         fileRefToInsert = null
@@ -1532,6 +1540,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 currentArtifacts.clear()
                 currentEvents.clear()
                 blackboard.clear()
+                resetNewCounts()
                 chatItems.clear()
                 quote = null
                 fileRefToInsert = null
@@ -1572,6 +1581,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
             val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
             val board = result["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
+            trackNewArtifacts(artifacts, events, board)
             currentArtifacts.clear()
             currentArtifacts.addAll(artifacts)
             currentEvents.clear()
@@ -1588,6 +1598,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val result = hub.call("session.artifacts", buildJsonObject { put("sessionId", sessionId) })
             val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
             val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
+            trackNewArtifacts(artifacts, events, null)
             currentArtifacts.clear()
             currentArtifacts.addAll(artifacts)
             currentEvents.clear()
@@ -1597,10 +1608,45 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 基于 at 时间戳累计新增计数；首次加载（基准为 0）只设置基准不计数 */
+    private fun trackNewArtifacts(
+        artifacts: List<ArtifactInfo>,
+        events: List<EventInfo>,
+        board: List<BlackboardEntry>?,
+    ) {
+        if (lastArtifactAt > 0L) newArtifactCount += artifacts.count { it.at > lastArtifactAt }
+        artifacts.maxOfOrNull { it.at }?.let { lastArtifactAt = maxOf(lastArtifactAt, it) }
+        if (lastEventAt > 0L) newEventCount += events.count { it.at > lastEventAt }
+        events.maxOfOrNull { it.at }?.let { lastEventAt = maxOf(lastEventAt, it) }
+        if (board != null) {
+            if (lastBlackboardAt > 0L) newBlackboardCount += board.count { it.at > lastBlackboardAt }
+            board.maxOfOrNull { it.at }?.let { lastBlackboardAt = maxOf(lastBlackboardAt, it) }
+        }
+    }
+
+    fun clearNewCounts(kind: String) {
+        when (kind) {
+            "artifact" -> newArtifactCount = 0
+            "event" -> newEventCount = 0
+            "blackboard" -> newBlackboardCount = 0
+        }
+    }
+
+    private fun resetNewCounts() {
+        newArtifactCount = 0
+        newEventCount = 0
+        newBlackboardCount = 0
+        lastArtifactAt = 0L
+        lastEventAt = 0L
+        lastBlackboardAt = 0L
+    }
+
     private suspend fun refreshBlackboard(roomId: String) {
         try {
             val result = hub.call("room.blackboard", buildJsonObject { put("roomId", roomId) })
             val list = result["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
+            // 初次加载只设置基准，不计数
+            list.maxOfOrNull { it.at }?.let { lastBlackboardAt = maxOf(lastBlackboardAt, it) }
             blackboard.clear()
             blackboard.addAll(list)
         } catch (e: Exception) {
@@ -2218,6 +2264,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun quoteEvent(event: EventInfo) {
         quote = sessionName(event.author) to "[${event.action}] ${event.summary}"
+    }
+
+    fun quoteBlackboard(entry: BlackboardEntry) {
+        quote = sessionName(entry.from) to entry.text
     }
 
     fun toggleMessageSelection(id: Long) {
@@ -2951,6 +3001,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val roomId = p["roomId"]!!.jsonPrimitive.content
                 if (currentRoom?.roomId == roomId) {
                     val list = p["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
+                    if (lastBlackboardAt > 0L) newBlackboardCount += list.count { it.at > lastBlackboardAt }
+                    list.maxOfOrNull { it.at }?.let { lastBlackboardAt = maxOf(lastBlackboardAt, it) }
                     blackboard.clear()
                     blackboard.addAll(list)
                 }

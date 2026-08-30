@@ -644,6 +644,7 @@ export function ChatScreen() {
   const eventCount = store.currentEvents?.length ?? 0;
   const flowCount = store.flow?.tasks?.length ?? 0;
   const blackboardCount = store.blackboard?.length ?? 0;
+  const newTotal = store.newCounts.artifact + store.newCounts.event + store.newCounts.blackboard;
   const isContextPanel =
     sidePanel === "flow" || sidePanel === "blackboard" || sidePanel === "artifact" || sidePanel === "event";
 
@@ -654,11 +655,15 @@ export function ChatScreen() {
     }
     if (isRoom && flowCount > 0) setSidePanel("flow");
     else if (artifactCount > 0) {
-      store.clearNewArtifacts();
+      store.clearNewCounts("artifact");
       setSidePanel("artifact");
-    } else if (eventCount > 0) setSidePanel("event");
-    else if (isRoom && blackboardCount > 0) setSidePanel("blackboard");
-    else setSidePanel("artifact");
+    } else if (eventCount > 0) {
+      store.clearNewCounts("event");
+      setSidePanel("event");
+    } else if (isRoom && blackboardCount > 0) {
+      store.clearNewCounts("blackboard");
+      setSidePanel("blackboard");
+    } else setSidePanel("artifact");
   };
 
   return (
@@ -732,7 +737,7 @@ export function ChatScreen() {
               title="任务 / 产物 / 事件面板"
             >
               <Activity size={15} />
-              {store.hasNewArtifacts && sidePanel !== "artifact" && <span className="new-dot" />}
+              {newTotal > 0 && !isContextPanel && <span className="new-badge">{newTotal > 99 ? "99+" : newTotal}</span>}
             </button>
             <button className="secondary model-btn" onClick={() => void store.showModelPickerDialog()} title="切换模型">
               <Cpu size={13} />
@@ -1034,9 +1039,15 @@ export function ChatScreen() {
                     className={`icon-btn ${sidePanel === "blackboard" ? "active" : ""}`}
                     title={`共享黑板 · ${blackboardCount} 条`}
                     disabled={blackboardCount === 0 && sidePanel !== "blackboard"}
-                    onClick={() => setSidePanel("blackboard")}
+                    onClick={() => {
+                      store.clearNewCounts("blackboard");
+                      setSidePanel("blackboard");
+                    }}
                   >
                     <NotebookText size={14} />
+                    {store.newCounts.blackboard > 0 && sidePanel !== "blackboard" && (
+                      <span className="new-badge">{store.newCounts.blackboard > 99 ? "99+" : store.newCounts.blackboard}</span>
+                    )}
                   </button>
                 </>
               )}
@@ -1045,20 +1056,28 @@ export function ChatScreen() {
                 title={`产物 · ${artifactCount} 条`}
                 disabled={artifactCount === 0 && sidePanel !== "artifact"}
                 onClick={() => {
-                  store.clearNewArtifacts();
+                  store.clearNewCounts("artifact");
                   setSidePanel("artifact");
                 }}
               >
                 <Package size={14} />
-                {store.hasNewArtifacts && sidePanel !== "artifact" && <span className="new-dot" />}
+                {store.newCounts.artifact > 0 && sidePanel !== "artifact" && (
+                  <span className="new-badge">{store.newCounts.artifact > 99 ? "99+" : store.newCounts.artifact}</span>
+                )}
               </button>
               <button
                 className={`icon-btn ${sidePanel === "event" ? "active" : ""}`}
                 title={`事件 · ${eventCount} 条`}
                 disabled={eventCount === 0 && sidePanel !== "event"}
-                onClick={() => setSidePanel("event")}
+                onClick={() => {
+                  store.clearNewCounts("event");
+                  setSidePanel("event");
+                }}
               >
                 <Zap size={14} />
+                {store.newCounts.event > 0 && sidePanel !== "event" && (
+                  <span className="new-badge">{store.newCounts.event > 99 ? "99+" : store.newCounts.event}</span>
+                )}
               </button>
               <span className="spacer" />
               <button className="icon-btn" onClick={() => setSidePanel(null)} title="关闭面板 (Esc)">
@@ -1447,6 +1466,7 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
   const store = useHubStore();
   const roomId = store.currentRoom?.roomId;
   const [detail, setDetail] = useState<BlackboardInfo | null>(null);
+  const [copied, setCopied] = useState(false);
   if (!blackboard || blackboard.length === 0) {
     return <div className="context-empty">暂无黑板摘要</div>;
   }
@@ -1473,7 +1493,7 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
         .map((e) => (
           <div key={e.id} className="blackboard-item" onClick={() => setDetail(e)}>
             <div className="blackboard-line">
-              <span className="blackboard-from">@{e.from}</span>
+              <span className="blackboard-from">@{store.sessionName(e.from)}</span>
               <span className="blackboard-time">{formatArtifactTime(e.at)}</span>
             </div>
             <div className="blackboard-text">{e.text}</div>
@@ -1485,11 +1505,28 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
           <div className="dialog blackboard-detail" onClick={(ev) => ev.stopPropagation()}>
             <h4>黑板摘要</h4>
             <div className="blackboard-line">
-              <span className="blackboard-from">@{detail.from}</span>
+              <span className="blackboard-from">@{store.sessionName(detail.from)}</span>
               <span className="blackboard-time">{formatArtifactTime(detail.at)}</span>
             </div>
             <pre>{detail.detail}</pre>
             <div className="form-row" style={{ justifyContent: "flex-end" }}>
+              <button
+                onClick={() => {
+                  store.quoteBlackboard(detail);
+                  setDetail(null);
+                }}
+              >
+                引用
+              </button>
+              <button
+                onClick={() => {
+                  void navigator.clipboard.writeText(detail.detail || detail.text);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                }}
+              >
+                {copied ? "已复制" : "复制"}
+              </button>
               <button onClick={() => setDetail(null)}>关闭</button>
               <button className="danger" onClick={onRemove}>删除</button>
             </div>
@@ -2078,6 +2115,8 @@ function ModelPicker() {
   const S = stringsFor(store.lang);
   const [filter, setFilter] = useState(store.modelFilter);
   const [selectedBackend, setSelectedBackend] = useState<string>("all");
+  const [selectedTiers, setSelectedTiers] = useState<string[]>([]);
+  const [selectedVendors, setSelectedVendors] = useState<string[]>([]);
 
   const isRoom = !!store.currentRoom;
   const memberModels = store.roomMemberModels;
@@ -2087,6 +2126,19 @@ function ModelPicker() {
     setFilter(store.modelFilter);
   }, [store.modelFilter]);
 
+  const costOrder = ["Free", "Low cost", "Med cost", "High cost"];
+  const availableVendors = useMemo(
+    () => [...new Set(store.modelList.map((m) => m.vendor).filter(Boolean))].sort(),
+    [store.modelList],
+  );
+  const availableTiers = useMemo(
+    () =>
+      [...new Set(store.modelList.map((m) => m.costTier).filter(Boolean))].sort(
+        (a, b) => costOrder.indexOf(a) - costOrder.indexOf(b),
+      ),
+    [store.modelList],
+  );
+
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     let models = store.modelList;
@@ -2094,6 +2146,14 @@ function ModelPicker() {
     // 按后端过滤（仅单聊模式）
     if (!isRoom && selectedBackend !== "all") {
       models = models.filter(m => m.backend === selectedBackend);
+    }
+    // 按费用层级过滤（多选）
+    if (!isRoom && selectedTiers.length > 0) {
+      models = models.filter((m) => selectedTiers.includes(m.costTier));
+    }
+    // 按供应商过滤（多选）
+    if (!isRoom && selectedVendors.length > 0) {
+      models = models.filter((m) => selectedVendors.includes(m.vendor));
     }
 
     // 按搜索词过滤
@@ -2103,12 +2163,24 @@ function ModelPicker() {
           m.uid.toLowerCase().includes(q) ||
           m.label.toLowerCase().includes(q) ||
           m.family.toLowerCase().includes(q) ||
+          m.vendor.toLowerCase().includes(q) ||
           m.aliases.some((a) => a.toLowerCase().includes(q)),
       );
     }
 
     return models;
-  }, [filter, store.modelList, selectedBackend, isRoom]);
+  }, [filter, store.modelList, selectedBackend, selectedTiers, selectedVendors, isRoom]);
+
+  const hasFilters =
+    filter.trim() !== "" || selectedBackend !== "all" || selectedTiers.length > 0 || selectedVendors.length > 0;
+  const clearFilters = () => {
+    setFilter("");
+    setSelectedBackend("all");
+    setSelectedTiers([]);
+    setSelectedVendors([]);
+  };
+  const toggleIn = (list: string[], v: string, setList: (next: string[]) => void) =>
+    setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
 
   // 按后端分组（仅单聊模式）
   const groupedByBackend = useMemo(() => {
@@ -2186,6 +2258,41 @@ function ModelPicker() {
                 {name}
               </button>
             ))}
+          </div>
+        )}
+        {!isRoom && (availableTiers.length > 1 || availableVendors.length > 1) && (
+          <div className="model-picker-filters">
+            {availableTiers.length > 1 && (
+              <div className="model-picker-chip-row">
+                {availableTiers.map((tier) => (
+                  <button
+                    key={tier}
+                    className={`model-chip ${selectedTiers.includes(tier) ? "active" : ""}`}
+                    onClick={() => toggleIn(selectedTiers, tier, setSelectedTiers)}
+                  >
+                    {tier}
+                  </button>
+                ))}
+              </div>
+            )}
+            {availableVendors.length > 1 && (
+              <div className="model-picker-chip-row">
+                {availableVendors.map((vendor) => (
+                  <button
+                    key={vendor}
+                    className={`model-chip ${selectedVendors.includes(vendor) ? "active" : ""}`}
+                    onClick={() => toggleIn(selectedVendors, vendor, setSelectedVendors)}
+                  >
+                    {vendor}
+                  </button>
+                ))}
+              </div>
+            )}
+            {hasFilters && (
+              <button className="model-picker-clear" onClick={clearFilters}>
+                {S.modelClearFilters}
+              </button>
+            )}
           </div>
         )}
         <div className="model-picker-list">

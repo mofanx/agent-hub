@@ -95,6 +95,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -2222,7 +2224,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 1.dp),
+            .padding(horizontal = 12.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (flowCount > 0) {
@@ -2238,80 +2240,63 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
             )
         }
         if (blackboardCount > 0) {
-            AssistChip(
-                onClick = { onExpand(if (expanded == "blackboard") null else "blackboard") },
-                label = { Text("黑板 $blackboardCount", style = MaterialTheme.typography.labelMedium) },
-                leadingIcon = {
-                    Text(
-                        if (expanded == "blackboard") "▾" else "▸",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+            CapsuleWithBadge(
+                label = "黑板 $blackboardCount",
+                badgeCount = vm.newBlackboardCount,
+                expanded = expanded == "blackboard",
+                onClick = {
+                    val next = if (expanded == "blackboard") null else "blackboard"
+                    if (next == "blackboard") vm.clearNewCounts("blackboard")
+                    onExpand(next)
                 },
             )
         }
         if (artifactCount > 0) {
-            var unread by remember { mutableStateOf(0) }
-            var previousCount by remember { mutableStateOf(artifactCount) }
-            LaunchedEffect(artifactCount, expanded) {
-                if (expanded == "artifact") {
-                    unread = 0
-                    previousCount = artifactCount
-                } else {
-                    if (artifactCount > previousCount) {
-                        unread += artifactCount - previousCount
-                    } else if (artifactCount < previousCount) {
-                        unread = maxOf(0, unread - (previousCount - artifactCount))
-                    }
-                    previousCount = artifactCount
-                }
-            }
-            Box {
-                AssistChip(
-                    onClick = { onExpand(if (expanded == "artifact") null else "artifact") },
-                    label = { Text("产物 $artifactCount", style = MaterialTheme.typography.labelMedium) },
-                    leadingIcon = {
-                        Text(
-                            if (expanded == "artifact") "▾" else "▸",
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    },
-                )
-                if (unread > 0) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .offset(x = (-2).dp, y = (-2).dp)
-                            .size(if (unread > 9) 16.dp else 10.dp)
-                            .background(
-                                MaterialTheme.colorScheme.error,
-                                CircleShape,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (unread > 9) {
-                            Text(
-                                unread.toString(),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onError,
-                                fontSize = 9.sp,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        if (eventCount > 0) {
-            AssistChip(
-                onClick = { onExpand(if (expanded == "event") null else "event") },
-                label = { Text("事件 $eventCount", style = MaterialTheme.typography.labelMedium) },
-                leadingIcon = {
-                    Text(
-                        if (expanded == "event") "▾" else "▸",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+            CapsuleWithBadge(
+                label = "产物 $artifactCount",
+                badgeCount = vm.newArtifactCount,
+                expanded = expanded == "artifact",
+                onClick = {
+                    val next = if (expanded == "artifact") null else "artifact"
+                    if (next == "artifact") vm.clearNewCounts("artifact")
+                    onExpand(next)
                 },
             )
         }
+        if (eventCount > 0) {
+            CapsuleWithBadge(
+                label = "事件 $eventCount",
+                badgeCount = vm.newEventCount,
+                expanded = expanded == "event",
+                onClick = {
+                    val next = if (expanded == "event") null else "event"
+                    if (next == "event") vm.clearNewCounts("event")
+                    onExpand(next)
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun CapsuleWithBadge(label: String, badgeCount: Int, expanded: Boolean, onClick: () -> Unit) {
+    BadgedBox(
+        badge = {
+            if (badgeCount > 0 && !expanded) {
+                Badge { Text(if (badgeCount > 99) "99+" else "$badgeCount") }
+            }
+        },
+    ) {
+        AssistChip(
+            onClick = onClick,
+            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+            leadingIcon = {
+                Text(
+                    if (expanded) "▾" else "▸",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            },
+        )
     }
 }
 
@@ -2373,7 +2358,7 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                             ),
                     ) {
                         Text(
-                            "@${entry.from} · ${formatArtifactTime(entry.at)}",
+                            "@${vm.sessionName(entry.from)} · ${formatArtifactTime(entry.at)}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2407,7 +2392,7 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            "@${entry.from} · ${formatArtifactTime(entry.at)}",
+                            "@${vm.sessionName(entry.from)} · ${formatArtifactTime(entry.at)}",
                             style = MaterialTheme.typography.titleSmall,
                         )
                         IconButton(onClick = { detailEntry = null }) {
@@ -2432,6 +2417,13 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                     ) {
                         TextButton(onClick = { detailEntry = null }) { Text("关闭") }
+                        OutlinedButton(
+                            onClick = {
+                                vm.quoteBlackboard(entry)
+                                detailEntry = null
+                                Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                            },
+                        ) { Text("引用") }
                         OutlinedButton(
                             onClick = {
                                 scope.launch {
