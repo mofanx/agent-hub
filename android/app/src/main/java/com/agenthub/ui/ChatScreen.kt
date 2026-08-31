@@ -1576,11 +1576,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
             .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
     ) {
-        Column(
-            Modifier
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-                .verticalScroll(scroll),
-        ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1700,7 +1696,12 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                     }
                     Spacer(Modifier.height(6.dp))
                 }
-                groups.forEach { (kind, list) ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scroll),
+                ) {
+                    groups.forEach { (kind, list) ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(vertical = 2.dp),
@@ -1806,6 +1807,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             }
                         }
                     }
+                }
             }
         }
     }
@@ -1913,11 +1915,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
             .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
     ) {
-        Column(
-            Modifier
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-                .verticalScroll(scroll),
-        ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2042,7 +2040,12 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                     }
                     Spacer(Modifier.height(6.dp))
                 }
-                events.forEach { event ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scroll),
+                ) {
+                    events.forEach { event ->
                     val isActive = selectedEvent?.id == event.id
                     val bg = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
                     Surface(
@@ -2140,6 +2143,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                 }
             }
         }
+    }
     }
 
     confirmRemove?.let { event ->
