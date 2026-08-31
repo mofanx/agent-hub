@@ -494,14 +494,17 @@ function onTurnEnd(sessionId: string, text: string): void {
       author: displayName,
       text,
     });
-    for (const room of rooms.roomsFor(sessionId)) {
-      if (roomModeManager.isHiddenTurn(sessionId, room.roomId)) continue;
-      store.append("room", room.roomId, {
-        at: Date.now(),
-        kind: "assistant",
-        author: displayName,
-        text,
-      });
+    // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
+    if (roomModeManager.isRoomTurn(sessionId)) {
+      for (const room of rooms.roomsFor(sessionId)) {
+        if (roomModeManager.isHiddenTurn(sessionId, room.roomId)) continue;
+        store.append("room", room.roomId, {
+          at: Date.now(),
+          kind: "assistant",
+          author: displayName,
+          text,
+        });
+      }
     }
   }
 }
@@ -516,15 +519,20 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
   // fs 通道掌握准确的 existed 信息，由它修正/产生 add/modify 事件（与 tool_call edit 去重）
   sessionLedger.addFileEvent(sessionId, { author, action: existed ? "modify" : "add", summary, path: relPath });
 
-  for (const room of rooms.roomsFor(sessionId)) {
-    rooms.addFile?.(room.roomId, { author, summary, path: relPath, content });
-    rooms.addFileEvent?.(room.roomId, { author, action: existed ? "modify" : "add", summary, path: relPath });
+  // 只有群聊回合才同步产物/事件到 room，单聊操作不泄漏到群聊
+  if (roomModeManager.isRoomTurn(sessionId)) {
+    for (const room of rooms.roomsFor(sessionId)) {
+      rooms.addFile?.(room.roomId, { author, summary, path: relPath, content });
+      rooms.addFileEvent?.(room.roomId, { author, action: existed ? "modify" : "add", summary, path: relPath });
+    }
   }
 
   persistState();
   broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
-  for (const room of rooms.roomsFor(sessionId)) {
-    broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
+  if (roomModeManager.isRoomTurn(sessionId)) {
+    for (const room of rooms.roomsFor(sessionId)) {
+      broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
+    }
   }
 }
 
@@ -548,17 +556,20 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
     const summary = title;
     sessionLedger.addEvent(sessionId, { author: meta.name, action, summary, path: relPath });
 
-    for (const room of rooms.roomsFor(sessionId)) {
-      rooms.addEvent?.(room.roomId, { author: meta.name, action, summary, path: relPath });
+    // 只有群聊回合才同步事件到 room，单聊操作不泄漏到群聊
+    if (roomModeManager.isRoomTurn(sessionId)) {
+      for (const room of rooms.roomsFor(sessionId)) {
+        rooms.addEvent?.(room.roomId, { author: meta.name, action, summary, path: relPath });
+      }
     }
-
-    // tool_call 只记录事件，不生成文件产物；真实文件写入由 fs/write_text_file 捕获
   }
 
   persistState();
   broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
-  for (const room of rooms.roomsFor(sessionId)) {
-    broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
+  if (roomModeManager.isRoomTurn(sessionId)) {
+    for (const room of rooms.roomsFor(sessionId)) {
+      broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
+    }
   }
 }
 
@@ -574,7 +585,7 @@ function onAgentEvent(event: HubEvent): void {
     const baseName = meta?.name ?? sessionId!;
     const origin = originFor(meta);
     const displayName = origin ? `${baseName} (${origin})` : baseName;
-    if (!roomModeManager.isHiddenSession(sessionId!)) {
+    if (!roomModeManager.isHiddenSession(sessionId!) && roomModeManager.isRoomTurn(sessionId!)) {
       const touched = rooms.recordOutput(sessionId!, displayName, output);
       for (const roomId of touched) {
         broadcast({
