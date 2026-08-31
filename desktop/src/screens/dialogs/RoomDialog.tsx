@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useHubStore } from "../../hub/store";
-import type { RoomModeConfig, SessionInfo } from "../../hub/types";
+import type { RoomInfo, RoomModeConfig, SessionInfo } from "../../hub/types";
 import { FormRow } from "../../components/FormRow";
 
 type RoomModeOption = { value: string; label: string; description: string; suggestWhen?: string };
@@ -62,18 +62,20 @@ function recommendMode(name: string): string | null {
   return null;
 }
 
-export function RoomDialog({ onClose }: { onClose: () => void }) {
+export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; editingRoom?: RoomInfo | null }) {
   const store = useHubStore();
+  const editing = editingRoom;
+  const isEdit = !!editing;
   const [form, setForm] = useState({
-    name: "",
-    mode: "mention",
-    selected: [] as string[],
-    specialId: "",
-    pipelineOrder: [] as string[],
-    debateSides: ["", ""] as [string, string],
-    debateJudge: "",
-    debateRounds: 2,
-    memberRoles: {} as Record<string, string>,
+    name: editing?.name ?? "",
+    mode: editing?.mode ?? "mention",
+    selected: (editing?.members.map((m) => m[0]) ?? []) as string[],
+    specialId: editing?.conductorId ?? editing?.parallelSummarizerId ?? editing?.debateJudge ?? "",
+    pipelineOrder: editing?.pipelineOrder ?? (editing?.members.map((m) => m[0]) ?? []),
+    debateSides: (editing?.debateSides ?? ["", ""]) as [string, string],
+    debateJudge: editing?.debateJudge ?? "",
+    debateRounds: editing?.debateRounds ?? 2,
+    memberRoles: (editing?.memberRoles ?? {}) as Record<string, string>,
   });
   const [modeManuallyChanged, setModeManuallyChanged] = useState(false);
 
@@ -127,7 +129,7 @@ export function RoomDialog({ onClose }: { onClose: () => void }) {
   };
 
   const isValid = (): boolean => {
-    if (form.selected.length < 2 || !form.name.trim()) return false;
+    if (form.selected.length < (isEdit ? 1 : 2) || !form.name.trim()) return false;
     switch (form.mode) {
       case "conductor":
       case "auto":
@@ -166,7 +168,11 @@ export function RoomDialog({ onClose }: { onClose: () => void }) {
     const memberRoles = Object.fromEntries(
       Object.entries(form.memberRoles).filter(([, v]) => v.trim()),
     );
-    void store.createRoom(form.name, form.selected, form.mode, config, memberRoles);
+    if (isEdit && editing) {
+      void store.updateRoom(editing, form.name, form.selected, form.mode, config, memberRoles);
+    } else {
+      void store.createRoom(form.name, form.selected, form.mode, config, memberRoles);
+    }
     onClose();
   };
 
@@ -298,7 +304,7 @@ export function RoomDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>新建群聊</h3>
+        <h3>{isEdit ? "编辑群聊" : "新建群聊"}</h3>
         <FormRow label="名称">
           <input
             value={form.name}
@@ -377,7 +383,7 @@ export function RoomDialog({ onClose }: { onClose: () => void }) {
             取消
           </button>
           <button className="primary" onClick={submit} disabled={!isValid()}>
-            创建
+            {isEdit ? "保存" : "创建"}
           </button>
         </div>
       </div>

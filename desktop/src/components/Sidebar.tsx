@@ -42,7 +42,7 @@ import { SessionDialog } from "../screens/dialogs/SessionDialog";
 import { RoomDialog } from "../screens/dialogs/RoomDialog";
 import { FilterSheet } from "../screens/dialogs/FilterSheet";
 
-type Dialog = { type: "session" } | { type: "room" } | null;
+type Dialog = { type: "session" } | { type: "room" } | { type: "editRoom"; room: RoomInfo } | null;
 
 const EMPTY_SESSION_FILTER: SessionListFilter = {
   query: "",
@@ -437,6 +437,12 @@ export function Sidebar() {
 
       {dialog?.type === "session" && <SessionDialog onClose={() => setDialog(null)} />}
       {dialog?.type === "room" && <RoomDialog onClose={() => setDialog(null)} />}
+      {store.editRoomTarget && (
+        <RoomDialog
+          onClose={() => store.closeEditRoomDialog()}
+          editingRoom={store.editRoomTarget}
+        />
+      )}
       {showFilter && (
         <FilterSheet
           sessionFilter={sessionFilter}
@@ -541,6 +547,16 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(s.name);
 
+  const commitRename = () => {
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== s.name) void store.renameSession(s, trimmed);
+    setRenaming(false);
+  };
+  const cancelRename = () => {
+    setName(s.name);
+    setRenaming(false);
+  };
+
   return (
     <div
       className={`nav-item ${active ? "active" : ""} ${batch && selected ? "selected" : ""}`}
@@ -566,14 +582,10 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
             onClick={(e) => e.stopPropagation()}
+            onBlur={commitRename}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                void store.renameSession(s, name.trim() || s.name);
-                setRenaming(false);
-              } else if (e.key === "Escape") {
-                setName(s.name);
-                setRenaming(false);
-              }
+              if (e.key === "Enter") commitRename();
+              else if (e.key === "Escape") cancelRename();
             }}
           />
         ) : (
@@ -631,6 +643,16 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(r.name);
 
+  const commitRename = () => {
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== r.name) void store.renameRoom(r, trimmed);
+    setRenaming(false);
+  };
+  const cancelRename = () => {
+    setName(r.name);
+    setRenaming(false);
+  };
+
   return (
     <div
       className={`nav-item ${active ? "active" : ""} ${batch && selected ? "selected" : ""}`}
@@ -653,14 +675,10 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
             onClick={(e) => e.stopPropagation()}
+            onBlur={commitRename}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                void store.renameRoom(r, name.trim() || r.name);
-                setRenaming(false);
-              } else if (e.key === "Escape") {
-                setName(r.name);
-                setRenaming(false);
-              }
+              if (e.key === "Enter") commitRename();
+              else if (e.key === "Escape") cancelRename();
             }}
           />
         ) : (
@@ -679,6 +697,9 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
         <div className="nav-actions" onClick={(e) => e.stopPropagation()}>
           <button className="icon-btn" title="重命名" onClick={() => { setName(r.name); setRenaming(true); }}>
             <Pencil size={12} />
+          </button>
+          <button className="icon-btn" title="编辑群聊" onClick={() => store.openEditRoomDialog(r)}>
+            <Settings size={12} />
           </button>
           <button className="icon-btn" title="克隆" onClick={() => void store.cloneRoom(r, `${r.name} (副本)`)}>
             <Copy size={12} />

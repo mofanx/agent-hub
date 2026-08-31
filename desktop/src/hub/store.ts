@@ -87,6 +87,7 @@ interface State {
   modelCurrent: string;
   modelFilter: string;
   showModelPicker: boolean;
+  editRoomTarget: RoomInfo | null;
   /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
   roomMemberModels: Record<string, { name: string; backend: string; model: string }>;
   /** 群聊模式：当前选中的成员标签 sessionId */
@@ -144,6 +145,14 @@ interface Actions {
   deleteConnection(id: string): Promise<void>;
   deleteRole(id: string): Promise<void>;
   createRoom(
+    name: string,
+    memberIds: string[],
+    mode: string,
+    config?: RoomModeConfig,
+    memberRoles?: Record<string, string>,
+  ): Promise<void>;
+  updateRoom(
+    room: RoomInfo,
     name: string,
     memberIds: string[],
     mode: string,
@@ -225,6 +234,8 @@ interface Actions {
   switchModelForMember(sessionId: string, model: ModelInfo): Promise<void>;
   selectMemberForModel(sessionId: string | null): void;
   closeModelPicker(): void;
+  openEditRoomDialog(room: RoomInfo): void;
+  closeEditRoomDialog(): void;
   listBackends(): Promise<void>;
   addBackend(backend: BackendConfig): Promise<void>;
   removeBackend(id: string): Promise<void>;
@@ -729,6 +740,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     modelCurrent: "",
     modelFilter: "",
     showModelPicker: false,
+    editRoomTarget: null,
     roomMemberModels: {},
     selectedMemberSession: null,
     backends: [],
@@ -1071,6 +1083,28 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const room = parseRoom((result.room as Record<string, unknown>) ?? {});
         set({ rooms: [...get().rooms, room] });
         get().openRoom(room);
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    updateRoom: async (room, name, memberIds, mode, config, memberRoles) => {
+      try {
+        const params: Record<string, unknown> = {
+          roomId: room.roomId,
+          name,
+          sessionIds: memberIds,
+          mode,
+        };
+        if (config?.conductorId) params.conductorId = config.conductorId;
+        if (config?.parallelSummarizerId) params.parallelSummarizerId = config.parallelSummarizerId;
+        if (config?.pipelineOrder?.length) params.pipelineOrder = config.pipelineOrder;
+        if (config?.debateSides?.length === 2) params.debateSides = config.debateSides;
+        if (config?.debateJudge) params.debateJudge = config.debateJudge;
+        if (config?.debateRounds != null) params.debateRounds = config.debateRounds;
+        if (memberRoles && Object.keys(memberRoles).length > 0) params.memberRoles = memberRoles;
+        await getOrCall("room.update", params);
+        await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });
       }
@@ -2224,6 +2258,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     closeModelPicker: () => set({ showModelPicker: false, modelFilter: "", selectedMemberSession: null }),
+
+    openEditRoomDialog: (room) => set({ editRoomTarget: room }),
+    closeEditRoomDialog: () => set({ editRoomTarget: null }),
 
     listBackends: async () => {
       const client = get().client;
