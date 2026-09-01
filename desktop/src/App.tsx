@@ -5,6 +5,7 @@ import { HubConfigScreen } from "./screens/HubConfigScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { ScheduleScreen } from "./screens/ScheduleScreen";
 import { Sidebar } from "./components/Sidebar";
 
 function App() {
@@ -57,6 +58,7 @@ function App() {
             {store.screen === "sessions" && <HomeScreen />}
             {(store.screen === "chat" || store.screen === "room") && <ChatScreen />}
             {store.screen === "settings" && <SettingsScreen />}
+            {store.screen === "schedule" && <ScheduleScreen />}
           </div>
         </main>
       </div>

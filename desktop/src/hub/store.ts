@@ -16,12 +16,14 @@ import type {
   RoomInfo,
   RoomModeConfig,
   RoleInfo,
+  ScheduledTask,
   Screen,
   SearchGroup,
   SearchHit,
   SessionInfo,
   SkillInfo,
   SlashCommand,
+  TaskLog,
 } from "./types";
 import { HubClient } from "./client";
 import {
@@ -97,6 +99,8 @@ interface State {
   historyCache: Record<string, ChatItem[]>;
   historyCacheKeys: string[];
   fileUpdateAt: number;
+  scheduledTasks: ScheduledTask[];
+  taskLogs: TaskLog[];
 }
 
 interface Actions {
@@ -244,6 +248,13 @@ interface Actions {
   addAttachment(attachment: Attachment): void;
   removeAttachment(attachment: Attachment): void;
   clearAttachments(): void;
+  loadScheduledTasks(): Promise<void>;
+  createScheduledTask(input: Omit<ScheduledTask, "id" | "lastRunAt" | "nextRunAt" | "createdAt">): Promise<ScheduledTask>;
+  updateScheduledTask(id: string, patch: Partial<Omit<ScheduledTask, "id" | "createdAt">>): Promise<ScheduledTask>;
+  deleteScheduledTask(id: string): Promise<void>;
+  toggleScheduledTask(id: string): Promise<ScheduledTask>;
+  loadTaskLogs(): Promise<void>;
+  clearTaskLogs(): Promise<void>;
 }
 
 const defaultConfig: AppConfig = {
@@ -560,6 +571,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         });
         break;
       }
+      case "task.update": {
+        const tasks = (params.tasks as unknown[] | undefined) ?? [];
+        set({ scheduledTasks: tasks as ScheduledTask[] });
+        break;
+      }
     }
   };
 
@@ -748,6 +764,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     historyCache: {},
     historyCacheKeys: [],
     fileUpdateAt: 0,
+    scheduledTasks: [],
+    taskLogs: [],
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -985,6 +1003,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
           parseRoom(it as Record<string, unknown>),
         );
         set({ rooms: list });
+      } catch {}
+
+      try {
+        const tList = (await client.call("task.list")) as Record<string, unknown>;
+        const tasks = ((tList.tasks as unknown[] | undefined) ?? []) as ScheduledTask[];
+        set({ scheduledTasks: tasks });
       } catch {}
     },
 
@@ -2319,6 +2343,55 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     clearAttachments: () => set({ pendingAttachments: [] }),
+
+    loadScheduledTasks: async () => {
+      try {
+        const tList = (await getOrCall<Record<string, unknown>>("task.list")) as Record<string, unknown>;
+        const tasks = ((tList.tasks as unknown[] | undefined) ?? []) as ScheduledTask[];
+        set({ scheduledTasks: tasks });
+      } catch {}
+    },
+
+    createScheduledTask: async (input: Omit<ScheduledTask, "id" | "lastRunAt" | "nextRunAt" | "createdAt">) => {
+      const resp = await getOrCall<Record<string, unknown>>("task.create", input as unknown as Record<string, unknown>);
+      const task = resp.task as ScheduledTask;
+      set({ scheduledTasks: [...get().scheduledTasks, task] });
+      return task;
+    },
+
+    updateScheduledTask: async (id: string, patch: Partial<Omit<ScheduledTask, "id" | "createdAt">>) => {
+      const resp = await getOrCall<Record<string, unknown>>("task.update", { id, ...patch } as unknown as Record<string, unknown>);
+      const task = resp.task as ScheduledTask;
+      set({ scheduledTasks: get().scheduledTasks.map((t) => (t.id === id ? task : t)) });
+      return task;
+    },
+
+    deleteScheduledTask: async (id: string) => {
+      await getOrCall("task.delete", { id });
+      set({ scheduledTasks: get().scheduledTasks.filter((t) => t.id !== id) });
+    },
+
+    toggleScheduledTask: async (id: string) => {
+      const resp = await getOrCall<Record<string, unknown>>("task.toggle", { id });
+      const task = resp.task as ScheduledTask;
+      set({ scheduledTasks: get().scheduledTasks.map((t) => (t.id === id ? task : t)) });
+      return task;
+    },
+
+    loadTaskLogs: async () => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("task.logs", { limit: 200 });
+        const logs = ((resp.logs as unknown[] | undefined) ?? []) as TaskLog[];
+        set({ taskLogs: logs });
+      } catch {}
+    },
+
+    clearTaskLogs: async () => {
+      try {
+        await getOrCall("task.clearLogs");
+        set({ taskLogs: [] });
+      } catch {}
+    },
   };
 
   // derived slashCommands after store is created

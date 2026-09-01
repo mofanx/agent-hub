@@ -18,6 +18,7 @@ import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
+import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -415,6 +416,35 @@ if (savedRuntime) {
     .importRuntime(savedRuntime)
     .catch((err) => logError("import runtime", err));
 }
+
+const scheduler = new Scheduler(
+  store,
+  () => scheduler.persistTo(store),
+  (tasks) => broadcast({ method: "task.update", params: { tasks } } as HubEvent),
+  async (task) => {
+    if (task.targetType === "room") {
+      const room = rooms.get(task.targetId);
+      if (!room) throw new Error(`unknown room: ${task.targetId}`);
+      store.append("room", room.roomId, {
+        at: Date.now(),
+        kind: "user",
+        author: "定时任务",
+        text: `[${task.name}] ${task.message}`,
+      });
+      await roomModeManager.handle(room, task.message, {});
+      persistState();
+    } else {
+      store.append("session", task.targetId, {
+        at: Date.now(),
+        kind: "user",
+        author: "定时任务",
+        text: task.message,
+      });
+      await agentOps.prompt(task.targetId, [{ type: "text", text: task.message }]);
+    }
+  },
+);
+scheduler.start();
 
 function ownerOf(sessionId: string): AcpAgent {
   const connectionId = owners.get(sessionId);
@@ -1780,6 +1810,55 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!id) throw new Error("backend id required");
       modelManager.toggleBackend(id);
       return { toggled: true };
+    }
+    case "task.list":
+      return { tasks: scheduler.list() };
+    case "task.create": {
+      const name = String(req.params?.name ?? "");
+      const targetType = req.params?.targetType === "room" ? "room" : "session";
+      const targetId = String(req.params?.targetId ?? "");
+      const targetName = String(req.params?.targetName ?? "");
+      const message = String(req.params?.message ?? "");
+      const schedule = req.params?.schedule as ScheduledTask["schedule"];
+      const enabled = req.params?.enabled !== false;
+      if (!name || !targetId || !message || !schedule)
+        throw new Error("name, targetId, message, schedule required");
+      const task = scheduler.create({ name, targetType, targetId, targetName, message, schedule, enabled });
+      return { task };
+    }
+    case "task.update": {
+      const id = String(req.params?.id ?? "");
+      const patch: Partial<Omit<ScheduledTask, "id" | "createdAt">> = {};
+      if (typeof req.params?.name === "string") patch.name = req.params.name;
+      if (req.params?.targetType === "room" || req.params?.targetType === "session")
+        patch.targetType = req.params.targetType;
+      if (typeof req.params?.targetId === "string") patch.targetId = req.params.targetId;
+      if (typeof req.params?.targetName === "string") patch.targetName = req.params.targetName;
+      if (typeof req.params?.message === "string") patch.message = req.params.message;
+      if (req.params?.schedule) patch.schedule = req.params.schedule as ScheduledTask["schedule"];
+      if (typeof req.params?.enabled === "boolean") patch.enabled = req.params.enabled;
+      const task = scheduler.update(id, patch);
+      if (!task) throw new Error(`unknown task: ${id}`);
+      return { task };
+    }
+    case "task.delete": {
+      const id = String(req.params?.id ?? "");
+      if (!scheduler.delete(id)) throw new Error(`unknown task: ${id}`);
+      return { deleted: true };
+    }
+    case "task.toggle": {
+      const id = String(req.params?.id ?? "");
+      const task = scheduler.toggle(id);
+      if (!task) throw new Error(`unknown task: ${id}`);
+      return { task };
+    }
+    case "task.logs": {
+      const limit = Number(req.params?.limit ?? 100);
+      return { logs: scheduler.listLogs(limit) };
+    }
+    case "task.clearLogs": {
+      scheduler.clearLogs();
+      return { cleared: true };
     }
     default:
       throw new Error(`unknown method: ${req.method}`);

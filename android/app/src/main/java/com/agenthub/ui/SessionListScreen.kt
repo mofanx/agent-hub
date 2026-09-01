@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -271,6 +272,10 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         )
                     }
                     IconButton(onClick = { showFilter = true }) { Icon(Icons.Filled.FilterList, contentDescription = S.filter) }
+                    IconButton(onClick = {
+                        vm.scheduleReturnScreen = Screen.Sessions
+                        vm.screen = Screen.Schedule
+                    }) { Icon(Icons.Filled.CalendarMonth, contentDescription = S.scheduledTasks) }
                 },
             )
         },

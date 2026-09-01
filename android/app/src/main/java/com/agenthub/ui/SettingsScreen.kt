@@ -23,6 +23,7 @@ import android.widget.Toast
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -368,6 +369,34 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         },
                         modifier = Modifier.padding(top = 4.dp),
                     ) { Text("应用详情设置") }
+                }
+            }
+            Card(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable {
+                    vm.scheduleReturnScreen = Screen.Settings
+                    vm.screen = Screen.Schedule
+                },
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                ),
+            ) {
+                Row(
+                    Modifier.padding(16.dp).fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.CalendarMonth, contentDescription = null, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.size(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(S.scheduledTasks, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "定时向会话或群聊发送消息",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = null,
+                        modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             Card(

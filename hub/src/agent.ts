@@ -44,7 +44,8 @@ export type HubEvent =
   | { method: "session.artifact"; params: { sessionId: string } }
   | { method: "room.blackboardUpdate"; params: { roomId: string; blackboard: { id: string; from: string; text: string; detail: string; at: number }[] } }
   | { method: "file.update"; params: { roomId?: string; sessionId?: string; path: string; op: "delete" | "rename"; from?: string; to?: string } }
-  | { method: "agent.status"; params: { status: string; detail?: string } };
+  | { method: "agent.status"; params: { status: string; detail?: string } }
+  | { method: "task.update"; params: { tasks: unknown[] } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 

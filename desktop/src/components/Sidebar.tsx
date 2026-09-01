@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
+  CalendarClock,
   CheckSquare,
   ChevronsUpDown,
   Copy,
@@ -277,7 +278,10 @@ export function Sidebar() {
         <button className="icon-btn" title="展开侧栏" onClick={() => setCollapsed(false)}>
           <PanelLeftOpen size={16} />
         </button>
-        <button className="icon-btn" title="设置" onClick={() => useHubStore.setState({ screen: "settings" })}>
+        <button className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`} title="定时任务" onClick={() => useHubStore.setState({ screen: "schedule" })}>
+          <CalendarClock size={16} />
+        </button>
+        <button className={`icon-btn ${store.screen === "settings" ? "active" : ""}`} title="设置" onClick={() => useHubStore.setState({ screen: "settings" })}>
           <Settings size={16} />
         </button>
       </aside>
@@ -425,6 +429,13 @@ export function Sidebar() {
           onClick={cycleTheme}
         >
           {themeIcon}
+        </button>
+        <button
+          className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`}
+          title="定时任务"
+          onClick={() => useHubStore.setState({ screen: "schedule" })}
+        >
+          <CalendarClock size={15} />
         </button>
         <button
           className={`icon-btn ${store.screen === "settings" ? "active" : ""}`}

@@ -181,6 +181,38 @@ data class FlowArtifact(
     val summary: String = "",
 )
 
+data class ScheduledTask(
+    val id: String,
+    val name: String,
+    val targetType: String, // "session" | "room"
+    val targetId: String,
+    val targetName: String,
+    val message: String,
+    val scheduleMode: String, // "simple" | "cron"
+    val simpleKind: String? = null, // "daily" | "interval" | "once"
+    val time: String? = null,
+    val intervalMinutes: Int? = null,
+    val at: Long? = null,
+    val cronExpr: String? = null,
+    val enabled: Boolean = true,
+    val lastRunAt: Long? = null,
+    val nextRunAt: Long? = null,
+    val createdAt: Long = 0,
+)
+
+data class TaskLog(
+    val id: String,
+    val taskId: String,
+    val taskName: String,
+    val targetType: String,
+    val targetId: String,
+    val targetName: String,
+    val message: String,
+    val at: Long,
+    val success: Boolean,
+    val error: String?,
+)
+
 data class FlowTask(
     val id: String,
     val sessionId: String,
@@ -325,7 +357,7 @@ data class SkillInfo(
     val scope: String,
 )
 
-enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings }
+enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings, Schedule }
 
 data class ConnProfile(
     val name: String,
@@ -421,6 +453,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val roles = mutableStateListOf<RoleInfo>()
     val skills = mutableStateListOf<SkillInfo>()
     val connections = mutableStateListOf<ConnectionInfo>()
+    val scheduledTasks = mutableStateListOf<ScheduledTask>()
+    val taskLogs = mutableStateListOf<TaskLog>()
+    var scheduleReturnScreen by mutableStateOf(Screen.Sessions)
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     var flow by mutableStateOf<FlowInfo?>(null)
@@ -1167,7 +1202,200 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (_: Exception) {
             }
+            try {
+                val result = hub.call("task.list")
+                val list = result["tasks"]?.jsonArray ?: return
+                scheduledTasks.clear()
+                for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+            } catch (_: Exception) {
+            }
         }
+
+    private fun parseTask(o: JsonObject): ScheduledTask {
+        val sched = o["schedule"]!!.jsonObject
+        return ScheduledTask(
+            id = o["id"]!!.jsonPrimitive.content,
+            name = o["name"]!!.jsonPrimitive.content,
+            targetType = o["targetType"]?.jsonPrimitive?.content ?: "session",
+            targetId = o["targetId"]!!.jsonPrimitive.content,
+            targetName = o["targetName"]?.jsonPrimitive?.content ?: "",
+            message = o["message"]!!.jsonPrimitive.content,
+            scheduleMode = sched["mode"]?.jsonPrimitive?.content ?: "simple",
+            simpleKind = sched["kind"]?.jsonPrimitive?.content,
+            time = sched["time"]?.jsonPrimitive?.content,
+            intervalMinutes = sched["intervalMinutes"]?.jsonPrimitive?.content?.toIntOrNull(),
+            at = sched["at"]?.jsonPrimitive?.content?.toLongOrNull(),
+            cronExpr = sched["expr"]?.jsonPrimitive?.content,
+            enabled = o["enabled"]?.jsonPrimitive?.content?.toBoolean() ?: true,
+            lastRunAt = o["lastRunAt"]?.jsonPrimitive?.content?.toLongOrNull(),
+            nextRunAt = o["nextRunAt"]?.jsonPrimitive?.content?.toLongOrNull(),
+            createdAt = o["createdAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+        )
+    }
+
+    fun loadScheduledTasks() {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("task.list")
+                val list = result["tasks"]?.jsonArray ?: return@launch
+                scheduledTasks.clear()
+                for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun createScheduledTask(
+        name: String,
+        targetType: String,
+        targetId: String,
+        targetName: String,
+        message: String,
+        scheduleMode: String,
+        simpleKind: String?,
+        time: String?,
+        intervalMinutes: Int?,
+        at: Long?,
+        cronExpr: String?,
+        enabled: Boolean,
+        onDone: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            try {
+                val sched = buildJsonObject {
+                    put("mode", scheduleMode)
+                    if (scheduleMode == "simple") {
+                        simpleKind?.let { put("kind", it) }
+                        time?.let { put("time", it) }
+                        intervalMinutes?.let { put("intervalMinutes", it) }
+                        at?.let { put("at", it) }
+                    } else {
+                        cronExpr?.let { put("expr", it) }
+                    }
+                }
+                val result = hub.call("task.create", buildJsonObject {
+                    put("name", name)
+                    put("targetType", targetType)
+                    put("targetId", targetId)
+                    put("targetName", targetName)
+                    put("message", message)
+                    put("schedule", sched)
+                    put("enabled", enabled)
+                })
+                val task = parseTask(result["task"]!!.jsonObject)
+                scheduledTasks.add(task)
+                onDone()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun updateScheduledTask(
+        id: String,
+        name: String,
+        targetType: String,
+        targetId: String,
+        targetName: String,
+        message: String,
+        scheduleMode: String,
+        simpleKind: String?,
+        time: String?,
+        intervalMinutes: Int?,
+        at: Long?,
+        cronExpr: String?,
+        enabled: Boolean,
+        onDone: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            try {
+                val sched = buildJsonObject {
+                    put("mode", scheduleMode)
+                    if (scheduleMode == "simple") {
+                        simpleKind?.let { put("kind", it) }
+                        time?.let { put("time", it) }
+                        intervalMinutes?.let { put("intervalMinutes", it) }
+                        at?.let { put("at", it) }
+                    } else {
+                        cronExpr?.let { put("expr", it) }
+                    }
+                }
+                val result = hub.call("task.update", buildJsonObject {
+                    put("id", id)
+                    put("name", name)
+                    put("targetType", targetType)
+                    put("targetId", targetId)
+                    put("targetName", targetName)
+                    put("message", message)
+                    put("schedule", sched)
+                    put("enabled", enabled)
+                })
+                val task = parseTask(result["task"]!!.jsonObject)
+                val idx = scheduledTasks.indexOfFirst { it.id == id }
+                if (idx >= 0) scheduledTasks[idx] = task
+                onDone()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun deleteScheduledTask(id: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("task.delete", buildJsonObject { put("id", id) })
+                scheduledTasks.removeAll { it.id == id }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun toggleScheduledTask(id: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("task.toggle", buildJsonObject { put("id", id) })
+                val task = parseTask(result["task"]!!.jsonObject)
+                val idx = scheduledTasks.indexOfFirst { it.id == id }
+                if (idx >= 0) scheduledTasks[idx] = task
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun parseLog(o: JsonObject): TaskLog {
+        return TaskLog(
+            id = o["id"]!!.jsonPrimitive.content,
+            taskId = o["taskId"]!!.jsonPrimitive.content,
+            taskName = o["taskName"]?.jsonPrimitive?.content ?: "",
+            targetType = o["targetType"]?.jsonPrimitive?.content ?: "session",
+            targetId = o["targetId"]?.jsonPrimitive?.content ?: "",
+            targetName = o["targetName"]?.jsonPrimitive?.content ?: "",
+            message = o["message"]?.jsonPrimitive?.content ?: "",
+            at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            success = o["success"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+            error = o["error"]?.jsonPrimitive?.content,
+        )
+    }
+
+    fun loadTaskLogs() {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("task.logs", buildJsonObject { put("limit", 200) })
+                val list = result["logs"]?.jsonArray ?: return@launch
+                taskLogs.clear()
+                for (l in list) taskLogs.add(parseLog(l.jsonObject))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun clearTaskLogs() {
+        viewModelScope.launch {
+            try {
+                hub.call("task.clearLogs")
+                taskLogs.clear()
+            } catch (_: Exception) {
+            }
+        }
+    }
 
     private fun restoreCurrentScreen() {
         val room = currentRoom
@@ -3040,6 +3268,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         author = sessionName(sid),
                     )
                 )
+            }
+            "task.update" -> {
+                val p = obj["params"]!!.jsonObject
+                val list = p["tasks"]?.jsonArray ?: return
+                scheduledTasks.clear()
+                for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
             }
         }
     }

@@ -229,7 +229,51 @@ export type ChatItem =
       author: string;
     };
 
-export type Screen = "connect" | "sessions" | "chat" | "room" | "settings";
+export type Screen = "connect" | "sessions" | "chat" | "room" | "settings" | "schedule";
+
+export type ScheduleMode = "simple" | "cron";
+
+export type SimpleSchedule = {
+  mode: "simple";
+  kind: "daily" | "interval" | "once";
+  time?: string;
+  intervalMinutes?: number;
+  at?: number;
+};
+
+export type CronSchedule = {
+  mode: "cron";
+  expr: string;
+};
+
+export type Schedule = SimpleSchedule | CronSchedule;
+
+export type ScheduledTask = {
+  id: string;
+  name: string;
+  targetType: "session" | "room";
+  targetId: string;
+  targetName: string;
+  message: string;
+  schedule: Schedule;
+  enabled: boolean;
+  lastRunAt: number | null;
+  nextRunAt: number | null;
+  createdAt: number;
+};
+
+export type TaskLog = {
+  id: string;
+  taskId: string;
+  taskName: string;
+  targetType: "session" | "room";
+  targetId: string;
+  targetName: string;
+  message: string;
+  at: number;
+  success: boolean;
+  error: string | null;
+};
 
 export interface SlashCommand {
   name: string;

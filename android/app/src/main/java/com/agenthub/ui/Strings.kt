@@ -98,6 +98,22 @@ interface Strings {
     val nameExists: String
     val chat: String
     val settings: String
+    val scheduledTasks: String
+    val createTask: String
+    val editTask: String
+    val taskName: String
+    val taskTarget: String
+    val taskMessage: String
+    val taskSchedule: String
+    val scheduleSimple: String
+    val scheduleCron: String
+    val scheduleDaily: String
+    val scheduleInterval: String
+    val scheduleOnce: String
+    val taskEnabled: String
+    val noTasks: String
+    val nextRun: String
+    val lastRun: String
     val theme: String
     val themeSystem: String
     val themeLight: String
@@ -265,6 +281,22 @@ object ZhStrings : Strings {
     override val nameExists = "名称已存在"
     override val chat = "聊天"
     override val settings = "设置"
+    override val scheduledTasks = "定时任务"
+    override val createTask = "创建定时任务"
+    override val editTask = "编辑定时任务"
+    override val taskName = "名称"
+    override val taskTarget = "目标"
+    override val taskMessage = "消息内容"
+    override val taskSchedule = "调度"
+    override val scheduleSimple = "简易"
+    override val scheduleCron = "高级"
+    override val scheduleDaily = "每天"
+    override val scheduleInterval = "间隔"
+    override val scheduleOnce = "一次性"
+    override val taskEnabled = "启用"
+    override val noTasks = "暂无定时任务"
+    override val nextRun = "下次执行"
+    override val lastRun = "上次执行"
     override val theme = "主题"
     override val themeSystem = "跟随系统"
     override val themeLight = "浅色"
@@ -432,6 +464,22 @@ object EnStrings : Strings {
     override val nameExists = "Name already exists"
     override val chat = "Chat"
     override val settings = "Settings"
+    override val scheduledTasks = "Scheduled Tasks"
+    override val createTask = "Create Task"
+    override val editTask = "Edit Task"
+    override val taskName = "Name"
+    override val taskTarget = "Target"
+    override val taskMessage = "Message"
+    override val taskSchedule = "Schedule"
+    override val scheduleSimple = "Simple"
+    override val scheduleCron = "Cron"
+    override val scheduleDaily = "Daily"
+    override val scheduleInterval = "Interval"
+    override val scheduleOnce = "Once"
+    override val taskEnabled = "Enabled"
+    override val noTasks = "No scheduled tasks"
+    override val nextRun = "Next run"
+    override val lastRun = "Last run"
     override val theme = "Theme"
     override val themeSystem = "System"
     override val themeLight = "Light"
