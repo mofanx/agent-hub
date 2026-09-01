@@ -41,6 +41,36 @@ cd android
 - 必须新增时，选择已发布至少 7 天的版本，避免 `latest`、`*` 等浮动范围。
 - Android 依赖通过 `gradle/libs.versions.toml` 管理。
 
+### Gradle 版本统一（Android）
+
+- **一律使用项目内的 `./gradlew`，禁止直接调用系统 `gradle`。**
+  系统包（如 apt 的 `gradle 4.4.1`）版本陈旧且与项目无关，不要用它构建，也不要为了"省事"再装一个全局 gradle。
+- 版本由 `android/gradle/wrapper/gradle-wrapper.properties` 中的 `distributionUrl` 锁定（当前 **9.5.1**）。
+  首次运行 `./gradlew` 会自动下载到 `~/.gradle/wrapper/dists/`，之后离线可用，重启不丢。
+- 升级 gradle 时**只改 wrapper 配置**，不要在机器上手动铺新版本：
+  ```bash
+  cd android
+  ./gradlew wrapper --gradle-version <新版本>
+  ```
+  提交 `gradle-wrapper.properties` 即可，所有协作者拉取后自动同步。
+- 如需切换本机默认 JDK，配 `org.gradle.java.home` 或用 `JAVA_HOME`，不要靠改系统 gradle 来绕。
+- 依赖版本统一走 `gradle/libs.versions.toml`，不要在 `build.gradle.kts` 里硬编码版本号。
+
+### Gradle 版本统一（Android）
+
+- **一律使用项目内的 `./gradlew`，禁止直接调用系统 `gradle`。**
+  系统包（如 apt 的 `gradle 4.4.1`）版本陈旧且与项目无关，不要用它构建，也不要为了"省事"再装一个全局 gradle。
+- 版本由 `android/gradle/wrapper/gradle-wrapper.properties` 中的 `distributionUrl` 锁定（当前 **9.5.1**）。
+  首次运行 `./gradlew` 会自动下载到 `~/.gradle/wrapper/dists/`，之后离线可用，重启不丢。
+- 升级 gradle 时**只改 wrapper 配置**，不要在机器上手动铺新版本：
+  ```bash
+  cd android
+  ./gradlew wrapper --gradle-version <新版本>
+  ```
+  提交 `gradle-wrapper.properties` 即可，所有协作者拉取后自动同步。
+- 如需切换本机默认 JDK，配 `org.gradle.java.home` 或用 `JAVA_HOME`，不要靠改系统 gradle 来绕。
+- 依赖版本统一走 `gradle/libs.versions.toml`，不要在 `build.gradle.kts` 里硬编码版本号。
+
 ## 代码约定
 
 - **不要**主动新增注释或文档文件，除非明确要求。
@@ -85,7 +115,4 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 - **Flow 状态**：`room.flow` API + `room.flowUpdate` 事件，前后端同步编排进度。
 - **Artifact 自动捕获**：从子任务输出中扫描 ````bash` 块、diff 块、文件路径和显式文件声明。
 - **ACP fs 能力**：Hub 声明 `fs.readTextFile` / `fs.writeTextFile`，直接感知 agent 文件写入并同步产物与事件。
-- **tool_call 捕获**：解析 `session/update` 中的 `tool_call` / `tool_call_update`，记录 edit/delete/move/execute 等关键动作（过滤 read/search 等低价值事件）。
-- **产物/事件面板**：Android 与桌面端均支持文件产物预览、下载、删除，以及事件清空、按类型过滤、批量删除。
-- **角色卡绑定**：房间成员可绑定 `memberRoles`，prompt 注入对应 persona。
-- **持久化**：SQLite（`hub/data/hub.db`），Hub 重启自动恢复。
+- **tool_call 捕获**：解析 `session/update` 中的 `tool_call` / `tool_call_update`，记录 edit/delete/move/execute 等关键动

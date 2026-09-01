@@ -46,6 +46,14 @@ module.exports = {
       // 合并输出到单一日志文件
       merge_logs: true,
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      // 日志轮转：依赖 pm2-logrotate 模块（全局生效，无需在此声明）
+      // 安装：pm2 install pm2-logrotate
+      // 配置：pm2 set pm2-logrotate:max_size 50M     # 单文件超 50M 轮转
+      //       pm2 set pm2-logrotate:retain 5         # 保留 5 份历史
+      //       pm2 set pm2-logrotate:compress true    # 旧日志 gzip
+      //       pm2 set pm2-logrotate:dateFormat YYYY-MM-DD_HH-mm-ss
+      // 注意：pm2 5.x 内置轮转已废弃，必须用 pm2-logrotate，否则日志无限增长
+      //       历史教训：未配轮转时 agent-hub-error.log 曾涨到 951M（devin CLI 的 INFO 走 stderr 全进 error.log）
       // 不监听文件变化，避免开发保存触发线上重启
       watch: false,
       // Node 堆上限 1024MB（与 max_memory_restart 对齐，避免 V8 先 OOM）
