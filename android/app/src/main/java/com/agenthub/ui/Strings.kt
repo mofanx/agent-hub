@@ -84,6 +84,7 @@ interface Strings {
     val stop: String
     val quoting: String
     val copy: String
+    val copyFull: String
     val selectText: String
     val copied: String
     val inputRoom: String
@@ -267,6 +268,7 @@ object ZhStrings : Strings {
     override val stop = "停止"
     override val quoting = "引用"
     override val copy = "复制"
+    override val copyFull = "复制全文"
     override val selectText = "选取文字"
     override val copied = "已复制"
     override val inputRoom = "群聊消息，@名字 指定成员"
@@ -450,6 +452,7 @@ object EnStrings : Strings {
     override val stop = "Stop"
     override val quoting = "Quote"
     override val copy = "Copy"
+    override val copyFull = "Copy full text"
     override val selectText = "Select text"
     override val copied = "Copied"
     override val inputRoom = "Message, @name to mention"

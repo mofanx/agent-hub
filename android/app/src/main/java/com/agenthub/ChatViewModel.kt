@@ -15,6 +15,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.State
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +38,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 import com.agenthub.ui.Strings
 import com.agenthub.ui.stringsFor
+import com.agenthub.ui.splitMessageBlocks
 
 data class Attachment(
     val mimeType: String,
@@ -113,6 +116,41 @@ sealed class ChatItem {
         override val at: Long = 0,
     ) : ChatItem() {
         override val text: String get() = title
+    }
+}
+
+/** 聊天列表里的可显示项：单个消息会按 Markdown 块展开为多个 ChatListItem.Message。 */
+sealed class ChatListItem {
+    abstract val id: String
+    abstract val originalId: Long
+    abstract val author: String
+    abstract val text: String
+    abstract val at: Long
+    abstract val isFirst: Boolean
+
+    data class Message(
+        override val id: String,
+        override val originalId: Long,
+        override val author: String,
+        override val text: String,
+        val content: String,
+        override val at: Long,
+        val isUser: Boolean,
+        override val isFirst: Boolean,
+        val isLast: Boolean,
+        val quoteAuthor: String? = null,
+        val quoteText: String? = null,
+        val attachments: List<Attachment> = emptyList(),
+        val usage: TokenUsage? = null,
+    ) : ChatListItem()
+
+    data class Other(val item: ChatItem) : ChatListItem() {
+        override val id: String get() = item.id.toString()
+        override val originalId: Long get() = item.id
+        override val author: String get() = item.author
+        override val text: String get() = item.text
+        override val at: Long get() = item.at
+        override val isFirst: Boolean get() = true
     }
 }
 
@@ -477,12 +515,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var fileTreeLoading by mutableStateOf(false)
     var filePreview by mutableStateOf<FilePreview?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
+    val chatListItems: State<List<ChatListItem>> = derivedStateOf { expandChatItems(chatItems) }
+    private val chatListCache = mutableMapOf<Pair<Long, String>, List<ChatListItem>>()
     val busyIds = mutableStateListOf<String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
     var multiSelectMode by mutableStateOf(false)
-    val selectedMessageIds = mutableStateListOf<Long>()
+    val selectedMessageIds = mutableStateListOf<String>()
     var fileRefToInsert by mutableStateOf<String?>(null)
     var pendingDownload by mutableStateOf<DownloadRequest?>(null)
 
@@ -2498,11 +2538,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         quote = sessionName(entry.from) to entry.text
     }
 
-    fun toggleMessageSelection(id: Long) {
+    fun toggleMessageSelection(id: String) {
         if (selectedMessageIds.contains(id)) selectedMessageIds.remove(id) else selectedMessageIds.add(id)
     }
 
-    fun enterMultiSelect(id: Long) {
+    fun enterMultiSelect(id: String) {
         multiSelectMode = true
         selectedMessageIds.clear()
         selectedMessageIds.add(id)
@@ -2515,23 +2555,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun quoteSelectedMessages() {
         if (selectedMessageIds.isEmpty()) return
-        val items = chatItems.filter { it.id in selectedMessageIds }
+        val items = chatListItems.value.filter { it.id in selectedMessageIds }
         if (items.isEmpty()) return
-        val combined = items.joinToString("\n\n") { "@${it.author}: ${it.text.take(500)}" }
-        quote = items.joinToString(", ") { it.author } to combined
+        val byOriginal = items.distinctBy { it.originalId }
+        val combined = byOriginal.joinToString("\n\n") { "@${it.author}: ${it.text.take(500)}" }
+        quote = byOriginal.joinToString(", ") { it.author } to combined
         exitMultiSelect()
     }
 
     fun copySelectedMessages() {
         if (selectedMessageIds.isEmpty()) return
-        val items = chatItems.filter { it.id in selectedMessageIds }
-        val text = items.joinToString("\n\n") { "@${it.author}: ${it.text}" }
+        val items = chatListItems.value.filter { it.id in selectedMessageIds }
+        val byOriginal = items.distinctBy { it.originalId }
+        val text = byOriginal.joinToString("\n\n") { "@${it.author}: ${it.text}" }
         viewModelScope.launch {
             // 复制到剪贴板
             val ctx = getApplication<Application>().applicationContext
             val clipboard = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
             clipboard.setPrimaryClip(android.content.ClipData.newPlainText(null, text))
-            android.widget.Toast.makeText(ctx, "已复制 ${items.size} 条消息", android.widget.Toast.LENGTH_SHORT).show()
+            android.widget.Toast.makeText(ctx, "已复制 ${byOriginal.size} 条消息", android.widget.Toast.LENGTH_SHORT).show()
         }
         exitMultiSelect()
     }
@@ -3329,6 +3371,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } ?: return
                 chatItems.add(ChatItem.Plan(++itemSeq, entries, author))
             }
+        }
+    }
+
+    private fun expandChatItems(items: List<ChatItem>): List<ChatListItem> {
+        val currentKeys = items.map { it.id to it.text }.toSet()
+        chatListCache.keys.retainAll(currentKeys)
+        return items.flatMap { item ->
+            when (item) {
+                is ChatItem.User -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = true) }
+                is ChatItem.Assistant -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
+                else -> listOf(ChatListItem.Other(item))
+            }
+        }
+    }
+
+    private fun splitItemBlocks(item: ChatItem, isUser: Boolean): List<ChatListItem> {
+        val blocks = splitMessageBlocks(item.text)
+        if (blocks.isEmpty()) return listOf(ChatListItem.Other(item))
+        val userItem = if (isUser) item as ChatItem.User else null
+        val assistantItem = if (!isUser) item as ChatItem.Assistant else null
+        return blocks.mapIndexed { index, block ->
+            val isFirst = block.isFirst
+            val isLast = block.isLast
+            val id = if (index == 0) item.id.toString() else "${item.id}_${index}"
+            val attachments = if (isFirst) userItem?.attachments ?: emptyList() else emptyList()
+            val quoteAuthor = if (isFirst) userItem?.quoteAuthor else null
+            val quoteText = if (isFirst) userItem?.quoteText else null
+            val usage = if (isLast) assistantItem?.usage else null
+            ChatListItem.Message(
+                id = id,
+                originalId = item.id,
+                author = item.author,
+                text = item.text,
+                content = block.text,
+                at = item.at,
+                isUser = isUser,
+                isFirst = isFirst,
+                isLast = isLast,
+                quoteAuthor = quoteAuthor,
+                quoteText = quoteText,
+                attachments = attachments,
+                usage = usage,
+            )
         }
     }
 

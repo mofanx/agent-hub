@@ -146,6 +146,7 @@ import com.agenthub.BlackboardEntry
 import com.agenthub.EventInfo
 import com.agenthub.Attachment
 import com.agenthub.ChatItem
+import com.agenthub.ChatListItem
 import com.agenthub.ChatViewModel
 import com.agenthub.DownloadRequest
 import com.agenthub.FileTreeNode
@@ -200,14 +201,14 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val listState = remember(sessionKey) { LazyListState(0, 0) }
     val activeSessionId = vm.currentRoom?.activeSpeaker ?: vm.currentSession?.sessionId
     val contextUsage by remember { derivedStateOf { activeSessionId?.let { vm.sessionUsage[it] } } }
-    val isAtBottom by produceState(false, listState, vm.chatItems.size) {
+    val isAtBottom by produceState(false, listState, vm.chatListItems.value.size) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .collect { (index, offset) ->
                 value = index == 0 && offset <= 20
             }
     }
     val scope = rememberCoroutineScope()
-    val messages by remember { derivedStateOf { vm.chatItems.asReversed() } }
+    val messages by remember { derivedStateOf { vm.chatListItems.value.asReversed() } }
     val isAtTop by remember { derivedStateOf { messages.isNotEmpty() && listState.firstVisibleItemIndex >= messages.lastIndex - 2 } }
 
     var activeDownload by remember { mutableStateOf<DownloadRequest?>(null) }
@@ -236,7 +237,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             vm.loadMoreHistory()
         }
     }
-    val matchPositions by remember(vm.chatItems, vm.inChatSearchQuery) {
+    val matchPositions by remember {
         derivedStateOf {
             val q = vm.inChatSearchQuery
             if (q.isBlank()) emptyList()
@@ -265,7 +266,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     LaunchedEffect(vm.jumpToHistoryId, matchPositions) {
         val targetId = vm.jumpToHistoryId ?: return@LaunchedEffect
-        val targetIndex = messages.indexOfFirst { it.id == -targetId }
+        val targetIndex = messages.indexOfFirst { it.originalId == -targetId }
         if (targetIndex >= 0) {
             val pos = matchPositions.indexOf(targetIndex).takeIf { it >= 0 } ?: 0
             vm.chatSearchMatchIndex = if (matchPositions.isNotEmpty()) pos else -1
@@ -473,7 +474,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         ChatBubble(
                             item,
                             vm,
-                            showAuthor = isRoom && nextAuthor != item.author,
+                            showAuthor = isRoom && item.isFirst && nextAuthor != item.author,
                             highlight = vm.inChatSearchQuery,
                             isCurrentMatch = currentMatchIndex == index,
                             isQuoted = isQuoted,
@@ -971,9 +972,10 @@ fun AuthorLabel(author: String) {
 @Composable
 private fun MessageBubbleBox(
     copyText: String,
+    fullText: String = copyText,
     quote: Pair<String, String>?,
     vm: ChatViewModel,
-    itemId: Long,
+    itemId: String,
     canSelect: Boolean,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
@@ -1013,6 +1015,13 @@ private fun MessageBubbleBox(
                             vm.enterMultiSelect(itemId)
                             close()
                         }
+                    }
+                    item(key = "copy_full", label = S.copyFull) {
+                        scope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, fullText)))
+                        }
+                        Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
+                        close()
                     }
                     quote?.let { (author, text) ->
                         item(key = "quote", label = S.quoting) {
@@ -1097,6 +1106,176 @@ fun HighlightText(
 
 @Composable
 fun ChatBubble(
+    item: ChatListItem,
+    vm: ChatViewModel,
+    showAuthor: Boolean,
+    highlight: String = "",
+    isCurrentMatch: Boolean = false,
+    isQuoted: Boolean = false,
+    onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
+    when (item) {
+        is ChatListItem.Other -> RawChatBubble(
+            item.item,
+            vm,
+            showAuthor = showAuthor,
+            highlight = highlight,
+            isCurrentMatch = isCurrentMatch,
+            isQuoted = isQuoted,
+            onMatchKeywordY = onMatchKeywordY,
+        )
+        is ChatListItem.Message -> MessageBlock(
+            item,
+            vm,
+            showAuthor = showAuthor,
+            highlight = highlight,
+            isCurrentMatch = isCurrentMatch,
+            isQuoted = isQuoted,
+            onMatchKeywordY = onMatchKeywordY,
+        )
+    }
+}
+
+@Composable
+private fun MessageBlock(
+    item: ChatListItem.Message,
+    vm: ChatViewModel,
+    showAuthor: Boolean,
+    highlight: String = "",
+    isCurrentMatch: Boolean = false,
+    isQuoted: Boolean = false,
+    onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
+    val S = LocalStrings.current
+    val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
+    val bubbleModifier = if (isCurrentMatch) Modifier.border(
+        width = 2.dp,
+        color = MaterialTheme.colorScheme.tertiary,
+        shape = RoundedCornerShape(12.dp),
+    ) else if (isQuoted) Modifier.border(
+        width = 2.dp,
+        color = MaterialTheme.colorScheme.primary,
+        shape = RoundedCornerShape(12.dp),
+    ) else Modifier
+
+    val (topStart, topEnd, bottomEnd, bottomStart) = when {
+        item.isUser && item.isFirst && item.isLast -> listOf(18.dp, 18.dp, 4.dp, 18.dp)
+        item.isUser && item.isFirst -> listOf(18.dp, 18.dp, 0.dp, 0.dp)
+        item.isUser && item.isLast -> listOf(0.dp, 0.dp, 4.dp, 18.dp)
+        item.isUser -> listOf(0.dp, 0.dp, 0.dp, 0.dp)
+        item.isFirst && item.isLast -> listOf(18.dp, 18.dp, 18.dp, 4.dp)
+        item.isFirst -> listOf(18.dp, 18.dp, 0.dp, 0.dp)
+        item.isLast -> listOf(0.dp, 0.dp, 18.dp, 4.dp)
+        else -> listOf(0.dp, 0.dp, 0.dp, 0.dp)
+    }
+    val shape = RoundedCornerShape(topStart, topEnd, bottomEnd, bottomStart)
+    val blockTop = if (item.isFirst) 4.dp else 0.dp
+    val blockBottom = if (item.isLast) 4.dp else 0.dp
+
+    if (item.isUser) {
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer
+            val quoteColor = textColor.copy(alpha = 0.7f)
+            MessageBubbleBox(
+                copyText = item.content,
+                fullText = item.text,
+                quote = item.author to item.text,
+                vm = vm,
+                itemId = item.id,
+                canSelect = true,
+                modifier = bubbleModifier.padding(top = blockTop, bottom = blockBottom),
+            ) {
+                Surface(
+                    shape = shape,
+                    color = bgColor,
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        if (item.isFirst && item.quoteAuthor != null) {
+                            Text(
+                                "${S.quoting} @${item.quoteAuthor}: ${item.quoteText?.take(80).orEmpty()}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = quoteColor,
+                                maxLines = 2,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        if (item.content.isNotBlank()) {
+                            MarkdownText(
+                                text = item.content,
+                                modifier = Modifier
+                                    .heightIn(max = 600.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                textColor = textColor,
+                                fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                                highlight = highlight,
+                                onMatchKeywordY = keywordCallback,
+                            )
+                        }
+                        if (item.isFirst && item.attachments.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            LazyRow(Modifier.height(120.dp)) {
+                                items(item.attachments, key = { it.base64.hashCode() }) { a ->
+                                    AttachmentImage(
+                                        a,
+                                        Modifier
+                                            .padding(end = 8.dp)
+                                            .size(120.dp)
+                                            .clip(RoundedCornerShape(12.dp)),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        Column(Modifier.padding(top = blockTop, bottom = blockBottom)) {
+            if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            MessageBubbleBox(
+                copyText = item.content,
+                fullText = item.text,
+                quote = item.author to item.text,
+                vm = vm,
+                itemId = item.id,
+                canSelect = true,
+                modifier = bubbleModifier.fillMaxWidth(),
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = shape,
+                    color = bgColor,
+                ) {
+                    MarkdownText(
+                        text = item.content,
+                        modifier = Modifier
+                            .heightIn(max = 600.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        textColor = textColor,
+                        fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                        highlight = highlight,
+                        onMatchKeywordY = keywordCallback,
+                    )
+                }
+            }
+            if (item.isLast && item.usage != null) {
+                Text(
+                    item.usage.format(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RawChatBubble(
     item: ChatItem,
     vm: ChatViewModel,
     showAuthor: Boolean,
@@ -1127,7 +1306,7 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = null,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = false,
                 modifier = bubbleModifier,
             ) {
@@ -1155,7 +1334,7 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = true,
                 modifier = bubbleModifier.padding(vertical = 4.dp),
             ) {
@@ -1176,6 +1355,9 @@ fun ChatBubble(
                         if (item.text.isNotBlank()) {
                             MarkdownText(
                                 text = item.text,
+                                modifier = Modifier
+                                    .heightIn(max = 400.dp)
+                                    .verticalScroll(rememberScrollState()),
                                 textColor = textColor,
                                 fontSize = MaterialTheme.typography.bodyLarge.fontSize,
                                 highlight = highlight,
@@ -1209,7 +1391,7 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = item.author to item.text,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = true,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
@@ -1220,7 +1402,10 @@ fun ChatBubble(
                 ) {
                     MarkdownText(
                         text = item.text,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .heightIn(max = 400.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         textColor = textColor,
                         fontSize = MaterialTheme.typography.bodyLarge.fontSize,
                         highlight = highlight,
@@ -1245,7 +1430,7 @@ fun ChatBubble(
                 copyText = item.text,
                 quote = null,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = true,
                 modifier = bubbleModifier.padding(vertical = 2.dp),
             ) {
@@ -1295,7 +1480,7 @@ fun ChatBubble(
                 copyText = "[${item.title}] ${item.status}",
                 quote = null,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = false,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
@@ -1339,7 +1524,7 @@ fun ChatBubble(
                 copyText = "${S.plan}\n${item.entries.joinToString("\n")}",
                 quote = null,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = false,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
@@ -1378,7 +1563,7 @@ fun ChatBubble(
                 copyText = text,
                 quote = null,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = false,
                 modifier = bubbleModifier.padding(vertical = 4.dp),
             ) {
@@ -1408,7 +1593,7 @@ fun ChatBubble(
                 copyText = item.title,
                 quote = null,
                 vm = vm,
-                itemId = item.id,
+                itemId = item.id.toString(),
                 canSelect = false,
                 modifier = bubbleModifier.fillMaxWidth(),
             ) {
