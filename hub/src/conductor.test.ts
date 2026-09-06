@@ -156,6 +156,49 @@ describe("conductor", () => {
     assert.match(notices.at(-1) ?? "", /无法解析/);
   });
 
+  it("子任务派发失败后自动重试，失败依赖不解锁下游任务", async () => {
+    const rooms = new RoomManager();
+    const failRoom = rooms.create(
+      "fail-retry",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+          if (sessionId === "worker1") throw new Error("worker1 unavailable");
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(failRoom, "任务");
+    const plan = `\`\`\`json\n{"tasks":[{"id":"t1","to":"worker1","task":"先失败"},{"id":"t2","to":"worker2","task":"依赖 t1","dependsOn":["t1"]}]}\n\`\`\``;
+    await orchestrator.onPromptDone("conductor", plan);
+
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setImmediate(r));
+      if (prompts.filter((p) => p.sessionId === "worker1").length >= 3) break;
+    }
+
+    assert.equal(prompts.filter((p) => p.sessionId === "worker1").length, 3);
+    assert.equal(prompts.filter((p) => p.sessionId === "worker2").length, 0);
+
+    const flow = orchestrator.getFlow(failRoom.roomId);
+    assert.ok(flow);
+    const tasks = flow!.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "failed");
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "pending");
+  });
+
   it("空任务计划把指挥家的直接回答展示给用户", async () => {
     const rooms = new RoomManager();
     const conductorRoom = rooms.create(

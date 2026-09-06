@@ -390,14 +390,15 @@ export class ConductorOrchestrator {
         continue;
       }
       const taskId = t.id?.trim() || `t${i + 1}`;
-      idMap.set(String(i), taskId);
+      const dependsOn = this.normalizeDependsOn(t.dependsOn, tasks, i, idMap, room);
       flow.tasks.set(taskId, {
         id: taskId,
         sessionId: member.sessionId,
         task: t.task.trim(),
-        dependsOn: this.normalizeDependsOn(t.dependsOn, tasks, i, idMap, room),
+        dependsOn,
         status: "pending",
       });
+      idMap.set(String(i), taskId);
     }
 
     if (flow.tasks.size === 0) {
@@ -459,7 +460,7 @@ export class ConductorOrchestrator {
   private runnableTasks(flow: Flow): FlowTask[] {
     const doneIds = new Set<string>();
     for (const [id, t] of flow.tasks) {
-      if (t.status === "done" || t.status === "failed") doneIds.add(id);
+      if (t.status === "done") doneIds.add(id);
     }
     const runningSessions = new Set<string>();
     for (const t of flow.tasks.values()) {
@@ -468,7 +469,7 @@ export class ConductorOrchestrator {
     const out: FlowTask[] = [];
     for (const t of flow.tasks.values()) {
       if (t.status !== "pending") continue;
-      const depsDone = t.dependsOn.every((d) => doneIds.has(d) || !flow.tasks.has(d));
+      const depsDone = t.dependsOn.every((d) => doneIds.has(d));
       if (!depsDone) continue;
       if (runningSessions.has(t.sessionId)) continue;
       out.push(t);
@@ -477,6 +478,7 @@ export class ConductorOrchestrator {
   }
 
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
+    if (!this.flows.has(flow.roomId)) return;
     const tasks = this.runnableTasks(flow);
     if (tasks.length === 0) {
       const values = [...flow.tasks.values()];
@@ -538,6 +540,12 @@ export class ConductorOrchestrator {
         this.notice({
           roomId: flow.roomId,
           message: `子任务派发失败（重试 ${t.retries}/3）：${msg}`,
+        });
+        setImmediate(() => {
+          if (!this.flows.has(flow.roomId)) return;
+          this.scheduleTasks(flow, room).catch((e) => {
+            logError("conductor schedule after fail", e);
+          });
         });
       });
     }
