@@ -5,7 +5,14 @@ import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
-import { AcpAgent, getPermissionBypass, setPermissionBypass, type HubEvent } from "./agent.js";
+import {
+  AcpAgent,
+  getPermissionBypass,
+  promptDoneInternalOutput,
+  setPermissionBypass,
+  toPublicHubEvent,
+  type HubEvent,
+} from "./agent.js";
 import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
@@ -611,6 +618,7 @@ function onAgentEvent(event: HubEvent): void {
     event.method !== "permission.request";
   if (event.method === "prompt.done") {
     const { output } = event.params;
+    const internalOutput = promptDoneInternalOutput(event.params);
     const meta = sessionMetas.get(sessionId!);
     const baseName = meta?.name ?? sessionId!;
     const origin = originFor(meta);
@@ -625,11 +633,11 @@ function onAgentEvent(event: HubEvent): void {
       }
     }
     if (!roomModeManager.isRoomTurn(sessionId!)) {
-      sessionLedger.captureOutput(sessionId!, extractTaskResult(output).artifacts);
+      sessionLedger.captureOutput(sessionId!, extractTaskResult(internalOutput).artifacts);
       broadcast({ method: "session.artifact", params: { sessionId: sessionId! } });
     }
     void roomModeManager
-      .onPromptDone(sessionId!, output)
+      .onPromptDone(sessionId!, internalOutput)
       .then(() => persistState())
       .catch((err) => {
         logError("room-modes", err);
@@ -647,7 +655,7 @@ function onAgentEvent(event: HubEvent): void {
       text: event.params.message,
     });
   }
-  if (!skipBroadcast) broadcast(event);
+  if (!skipBroadcast) broadcast(toPublicHubEvent(event));
 }
 
 function broadcast(event: HubEvent): void {

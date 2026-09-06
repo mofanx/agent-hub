@@ -21,13 +21,21 @@ export type ContextUsage = {
   cost?: { amount: number; currency: string } | null;
 };
 
+export type PromptDoneParams = {
+  sessionId: string;
+  stopReason: string;
+  output: string;
+  internalOutput?: string;
+  usage?: TokenUsage;
+};
+
 export type HubEvent =
   | { method: "session.update"; params: { sessionId: string; update: unknown } }
   | { method: "session.generating"; params: { sessionId: string; stoppable: boolean } }
   | { method: "session.usage"; params: { sessionId: string; usage: ContextUsage } }
   | {
       method: "prompt.done";
-      params: { sessionId: string; stopReason: string; output: string; usage?: TokenUsage };
+      params: PromptDoneParams;
     }
   | { method: "prompt.error"; params: { sessionId: string; message: string } }
   | {
@@ -61,6 +69,32 @@ type SessionEntry = {
 const PERMISSION_TIMEOUT_MS = 120_000;
 const OUTPUT_CAPTURE_LEN = 800;
 let permissionBypass = process.env.HUB_PERMISSION_BYPASS === "1";
+
+export function createPromptDoneParams(
+  sessionId: string,
+  stopReason: string,
+  internalOutput: string,
+  usage?: TokenUsage,
+): PromptDoneParams {
+  const params: PromptDoneParams = {
+    sessionId,
+    stopReason,
+    output: internalOutput.slice(-OUTPUT_CAPTURE_LEN),
+    internalOutput,
+  };
+  if (usage) params.usage = usage;
+  return params;
+}
+
+export function promptDoneInternalOutput(params: PromptDoneParams): string {
+  return params.internalOutput ?? params.output;
+}
+
+export function toPublicHubEvent(event: HubEvent): HubEvent {
+  if (event.method !== "prompt.done" || event.params.internalOutput === undefined) return event;
+  const { internalOutput: _internalOutput, ...params } = event.params;
+  return { method: "prompt.done", params };
+}
 
 export function getPermissionBypass(): boolean {
   return permissionBypass;
@@ -233,10 +267,10 @@ export class AcpAgent {
       method: "session.generating",
       params: { sessionId, stoppable: false },
     });
-    const doneParams: { sessionId: string; stopReason: string; output: string; usage?: TokenUsage } =
-      { sessionId, stopReason, output: fullText.slice(-OUTPUT_CAPTURE_LEN) };
-    if (usage) doneParams.usage = usage;
-    this.emit({ method: "prompt.done", params: doneParams });
+    this.emit({
+      method: "prompt.done",
+      params: createPromptDoneParams(sessionId, stopReason, fullText, usage),
+    });
     entry.turnText = "";
   }
 

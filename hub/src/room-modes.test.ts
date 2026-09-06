@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseTaskCommand, RoomModeManager, type AgentOps } from "./room-modes.js";
+import { createPromptDoneParams, promptDoneInternalOutput } from "./agent.js";
 import { resolveMemberByString } from "./conductor.js";
 import { RoomManager } from "./room.js";
 import type { Room } from "./room.js";
@@ -15,6 +16,10 @@ const room: Room = {
     { sessionId: "s2", name: "tester" },
   ],
 };
+
+function complete(sessionId: string, output: string): string {
+  return promptDoneInternalOutput(createPromptDoneParams(sessionId, "end_turn", output));
+}
 
 describe("room-modes", () => {
   it("parseTaskCommand 解析单任务", () => {
@@ -157,5 +162,122 @@ describe("room-modes", () => {
 
     await manager.onPromptDone("s1", "最终总结");
     assert.equal(lastFlow(), undefined);
+  });
+
+  it("mention 和 roundrobin 使用完整输出提取前部 artifact", async () => {
+    for (const mode of ["mention", "roundrobin"] as const) {
+      const rooms = new RoomManager();
+      const modeRoom = rooms.create(`${mode}-long`, [{ sessionId: "s1", name: "coder" }], mode);
+      const manager = new RoomModeManager(
+        { prompt: async () => {}, isBusy: () => false, cancel: async () => {} },
+        rooms,
+        () => {},
+      );
+      await manager.handle(modeRoom, mode === "mention" ? "@coder 修改文件" : "修改文件");
+      const output = `\`\`\`json\n${JSON.stringify({
+        text: "完成",
+        artifacts: [{ type: "file", path: `${mode}.ts`, summary: "长输出前部产物" }],
+      })}\n\`\`\`\n${"尾部内容".repeat(300)}`;
+      await manager.onPromptDone("s1", complete("s1", output));
+      assert.equal(rooms.getArtifacts(modeRoom.roomId, 10)[0]?.path, `${mode}.ts`);
+    }
+  });
+
+  it("auto 使用完整长 JSON 决策而不错误兜底", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-long",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const prompts: { sessionId: string; content: string | unknown[] }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(autoRoom, "交给 worker 回答");
+    const decision = `\`\`\`json\n${JSON.stringify({
+      mode: "mention",
+      reason: "需要指定成员",
+      params: { targets: ["worker"], detail: "x".repeat(1000) },
+    })}\n\`\`\``;
+    await manager.onPromptDone("host", complete("host", decision));
+    assert.equal(manager.subModeFor(autoRoom.roomId)?.mode, "mention");
+    assert.equal(prompts.at(-1)?.sessionId, "worker");
+  });
+
+  it("parallel 汇总能读取长输出开头", async () => {
+    const rooms = new RoomManager();
+    const parallelRoom = rooms.create(
+      "parallel-long",
+      [
+        { sessionId: "worker", name: "worker" },
+        { sessionId: "summary", name: "summary" },
+      ],
+      "parallel",
+      { parallelSummarizerId: "summary" },
+    );
+    const prompts: { sessionId: string; content: string | unknown[] }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(parallelRoom, "分析问题", { params: { targets: ["worker"], summarizer: "summary" } });
+    await manager.onPromptDone("worker", complete("worker", `关键结论在开头。${"长内容".repeat(300)}`));
+    assert.equal(prompts.at(-1)?.sessionId, "summary");
+    assert.match(String(prompts.at(-1)?.content), /关键结论在开头/);
+  });
+
+  it("pipeline 和 debate 能把长输出开头传给下一阶段", async () => {
+    for (const mode of ["pipeline", "debate"] as const) {
+      const rooms = new RoomManager();
+      const members = [
+        { sessionId: "s1", name: "first" },
+        { sessionId: "s2", name: "second" },
+        { sessionId: "s3", name: "judge" },
+      ];
+      const modeRoom = rooms.create(
+        `${mode}-long`,
+        members,
+        mode,
+        mode === "pipeline"
+          ? { pipelineOrder: ["s1", "s2"] }
+          : { debateSides: ["s1", "s2"], debateJudge: "s3", debateRounds: 1 },
+      );
+      const prompts: { sessionId: string; content: string | unknown[] }[] = [];
+      const manager = new RoomModeManager(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content });
+          },
+          isBusy: () => false,
+          cancel: async () => {},
+        },
+        rooms,
+        () => {},
+      );
+      await manager.handle(modeRoom, "继续处理");
+      await manager.onPromptDone("s1", complete("s1", `首段关键证据。${"长内容".repeat(300)}`));
+      assert.equal(prompts.at(-1)?.sessionId, "s2");
+      assert.match(String(prompts.at(-1)?.content), /首段关键证据/);
+    }
   });
 });

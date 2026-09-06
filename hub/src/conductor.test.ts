@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseTasks, extractTaskResult } from "./conductor.js";
-import type { Room } from "./room.js";
+import { ConductorOrchestrator, parseTasks, extractTaskResult } from "./conductor.js";
+import { createPromptDoneParams, promptDoneInternalOutput, toPublicHubEvent } from "./agent.js";
+import { RoomManager, type Room } from "./room.js";
 
 describe("conductor", () => {
   const room: Room = {
@@ -93,6 +94,92 @@ describe("conductor", () => {
     const result = extractTaskResult(output);
     const test = result.artifacts.find((a) => a.type === "event" && a.action === "test" && a.path === "tests/sort.test.ts");
     assert.ok(test);
+  });
+
+  it("长计划使用完整内部输出派工，公开事件仍保持截断", async () => {
+    const rooms = new RoomManager();
+    const conductorRoom = rooms.create(
+      "long-plan",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(conductorRoom, "实现完整质量方案");
+    const task = `实现：${"详细要求".repeat(300)}`;
+    const fullOutput = `\`\`\`json\n${JSON.stringify({ tasks: [{ to: "worker", task }] })}\n\`\`\``;
+    const params = createPromptDoneParams("conductor", "end_turn", fullOutput);
+    assert.equal(params.output.length, 800);
+    assert.equal(parseTasks(params.output, conductorRoom), null);
+    assert.equal(promptDoneInternalOutput(params), fullOutput);
+    await orchestrator.onPromptDone("conductor", promptDoneInternalOutput(params));
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[1]!.sessionId, "worker");
+    assert.match(prompts[1]!.content, /详细要求/);
+    const publicEvent = toPublicHubEvent({ method: "prompt.done", params });
+    assert.equal("internalOutput" in publicEvent.params, false);
+  });
+
+  it("计划无法解析时通知用户而不是静默结束", async () => {
+    const rooms = new RoomManager();
+    const conductorRoom = rooms.create(
+      "bad-plan",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(conductorRoom, "拆解任务");
+    await orchestrator.onPromptDone("conductor", "不是合法任务计划");
+    assert.equal(orchestrator.hasActiveFlow(conductorRoom.roomId), false);
+    assert.match(notices.at(-1) ?? "", /无法解析/);
+  });
+
+  it("空任务计划把指挥家的直接回答展示给用户", async () => {
+    const rooms = new RoomManager();
+    const conductorRoom = rooms.create(
+      "direct-answer",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(conductorRoom, "简单问题");
+    await orchestrator.onPromptDone(
+      "conductor",
+      "这个问题不需要派工，答案是 42。\n```json\n{\"tasks\":[]}\n```",
+    );
+    assert.equal(orchestrator.hasActiveFlow(conductorRoom.roomId), false);
+    assert.equal(notices.at(-1), "这个问题不需要派工，答案是 42。");
   });
 
 });

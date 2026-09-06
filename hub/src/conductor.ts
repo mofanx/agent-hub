@@ -350,6 +350,19 @@ export class ConductorOrchestrator {
     const tasks = parseTasks(conductorOutput, room);
     if (tasks === null) {
       this.flows.delete(flow.roomId);
+      this.notice({
+        roomId: flow.roomId,
+        message: "指挥家输出无法解析为任务计划，本轮编排已取消，请重试",
+      });
+      return;
+    }
+    if (tasks.length === 0) {
+      this.flows.delete(flow.roomId);
+      const answer = conductorOutput.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
+      this.notice({
+        roomId: flow.roomId,
+        message: answer || "指挥家判断本次任务无需派工",
+      });
       return;
     }
     await this.dispatchFromTasks(flow, room, tasks);
