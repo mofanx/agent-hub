@@ -1864,6 +1864,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
                   const uid = String(model.uid ?? modelName);
                   const label = String(model.label ?? "");
                   set({ chatItems: [...get().chatItems, { kind: "system", text: `@${memberName} 模型已切换为 ${label || uid}`, author: "" }] });
+                  void get().refreshRoomMemberModels();
                 } else {
                   set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelUnknown.replace("%s", modelName), author: "" }] });
                 }

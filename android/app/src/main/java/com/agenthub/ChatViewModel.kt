@@ -839,6 +839,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             val uid = model["uid"]?.jsonPrimitive?.content ?: modelName
                             val label = model["label"]?.jsonPrimitive?.content ?: ""
                             chatItems.add(ChatItem.System(++itemSeq, "@$memberName 模型已切换为 ${label.ifBlank { uid }}"))
+                            refreshCurrentModel()
                         } else {
                             chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(modelName)))
                         }
@@ -855,6 +856,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             val label = model["label"]?.jsonPrimitive?.content ?: ""
                             val cost = formatModelCost(S, model)
                             chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                            refreshCurrentModel()
                         } else {
                             chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(arg)))
                         }
@@ -979,6 +981,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         val label = m["label"]?.jsonPrimitive?.content ?: ""
                         val cost = formatModelCost(S, m)
                         chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
+                        refreshCurrentModel()
                     }
                 }
                 showModelPicker = false
