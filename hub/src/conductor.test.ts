@@ -401,10 +401,12 @@ describe("conductor", () => {
 
     terminalCallbacks.get("qrun-t1")!(false);
 
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
     const flow2 = orchestrator.getFlow(qRoom.roomId);
-    const tasks2 = flow2!.tasks as { id: string; status: string }[];
-    assert.equal(tasks2.find((t) => t.id === "t1")?.status, "failed");
-    assert.equal(tasks2.find((t) => t.id === "t2")?.status, "pending");
+    assert.equal(flow2, undefined, "flow should be cleaned up after dependency failure cascade");
   });
 
   it("Q1-03: 无文件 artifact 时不启动质量验证，直接 done", async () => {

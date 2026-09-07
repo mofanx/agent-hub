@@ -604,21 +604,48 @@ export class ConductorOrchestrator {
       return;
     }
 
+    // 依赖失败传播：任何 failed task 的下游 pending task 标记为 failed
+    const failedIds = new Set<string>();
+    for (const [id, t] of flow.tasks) {
+      if (t.status === "failed") failedIds.add(id);
+    }
+    if (failedIds.size > 0) {
+      let propagated = false;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const [id, t] of flow.tasks) {
+          if (t.status !== "pending") continue;
+          if (t.dependsOn.some((d) => failedIds.has(d))) {
+            t.status = "failed";
+            t.failureMessage = "前置依赖任务失败";
+            failedIds.add(id);
+            changed = true;
+            propagated = true;
+          }
+        }
+      }
+      if (propagated) this.emitFlow?.(flow.roomId);
+    }
+
     const tasks = this.runnableTasks(flow);
     if (tasks.length === 0) {
       const values = [...flow.tasks.values()];
+      const hasActive = values.some((t) => t.status === "running" || t.status === "verifying");
+      if (hasActive) return;
       const allDone = values.every((t) => t.status === "done");
-      const hasFailed = values.some((t) => t.status === "failed");
-      const hasVerifying = values.some((t) => t.status === "verifying");
       if (allDone) {
         await this.summarize(flow, room);
-      } else if (hasFailed && !hasVerifying) {
+      } else {
         const failedTasks = values.filter((t) => t.status === "failed");
         const names = failedTasks.map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId);
         this.notice({
           roomId: flow.roomId,
           message: `以下子任务执行失败：${names.join("、")}，指挥家无法进行汇总`,
         });
+        flow.phase = "done";
+        this.emitFlow?.(flow.roomId);
+        this.flows.delete(flow.roomId);
       }
       return;
     }
