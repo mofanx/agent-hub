@@ -95,6 +95,8 @@ export type QualityServiceOptions = {
   quickRunner?: GateRunner | undefined;
   /** full gate runner：run 进入 full-verifying 时触发。 */
   fullRunner?: GateRunner | undefined;
+  /** run 进入 awaiting-approval 时触发，用于通知用户审批。 */
+  onAwaitingApproval?: ((run: QualityRun) => void) | undefined;
   /**
    * 沙盒验证 runner（P4）：在临时策略版本上跑 quick gate。
    * 返回 check 摘要列表和是否通过。由 index.ts 提供 GateEngine 实现。
@@ -114,6 +116,7 @@ export class QualityService {
   private readonly sandboxRunner: QualityServiceOptions["sandboxRunner"];
   private readonly quickRunner: GateRunner | undefined;
   private readonly fullRunner: GateRunner | undefined;
+  private readonly onAwaitingApproval: ((run: QualityRun) => void) | undefined;
 
   constructor(store: Store, emit: Emit, opts: QualityServiceOptions = {}) {
     this.store = store;
@@ -124,6 +127,7 @@ export class QualityService {
     this.sandboxRunner = opts.sandboxRunner;
     this.quickRunner = opts.quickRunner;
     this.fullRunner = opts.fullRunner;
+    this.onAwaitingApproval = opts.onAwaitingApproval;
   }
 
   // ── projects ───────────────────────────────────────────────────────
@@ -787,6 +791,9 @@ export class QualityService {
     }
     if (to === "full-verifying" && this.fullRunner) {
       this.fullRunner(next);
+    }
+    if (to === "awaiting-approval" && this.onAwaitingApproval) {
+      this.onAwaitingApproval(next);
     }
     return next;
   }

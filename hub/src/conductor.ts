@@ -33,6 +33,7 @@ type FlowTask = {
   retries?: number;
   qualityRunId?: string;
   verifyingSince?: number;
+  awaitingApproval?: boolean;
 };
 
 type Flow = {
@@ -87,6 +88,20 @@ export class ConductorOrchestrator {
 
   hasActiveFlow(roomId: string): boolean {
     return this.flows.has(roomId);
+  }
+
+  /** run 进入 awaiting-approval 时由 Hub 调用：暂停对应 task 的超时计数 */
+  notifyAwaitingApproval(runId: string): void {
+    for (const flow of this.flows.values()) {
+      for (const t of flow.tasks.values()) {
+        if (t.qualityRunId === runId && t.status === "verifying") {
+          t.awaitingApproval = true;
+          t.verifyingSince = Date.now();
+          this.emitFlow?.(flow.roomId);
+          return;
+        }
+      }
+    }
   }
 
   /** 强制中断某个房间的指挥编排 */
@@ -356,6 +371,7 @@ export class ConductorOrchestrator {
               if (!this.flows.has(flow.roomId)) return;
               const task = flow.tasks.get(running.id);
               if (!task || task.status !== "verifying") return;
+              task.awaitingApproval = false;
               if (accepted) {
                 task.status = "done";
                 this.notice({
@@ -561,11 +577,11 @@ export class ConductorOrchestrator {
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
     if (!this.flows.has(flow.roomId)) return;
 
-    // Bug 2: 检查 verifying task 超时
+    // Bug 2: 检查 verifying task 超时（awaitingApproval 期间暂停超时计数）
     const now = Date.now();
     let verifyingTimedOut = false;
     for (const t of flow.tasks.values()) {
-      if (t.status === "verifying" && t.verifyingSince) {
+      if (t.status === "verifying" && t.verifyingSince && !t.awaitingApproval) {
         const elapsed = now - t.verifyingSince;
         if (elapsed > VERIFYING_TIMEOUT_MS) {
           t.status = "failed";
@@ -748,6 +764,7 @@ export class ConductorOrchestrator {
           dependsOn: t.dependsOn,
           status: t.status,
           ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
+          ...(t.awaitingApproval ? { awaitingApproval: true } : {}),
         })),
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
@@ -786,6 +803,7 @@ export class ConductorOrchestrator {
         if (!room.members.some((m) => m.sessionId === sessionId)) continue;
         const rawStatus = (o.status as FlowTask["status"]) ?? "pending";
         const qualityRunId = typeof o.qualityRunId === "string" && o.qualityRunId ? o.qualityRunId : undefined;
+        const awaitingApproval = Boolean(o.awaitingApproval);
         // running → pending（重启后需要重新派发）；verifying 保留（通过 recoverRun 恢复回调）
         const status: FlowTask["status"] = rawStatus === "running" ? "pending" : rawStatus;
         flow.tasks.set(taskId, {
@@ -797,6 +815,7 @@ export class ConductorOrchestrator {
             : [],
           status,
           ...(qualityRunId ? { qualityRunId } : {}),
+          ...(awaitingApproval && status === "verifying" ? { awaitingApproval: true, verifyingSince: Date.now() } : {}),
         });
       }
       const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;
@@ -833,6 +852,7 @@ export class ConductorOrchestrator {
             if (!this.flows.has(flowRef.roomId)) return;
             const task = flowRef.tasks.get(taskRef.id);
             if (!task || task.status !== "verifying") return;
+            task.awaitingApproval = false;
             if (accepted) {
               task.status = "done";
               this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证通过` });

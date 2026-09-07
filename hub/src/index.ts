@@ -276,6 +276,13 @@ const qualityService = new QualityService(store, qualityEmit, {
   fixerRunner,
   quickRunner,
   fullRunner,
+  onAwaitingApproval: (run) => {
+    if (run.roomId) {
+      roomModeManager.notifyAwaitingApproval(run.id);
+      roomModeManager.broadcastRoomNotice(run.roomId, `质量运行 ${run.id} 等待审批 · 风险: ${run.risk} · 修复轮次: ${run.fixRound}/${run.budget.maxFixRounds}，请在质量面板中批准或拒绝`);
+    }
+    broadcast({ method: "quality.awaitingApproval", params: { runId: run.id, projectId: run.projectId, roomId: run.roomId ?? null } });
+  },
   sandboxRunner: async (opts) => {
     const project = qualityService.getProject(opts.projectId);
     if (!project) return { passed: false, checkSummaries: [], checksTotal: 0, checksPassed: 0, checksFailed: 1 };
@@ -2299,6 +2306,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           timeoutMs: Number(p.timeoutMs ?? 60000),
         },
       });
+      try {
+        qualityService.advance(run.id, "preflight");
+        qualityService.advance(run.id, "implementing");
+        qualityService.advance(run.id, "collecting");
+        qualityService.advance(run.id, "quick-verifying");
+      } catch (err) {
+        logError("quality.run.start auto-advance", `run ${run.id} failed: ${String(err)}`);
+      }
       return { run };
     }
     case "quality.run.list": {

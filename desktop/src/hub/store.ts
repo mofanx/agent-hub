@@ -1227,6 +1227,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
       saveCurrentHistoryCache();
       const cached = getHistoryCache("room", updatedRoom.roomId);
+      const isSameRoom = get().currentRoom?.roomId === updatedRoom.roomId;
       set({
         currentRoom: updatedRoom,
         currentSession: null,
@@ -1241,7 +1242,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         lastEventAt: 0,
         lastBlackboardAt: 0,
         screen: "room",
-        flow: null,
+        ...(isSameRoom ? {} : { flow: null }),
         historyHasMore: false,
         historyLoading: false,
         historySearchContext: anchorAt != null,

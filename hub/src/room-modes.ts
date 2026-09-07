@@ -185,6 +185,16 @@ export class RoomModeManager {
     this.conductor.resumeFlows();
   }
 
+  /** run 进入 awaiting-approval 时暂停对应 task 的超时计数 */
+  notifyAwaitingApproval(runId: string): void {
+    this.conductor.notifyAwaitingApproval(runId);
+  }
+
+  /** 向指定房间广播 room.notice 消息 */
+  broadcastRoomNotice(roomId: string, message: string): void {
+    this.notice({ roomId, message });
+  }
+
   private notice(n: ConductorNotice): void {
     this.broadcast("room.notice", n as unknown as Record<string, unknown>);
   }

@@ -634,4 +634,70 @@ describe("conductor", () => {
     );
   });
 
+  it("Q2-04: awaitingApproval 期间 verifying 超时检查被跳过", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "test",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask(opts) {
+        return `qrun-${opts.taskId}`;
+      },
+      onRunTerminal() {},
+      recoverRun() {},
+    };
+
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      (n) => notices.push(n.message),
+      qualityIntegration,
+    );
+
+    await orchestrator.start(qRoom, "任务");
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"改文件"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    const w1Output = '```json\n{"text":"done","artifacts":[{"type":"file","path":"/a.ts","summary":"改"}]}\n```';
+    await orchestrator.onPromptDone("worker1", w1Output);
+
+    const flow = orchestrator.getFlow(qRoom.roomId);
+    const t1 = (flow!.tasks as { id: string; status: string; qualityRunId?: string }[]).find((t) => t.id === "t1");
+    assert.equal(t1?.status, "verifying");
+    assert.ok(t1?.qualityRunId);
+
+    // 模拟 run 进入 awaiting-approval
+    orchestrator.notifyAwaitingApproval(t1!.qualityRunId!);
+
+    // 手动把 verifyingSince 设为很久以前，模拟超时
+    const flowInternal = orchestrator.getFlow(qRoom.roomId);
+    const tasks = flowInternal!.tasks as unknown as Array<{ id: string; status: string; verifyingSince: number; awaitingApproval: boolean }>;
+    const t1Internal = tasks.find((t) => t.id === "t1")!;
+    t1Internal.verifyingSince = Date.now() - 10 * 60 * 1000; // 10 分钟前
+
+    // 触发 scheduleTasks（通过 cancel + import 重新触发）
+    const exported = orchestrator.export();
+    orchestrator.cancel(qRoom.roomId);
+    await orchestrator.import(exported);
+
+    // 不应出现超时通知
+    assert.ok(
+      !notices.some((m) => m.includes("质量验证超时")),
+      "should not timeout while awaitingApproval is true",
+    );
+
+    const flowAfter = orchestrator.getFlow(qRoom.roomId);
+    const t1After = (flowAfter!.tasks as { id: string; status: string }[]).find((t) => t.id === "t1");
+    assert.equal(t1After?.status, "verifying");
+  });
+
 });

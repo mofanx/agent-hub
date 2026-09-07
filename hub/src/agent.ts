@@ -55,7 +55,8 @@ export type HubEvent =
   | { method: "file.update"; params: { roomId?: string; sessionId?: string; path: string; op: "delete" | "rename"; from?: string; to?: string } }
   | { method: "agent.status"; params: { status: string; detail?: string } }
   | { method: "task.update"; params: { tasks: unknown[] } }
-  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } };
+  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } }
+  | { method: "quality.awaitingApproval"; params: { runId: string; projectId: string; roomId: string | null } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 

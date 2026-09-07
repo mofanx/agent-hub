@@ -377,6 +377,53 @@ describe("QualityService", () => {
       assert.equal(fullRuns[0], run.id);
     });
 
+    it("advance 到 awaiting-approval 时触发 onAwaitingApproval", () => {
+      const approvalRuns: string[] = [];
+      const svc = new QualityService(store, () => {}, {
+        onAwaitingApproval: (run) => approvalRuns.push(run.id),
+      });
+      const p = svc.registerProject({ connectionId: "c1", root: dir });
+      const run = svc.startRun({
+        projectId: p.id,
+        trigger: "interactive",
+        risk: "low",
+        policyVersion: "v1",
+        budget: { maxFixRounds: 2, timeoutMs: 60000 },
+      });
+      svc.advance(run.id, "preflight");
+      svc.advance(run.id, "implementing");
+      svc.advance(run.id, "collecting");
+      svc.advance(run.id, "quick-verifying");
+      svc.advance(run.id, "reviewing");
+      assert.equal(approvalRuns.length, 0);
+      svc.advance(run.id, "full-verifying");
+      svc.advance(run.id, "awaiting-approval");
+      assert.equal(approvalRuns.length, 1);
+      assert.equal(approvalRuns[0], run.id);
+    });
+
+    it("advance 到非 awaiting-approval 阶段不触发 onAwaitingApproval", () => {
+      const approvalRuns: string[] = [];
+      const svc = new QualityService(store, () => {}, {
+        onAwaitingApproval: (run) => approvalRuns.push(run.id),
+      });
+      const p = svc.registerProject({ connectionId: "c1", root: dir });
+      const run = svc.startRun({
+        projectId: p.id,
+        trigger: "interactive",
+        risk: "low",
+        policyVersion: "v1",
+        budget: { maxFixRounds: 2, timeoutMs: 60000 },
+      });
+      svc.advance(run.id, "preflight");
+      svc.advance(run.id, "implementing");
+      svc.advance(run.id, "collecting");
+      svc.advance(run.id, "quick-verifying");
+      svc.advance(run.id, "reviewing");
+      svc.advance(run.id, "full-verifying");
+      assert.equal(approvalRuns.length, 0);
+    });
+
     it("advance 到非 gate 阶段不触发 quickRunner/fullRunner", () => {
       const quickRuns: string[] = [];
       const fullRuns: string[] = [];
