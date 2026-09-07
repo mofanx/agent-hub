@@ -2184,6 +2184,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatSearchMatchCount = 0
                 screen = Screen.Room
                 loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
+                syncBusyIdsFromList(sessions)
                 refreshFlow(updatedRoom.roomId)
                 refreshArtifacts(updatedRoom.roomId)
                 refreshBlackboard(updatedRoom.roomId)

@@ -1248,6 +1248,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historySearchContext: anchorAt != null,
       });
       get().loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt);
+      get().syncBusyIdsFromList(get().sessions);
       get().refreshFlow(updatedRoom.roomId);
       get().refreshArtifacts({ roomId: updatedRoom.roomId });
       get().refreshBlackboard(updatedRoom.roomId);
