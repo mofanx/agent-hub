@@ -84,10 +84,17 @@ export type ReviewRunner = (run: QualityRun) => void;
 /** fixer 回调：当 run 进入 fixing 阶段时触发 FixerOrchestrator。 */
 export type FixerRunner = (run: QualityRun) => void;
 
+/** gate runner 回调：在 quick-verifying / full-verifying 阶段执行 gate 检查。 */
+export type GateRunner = (run: QualityRun) => void;
+
 export type QualityServiceOptions = {
   reviewRunner?: ReviewRunner | undefined;
   fixerRunner?: FixerRunner | undefined;
   onTerminal?: ((run: QualityRun) => void) | undefined;
+  /** quick gate runner：run 进入 quick-verifying 时触发。 */
+  quickRunner?: GateRunner | undefined;
+  /** full gate runner：run 进入 full-verifying 时触发。 */
+  fullRunner?: GateRunner | undefined;
   /**
    * 沙盒验证 runner（P4）：在临时策略版本上跑 quick gate。
    * 返回 check 摘要列表和是否通过。由 index.ts 提供 GateEngine 实现。
@@ -105,6 +112,8 @@ export class QualityService {
   private readonly fixerRunner: FixerRunner | undefined;
   private readonly onTerminal: ((run: QualityRun) => void) | undefined;
   private readonly sandboxRunner: QualityServiceOptions["sandboxRunner"];
+  private readonly quickRunner: GateRunner | undefined;
+  private readonly fullRunner: GateRunner | undefined;
 
   constructor(store: Store, emit: Emit, opts: QualityServiceOptions = {}) {
     this.store = store;
@@ -113,6 +122,8 @@ export class QualityService {
     this.fixerRunner = opts.fixerRunner;
     this.onTerminal = opts.onTerminal;
     this.sandboxRunner = opts.sandboxRunner;
+    this.quickRunner = opts.quickRunner;
+    this.fullRunner = opts.fullRunner;
   }
 
   // ── projects ───────────────────────────────────────────────────────
@@ -770,6 +781,12 @@ export class QualityService {
     }
     if (to === "fixing" && this.fixerRunner) {
       this.fixerRunner(next);
+    }
+    if (to === "quick-verifying" && this.quickRunner) {
+      this.quickRunner(next);
+    }
+    if (to === "full-verifying" && this.fullRunner) {
+      this.fullRunner(next);
     }
     return next;
   }

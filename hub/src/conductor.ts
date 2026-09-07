@@ -32,6 +32,7 @@ type FlowTask = {
   failureMessage?: string;
   retries?: number;
   qualityRunId?: string;
+  verifyingSince?: number;
 };
 
 type Flow = {
@@ -55,19 +56,34 @@ export interface QualityIntegration {
     artifacts: TaskArtifact[];
   }): string | undefined;
   onRunTerminal(runId: string, cb: (accepted: boolean) => void): void;
+  /** 恢复重启前注册的 run terminal 回调：若 run 已终态立即回调，否则重新注册 */
+  recoverRun(runId: string, cb: (accepted: boolean) => void): void;
 }
 
 const PLAN_RESULT_LEN = 4000;
+const VERIFYING_TIMEOUT_MS = 5 * 60 * 1000;
+const BUSY_RETRY_MS = 5000;
+const PROMPT_RETRY_MS = 5000;
+const SUMMARIZE_RETRY_MS = 5000;
 
 export class ConductorOrchestrator {
   private flows = new Map<string, Flow>();
+  private readonly promptRetryMs: number;
+  private readonly quality: QualityIntegration | undefined;
+  private readonly emitFlow: ((roomId: string) => void) | undefined;
 
   constructor(
     private readonly agent: AgentOps,
     private readonly rooms: RoomManager,
     private readonly notice: (n: ConductorNotice) => void,
-    private readonly quality?: QualityIntegration,
-  ) {}
+    quality?: QualityIntegration,
+    emitFlow?: (roomId: string) => void,
+    promptRetryMs?: number,
+  ) {
+    this.quality = quality;
+    this.emitFlow = emitFlow;
+    this.promptRetryMs = promptRetryMs ?? PROMPT_RETRY_MS;
+  }
 
   hasActiveFlow(roomId: string): boolean {
     return this.flows.has(roomId);
@@ -84,6 +100,7 @@ export class ConductorOrchestrator {
       }
     }
     this.flows.delete(roomId);
+    this.emitFlow?.(roomId);
     if (reason) this.notice({ roomId, message: reason });
     return [...touched];
   }
@@ -295,6 +312,8 @@ export class ConductorOrchestrator {
           for (const a of result.artifacts) {
             this.commitArtifact(roomId, a, sessionId);
           }
+          flow.phase = "done";
+          this.emitFlow?.(roomId);
           this.flows.delete(roomId);
           return roomId;
         }
@@ -328,6 +347,7 @@ export class ConductorOrchestrator {
           if (runId) {
             running.status = "verifying";
             running.qualityRunId = runId;
+            running.verifyingSince = Date.now();
             this.notice({
               roomId: flow.roomId,
               message: `@${name} 子任务 ${running.id} 已提交质量验证（run ${runId}）`,
@@ -350,6 +370,7 @@ export class ConductorOrchestrator {
                   message: `@${name} 子任务 ${running.id} 质量验证未通过`,
                 });
               }
+              this.emitFlow?.(flow.roomId);
               const r = this.rooms.get(flow.roomId);
               if (r) {
                 this.scheduleTasks(flow, r).catch((e) =>
@@ -539,14 +560,43 @@ export class ConductorOrchestrator {
 
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
     if (!this.flows.has(flow.roomId)) return;
+
+    // Bug 2: 检查 verifying task 超时
+    const now = Date.now();
+    let verifyingTimedOut = false;
+    for (const t of flow.tasks.values()) {
+      if (t.status === "verifying" && t.verifyingSince) {
+        const elapsed = now - t.verifyingSince;
+        if (elapsed > VERIFYING_TIMEOUT_MS) {
+          t.status = "failed";
+          t.failureMessage = "质量验证超时";
+          verifyingTimedOut = true;
+          this.notice({
+            roomId: flow.roomId,
+            message: `子任务 ${t.id} 质量验证超时（${Math.round(elapsed / 1000)}s），已标记失败`,
+          });
+        }
+      }
+    }
+    if (verifyingTimedOut) {
+      const r = this.rooms.get(flow.roomId);
+      if (r) {
+        this.scheduleTasks(flow, r).catch((e) =>
+          logError("conductor verifying timeout reschedule", e),
+        );
+      }
+      return;
+    }
+
     const tasks = this.runnableTasks(flow);
     if (tasks.length === 0) {
       const values = [...flow.tasks.values()];
       const allDone = values.every((t) => t.status === "done");
       const hasFailed = values.some((t) => t.status === "failed");
+      const hasVerifying = values.some((t) => t.status === "verifying");
       if (allDone) {
         await this.summarize(flow, room);
-      } else if (hasFailed) {
+      } else if (hasFailed && !hasVerifying) {
         const failedTasks = values.filter((t) => t.status === "failed");
         const names = failedTasks.map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId);
         this.notice({
@@ -558,8 +608,12 @@ export class ConductorOrchestrator {
     }
 
     const assignments: string[] = [];
+    let skippedBusy = false;
     for (const t of tasks) {
-      if (this.agent.isBusy(t.sessionId)) continue;
+      if (this.agent.isBusy(t.sessionId)) {
+        skippedBusy = true;
+        continue;
+      }
       t.status = "running";
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       assignments.push(`@${name}：${t.task}`);
@@ -601,22 +655,35 @@ export class ConductorOrchestrator {
           roomId: flow.roomId,
           message: `子任务派发失败（重试 ${t.retries}/3）：${msg}`,
         });
-        setImmediate(() => {
+        setTimeout(() => {
           if (!this.flows.has(flow.roomId)) return;
           this.scheduleTasks(flow, room).catch((e) => {
             logError("conductor schedule after fail", e);
           });
-        });
+        }, this.promptRetryMs);
       });
     }
 
     if (assignments.length > 0) {
       this.notice({ roomId: flow.roomId, message: `指挥家派工：${assignments.join("；")}` });
     }
+
+    // Bug 4: 有 runnable task 因 isBusy 被跳过时，定时轮询重试
+    if (skippedBusy) {
+      setTimeout(() => {
+        if (!this.flows.has(flow.roomId)) return;
+        this.scheduleTasks(flow, room).catch((e) =>
+          logError("conductor busy retry reschedule", e),
+        );
+      }, BUSY_RETRY_MS);
+    }
+
+    this.emitFlow?.(flow.roomId);
   }
 
   private async summarize(flow: Flow, room: Room): Promise<void> {
     flow.phase = "summarizing";
+    this.emitFlow?.(flow.roomId);
     // 按照 task 在 tasks Map 中的创建顺序（即指挥家给出的顺序）生成汇总
     const lines: string[] = [];
     for (const t of flow.tasks.values()) {
@@ -643,7 +710,30 @@ export class ConductorOrchestrator {
       "请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复。如果涉及文件修改，请引用文件路径。",
     ].join("\n");
     this.notice({ roomId: flow.roomId, message: "子任务全部完成，指挥家汇总中…" });
-    await this.agent.prompt(room.conductorId!, prompt);
+    try {
+      await this.agent.prompt(room.conductorId!, prompt);
+    } catch (err) {
+      logError("conductor summarize prompt", err);
+      this.notice({ roomId: flow.roomId, message: `指挥家汇总派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
+      setTimeout(() => {
+        if (!this.flows.has(flow.roomId)) return;
+        if (flow.phase !== "summarizing") return;
+        this.summarize(flow, room).catch((e) => logError("conductor summarize retry", e));
+      }, this.promptRetryMs);
+    }
+  }
+
+  /** agent 连接后恢复所有活跃 flow 的调度（Fix C）。 */
+  resumeFlows(): void {
+    for (const flow of this.flows.values()) {
+      const room = this.rooms.get(flow.roomId);
+      if (!room) continue;
+      if (flow.phase === "summarizing") {
+        this.summarize(flow, room).catch((e) => logError("conductor resume summarize", e));
+      } else if (flow.phase === "working") {
+        this.scheduleTasks(flow, room).catch((e) => logError("conductor resume schedule", e));
+      }
+    }
   }
 
   export(): Record<string, unknown> {
@@ -695,7 +785,9 @@ export class ConductorOrchestrator {
         const sessionId = String(o.sessionId ?? "");
         if (!room.members.some((m) => m.sessionId === sessionId)) continue;
         const rawStatus = (o.status as FlowTask["status"]) ?? "pending";
-        const status: FlowTask["status"] = rawStatus === "running" ? "pending" : rawStatus === "verifying" ? "pending" : rawStatus;
+        const qualityRunId = typeof o.qualityRunId === "string" && o.qualityRunId ? o.qualityRunId : undefined;
+        // running → pending（重启后需要重新派发）；verifying 保留（通过 recoverRun 恢复回调）
+        const status: FlowTask["status"] = rawStatus === "running" ? "pending" : rawStatus;
         flow.tasks.set(taskId, {
           id: taskId,
           sessionId,
@@ -704,7 +796,7 @@ export class ConductorOrchestrator {
             ? o.dependsOn.map((s) => String(s)).filter(Boolean)
             : [],
           status,
-          ...(typeof o.qualityRunId === "string" && o.qualityRunId ? { qualityRunId: o.qualityRunId } : {}),
+          ...(qualityRunId ? { qualityRunId } : {}),
         });
       }
       const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;
@@ -731,10 +823,39 @@ export class ConductorOrchestrator {
         }
       }
       this.flows.set(roomId, flow);
+      // 为 verifying task 恢复 onRunTerminal 回调
+      for (const t of flow.tasks.values()) {
+        if (t.status === "verifying" && t.qualityRunId && this.quality) {
+          const taskRef = t;
+          const flowRef = flow;
+          const memberName = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+          this.quality.recoverRun(t.qualityRunId, (accepted) => {
+            if (!this.flows.has(flowRef.roomId)) return;
+            const task = flowRef.tasks.get(taskRef.id);
+            if (!task || task.status !== "verifying") return;
+            if (accepted) {
+              task.status = "done";
+              this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证通过` });
+            } else {
+              task.status = "failed";
+              task.failureMessage = "质量验证未通过";
+              this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证未通过` });
+            }
+            this.emitFlow?.(flowRef.roomId);
+            const r = this.rooms.get(flowRef.roomId);
+            if (r) {
+              this.scheduleTasks(flowRef, r).catch((e) =>
+                logError("conductor recover run terminal", e),
+              );
+            }
+          });
+        }
+      }
       this.notice({ roomId, message: "🔄 已恢复指挥编排，继续执行待派发任务" });
       await this.scheduleTasks(flow, room).catch((err) => {
         logError("conductor import schedule", err);
       });
+      this.emitFlow?.(roomId);
     }
   }
 }

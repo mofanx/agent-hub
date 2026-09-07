@@ -152,8 +152,9 @@ export class RoomModeManager {
     private readonly rooms: RoomManager,
     private readonly broadcast: (method: string, params: Record<string, unknown>) => void,
     quality?: QualityIntegration,
+    promptRetryMs?: number,
   ) {
-    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), quality);
+    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), quality, (roomId) => this.emitFlowUpdate(roomId), promptRetryMs);
   }
 
   exportRuntime(): Record<string, unknown> {
@@ -177,6 +178,11 @@ export class RoomModeManager {
         this.roomSubMode.set(roomId, { mode: sm.mode, activeSpeaker: sm.activeSpeaker, reason: sm.reason });
       }
     }
+  }
+
+  /** agent 连接后恢复所有活跃 flow 的调度（Fix C）。 */
+  resumeFlows(): void {
+    this.conductor.resumeFlows();
   }
 
   private notice(n: ConductorNotice): void {

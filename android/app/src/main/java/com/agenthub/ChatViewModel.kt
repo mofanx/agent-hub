@@ -742,7 +742,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val generating: Boolean
         get() {
             val room = currentRoom
-            if (room != null) return room.members.any { busyIds.contains(it.first) }
+            if (room != null) {
+                if (room.members.any { busyIds.contains(it.first) }) return true
+                val f = flow
+                if (f != null && f.roomId == room.roomId && f.phase != "done") return true
+                return false
+            }
             val s = currentSession ?: return false
             return busyIds.contains(s.sessionId)
         }
@@ -2114,15 +2119,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             resumeSession(session, autoOpen = true)
             return
         }
+        val isSameSession = currentSession?.sessionId == session.sessionId
         listTab.value = 0
         currentSession = session
         currentRoom = null
-        currentArtifacts.clear()
-        currentEvents.clear()
-        blackboard.clear()
+        if (!isSameSession) {
+            currentArtifacts.clear()
+            currentEvents.clear()
+            blackboard.clear()
+            quote = null
+            flow = null
+        }
         resetNewCounts()
-        flow = null
-        quote = null
         fileRefToInsert = null
         historyHasMore = false
         historyLoading = false
@@ -2152,17 +2160,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 syncRefreshAll()
                 val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
+                val isSameRoom = currentRoom?.roomId == updatedRoom.roomId
                 listTab.value = 1
                 currentRoom = updatedRoom
                 currentSession = null
-                currentArtifacts.clear()
-                currentEvents.clear()
-                blackboard.clear()
+                if (!isSameRoom) {
+                    currentArtifacts.clear()
+                    currentEvents.clear()
+                    blackboard.clear()
+                    quote = null
+                    flow = null
+                    chatItems.clear()
+                }
                 resetNewCounts()
-                chatItems.clear()
-                quote = null
                 fileRefToInsert = null
-                flow = null
                 historyHasMore = false
                 historyLoading = false
                 if (anchorAt == null) {
@@ -2758,12 +2769,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun backToList() {
-        currentSession = null
-        currentRoom = null
-        currentArtifacts.clear()
-        currentEvents.clear()
-        blackboard.clear()
-        flow = null
+        // 返回列表时只切屏，不清空 currentRoom/currentSession/flow/artifacts 等状态，
+        // 这样 re-enter 同一会话/群聊时还能继续看到运行中状态，避免被误判为“结束”
+        listTab.value = if (currentRoom != null) 1 else if (currentSession != null) 0 else listTab.value
         fileRefToInsert = null
         jumpToHistoryId = null
         chatSearchMatchIndex = -1

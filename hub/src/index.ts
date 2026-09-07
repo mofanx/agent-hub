@@ -34,10 +34,11 @@ import { isTerminal } from "./quality/run.js";
 import { RunPermissionManager } from "./quality/permissions.js";
 import { ReviewOrchestrator, type ReviewerSessionRunner } from "./quality/review-orchestrator.js";
 import { FixerOrchestrator, type FixerSessionRunner } from "./quality/fixer-orchestrator.js";
-import { GateEngine } from "./quality/gate.js";
+import { GateEngine, type GateResult } from "./quality/gate.js";
 import type { ExecutionProvider } from "./quality/execution.js";
 import { LocalExecutionProvider } from "./quality/execution-local.js";
-import type { QualityRisk, QualityTrigger } from "./quality/types.js";
+import { collectChangeSet, collectBaseline } from "./quality/change-set.js";
+import type { ChangeSet, CheckTier, QualityPolicy, QualityRisk, QualityRun, QualityTrigger } from "./quality/types.js";
 import type { QualityIntegration } from "./conductor.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -170,9 +171,111 @@ const fixerRunner = (run: { id: string; stage: string }) => {
   });
 };
 
+/**
+ * 通用 gate runner 工厂：在 quick-verifying / full-verifying 阶段执行 gate 检查并按结果自动推进。
+ *
+ * 推进规则：
+ * - passed → quick: review.enabled ? reviewing : full-verifying；full: autonomy=observe ? awaiting-approval : accepted
+ * - codeFailed → 有 fix 预算 ? fixing : failed
+ * - infraFailed/cancelled → failed
+ */
+function makeGateRunner(tier: CheckTier): (run: { id: string; stage: string }) => void {
+  return (run) => {
+    const stage = tier === "quick" ? "quick-verifying" : "full-verifying";
+    if (run.stage !== stage) return;
+    const runId = run.id;
+    const current = qualityService.getRun(runId);
+    if (!current || current.stage !== stage) return;
+    const project = qualityService.getProject(current.projectId);
+    if (!project) {
+      logWarn("gate-runner", `unknown project ${current.projectId} for run ${runId}`);
+      try { qualityService.advance(runId, "failed"); } catch { /* */ }
+      return;
+    }
+    const { policy } = qualityService.getPolicy(current.projectId);
+    const baseline = collectBaseline(project);
+    let changeSet: ChangeSet | undefined;
+    try {
+      changeSet = collectChangeSet(runId, project, baseline, {
+        protectedPaths: policy.protectedPaths,
+        riskRules: policy.riskRules,
+      }, qualityArtifactDir);
+      qualityService.saveRun({ ...current, patchHash: changeSet.patchHash });
+    } catch (err) {
+      logWarn("gate-runner", `changeSet collection failed for run ${runId}: ${String(err)}`);
+      changeSet = undefined;
+    }
+    const gate = new GateEngine(resolveGateExecProvider(), {
+      onSaveCheck: (check) => qualityService.saveCheck(check),
+    });
+    const attempt = current.fixRound + 1;
+    gate.runGate(project, policy, tier, runId, changeSet, attempt).then((result) => {
+      advanceAfterGate(runId, result, current, policy, tier);
+    }).catch((err) => {
+      logError("gate-runner", err);
+      try { qualityService.advance(runId, "failed"); } catch { /* */ }
+    });
+  };
+}
+
+/**
+ * gate 完成后按结果推进 run 状态。
+ * - quick passed → review.enabled ? reviewing : full-verifying
+ * - full passed → autonomy=observe ? awaiting-approval : accepted（需 patchHash）
+ * - codeFailed → 有 fix 预算 ? fixing : failed
+ * - infraFailed/cancelled → failed
+ */
+function advanceAfterGate(
+  runId: string,
+  gate: GateResult,
+  run: QualityRun,
+  policy: QualityPolicy,
+  tier: CheckTier,
+): void {
+  if (gate.passed) {
+    if (tier === "quick") {
+      if (policy.review.enabled) {
+        qualityService.advance(runId, "reviewing");
+      } else {
+        qualityService.advance(runId, "full-verifying");
+      }
+    } else {
+      // full gate 通过
+      if (policy.autonomy === "observe") {
+        qualityService.advance(runId, "awaiting-approval");
+      } else {
+        // autonomy=auto-apply 需要 patchHash 才能 accepted
+        if (run.patchHash) {
+          qualityService.advance(runId, "accepted");
+        } else {
+          qualityService.advance(runId, "awaiting-approval");
+        }
+      }
+    }
+    return;
+  }
+  if (gate.infraFailed || gate.cancelled) {
+    logWarn("gate-runner", `run ${runId} ${tier} gate infra-failed/cancelled, failing`);
+    try { qualityService.advance(runId, "failed"); } catch { /* */ }
+    return;
+  }
+  // codeFailed：检查 fix 预算
+  if (run.fixRound >= run.budget.maxFixRounds) {
+    logWarn("gate-runner", `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing after ${tier} gate`);
+    try { qualityService.advance(runId, "failed"); } catch { /* */ }
+    return;
+  }
+  try { qualityService.advance(runId, "fixing"); } catch { /* */ }
+}
+
+const quickRunner = makeGateRunner("quick");
+const fullRunner = makeGateRunner("full");
+
 const qualityService = new QualityService(store, qualityEmit, {
   reviewRunner,
   fixerRunner,
+  quickRunner,
+  fullRunner,
   sandboxRunner: async (opts) => {
     const project = qualityService.getProject(opts.projectId);
     if (!project) return { passed: false, checkSummaries: [], checksTotal: 0, checksPassed: 0, checksFailed: 1 };
@@ -233,9 +336,35 @@ const qualityIntegration: QualityIntegration = {
     if (reviewerSessionId) {
       runPermissionManager.bindSession(reviewerSessionId, run.id, "reviewer");
     }
+    // 状态机自驱：Conductor 创建 run 后立即把它从 queued 推到 quick-verifying，触发 gate runner
+    try {
+      qualityService.advance(run.id, "preflight");
+      qualityService.advance(run.id, "implementing");
+      qualityService.advance(run.id, "collecting");
+      qualityService.advance(run.id, "quick-verifying");
+    } catch (err) {
+      logError("quality auto-advance", `run ${run.id} failed to advance: ${String(err)}`);
+    }
     return run.id;
   },
   onRunTerminal(runId, cb) {
+    const run = qualityService.getRun(runId);
+    if (run && isTerminal(run.stage)) {
+      cb(run.stage === "accepted");
+    } else {
+      qualityRunCallbacks.set(runId, cb);
+    }
+  },
+  recoverRun(runId, cb) {
+    const run = qualityService.getRun(runId);
+    if (!run) {
+      cb(false);
+      return;
+    }
+    if (isTerminal(run.stage)) {
+      cb(run.stage === "accepted");
+      return;
+    }
     qualityRunCallbacks.set(runId, cb);
   },
 };
@@ -582,6 +711,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
         settle(() => {
           localAgentErrors.delete(connection.id);
           console.log(`[hub] local agent ${connection.id} started`);
+          roomModeManager.resumeFlows();
           resolve();
         });
       })
@@ -625,6 +755,7 @@ const roomModeManager = new RoomModeManager(
 if (savedRuntime) {
   roomModeManager
     .importRuntime(savedRuntime)
+    .then(() => persistState())
     .catch((err) => logError("import runtime", err));
 }
 
@@ -2124,6 +2255,17 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!project) throw new Error(`unknown project: ${id}`);
       return { project };
     }
+    case "quality.project.register": {
+      const p = req.params ?? {};
+      const project = qualityService.registerProject({
+        connectionId: String(p.connectionId ?? "manual"),
+        root: String(p.root ?? ""),
+        ...(p.displayName !== undefined ? { displayName: String(p.displayName) } : {}),
+        ...(p.localExec !== undefined ? { localExec: Boolean(p.localExec) } : {}),
+        ...(p.remoteExec !== undefined ? { remoteExec: Boolean(p.remoteExec) } : {}),
+      });
+      return { project };
+    }
     case "quality.policy.detect": {
       const id = String(req.params?.projectId ?? "");
       return qualityService.detectPolicy(id);
@@ -2187,6 +2329,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     case "quality.run.retry": {
       const id = String(req.params?.id ?? "");
       return { run: qualityService.retryRun(id) };
+    }
+    case "quality.run.advance": {
+      const id = String(req.params?.id ?? "");
+      const to = String(req.params?.to ?? "");
+      return { run: qualityService.advance(id, to as never) };
+    }
+    case "quality.check.list": {
+      const runId = String(req.params?.runId ?? "");
+      return { checks: qualityService.listChecks(runId) };
     }
     case "quality.finding.list": {
       const runId = String(req.params?.runId ?? "");
@@ -2388,7 +2539,9 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   const stream = webSocketStream(ws);
   const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall, runPermissionManager);
   agents.set(connectionId, a);
-  a.ensureStarted().catch((err) => {
+  a.ensureStarted().then(() => {
+    roomModeManager.resumeFlows();
+  }).catch((err) => {
     logWarn("worker", `${connectionId} start failed: ${String(err)}`);
     agents.delete(connectionId);
     ws.close();
@@ -2505,7 +2658,9 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       agents.set(virtualId, a);
       virtualAgents.set(ch.id, a);
 
-      a.ensureStarted().catch((err) => {
+      a.ensureStarted().then(() => {
+        roomModeManager.resumeFlows();
+      }).catch((err) => {
         logWarn("worker", `multiplex channel ${ch.id} start failed: ${String(err)}`);
         agents.delete(virtualId);
         virtualAgents.delete(ch.id);

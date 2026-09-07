@@ -1639,7 +1639,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     isGenerating: () => {
       const room = get().currentRoom;
-      if (room) return room.members.some((m) => get().busyIds.includes(m[0]));
+      if (room) {
+        if (room.members.some((m) => get().busyIds.includes(m[0]))) return true;
+        const flow = get().flow;
+        if (flow && flow.phase !== "done") return true;
+        return false;
+      }
       const s = get().currentSession;
       return s ? get().busyIds.includes(s.sessionId) : false;
     },

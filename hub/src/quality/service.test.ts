@@ -332,6 +332,73 @@ describe("QualityService", () => {
       assert.equal(reviewedRuns.length, 0);
     });
 
+    it("advance 到 quick-verifying 时触发 quickRunner", () => {
+      const quickRuns: string[] = [];
+      const svc = new QualityService(store, () => {}, {
+        quickRunner: (run) => quickRuns.push(run.id),
+      });
+      const p = svc.registerProject({ connectionId: "c1", root: dir });
+      const run = svc.startRun({
+        projectId: p.id,
+        trigger: "interactive",
+        risk: "low",
+        policyVersion: "v1",
+        budget: { maxFixRounds: 2, timeoutMs: 60000 },
+      });
+      svc.advance(run.id, "preflight");
+      svc.advance(run.id, "implementing");
+      svc.advance(run.id, "collecting");
+      assert.equal(quickRuns.length, 0);
+      svc.advance(run.id, "quick-verifying");
+      assert.equal(quickRuns.length, 1);
+      assert.equal(quickRuns[0], run.id);
+    });
+
+    it("advance 到 full-verifying 时触发 fullRunner", () => {
+      const fullRuns: string[] = [];
+      const svc = new QualityService(store, () => {}, {
+        fullRunner: (run) => fullRuns.push(run.id),
+      });
+      const p = svc.registerProject({ connectionId: "c1", root: dir });
+      const run = svc.startRun({
+        projectId: p.id,
+        trigger: "interactive",
+        risk: "low",
+        policyVersion: "v1",
+        budget: { maxFixRounds: 2, timeoutMs: 60000 },
+      });
+      svc.advance(run.id, "preflight");
+      svc.advance(run.id, "implementing");
+      svc.advance(run.id, "collecting");
+      svc.advance(run.id, "quick-verifying");
+      assert.equal(fullRuns.length, 0);
+      svc.advance(run.id, "full-verifying");
+      assert.equal(fullRuns.length, 1);
+      assert.equal(fullRuns[0], run.id);
+    });
+
+    it("advance 到非 gate 阶段不触发 quickRunner/fullRunner", () => {
+      const quickRuns: string[] = [];
+      const fullRuns: string[] = [];
+      const svc = new QualityService(store, () => {}, {
+        quickRunner: (run) => quickRuns.push(run.id),
+        fullRunner: (run) => fullRuns.push(run.id),
+      });
+      const p = svc.registerProject({ connectionId: "c1", root: dir });
+      const run = svc.startRun({
+        projectId: p.id,
+        trigger: "interactive",
+        risk: "low",
+        policyVersion: "v1",
+        budget: { maxFixRounds: 2, timeoutMs: 60000 },
+      });
+      svc.advance(run.id, "preflight");
+      svc.advance(run.id, "implementing");
+      svc.advance(run.id, "collecting");
+      assert.equal(quickRuns.length, 0);
+      assert.equal(fullRuns.length, 0);
+    });
+
     it("run 进入终态时触发 onTerminal", () => {
       const terminalRuns: { id: string; stage: string }[] = [];
       const svc = new QualityService(store, () => {}, {

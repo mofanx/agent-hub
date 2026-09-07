@@ -92,7 +92,7 @@ export interface FlowTask {
   id: string;
   sessionId: string;
   name: string;
-  status: "pending" | "running" | "done" | "failed";
+  status: "pending" | "running" | "done" | "failed" | "verifying";
   task: string;
   dependsOn: string[];
   artifacts: FlowArtifact[];
@@ -111,7 +111,7 @@ export interface ArtifactInfo {
 export interface FlowInfo {
   roomId: string;
   phase: string;
-  progress: { done: number; running: number; pending: number; failed: number; total: number };
+  progress: { done: number; running: number; pending: number; failed: number; verifying?: number; total: number };
   tasks: FlowTask[];
 }
 

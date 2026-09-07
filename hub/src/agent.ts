@@ -551,13 +551,6 @@ export class AcpAgent {
     entry.busy = true;
     entry.stoppable = true;
     entry.turnText = "";
-    for (const block of prompt) {
-      if (block.type === "text") {
-        entry.turnText += (block.text as string) ?? "";
-      } else if (block.type === "image") {
-        entry.turnText += "[图片]";
-      }
-    }
     this.emit({
       method: "session.generating",
       params: { sessionId, stoppable: true },

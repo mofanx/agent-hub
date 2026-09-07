@@ -1,6 +1,7 @@
 # Node
 hub/node_modules/
 hub/data/
+hub/data-sandbox/
 hub/package-lock.json
 
 # Android
