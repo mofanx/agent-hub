@@ -583,6 +583,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val qualityFindings = mutableStateListOf<QualityFinding>()
     val qualityIncidents = mutableStateListOf<QualityIncident>()
     val qualityRules = mutableStateListOf<QualityRule>()
+    var qualityAwaitingCount by mutableStateOf(0)
     var qualityPolicy by mutableStateOf<QualityPolicyInfo?>(null)
     var qualityProjectId by mutableStateOf<String?>(null)
     var qualityRunId by mutableStateOf<String?>(null)
@@ -1583,6 +1584,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = result["runs"]?.jsonArray ?: return@launch
                 qualityRuns.clear()
                 for (r in list) qualityRuns.add(parseQualityRun(r.jsonObject))
+                qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }
             } catch (_: Exception) {
             }
         }
@@ -3682,7 +3684,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val parsed = parseQualityRun(runObj)
                 val idx = qualityRuns.indexOfFirst { it.id == parsed.id }
                 if (idx >= 0) qualityRuns[idx] = parsed else qualityRuns.add(0, parsed)
+                qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }
                 if (qualityRunId == parsed.id) loadQualityRun(parsed.id)
+            }
+            "quality.awaitingApproval" -> {
+                qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }
             }
         }
     }

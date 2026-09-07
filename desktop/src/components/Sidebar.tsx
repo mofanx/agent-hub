@@ -282,8 +282,18 @@ export function Sidebar() {
         <button className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`} title="定时任务" onClick={() => useHubStore.setState({ screen: "schedule" })}>
           <CalendarClock size={16} />
         </button>
-        <button className={`icon-btn ${store.screen === "quality" ? "active" : ""}`} title="质量" onClick={() => void store.openQuality()}>
+        <button className={`icon-btn ${store.screen === "quality" ? "active" : ""}`} title="质量" onClick={() => void store.openQuality()} style={{ position: "relative" }}>
           <ShieldCheck size={16} />
+          {store.qualityAwaitingCount > 0 && (
+            <span style={{
+              position: "absolute", top: -2, right: -2, background: "var(--warn, #f1c40f)",
+              color: "var(--bg, #000)", fontSize: 9, fontWeight: 700, borderRadius: "50%",
+              minWidth: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center",
+              padding: "0 3px", lineHeight: 1,
+            }}>
+              {store.qualityAwaitingCount}
+            </span>
+          )}
         </button>
         <button className={`icon-btn ${store.screen === "settings" ? "active" : ""}`} title="设置" onClick={() => useHubStore.setState({ screen: "settings" })}>
           <Settings size={16} />
@@ -445,8 +455,19 @@ export function Sidebar() {
           className={`icon-btn ${store.screen === "quality" ? "active" : ""}`}
           title="质量"
           onClick={() => void store.openQuality()}
+          style={{ position: "relative" }}
         >
           <ShieldCheck size={15} />
+          {store.qualityAwaitingCount > 0 && (
+            <span style={{
+              position: "absolute", top: -2, right: -2, background: "var(--warn, #f1c40f)",
+              color: "var(--bg, #000)", fontSize: 9, fontWeight: 700, borderRadius: "50%",
+              minWidth: 13, height: 13, display: "flex", alignItems: "center", justifyContent: "center",
+              padding: "0 3px", lineHeight: 1,
+            }}>
+              {store.qualityAwaitingCount}
+            </span>
+          )}
         </button>
         <button
           className={`icon-btn ${store.screen === "settings" ? "active" : ""}`}

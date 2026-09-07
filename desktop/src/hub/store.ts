@@ -118,6 +118,7 @@ interface State {
   qualityLoading: boolean;
   qualityIncidents: QualityIncident[];
   qualityRules: QualityRule[];
+  qualityAwaitingCount: number;
 }
 
 interface Actions {
@@ -614,10 +615,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const idx = runs.findIndex((r) => r.id === run.id);
         if (idx >= 0) runs[idx] = run;
         else runs.unshift(run);
-        set({ qualityRuns: runs });
+        set({ qualityRuns: runs, qualityAwaitingCount: runs.filter((r) => r.stage === "awaiting-approval").length });
         if (get().qualityRunId === run.id) {
           void get().loadQualityRun(run.id);
         }
+        break;
+      }
+      case "quality.awaitingApproval": {
+        const runs = get().qualityRuns;
+        set({ qualityAwaitingCount: runs.filter((r) => r.stage === "awaiting-approval").length });
         break;
       }
     }
@@ -820,6 +826,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     qualityLoading: false,
     qualityIncidents: [],
     qualityRules: [],
+    qualityAwaitingCount: 0,
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -2491,7 +2498,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           "quality.run.list",
           projectId ? { projectId, limit: 100 } : { limit: 100 },
         );
-        set({ qualityRuns: ((resp.runs as unknown[] | undefined) ?? []) as QualityRun[] });
+        const runs = ((resp.runs as unknown[] | undefined) ?? []) as QualityRun[];
+        set({ qualityRuns: runs, qualityAwaitingCount: runs.filter((r) => r.stage === "awaiting-approval").length });
       } catch {}
     },
 
