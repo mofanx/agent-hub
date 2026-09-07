@@ -56,7 +56,19 @@ export type HubEvent =
   | { method: "agent.status"; params: { status: string; detail?: string } }
   | { method: "task.update"; params: { tasks: unknown[] } }
   | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } }
-  | { method: "quality.awaitingApproval"; params: { runId: string; projectId: string; roomId: string | null } };
+  | { method: "quality.awaitingApproval"; params: { runId: string; projectId: string; roomId: string | null } }
+  | {
+      method: "quality.approvalRequest";
+      params: {
+        requestId: string;
+        runId: string;
+        projectId: string;
+        roomId: string | null;
+        title: string;
+        options: { optionId: string; name: string }[];
+      };
+    }
+  | { method: "quality.approvalResolved"; params: { requestId: string; outcome: string } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 

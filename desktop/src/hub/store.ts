@@ -626,6 +626,45 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({ qualityAwaitingCount: runs.filter((r) => r.stage === "awaiting-approval").length });
         break;
       }
+      case "quality.approvalRequest": {
+        const requestId = String(params.requestId ?? "");
+        const roomId = String(params.roomId ?? "");
+        const room = get().currentRoom;
+        if (roomId && (!room || room.roomId !== roomId)) break;
+        const title = String(params.title ?? "质量审批");
+        const options = ((params.options as unknown[] | undefined) ?? []).map((it) => {
+          const o = it as Record<string, unknown>;
+          return [String(o.optionId ?? ""), String(o.name ?? "")] as [string, string];
+        });
+        const next: ChatItem = {
+          kind: "permission",
+          at: Date.now(),
+          requestId,
+          title,
+          options,
+          answered: null,
+          author: "质量",
+        };
+        set({ chatItems: [...get().chatItems, next] });
+        ensurePermission().then(() => {
+          showNotification("质量审批", title).catch(() => {});
+        });
+        break;
+      }
+      case "quality.approvalResolved": {
+        const requestId = String(params.requestId ?? "");
+        const outcome = String(params.outcome ?? "");
+        const items = [...get().chatItems];
+        const idx = findLastIndex(items, (it) => it.kind === "permission" && it.requestId === requestId);
+        if (idx >= 0) {
+          const p = items[idx];
+          if (p.kind === "permission" && p.answered === null) {
+            items[idx] = { ...p, answered: outcome };
+            set({ chatItems: items });
+          }
+        }
+        break;
+      }
     }
   };
 
@@ -1509,7 +1548,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
           set({ chatItems: items });
         }
       }
-      getOrCall("permission.respond", { requestId, optionId }).catch(() => {});
+      if (requestId.startsWith("quality-approval-")) {
+        const runId = requestId.slice("quality-approval-".length);
+        const action = optionId === "approve" ? "approve" : "reject";
+        getOrCall(`quality.run.${action}`, { id: runId }).then(() => {
+          void get().loadQualityRuns(get().qualityProjectId ?? undefined);
+        }).catch(() => {});
+      } else {
+        getOrCall("permission.respond", { requestId, optionId }).catch(() => {});
+      }
     },
 
     search: async (query) => {

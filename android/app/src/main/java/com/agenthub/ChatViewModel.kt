@@ -3512,10 +3512,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             try {
-                hub.call("permission.respond", buildJsonObject {
-                    put("requestId", requestId)
-                    put("optionId", optionId)
-                })
+                if (requestId.startsWith("quality-approval-")) {
+                    val runId = requestId.removePrefix("quality-approval-")
+                    val action = if (optionId == "approve") "approve" else "reject"
+                    hub.call("quality.run.$action", buildJsonObject { put("id", runId) })
+                    loadQualityRuns(qualityProjectId)
+                } else {
+                    hub.call("permission.respond", buildJsonObject {
+                        put("requestId", requestId)
+                        put("optionId", optionId)
+                    })
+                }
             } catch (_: Exception) {
             }
         }
@@ -3689,6 +3696,37 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             "quality.awaitingApproval" -> {
                 qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }
+            }
+            "quality.approvalRequest" -> {
+                val p = obj["params"]!!.jsonObject
+                val roomId = p["roomId"]?.jsonPrimitive?.contentOrNull
+                if (roomId != null && currentRoom?.roomId != roomId) return
+                val requestId = p["requestId"]!!.jsonPrimitive.content
+                val title = p["title"]?.jsonPrimitive?.content ?: "质量审批"
+                val options = p["options"]!!.jsonArray.map {
+                    val o = it.jsonObject
+                    o["optionId"]!!.jsonPrimitive.content to o["name"]!!.jsonPrimitive.content
+                }
+                chatItems.add(
+                    ChatItem.Permission(++itemSeq,
+                        requestId,
+                        title,
+                        options,
+                        author = "质量",
+                    )
+                )
+            }
+            "quality.approvalResolved" -> {
+                val p = obj["params"]!!.jsonObject
+                val requestId = p["requestId"]!!.jsonPrimitive.content
+                val outcome = p["outcome"]?.jsonPrimitive?.contentOrNull ?: ""
+                val idx = chatItems.indexOfLast { it is ChatItem.Permission && it.requestId == requestId }
+                if (idx >= 0) {
+                    val item = chatItems[idx] as ChatItem.Permission
+                    if (item.answered == null) {
+                        chatItems[idx] = item.copy(answered = outcome)
+                    }
+                }
             }
         }
     }

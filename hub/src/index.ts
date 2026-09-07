@@ -66,6 +66,10 @@ const qualityEmit: Emit = (event: QualityEvent) => {
   const { runId, run } = event.params;
   if (isTerminal(run.stage)) {
     runPermissionManager.unbindRun(runId);
+    broadcast({
+      method: "quality.approvalResolved",
+      params: { requestId: `quality-approval-${runId}`, outcome: run.stage },
+    });
     const cb = qualityRunCallbacks.get(runId);
     if (cb) {
       qualityRunCallbacks.delete(runId);
@@ -282,6 +286,20 @@ const qualityService = new QualityService(store, qualityEmit, {
       roomModeManager.broadcastRoomNotice(run.roomId, `质量运行 ${run.id} 等待审批 · 风险: ${run.risk} · 修复轮次: ${run.fixRound}/${run.budget.maxFixRounds}，请在质量面板中批准或拒绝`);
     }
     broadcast({ method: "quality.awaitingApproval", params: { runId: run.id, projectId: run.projectId, roomId: run.roomId ?? null } });
+    broadcast({
+      method: "quality.approvalRequest",
+      params: {
+        requestId: `quality-approval-${run.id}`,
+        runId: run.id,
+        projectId: run.projectId,
+        roomId: run.roomId ?? null,
+        title: `质量审批 · ${run.id} · 风险: ${run.risk} · 修复轮次: ${run.fixRound}/${run.budget.maxFixRounds}`,
+        options: [
+          { optionId: "approve", name: "批准" },
+          { optionId: "reject", name: "拒绝" },
+        ],
+      },
+    });
   },
   sandboxRunner: async (opts) => {
     const project = qualityService.getProject(opts.projectId);
