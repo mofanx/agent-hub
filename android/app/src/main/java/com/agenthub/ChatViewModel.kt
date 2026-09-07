@@ -33,6 +33,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
@@ -276,6 +277,88 @@ data class FlowInfo(
     val tasks: List<FlowTask>,
 )
 
+data class QualityProject(
+    val id: String,
+    val connectionId: String = "",
+    val root: String = "",
+    val gitRoot: String? = null,
+    val displayName: String = "",
+)
+
+data class QualityRun(
+    val id: String,
+    val projectId: String,
+    val stage: String,
+    val risk: String,
+    val trigger: String,
+    val verdict: String? = null,
+    val fixRound: Int = 0,
+    val maxFixRounds: Int = 0,
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+    val completedAt: Long? = null,
+    val failureCode: String? = null,
+    val patchHash: String? = null,
+    val roomId: String? = null,
+    val taskId: String? = null,
+)
+
+data class QualityCheck(
+    val id: String,
+    val checkId: String,
+    val status: String,
+    val attempt: Int = 1,
+    val exitCode: Int? = null,
+    val durationMs: Long? = null,
+    val summary: String? = null,
+    val stdoutArtifact: String? = null,
+    val stderrArtifact: String? = null,
+)
+
+data class QualityFinding(
+    val id: String,
+    val severity: String,
+    val confidence: Double = 0.0,
+    val claim: String,
+    val evidence: String = "",
+    val reproduction: String? = null,
+    val suggestion: String? = null,
+    val file: String? = null,
+    val line: Int? = null,
+    val blocking: Boolean = false,
+    val status: String = "open",
+)
+
+data class QualityIncident(
+    val id: String,
+    val projectId: String,
+    val sourceRunId: String? = null,
+    val description: String,
+    val fingerprint: String,
+    val severity: String,
+    val reproduction: String? = null,
+    val regressionTest: String? = null,
+    val status: String = "open",
+)
+
+data class QualityRule(
+    val id: String,
+    val projectId: String,
+    val fingerprint: String,
+    val rule: String,
+    val evidenceIncidentIds: List<String> = emptyList(),
+    val recurrence: Int = 0,
+    val measuredImpact: String? = null,
+    val status: String = "candidate",
+)
+
+data class QualityPolicyInfo(
+    val source: String = "default",
+    val autonomy: String = "observe",
+    val checkCount: Int = 0,
+    val errors: List<String> = emptyList(),
+)
+
 data class ArtifactInfo(
     val id: String,
     val alias: String? = null,
@@ -395,7 +478,7 @@ data class SkillInfo(
     val scope: String,
 )
 
-enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings, Schedule }
+enum class Screen { Connect, Sessions, Chat, Room, FileTree, Settings, Schedule, Quality }
 
 data class ConnProfile(
     val name: String,
@@ -494,6 +577,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val scheduledTasks = mutableStateListOf<ScheduledTask>()
     val taskLogs = mutableStateListOf<TaskLog>()
     var scheduleReturnScreen by mutableStateOf(Screen.Sessions)
+    val qualityProjects = mutableStateListOf<QualityProject>()
+    val qualityRuns = mutableStateListOf<QualityRun>()
+    val qualityChecks = mutableStateListOf<QualityCheck>()
+    val qualityFindings = mutableStateListOf<QualityFinding>()
+    val qualityIncidents = mutableStateListOf<QualityIncident>()
+    val qualityRules = mutableStateListOf<QualityRule>()
+    var qualityPolicy by mutableStateOf<QualityPolicyInfo?>(null)
+    var qualityProjectId by mutableStateOf<String?>(null)
+    var qualityRunId by mutableStateOf<String?>(null)
+    var qualityReturnScreen by mutableStateOf(Screen.Sessions)
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
     var flow by mutableStateOf<FlowInfo?>(null)
@@ -1439,6 +1532,260 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    // ── quality ───────────────────────────────────────────────────────
+
+    fun openQuality() {
+        screen = Screen.Quality
+        loadQualityProjects()
+        loadQualityRuns()
+    }
+
+    fun loadQualityProjects() {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.project.list")
+                val list = result["projects"]?.jsonArray ?: return@launch
+                qualityProjects.clear()
+                for (p in list) qualityProjects.add(parseQualityProject(p.jsonObject))
+                if (qualityProjectId == null && qualityProjects.isNotEmpty()) {
+                    selectQualityProject(qualityProjects.first().id)
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun selectQualityProject(id: String) {
+        qualityProjectId = id
+        qualityRunId = null
+        qualityChecks.clear()
+        qualityFindings.clear()
+        loadQualityRuns(id)
+        loadQualityPolicy(id)
+        loadQualityIncidents(id)
+        loadQualityRules(id)
+    }
+
+    fun loadQualityRuns(projectId: String? = qualityProjectId) {
+        viewModelScope.launch {
+            try {
+                val params = buildJsonObject {
+                    projectId?.let { put("projectId", it) }
+                    put("limit", 100)
+                }
+                val result = hub.call("quality.run.list", params)
+                val list = result["runs"]?.jsonArray ?: return@launch
+                qualityRuns.clear()
+                for (r in list) qualityRuns.add(parseQualityRun(r.jsonObject))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun loadQualityRun(id: String) {
+        qualityRunId = id
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.run.get", buildJsonObject { put("id", id) })
+                qualityChecks.clear()
+                result["checks"]?.jsonArray?.forEach { qualityChecks.add(parseQualityCheck(it.jsonObject)) }
+                qualityFindings.clear()
+                result["findings"]?.jsonArray?.forEach { qualityFindings.add(parseQualityFinding(it.jsonObject)) }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun loadQualityPolicy(projectId: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.policy.get", buildJsonObject { put("projectId", projectId) })
+                val policy = result["policy"]?.jsonObject
+                qualityPolicy = QualityPolicyInfo(
+                    source = result["source"]?.jsonPrimitive?.content ?: "default",
+                    autonomy = policy?.get("autonomy")?.jsonPrimitive?.content ?: "observe",
+                    checkCount = policy?.get("checks")?.jsonArray?.size ?: 0,
+                    errors = result["errors"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun startQualityRun() {
+        val projectId = qualityProjectId ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("quality.run.start", buildJsonObject {
+                    put("projectId", projectId)
+                    put("trigger", "interactive")
+                    put("risk", "low")
+                    put("policyVersion", "")
+                    put("maxFixRounds", 2)
+                    put("timeoutMs", 600000)
+                })
+                loadQualityRuns(projectId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun qualityRunAction(id: String, action: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.run.$action", buildJsonObject { put("id", id) })
+                loadQualityRuns(qualityProjectId)
+                val nextId = if (action == "retry") {
+                    result["run"]?.jsonObject?.get("id")?.jsonPrimitive?.content ?: id
+                } else id
+                loadQualityRun(nextId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun parseQualityProject(o: JsonObject) = QualityProject(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        connectionId = o["connectionId"]?.jsonPrimitive?.content ?: "",
+        root = o["root"]?.jsonPrimitive?.content ?: "",
+        gitRoot = o["gitRoot"]?.jsonPrimitive?.contentOrNull,
+        displayName = o["displayName"]?.jsonPrimitive?.content ?: "",
+    )
+
+    private fun parseQualityRun(o: JsonObject) = QualityRun(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        projectId = o["projectId"]?.jsonPrimitive?.content ?: "",
+        stage = o["stage"]?.jsonPrimitive?.content ?: "",
+        risk = o["risk"]?.jsonPrimitive?.content ?: "low",
+        trigger = o["trigger"]?.jsonPrimitive?.content ?: "interactive",
+        verdict = o["verdict"]?.jsonPrimitive?.contentOrNull,
+        fixRound = o["fixRound"]?.jsonPrimitive?.intOrNull ?: 0,
+        maxFixRounds = o["budget"]?.jsonObject?.get("maxFixRounds")?.jsonPrimitive?.intOrNull ?: 0,
+        createdAt = o["createdAt"]?.jsonPrimitive?.longOrNull ?: 0,
+        updatedAt = o["updatedAt"]?.jsonPrimitive?.longOrNull ?: 0,
+        completedAt = o["completedAt"]?.jsonPrimitive?.longOrNull,
+        failureCode = o["failureCode"]?.jsonPrimitive?.contentOrNull,
+        patchHash = o["patchHash"]?.jsonPrimitive?.contentOrNull,
+        roomId = o["roomId"]?.jsonPrimitive?.contentOrNull,
+        taskId = o["taskId"]?.jsonPrimitive?.contentOrNull,
+    )
+
+    private fun parseQualityCheck(o: JsonObject) = QualityCheck(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        checkId = o["checkId"]?.jsonPrimitive?.content ?: "",
+        status = o["status"]?.jsonPrimitive?.content ?: "queued",
+        attempt = o["attempt"]?.jsonPrimitive?.intOrNull ?: 1,
+        exitCode = o["exitCode"]?.jsonPrimitive?.intOrNull,
+        durationMs = o["durationMs"]?.jsonPrimitive?.longOrNull,
+        summary = o["summary"]?.jsonPrimitive?.contentOrNull,
+        stdoutArtifact = o["stdoutArtifact"]?.jsonPrimitive?.contentOrNull,
+        stderrArtifact = o["stderrArtifact"]?.jsonPrimitive?.contentOrNull,
+    )
+
+    private fun parseQualityFinding(o: JsonObject) = QualityFinding(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        severity = o["severity"]?.jsonPrimitive?.content ?: "info",
+        confidence = o["confidence"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+        claim = o["claim"]?.jsonPrimitive?.content ?: "",
+        evidence = o["evidence"]?.jsonPrimitive?.content ?: "",
+        reproduction = o["reproduction"]?.jsonPrimitive?.contentOrNull,
+        suggestion = o["suggestion"]?.jsonPrimitive?.contentOrNull,
+        file = o["file"]?.jsonPrimitive?.contentOrNull,
+        line = o["line"]?.jsonPrimitive?.intOrNull,
+        blocking = o["blocking"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+        status = o["status"]?.jsonPrimitive?.content ?: "open",
+    )
+
+    fun resolveQualityFinding(id: String, status: String, note: String = "") {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.finding.resolve", buildJsonObject {
+                    put("id", id)
+                    put("status", status)
+                    put("resolutionNote", note)
+                })
+                loadQualityRun(qualityRunId ?: "")
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun loadQualityIncidents(projectId: String? = qualityProjectId) {
+        viewModelScope.launch {
+            try {
+                val params = buildJsonObject { projectId?.let { put("projectId", it) } }
+                val result = hub.call("quality.incident.list", params)
+                val list = result["incidents"]?.jsonArray ?: return@launch
+                qualityIncidents.clear()
+                for (i in list) qualityIncidents.add(parseQualityIncident(i.jsonObject))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun resolveQualityIncident(id: String, status: String, regressionTest: String = "") {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.incident.resolve", buildJsonObject {
+                    put("id", id)
+                    put("status", status)
+                    if (regressionTest.isNotBlank()) put("regressionTest", regressionTest)
+                })
+                loadQualityIncidents(qualityProjectId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun loadQualityRules(projectId: String? = qualityProjectId) {
+        viewModelScope.launch {
+            try {
+                val params = buildJsonObject { projectId?.let { put("projectId", it) } }
+                val result = hub.call("quality.rule.list", params)
+                val list = result["rules"]?.jsonArray ?: return@launch
+                qualityRules.clear()
+                for (r in list) qualityRules.add(parseQualityRule(r.jsonObject))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun resolveQualityRule(id: String, status: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.rule.resolve", buildJsonObject {
+                    put("id", id)
+                    put("status", status)
+                })
+                loadQualityRules(qualityProjectId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun parseQualityIncident(o: JsonObject) = QualityIncident(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        projectId = o["projectId"]?.jsonPrimitive?.content ?: "",
+        sourceRunId = o["sourceRunId"]?.jsonPrimitive?.contentOrNull,
+        description = o["description"]?.jsonPrimitive?.content ?: "",
+        fingerprint = o["fingerprint"]?.jsonPrimitive?.content ?: "",
+        severity = o["severity"]?.jsonPrimitive?.content ?: "major",
+        reproduction = o["reproduction"]?.jsonPrimitive?.contentOrNull,
+        regressionTest = o["regressionTest"]?.jsonPrimitive?.contentOrNull,
+        status = o["status"]?.jsonPrimitive?.content ?: "open",
+    )
+
+    private fun parseQualityRule(o: JsonObject) = QualityRule(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        projectId = o["projectId"]?.jsonPrimitive?.content ?: "",
+        fingerprint = o["fingerprint"]?.jsonPrimitive?.content ?: "",
+        rule = o["rule"]?.jsonPrimitive?.content ?: "",
+        evidenceIncidentIds = o["evidenceIncidentIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+        recurrence = o["recurrence"]?.jsonPrimitive?.intOrNull ?: 0,
+        measuredImpact = o["measuredImpact"]?.jsonPrimitive?.contentOrNull,
+        status = o["status"]?.jsonPrimitive?.content ?: "candidate",
+    )
 
     private fun restoreCurrentScreen() {
         val room = currentRoom
@@ -3319,6 +3666,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = p["tasks"]?.jsonArray ?: return
                 scheduledTasks.clear()
                 for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+            }
+            "quality.runUpdate" -> {
+                val p = obj["params"]!!.jsonObject
+                val runObj = p["run"]?.jsonObject ?: return
+                val parsed = parseQualityRun(runObj)
+                val idx = qualityRuns.indexOfFirst { it.id == parsed.id }
+                if (idx >= 0) qualityRuns[idx] = parsed else qualityRuns.add(0, parsed)
+                if (qualityRunId == parsed.id) loadQualityRun(parsed.id)
             }
         }
     }

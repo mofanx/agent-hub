@@ -62,18 +62,28 @@ export type MultiplexFrame = {
   payload: AnyMessage;
 };
 
-/** 控制帧：announce 声明可用通道 */
+/** 控制帧：channel=__control__，method 为 announce 或 quality.* 等 */
 export type ControlFrame = {
   channel: "__control__";
-  method: "announce";
+  method: string;
   hostname?: string;
-  channels: { id: string; agent: string; name?: string }[];
+  channels?: { id: string; agent: string; name?: string }[];
+  [key: string]: unknown;
 };
 
 export function isControlFrame(msg: unknown): msg is ControlFrame {
   return typeof msg === "object" && msg !== null &&
     (msg as Record<string, unknown>).channel === "__control__" &&
-    (msg as Record<string, unknown>).method === "announce";
+    typeof (msg as Record<string, unknown>).method === "string";
+}
+
+/** announce 帧特有判定。 */
+export function isAnnounceFrame(msg: unknown): msg is ControlFrame & {
+  method: "announce";
+  channels: { id: string; agent: string; name?: string }[];
+} {
+  return isControlFrame(msg) && (msg as Record<string, unknown>).method === "announce" &&
+    Array.isArray((msg as Record<string, unknown>).channels);
 }
 
 export function isMultiplexFrame(msg: unknown): msg is MultiplexFrame {

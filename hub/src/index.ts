@@ -3,6 +3,7 @@ import { networkInterfaces } from "node:os";
 import { randomBytes } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import path from "node:path";
 import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
 import {
@@ -20,12 +21,24 @@ import { Store, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
-import { webSocketStream, multiplexWebSocketStream, isControlFrame, type ControlFrame } from "./stream.js";
+import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
+import { WorkerExecutionProvider, isQualityControlFrame, type QualityControlFrame } from "./quality/execution-worker.js";
+import { QualityService, type Emit, type QualityEvent } from "./quality/service.js";
+import { recoverInterruptedRuns } from "./quality/recovery.js";
+import { isTerminal } from "./quality/run.js";
+import { RunPermissionManager } from "./quality/permissions.js";
+import { ReviewOrchestrator, type ReviewerSessionRunner } from "./quality/review-orchestrator.js";
+import { FixerOrchestrator, type FixerSessionRunner } from "./quality/fixer-orchestrator.js";
+import { GateEngine } from "./quality/gate.js";
+import type { ExecutionProvider } from "./quality/execution.js";
+import { LocalExecutionProvider } from "./quality/execution-local.js";
+import type { QualityRisk, QualityTrigger } from "./quality/types.js";
+import type { QualityIntegration } from "./conductor.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -41,8 +54,191 @@ const agents = new Map<string, AcpAgent>();
 const owners = new Map<string, string>();
 const localStarts = new Map<string, Promise<void>>();
 const localAgentErrors = new Map<string, string>();
+const workerExecProviders = new Map<string, WorkerExecutionProvider>();
+const localExecProvider = new LocalExecutionProvider();
 const store = new Store();
 const modelManager = new ModelManager();
+const qualityRunCallbacks = new Map<string, (accepted: boolean) => void>();
+const runPermissionManager = new RunPermissionManager();
+const qualityEmit: Emit = (event: QualityEvent) => {
+  broadcast(event as HubEvent);
+  const { runId, run } = event.params;
+  if (isTerminal(run.stage)) {
+    runPermissionManager.unbindRun(runId);
+    const cb = qualityRunCallbacks.get(runId);
+    if (cb) {
+      qualityRunCallbacks.delete(runId);
+      cb(run.stage === "accepted");
+    }
+  }
+};
+const qualityArtifactDir = path.resolve(process.cwd(), "data", "quality");
+
+/**
+ * ReviewerSessionRunner 实现：使用第一个可用 agent 创建/复用 reviewer session。
+ * 在 reviewRunner 回调被触发时，agent 可能已连接。
+ */
+const reviewerSessionRunner: ReviewerSessionRunner = {
+  async ensureSession(opts) {
+    // 复用已有 reviewerSessionId
+    if (opts.existingSessionId) return opts.existingSessionId;
+    // 找一个可用的 agent 创建新 session
+    const agent = [...agents.values()].find((a) => a.isReady);
+    if (!agent) throw new Error("no agent available for reviewer session");
+    const { sessionId } = await agent.createSession(opts.project.root, "reviewer");
+    owners.set(sessionId, [...agents.entries()].find(([, a]) => a === agent)![0]);
+    return sessionId;
+  },
+  async promptOnce(sessionId, text, timeoutMs) {
+    const agent = agentForSession(sessionId);
+    if (!agent) throw new Error(`agent not found for reviewer session ${sessionId}`);
+    return agent.promptOnce(sessionId, text, timeoutMs);
+  },
+};
+
+let reviewOrchestrator: ReviewOrchestrator | undefined;
+
+/** reviewRunner 回调：当 run 进入 reviewing 阶段时触发 ReviewOrchestrator。 */
+const reviewRunner = (run: { id: string; stage: string }) => {
+  if (run.stage !== "reviewing") return;
+  if (!reviewOrchestrator) {
+    reviewOrchestrator = new ReviewOrchestrator(
+      qualityService,
+      runPermissionManager,
+      reviewerSessionRunner,
+      { artifactDir: qualityArtifactDir },
+    );
+  }
+  reviewOrchestrator.runReview(run.id).catch((err) => {
+    logError("review-orchestrator", err);
+    // 安全失败：推进到 failed
+    try {
+      qualityService.advance(run.id, "failed");
+    } catch { /* run 可能已终态 */ }
+  });
+};
+
+/**
+ * FixerSessionRunner 实现：复用 implementer session 或创建新 session。
+ */
+const fixerSessionRunner: FixerSessionRunner = {
+  async ensureSession(opts) {
+    if (opts.existingSessionId) return opts.existingSessionId;
+    const agent = [...agents.values()].find((a) => a.isReady);
+    if (!agent) throw new Error("no agent available for fixer session");
+    const { sessionId } = await agent.createSession(opts.project.root, "fixer");
+    owners.set(sessionId, [...agents.entries()].find(([, a]) => a === agent)![0]);
+    return sessionId;
+  },
+  async promptOnce(sessionId, text, timeoutMs) {
+    const agent = agentForSession(sessionId);
+    if (!agent) throw new Error(`agent not found for fixer session ${sessionId}`);
+    return agent.promptOnce(sessionId, text, timeoutMs);
+  },
+};
+
+/** GateEngine 使用的 ExecutionProvider：优先用 workerExecProviders，否则 LocalExecutionProvider。 */
+function resolveGateExecProvider(): ExecutionProvider {
+  for (const provider of workerExecProviders.values()) {
+    return provider;
+  }
+  return localExecProvider;
+}
+
+let fixerOrchestrator: FixerOrchestrator | undefined;
+
+/** fixerRunner 回调：当 run 进入 fixing 阶段时触发 FixerOrchestrator。 */
+const fixerRunner = (run: { id: string; stage: string }) => {
+  if (run.stage !== "fixing") return;
+  if (!fixerOrchestrator) {
+    const gateEngine = new GateEngine(resolveGateExecProvider(), {
+      onSaveCheck: (check) => qualityService.saveCheck(check),
+    });
+    fixerOrchestrator = new FixerOrchestrator(
+      qualityService,
+      runPermissionManager,
+      fixerSessionRunner,
+      gateEngine,
+      { artifactDir: qualityArtifactDir },
+    );
+  }
+  fixerOrchestrator.runFix(run.id).catch((err) => {
+    logError("fixer-orchestrator", err);
+    try {
+      qualityService.advance(run.id, "failed");
+    } catch { /* run 可能已终态 */ }
+  });
+};
+
+const qualityService = new QualityService(store, qualityEmit, {
+  reviewRunner,
+  fixerRunner,
+  sandboxRunner: async (opts) => {
+    const project = qualityService.getProject(opts.projectId);
+    if (!project) return { passed: false, checkSummaries: [], checksTotal: 0, checksPassed: 0, checksFailed: 1 };
+    const gate = new GateEngine(resolveGateExecProvider(), {
+      onSaveCheck: (check) => qualityService.saveCheck(check),
+    });
+    const sandboxRunId = `sandbox-${randomBytes(4).toString("hex")}`;
+    const result = await gate.runGate(project, opts.sandboxPolicy, "quick", sandboxRunId, undefined);
+    const summaries = result.checks.map((c) => `[${c.status}] ${c.checkId}: ${c.summary ?? ""}`);
+    const checksPassed = result.checks.filter((c) => c.status === "passed").length;
+    const checksFailed = result.checks.filter((c) => c.status !== "passed").length;
+    return {
+      passed: result.passed,
+      checkSummaries: summaries,
+      checksTotal: result.checks.length,
+      checksPassed,
+      checksFailed,
+    };
+  },
+});
+
+function findProjectForPaths(
+  projects: ReturnType<QualityService["listProjects"]>,
+  filePaths: string[],
+): ReturnType<QualityService["getProject"]> | undefined {
+  for (const p of projects) {
+    const root = p.root.endsWith("/") ? p.root : p.root + "/";
+    if (filePaths.some((fp) => fp.startsWith(root) || fp === p.root)) return p;
+  }
+  return projects[0];
+}
+
+const qualityIntegration: QualityIntegration = {
+  startRunForTask(opts) {
+    const projects = qualityService.listProjects();
+    if (projects.length === 0) return undefined;
+    const filePaths = opts.artifacts
+      .filter((a) => a.type === "file" && a.path)
+      .map((a) => a.path!);
+    const project = findProjectForPaths(projects, filePaths);
+    if (!project) return undefined;
+    const { policy } = qualityService.getPolicy(project.id);
+    const reviewerSessionId = policy.review.reviewerSessionId;
+    const run = qualityService.startRun({
+      projectId: project.id,
+      trigger: "conductor",
+      ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
+      ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
+      ...(opts.sessionId !== undefined ? { implementerSessionId: opts.sessionId } : {}),
+      ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
+      risk: "medium",
+      policyVersion: String(policy.version),
+      budget: { maxFixRounds: policy.review.maxFixRounds ?? 2, timeoutMs: 60000 },
+    });
+    if (opts.sessionId) {
+      runPermissionManager.bindSession(opts.sessionId, run.id, "implementer");
+    }
+    if (reviewerSessionId) {
+      runPermissionManager.bindSession(reviewerSessionId, run.id, "reviewer");
+    }
+    return run.id;
+  },
+  onRunTerminal(runId, cb) {
+    qualityRunCallbacks.set(runId, cb);
+  },
+};
 
 rooms.setRoleResolver((roleId) => store.listRoles().find((r) => r.id === roleId)?.persona);
 ensureDefaultLocalConnections();
@@ -134,6 +330,10 @@ function repairHistoryAtStartup(): void {
 }
 
 repairHistoryAtStartup();
+const qualityRecovery = recoverInterruptedRuns(store);
+if (qualityRecovery.runs.length > 0) {
+  console.log(`[hub] quality recovery: ${qualityRecovery.runs.length} runs, ${qualityRecovery.checks.length} checks resumed to terminal state`);
+}
 
 function parseEventAction(raw: unknown): EventAction {
   const actions: EventAction[] = ["add", "modify", "delete", "rename", "command", "test"];
@@ -328,6 +528,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     onTurnEnd,
     onFileWrite,
     onToolCall,
+    runPermissionManager,
   );
 
   agents.set(connection.id, a);
@@ -413,8 +614,11 @@ const agentOps: AgentOps = {
   isBusy: (sessionId) => ownerOf(sessionId).isBusy(sessionId),
   cancel: (sessionId) => ownerOf(sessionId).cancel(sessionId),
 };
-const roomModeManager = new RoomModeManager(agentOps, rooms, (method, params) =>
-  broadcast({ method, params } as HubEvent),
+const roomModeManager = new RoomModeManager(
+  agentOps,
+  rooms,
+  (method, params) => broadcast({ method, params } as HubEvent),
+  qualityIntegration,
 );
 
 // 恢复运行时编排状态（必须在 roomModeManager 创建后，但 agents 可能尚未连接）
@@ -546,11 +750,14 @@ function onTurnEnd(sessionId: string, text: string): void {
   }
 }
 
+const sessionsWithFileChanges = new Set<string>();
+
 function onFileWrite(sessionId: string, relPath: string, existed: boolean, content?: string): void {
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
   const author = meta.name;
   const summary = existed ? "修改" : "新增";
+  sessionsWithFileChanges.add(sessionId);
 
   sessionLedger.addFile(sessionId, { author, summary, path: relPath });
   // fs 通道掌握准确的 existed 信息，由它修正/产生 add/modify 事件（与 tool_call edit 去重）
@@ -588,6 +795,9 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
     execute: "command",
   };
   const action = actionMap[kind] ?? "command";
+  if (kind === "edit" || kind === "delete" || kind === "move") {
+    sessionsWithFileChanges.add(sessionId);
+  }
 
   for (const relPath of paths) {
     const summary = title;
@@ -638,9 +848,16 @@ function onAgentEvent(event: HubEvent): void {
     }
     void roomModeManager
       .onPromptDone(sessionId!, internalOutput)
-      .then(() => persistState())
+      .then((handled) => {
+        persistState();
+        if (!handled && sessionsWithFileChanges.has(sessionId!)) {
+          triggerGateForSession(sessionId!, internalOutput);
+        }
+        sessionsWithFileChanges.delete(sessionId!);
+      })
       .catch((err) => {
         logError("room-modes", err);
+        sessionsWithFileChanges.delete(sessionId!);
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
@@ -656,6 +873,36 @@ function onAgentEvent(event: HubEvent): void {
     });
   }
   if (!skipBroadcast) broadcast(toPublicHubEvent(event));
+}
+
+function triggerGateForSession(sessionId: string, output: string): void {
+  const projects = qualityService.listProjects();
+  if (projects.length === 0) return;
+  const artifacts = extractTaskResult(output).artifacts;
+  const filePaths = artifacts
+    .filter((a) => a.type === "file" && a.path)
+    .map((a) => a.path!);
+  const ledgerFiles = sessionLedger.getArtifacts(sessionId)
+    .filter((a) => a.path)
+    .map((a) => a.path!);
+  const allPaths = [...new Set([...filePaths, ...ledgerFiles])];
+  const project = findProjectForPaths(projects, allPaths);
+  if (!project) return;
+  const { policy } = qualityService.getPolicy(project.id);
+  const reviewerSessionId = policy.review.reviewerSessionId;
+  const run = qualityService.startRun({
+    projectId: project.id,
+    trigger: "interactive",
+    implementerSessionId: sessionId,
+    ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
+    risk: "medium",
+    policyVersion: String(policy.version),
+    budget: { maxFixRounds: policy.review.maxFixRounds ?? 2, timeoutMs: 60000 },
+  });
+  runPermissionManager.bindSession(sessionId, run.id, "implementer");
+  if (reviewerSessionId) {
+    runPermissionManager.bindSession(reviewerSessionId, run.id, "reviewer");
+  }
 }
 
 function broadcast(event: HubEvent): void {
@@ -1868,6 +2115,237 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       scheduler.clearLogs();
       return { cleared: true };
     }
+    // ── quality: projects ──────────────────────────────────────────────
+    case "quality.project.list":
+      return { projects: qualityService.listProjects() };
+    case "quality.project.get": {
+      const id = String(req.params?.id ?? "");
+      const project = qualityService.getProject(id);
+      if (!project) throw new Error(`unknown project: ${id}`);
+      return { project };
+    }
+    case "quality.policy.detect": {
+      const id = String(req.params?.projectId ?? "");
+      return qualityService.detectPolicy(id);
+    }
+    case "quality.policy.validate": {
+      const id = String(req.params?.projectId ?? "");
+      const policy = req.params?.policy;
+      return qualityService.validatePolicy(id, policy);
+    }
+    case "quality.policy.get": {
+      const id = String(req.params?.projectId ?? "");
+      return qualityService.getPolicy(id);
+    }
+    // ── quality: runs ──────────────────────────────────────────────────
+    case "quality.run.start": {
+      const p = req.params ?? {};
+      const run = qualityService.startRun({
+        projectId: String(p.projectId ?? ""),
+        trigger: String(p.trigger ?? "interactive") as QualityTrigger,
+        ...(p.roomId !== undefined ? { roomId: String(p.roomId) } : {}),
+        ...(p.taskId !== undefined ? { taskId: String(p.taskId) } : {}),
+        ...(p.implementerSessionId !== undefined ? { implementerSessionId: String(p.implementerSessionId) } : {}),
+        ...(p.reviewerSessionId !== undefined ? { reviewerSessionId: String(p.reviewerSessionId) } : {}),
+        risk: String(p.risk ?? "low") as QualityRisk,
+        policyVersion: String(p.policyVersion ?? ""),
+        ...(p.baseRevision !== undefined ? { baseRevision: String(p.baseRevision) } : {}),
+        ...(p.dirtyBaselineHash !== undefined ? { dirtyBaselineHash: String(p.dirtyBaselineHash) } : {}),
+        ...(p.patchHash !== undefined ? { patchHash: String(p.patchHash) } : {}),
+        budget: {
+          maxFixRounds: Number(p.maxFixRounds ?? 2),
+          timeoutMs: Number(p.timeoutMs ?? 60000),
+        },
+      });
+      return { run };
+    }
+    case "quality.run.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { runs: qualityService.listRuns(projectId, limit) };
+    }
+    case "quality.run.get": {
+      const id = String(req.params?.id ?? "");
+      const run = qualityService.getRun(id);
+      if (!run) throw new Error(`unknown run: ${id}`);
+      const checks = qualityService.listChecks(id);
+      const findings = qualityService.listFindings(id);
+      return { run, checks, findings };
+    }
+    case "quality.run.cancel": {
+      const id = String(req.params?.id ?? "");
+      return { run: qualityService.cancelRun(id) };
+    }
+    case "quality.run.approve": {
+      const id = String(req.params?.id ?? "");
+      return { run: qualityService.approveRun(id) };
+    }
+    case "quality.run.reject": {
+      const id = String(req.params?.id ?? "");
+      return { run: qualityService.rejectRun(id) };
+    }
+    case "quality.run.retry": {
+      const id = String(req.params?.id ?? "");
+      return { run: qualityService.retryRun(id) };
+    }
+    case "quality.finding.list": {
+      const runId = String(req.params?.runId ?? "");
+      return { findings: qualityService.listFindings(runId) };
+    }
+    case "quality.finding.get": {
+      const id = String(req.params?.id ?? "");
+      const finding = qualityService.getFinding(id);
+      if (!finding) throw new Error(`unknown finding: ${id}`);
+      return { finding };
+    }
+    case "quality.finding.resolve": {
+      const id = String(req.params?.id ?? "");
+      const status = String(req.params?.status ?? "");
+      const note = req.params?.resolutionNote !== undefined ? String(req.params.resolutionNote) : undefined;
+      const finding = qualityService.resolveFinding(id, status as never, note);
+      return { finding };
+    }
+    // ── quality: review decisions & metrics (Q2-07) ───────────────────
+    case "quality.review.decision.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { decisions: qualityService.listReviewDecisions(projectId, limit) };
+    }
+    case "quality.review.metrics": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      return { metrics: qualityService.getReviewerMetrics(projectId) };
+    }
+    // ── quality: incidents (Q3-01) ────────────────────────────────────
+    case "quality.incident.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      return { incidents: qualityService.listIncidents(projectId) };
+    }
+    case "quality.incident.get": {
+      const id = String(req.params?.id ?? "");
+      const incident = qualityService.getIncident(id);
+      if (!incident) throw new Error(`unknown incident: ${id}`);
+      return { incident };
+    }
+    case "quality.incident.create": {
+      const p = req.params ?? {};
+      const incident = qualityService.createIncident({
+        projectId: String(p.projectId ?? ""),
+        description: String(p.description ?? ""),
+        severity: String(p.severity ?? "major"),
+        ...(p.sourceRunId !== undefined ? { sourceRunId: String(p.sourceRunId) } : {}),
+        ...(p.reproduction !== undefined ? { reproduction: String(p.reproduction) } : {}),
+        ...(p.regressionTest !== undefined ? { regressionTest: String(p.regressionTest) } : {}),
+      });
+      return { incident };
+    }
+    case "quality.incident.resolve": {
+      const id = String(req.params?.id ?? "");
+      const status = String(req.params?.status ?? "");
+      const regressionTest = req.params?.regressionTest !== undefined ? String(req.params.regressionTest) : undefined;
+      const incident = qualityService.resolveIncident(id, status as never, regressionTest);
+      return { incident };
+    }
+    case "quality.incident.delete": {
+      const id = String(req.params?.id ?? "");
+      const ok = qualityService.deleteIncident(id);
+      if (!ok) throw new Error(`unknown incident: ${id}`);
+      return { ok: true };
+    }
+    // ── quality: rule candidates (Q3-04) ──────────────────────────────
+    case "quality.rule.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      return { rules: qualityService.listRules(projectId) };
+    }
+    case "quality.rule.get": {
+      const id = String(req.params?.id ?? "");
+      const rule = qualityService.getRule(id);
+      if (!rule) throw new Error(`unknown rule: ${id}`);
+      return { rule };
+    }
+    case "quality.rule.create": {
+      const p = req.params ?? {};
+      const rule = qualityService.createRule({
+        projectId: String(p.projectId ?? ""),
+        rule: String(p.rule ?? ""),
+        evidenceIncidentIds: Array.isArray(p.evidenceIncidentIds)
+          ? p.evidenceIncidentIds.map((s: unknown) => String(s))
+          : [],
+        ...(p.measuredImpact !== undefined ? { measuredImpact: String(p.measuredImpact) } : {}),
+      });
+      return { rule };
+    }
+    case "quality.rule.promote": {
+      const incidentId = String(req.params?.incidentId ?? "");
+      const ruleText = String(req.params?.rule ?? "");
+      const rule = qualityService.promoteIncidentToRule(incidentId, ruleText);
+      return { rule };
+    }
+    case "quality.rule.resolve": {
+      const id = String(req.params?.id ?? "");
+      const status = String(req.params?.status ?? "");
+      const rule = qualityService.resolveRule(id, status as never);
+      return { rule };
+    }
+    case "quality.rule.delete": {
+      const id = String(req.params?.id ?? "");
+      const ok = qualityService.deleteRule(id);
+      if (!ok) throw new Error(`unknown rule: ${id}`);
+      return { ok: true };
+    }
+    case "quality.rule.sandbox": {
+      const id = String(req.params?.id ?? "");
+      const result = await qualityService.sandboxRule(id);
+      return { result };
+    }
+    // ── quality: benchmarks (P4 评测基线) ─────────────────────────────
+    case "quality.benchmark.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      return { benchmarks: qualityService.listBenchmarks(projectId) };
+    }
+    case "quality.benchmark.get": {
+      const id = String(req.params?.id ?? "");
+      const benchmark = qualityService.getBenchmark(id);
+      if (!benchmark) throw new Error(`unknown benchmark: ${id}`);
+      return { benchmark };
+    }
+    case "quality.benchmark.start": {
+      const p = req.params ?? {};
+      const benchmark = qualityService.startBenchmark({
+        projectId: String(p.projectId ?? ""),
+        name: String(p.name ?? ""),
+        taskSet: String(p.taskSet ?? ""),
+        agents: Array.isArray(p.agents) ? p.agents.map((s: unknown) => String(s)) : [],
+      });
+      return { benchmark };
+    }
+    case "quality.benchmark.collect": {
+      const p = req.params ?? {};
+      const benchmark = qualityService.collectBenchmarkResult({
+        benchmarkId: String(p.benchmarkId ?? ""),
+        agent: String(p.agent ?? ""),
+        qualityRunId: String(p.qualityRunId ?? ""),
+        passedChecks: Number(p.passedChecks ?? 0),
+        failedChecks: Number(p.failedChecks ?? 0),
+        findingCount: Number(p.findingCount ?? 0),
+        blockingCount: Number(p.blockingCount ?? 0),
+        fixRounds: Number(p.fixRounds ?? 0),
+        durationMs: Number(p.durationMs ?? 0),
+        ...(p.status !== undefined ? { status: String(p.status) as never } : {}),
+        ...(p.failureReason !== undefined ? { failureReason: String(p.failureReason) } : {}),
+      });
+      return { benchmark };
+    }
+    case "quality.benchmark.cancel": {
+      const id = String(req.params?.id ?? "");
+      const benchmark = qualityService.cancelBenchmark(id);
+      return { benchmark };
+    }
+    case "quality.benchmark.delete": {
+      const id = String(req.params?.id ?? "");
+      const ok = qualityService.deleteBenchmark(id);
+      if (!ok) throw new Error(`unknown benchmark: ${id}`);
+      return { ok: true };
+    }
     default:
       throw new Error(`unknown method: ${req.method}`);
   }
@@ -1908,7 +2386,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   }
   console.log(`[hub] worker connected for ${connection.name} (${connectionId})`);
   const stream = webSocketStream(ws);
-  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall);
+  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall, runPermissionManager);
   agents.set(connectionId, a);
   a.ensureStarted().catch((err) => {
     logWarn("worker", `${connectionId} start failed: ${String(err)}`);
@@ -1957,6 +2435,10 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       logWarn("worker", "multiplex: expected announce frame first, got " + text.slice(0, 100));
       return;
     }
+    if (!isAnnounceFrame(msg)) {
+      // quality.* 等控制帧在 announce 之前到达，忽略
+      return;
+    }
 
     ws.off("message", pendingHandler);
 
@@ -1987,7 +2469,14 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
     }
 
     // 创建子通道 Stream（注册新的 message listener）
-    multiplexed = multiplexWebSocketStream(ws, channelIds);
+    // quality.* 控制帧通过 onControl 路由到 WorkerExecutionProvider
+    const workerExec = new WorkerExecutionProvider((frame) => {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
+    });
+    workerExecProviders.set(baseConnection.id, workerExec);
+    multiplexed = multiplexWebSocketStream(ws, channelIds, (frame) => {
+      if (isQualityControlFrame(frame)) workerExec.dispatch(frame as QualityControlFrame);
+    });
 
     // 为每个通道创建 AcpAgent
     for (const ch of channels) {
@@ -2011,6 +2500,7 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
         onTurnEnd,
         onFileWrite,
         onToolCall,
+        runPermissionManager,
       );
       agents.set(virtualId, a);
       virtualAgents.set(ch.id, a);
@@ -2035,6 +2525,9 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       }
     }
     virtualAgents.clear();
+    const removedWorkerExec = workerExecProviders.get(baseConnection.id);
+    workerExecProviders.delete(baseConnection.id);
+    removedWorkerExec?.onDisconnect();
   });
 }
 

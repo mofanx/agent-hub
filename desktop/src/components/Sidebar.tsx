@@ -18,6 +18,7 @@ import {
   RotateCw,
   Search,
   Settings,
+  ShieldCheck,
   Sun,
   Trash2,
   Unplug,
@@ -281,6 +282,9 @@ export function Sidebar() {
         <button className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`} title="定时任务" onClick={() => useHubStore.setState({ screen: "schedule" })}>
           <CalendarClock size={16} />
         </button>
+        <button className={`icon-btn ${store.screen === "quality" ? "active" : ""}`} title="质量" onClick={() => void store.openQuality()}>
+          <ShieldCheck size={16} />
+        </button>
         <button className={`icon-btn ${store.screen === "settings" ? "active" : ""}`} title="设置" onClick={() => useHubStore.setState({ screen: "settings" })}>
           <Settings size={16} />
         </button>
@@ -436,6 +440,13 @@ export function Sidebar() {
           onClick={() => useHubStore.setState({ screen: "schedule" })}
         >
           <CalendarClock size={15} />
+        </button>
+        <button
+          className={`icon-btn ${store.screen === "quality" ? "active" : ""}`}
+          title="质量"
+          onClick={() => void store.openQuality()}
+        >
+          <ShieldCheck size={15} />
         </button>
         <button
           className={`icon-btn ${store.screen === "settings" ? "active" : ""}`}

@@ -28,9 +28,10 @@ type FlowTask = {
   sessionId: string;
   task: string;
   dependsOn: string[];
-  status: "pending" | "running" | "done" | "failed";
+  status: "pending" | "running" | "done" | "failed" | "verifying";
   failureMessage?: string;
   retries?: number;
+  qualityRunId?: string;
 };
 
 type Flow = {
@@ -45,6 +46,17 @@ type Flow = {
 
 export type ConductorNotice = { roomId: string; message: string };
 
+export interface QualityIntegration {
+  startRunForTask(opts: {
+    roomId: string;
+    taskId: string;
+    sessionId: string;
+    output: string;
+    artifacts: TaskArtifact[];
+  }): string | undefined;
+  onRunTerminal(runId: string, cb: (accepted: boolean) => void): void;
+}
+
 const PLAN_RESULT_LEN = 4000;
 
 export class ConductorOrchestrator {
@@ -54,6 +66,7 @@ export class ConductorOrchestrator {
     private readonly agent: AgentOps,
     private readonly rooms: RoomManager,
     private readonly notice: (n: ConductorNotice) => void,
+    private readonly quality?: QualityIntegration,
   ) {}
 
   hasActiveFlow(roomId: string): boolean {
@@ -90,16 +103,18 @@ export class ConductorOrchestrator {
         task: t.task,
         dependsOn: t.dependsOn,
         artifacts: result?.artifacts ?? [],
+        ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
       };
     });
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
     const pending = tasks.filter((t) => t.status === "pending").length;
     const failed = tasks.filter((t) => t.status === "failed").length;
+    const verifying = tasks.filter((t) => t.status === "verifying").length;
     return {
       roomId: flow.roomId,
       phase: flow.phase,
-      progress: { done, running, pending, failed, total: tasks.length },
+      progress: { done, running, pending, failed, verifying, total: tasks.length },
       tasks,
     };
   }
@@ -291,7 +306,6 @@ export class ConductorOrchestrator {
         if (running) {
           const name =
             room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
-          running.status = "done";
           const result = extractTaskResult(output);
           flow.results.set(running.id, result);
           for (const a of result.artifacts) {
@@ -300,10 +314,56 @@ export class ConductorOrchestrator {
           const artifactCount = result.artifacts.length;
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
-          this.notice({
-            roomId: flow.roomId,
-            message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
-          });
+
+          const hasFileChanges = result.artifacts.some((a) => a.type === "file");
+          const runId = hasFileChanges
+            ? this.quality?.startRunForTask({
+                roomId: flow.roomId,
+                taskId: running.id,
+                sessionId,
+                output,
+                artifacts: result.artifacts,
+              })
+            : undefined;
+          if (runId) {
+            running.status = "verifying";
+            running.qualityRunId = runId;
+            this.notice({
+              roomId: flow.roomId,
+              message: `@${name} 子任务 ${running.id} 已提交质量验证（run ${runId}）`,
+            });
+            this.quality!.onRunTerminal(runId, (accepted) => {
+              if (!this.flows.has(flow.roomId)) return;
+              const task = flow.tasks.get(running.id);
+              if (!task || task.status !== "verifying") return;
+              if (accepted) {
+                task.status = "done";
+                this.notice({
+                  roomId: flow.roomId,
+                  message: `@${name} 子任务 ${running.id} 质量验证通过`,
+                });
+              } else {
+                task.status = "failed";
+                task.failureMessage = "质量验证未通过";
+                this.notice({
+                  roomId: flow.roomId,
+                  message: `@${name} 子任务 ${running.id} 质量验证未通过`,
+                });
+              }
+              const r = this.rooms.get(flow.roomId);
+              if (r) {
+                this.scheduleTasks(flow, r).catch((e) =>
+                  logError("conductor quality terminal schedule", e),
+                );
+              }
+            });
+          } else {
+            running.status = "done";
+            this.notice({
+              roomId: flow.roomId,
+              message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
+            });
+          }
           await this.scheduleTasks(flow, room);
           return flow.roomId;
         }
@@ -597,6 +657,7 @@ export class ConductorOrchestrator {
           task: t.task,
           dependsOn: t.dependsOn,
           status: t.status,
+          ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
         })),
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
@@ -633,6 +694,8 @@ export class ConductorOrchestrator {
         if (!taskId) continue;
         const sessionId = String(o.sessionId ?? "");
         if (!room.members.some((m) => m.sessionId === sessionId)) continue;
+        const rawStatus = (o.status as FlowTask["status"]) ?? "pending";
+        const status: FlowTask["status"] = rawStatus === "running" ? "pending" : rawStatus === "verifying" ? "pending" : rawStatus;
         flow.tasks.set(taskId, {
           id: taskId,
           sessionId,
@@ -640,7 +703,8 @@ export class ConductorOrchestrator {
           dependsOn: Array.isArray(o.dependsOn)
             ? o.dependsOn.map((s) => String(s)).filter(Boolean)
             : [],
-          status: (o.status as FlowTask["status"]) === "running" ? "pending" : (o.status as FlowTask["status"]) ?? "pending",
+          status,
+          ...(typeof o.qualityRunId === "string" && o.qualityRunId ? { qualityRunId: o.qualityRunId } : {}),
         });
       }
       const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;

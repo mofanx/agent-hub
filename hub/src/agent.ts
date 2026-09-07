@@ -5,6 +5,7 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { logWarn } from "./logger.js";
+import type { RunPermissionManager } from "./quality/permissions.js";
 
 export type TokenUsage = {
   totalTokens?: number;
@@ -53,7 +54,8 @@ export type HubEvent =
   | { method: "room.blackboardUpdate"; params: { roomId: string; blackboard: { id: string; from: string; text: string; detail: string; at: number }[] } }
   | { method: "file.update"; params: { roomId?: string; sessionId?: string; path: string; op: "delete" | "rename"; from?: string; to?: string } }
   | { method: "agent.status"; params: { status: string; detail?: string } }
-  | { method: "task.update"; params: { tasks: unknown[] } };
+  | { method: "task.update"; params: { tasks: unknown[] } }
+  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 
@@ -131,6 +133,7 @@ export class AcpAgent {
   private starting: Promise<void> | null = null;
   private ready = false;
   private cachedConfigOptions: unknown[] | null = null;
+  private promptOnceWaiters = new Map<string, (output: string, stopReason: string) => void>();
 
   constructor(
     private readonly name: string,
@@ -141,6 +144,7 @@ export class AcpAgent {
     private readonly onTurnEnd?: (sessionId: string, text: string) => void,
     private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
     private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
+    private readonly permissionManager?: RunPermissionManager,
   ) {}
 
   get isReady(): boolean {
@@ -271,6 +275,12 @@ export class AcpAgent {
       method: "prompt.done",
       params: createPromptDoneParams(sessionId, stopReason, fullText, usage),
     });
+    // 解析 promptOnce 等待者（reviewer 等需要同步获取完整输出的场景）
+    const waiter = this.promptOnceWaiters.get(sessionId);
+    if (waiter) {
+      this.promptOnceWaiters.delete(sessionId);
+      waiter(fullText, stopReason);
+    }
     entry.turnText = "";
   }
 
@@ -280,6 +290,40 @@ export class AcpAgent {
     options: PermissionOption[];
   }): Promise<{ outcome: { outcome: "selected"; optionId: string } }> {
     const requestId = randomUUID();
+
+    // 质量角色只读硬限制（Q2-02 / §11.1）：
+    // reviewer/planner 即使全局 bypass 开启，也不能写/delete/move。
+    if (this.permissionManager) {
+      const binding = this.permissionManager.getBinding(params.sessionId);
+      if (binding && this.permissionManager.isReadOnlyEnforced(params.sessionId)) {
+        const toolName =
+          typeof params.toolCall === "object" &&
+          params.toolCall != null &&
+          "name" in params.toolCall
+            ? String(params.toolCall.name)
+            : "?";
+        // 从 toolCall 中提取 kind 用于权限判断
+        const kind =
+          typeof params.toolCall === "object" &&
+          params.toolCall != null &&
+          "kind" in params.toolCall
+            ? String((params.toolCall as { kind: string }).kind)
+            : "";
+        const decision = this.permissionManager.checkSession(params.sessionId, kind, permissionBypass);
+        if (!decision.allowed) {
+          // 自动选择 reject/deny 选项
+          const reject =
+            params.options.find((o) => /reject|deny|denied|block/i.test(o.kind) || /reject|deny|denied|block/i.test(o.name)) ??
+            params.options[params.options.length - 1];
+          const optionId = reject?.optionId ?? "";
+          logWarn(
+            "permission",
+            `read-only ${binding.role} denied ${toolName} (${kind}) in session ${params.sessionId}: ${decision.reason}`,
+          );
+          return Promise.resolve({ outcome: { outcome: "selected", optionId } });
+        }
+      }
+    }
 
     if (permissionBypass) {
       const chosen =
@@ -406,6 +450,13 @@ export class AcpAgent {
     path: string;
     content: string;
   }): Record<string, never> {
+    // 质量角色只读硬限制（Q2-02）：reviewer/planner 不能写任何文件
+    if (this.permissionManager?.isReadOnlyEnforced(params.sessionId)) {
+      const binding = this.permissionManager.getBinding(params.sessionId);
+      throw new Error(
+        `permission denied: ${binding?.role ?? "read-only"} is read-only, cannot write ${params.path}`,
+      );
+    }
     const target = this.resolveSessionPath(params.sessionId, params.path);
     const dir = path.dirname(target);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -533,7 +584,41 @@ export class AcpAgent {
           method: "prompt.error",
           params: { sessionId, message: String(err) },
         });
+        // promptOnce 等待者在错误时也需要被 reject
+        const waiter = this.promptOnceWaiters.get(sessionId);
+        if (waiter) {
+          this.promptOnceWaiters.delete(sessionId);
+          // 用空输出 + error stopReason 触发安全失败路径
+          waiter("", "error");
+        }
       });
+  }
+
+  /**
+   * 发送 prompt 并等待完整 internalOutput（不截断）。
+   * 用于 reviewer 等需要同步获取完整输出的场景。
+   * 返回 { output, stopReason }，output 为完整 turnText。
+   */
+  async promptOnce(
+    sessionId: string,
+    text: string,
+    timeoutMs = 300_000,
+  ): Promise<{ output: string; stopReason: string }> {
+    return new Promise<{ output: string; stopReason: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.promptOnceWaiters.delete(sessionId);
+        reject(new Error(`promptOnce timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.promptOnceWaiters.set(sessionId, (output, stopReason) => {
+        clearTimeout(timer);
+        resolve({ output, stopReason });
+      });
+      this.promptContent(sessionId, [{ type: "text", text }]).catch((err) => {
+        clearTimeout(timer);
+        this.promptOnceWaiters.delete(sessionId);
+        reject(err);
+      });
+    });
   }
 
   async cancel(sessionId: string): Promise<void> {

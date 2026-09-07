@@ -229,7 +229,157 @@ export type ChatItem =
       author: string;
     };
 
-export type Screen = "connect" | "sessions" | "chat" | "room" | "settings" | "schedule";
+export type Screen = "connect" | "sessions" | "chat" | "room" | "settings" | "schedule" | "quality";
+
+export type QualityStage =
+  | "queued"
+  | "preflight"
+  | "implementing"
+  | "collecting"
+  | "quick-verifying"
+  | "reviewing"
+  | "fixing"
+  | "full-verifying"
+  | "awaiting-approval"
+  | "accepted"
+  | "failed"
+  | "cancelled"
+  | "quarantined";
+
+export type QualityRisk = "low" | "medium" | "high" | "critical";
+export type QualityTrigger = "interactive" | "conductor" | "scheduled" | "incident";
+export type QualityVerdict = "pass" | "fail" | "needs-approval";
+
+export interface QualityRun {
+  id: string;
+  projectId: string;
+  roomId?: string;
+  taskId?: string;
+  implementerSessionId?: string;
+  reviewerSessionId?: string;
+  trigger: QualityTrigger;
+  stage: QualityStage;
+  risk: QualityRisk;
+  policyVersion: string;
+  baseRevision?: string;
+  dirtyBaselineHash?: string;
+  patchHash?: string;
+  fixRound: number;
+  budget: { maxFixRounds: number; timeoutMs: number };
+  verdict?: QualityVerdict;
+  failureCode?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+export type CheckRunStatus =
+  | "queued"
+  | "running"
+  | "passed"
+  | "failed"
+  | "timeout"
+  | "cancelled"
+  | "infra-failed";
+
+export interface QualityCheck {
+  id: string;
+  runId: string;
+  checkId: string;
+  attempt: number;
+  status: CheckRunStatus;
+  exitCode?: number;
+  durationMs?: number;
+  summary?: string;
+  stdoutArtifact?: string;
+  stderrArtifact?: string;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export interface QualityFinding {
+  id: string;
+  runId: string;
+  severity: "critical" | "major" | "minor" | "info";
+  confidence: number;
+  category: string;
+  file?: string;
+  line?: number;
+  claim: string;
+  evidence: string;
+  reproduction?: string;
+  suggestion?: string;
+  blocking: boolean;
+  status: "open" | "fixed" | "dismissed" | "accepted-risk";
+  resolutionNote?: string;
+}
+
+export interface QualityProject {
+  id: string;
+  connectionId: string;
+  root: string;
+  gitRoot?: string;
+  displayName: string;
+  capabilities: { git: boolean; localExec: boolean; remoteExec: boolean; isolatedWorktree: boolean };
+  policyVersion?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface QualityCheckDef {
+  id: string;
+  cwd: string;
+  argv: string[];
+  tier: "quick" | "full";
+  timeoutMs: number;
+  paths?: string[];
+  required: boolean;
+  allowNetwork?: boolean;
+}
+
+export interface QualityPolicy {
+  version: number;
+  checks: QualityCheckDef[];
+  protectedPaths: string[];
+  riskRules: { pattern: string; risk: QualityRisk; reason: string }[];
+  review: {
+    enabled: boolean;
+    reviewerSessionId?: string;
+    blockSeverity: string;
+    minBlockingConfidence: number;
+    maxFixRounds: number;
+  };
+  autonomy: "observe" | "propose" | "isolated-fix" | "apply-low-risk";
+}
+
+export interface QualityPolicyInfo {
+  policy: QualityPolicy;
+  source: string;
+  errors: string[];
+}
+
+export interface QualityIncident {
+  id: string;
+  projectId: string;
+  sourceRunId?: string;
+  description: string;
+  fingerprint: string;
+  severity: string;
+  reproduction?: string;
+  regressionTest?: string;
+  status: "open" | "covered" | "accepted-risk";
+}
+
+export interface QualityRule {
+  id: string;
+  projectId: string;
+  fingerprint: string;
+  rule: string;
+  evidenceIncidentIds: string[];
+  recurrence: number;
+  measuredImpact?: string;
+  status: "candidate" | "approved" | "active" | "retired" | "rejected";
+}
 
 export type ScheduleMode = "simple" | "cron";
 

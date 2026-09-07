@@ -199,6 +199,52 @@ describe("conductor", () => {
     assert.equal(tasks.find((t) => t.id === "t2")?.status, "pending");
   });
 
+  it("链式依赖：t1 failed 后 t2 和 t3 都保持 pending", async () => {
+    const rooms = new RoomManager();
+    const chainRoom = rooms.create(
+      "chain-fail",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+        { sessionId: "worker3", name: "c" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+          if (sessionId === "worker1") throw new Error("worker1 unavailable");
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(chainRoom, "任务");
+    const plan = `\`\`\`json\n{"tasks":[{"id":"t1","to":"worker1","task":"先失败"},{"id":"t2","to":"worker2","task":"依赖 t1","dependsOn":["t1"]},{"id":"t3","to":"worker3","task":"依赖 t2","dependsOn":["t2"]}]}\n\`\`\``;
+    await orchestrator.onPromptDone("conductor", plan);
+
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setImmediate(r));
+      if (prompts.filter((p) => p.sessionId === "worker1").length >= 3) break;
+    }
+
+    assert.equal(prompts.filter((p) => p.sessionId === "worker1").length, 3);
+    assert.equal(prompts.filter((p) => p.sessionId === "worker2").length, 0);
+    assert.equal(prompts.filter((p) => p.sessionId === "worker3").length, 0);
+
+    const flow = orchestrator.getFlow(chainRoom.roomId);
+    assert.ok(flow);
+    const tasks = flow!.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "failed");
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "pending");
+    assert.equal(tasks.find((t) => t.id === "t3")?.status, "pending");
+  });
+
   it("空任务计划把指挥家的直接回答展示给用户", async () => {
     const rooms = new RoomManager();
     const conductorRoom = rooms.create(
@@ -223,6 +269,178 @@ describe("conductor", () => {
     );
     assert.equal(orchestrator.hasActiveFlow(conductorRoom.roomId), false);
     assert.equal(notices.at(-1), "这个问题不需要派工，答案是 42。");
+  });
+
+  it("Q1-03: 写任务接入 QualityRun，accepted 前不标记 done", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "quality-room",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const terminalCallbacks = new Map<string, (accepted: boolean) => void>();
+    const startedRuns: { runId: string; taskId: string; sessionId: string }[] = [];
+
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask(opts) {
+        const runId = `qrun-${opts.taskId}`;
+        startedRuns.push({ runId, taskId: opts.taskId, sessionId: opts.sessionId });
+        return runId;
+      },
+      onRunTerminal(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+    };
+
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      qualityIntegration,
+    );
+
+    await orchestrator.start(qRoom, "写任务");
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"写文件"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    const workerOutput = '已完成\n```json\n{"text":"done","artifacts":[{"type":"file","path":"src/foo.ts","summary":"新增"}]}\n```';
+    await orchestrator.onPromptDone("worker1", workerOutput);
+
+    const flow = orchestrator.getFlow(qRoom.roomId);
+    assert.ok(flow);
+    const tasks = flow!.tasks as { id: string; status: string; qualityRunId?: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "verifying");
+    assert.equal(tasks.find((t) => t.id === "t1")?.qualityRunId, "qrun-t1");
+    assert.equal(startedRuns.length, 1);
+    assert.equal(startedRuns[0]!.taskId, "t1");
+
+    assert.equal(orchestrator.hasActiveFlow(qRoom.roomId), true);
+
+    terminalCallbacks.get("qrun-t1")!(true);
+
+    const flow2 = orchestrator.getFlow(qRoom.roomId);
+    const tasks2 = flow2!.tasks as { id: string; status: string }[];
+    assert.equal(tasks2.find((t) => t.id === "t1")?.status, "done");
+  });
+
+  it("Q1-03: 质量验证失败后任务标记 failed，下游不继续", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "quality-fail",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const terminalCallbacks = new Map<string, (accepted: boolean) => void>();
+
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask(opts) {
+        return `qrun-${opts.taskId}`;
+      },
+      onRunTerminal(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+    };
+
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async () => {},
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      qualityIntegration,
+    );
+
+    await orchestrator.start(qRoom, "写任务");
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"写文件"},{"id":"t2","to":"worker2","task":"依赖 t1","dependsOn":["t1"]}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    const workerOutput = '已完成\n```json\n{"text":"done","artifacts":[{"type":"file","path":"src/foo.ts","summary":"新增"}]}\n```';
+    await orchestrator.onPromptDone("worker1", workerOutput);
+
+    const flow = orchestrator.getFlow(qRoom.roomId);
+    const tasks = flow!.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "verifying");
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "pending");
+
+    terminalCallbacks.get("qrun-t1")!(false);
+
+    const flow2 = orchestrator.getFlow(qRoom.roomId);
+    const tasks2 = flow2!.tasks as { id: string; status: string }[];
+    assert.equal(tasks2.find((t) => t.id === "t1")?.status, "failed");
+    assert.equal(tasks2.find((t) => t.id === "t2")?.status, "pending");
+  });
+
+  it("Q1-03: 无文件 artifact 时不启动质量验证，直接 done", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "quality-nochange",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    let runStarted = false;
+
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask() {
+        runStarted = true;
+        return "qrun-x";
+      },
+      onRunTerminal() {},
+    };
+
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async () => {},
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      qualityIntegration,
+    );
+
+    await orchestrator.start(qRoom, "分析任务");
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"分析代码"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    const workerOutput = '```json\n{"text":"分析完成","artifacts":[]}\n```';
+    await orchestrator.onPromptDone("worker1", workerOutput);
+
+    assert.equal(runStarted, false);
+    const flow = orchestrator.getFlow(qRoom.roomId);
+    const tasks = flow!.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "done");
   });
 
 });

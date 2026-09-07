@@ -1,0 +1,95 @@
+import type { CheckRun, QualityRun } from "./types.js";
+import { isTerminal, transition } from "./run.js";
+import type { Store } from "../store.js";
+
+/**
+ * CheckRun 持久化与重启恢复（设计文档 §6 / §12）。
+ *
+ * 硬约束：Hub 重启时 implementing/running check 回到可判定状态，不直接标记通过。
+ *
+ * 恢复策略：
+ * - 遍历所有非终态 QualityRun；
+ * - 将其名下 status=running/queued 的 CheckRun 标记为 infra-failed（不产生假通过）；
+ * - 将 run 推进到 failed（failureCode="hub-restart"），queued 状态转 cancelled；
+ * - 持久化更新后的 run 和 check；
+ * - 返回恢复摘要，供人工处理或重试。
+ */
+
+export const FAILURE_HUB_RESTART = "hub-restart";
+
+export type RecoverySummary = {
+  runs: QualityRun[];
+  checks: CheckRun[];
+};
+
+/** 将单个 CheckRun 标记为 infra-failed（重启时）。 */
+export function markCheckInfraFailed(check: CheckRun, now = Date.now()): CheckRun {
+  return {
+    ...check,
+    status: "infra-failed",
+    completedAt: now,
+    ...(check.startedAt !== undefined ? {} : { startedAt: now }),
+    summary: check.summary ?? "interrupted by hub restart",
+  };
+}
+
+/**
+ * 对单个 run 执行恢复：标记其运行中 check，并推进 run 到终态。
+ * 返回更新后的 run 和被修改的 check 列表。不写存储。
+ */
+export function recoverRun(run: QualityRun, checks: CheckRun[], now = Date.now()): { run: QualityRun; checks: CheckRun[] } {
+  if (isTerminal(run.stage)) return { run, checks: [] };
+  const updatedChecks = checks
+    .filter((c) => c.status === "running" || c.status === "queued")
+    .map((c) => markCheckInfraFailed(c, now));
+
+  let nextRun = run;
+  if (run.stage === "queued") {
+    nextRun = transition(run, "cancelled");
+  } else {
+    nextRun = transition(run, "failed");
+    nextRun = { ...nextRun, failureCode: FAILURE_HUB_RESTART };
+  }
+  return { run: nextRun, checks: updatedChecks };
+}
+
+/**
+ * 扫描整个 store，恢复所有被 Hub 重启中断的 run/check 并持久化。
+ * 返回恢复摘要。
+ */
+export function recoverInterruptedRuns(store: Store): RecoverySummary {
+  const now = Date.now();
+  const recoveredRuns: QualityRun[] = [];
+  const recoveredChecks: CheckRun[] = [];
+
+  const nonTerminalStages = [
+    "queued",
+    "preflight",
+    "implementing",
+    "collecting",
+    "quick-verifying",
+    "reviewing",
+    "fixing",
+    "full-verifying",
+    "awaiting-approval",
+  ];
+
+  for (const stage of nonTerminalStages) {
+    const runs = store.listQualityRunsByStage(stage);
+    for (const run of runs) {
+      const checks = store.listQualityChecks(run.id);
+      const { run: nextRun, checks: nextChecks } = recoverRun(run, checks, now);
+      store.saveQualityRun(nextRun);
+      for (const c of nextChecks) store.saveQualityCheck(c);
+      recoveredRuns.push(nextRun);
+      recoveredChecks.push(...nextChecks);
+    }
+  }
+
+  return { runs: recoveredRuns, checks: recoveredChecks };
+}
+
+/** 判断某 run 是否因 hub 重启而失败（可重试）。 */
+export function isHubRestartFailure(run: QualityRun): boolean {
+  return run.stage === "failed" && run.failureCode === FAILURE_HUB_RESTART;
+}

@@ -6,6 +6,7 @@ import { HomeScreen } from "./screens/HomeScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { ScheduleScreen } from "./screens/ScheduleScreen";
+import { QualityScreen } from "./screens/QualityScreen";
 import { Sidebar } from "./components/Sidebar";
 
 function App() {
@@ -59,6 +60,7 @@ function App() {
             {(store.screen === "chat" || store.screen === "room") && <ChatScreen />}
             {store.screen === "settings" && <SettingsScreen />}
             {store.screen === "schedule" && <ScheduleScreen />}
+            {store.screen === "quality" && <QualityScreen />}
           </div>
         </main>
       </div>

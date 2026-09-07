@@ -13,6 +13,13 @@ import type {
   ModelInfo,
   ModelBackend,
   Attachment,
+  QualityCheck,
+  QualityFinding,
+  QualityIncident,
+  QualityPolicyInfo,
+  QualityProject,
+  QualityRule,
+  QualityRun,
   RoomInfo,
   RoomModeConfig,
   RoleInfo,
@@ -101,6 +108,16 @@ interface State {
   fileUpdateAt: number;
   scheduledTasks: ScheduledTask[];
   taskLogs: TaskLog[];
+  qualityProjects: QualityProject[];
+  qualityRuns: QualityRun[];
+  qualityChecks: QualityCheck[];
+  qualityFindings: QualityFinding[];
+  qualityPolicy: QualityPolicyInfo | null;
+  qualityProjectId: string | null;
+  qualityRunId: string | null;
+  qualityLoading: boolean;
+  qualityIncidents: QualityIncident[];
+  qualityRules: QualityRule[];
 }
 
 interface Actions {
@@ -255,6 +272,20 @@ interface Actions {
   toggleScheduledTask(id: string): Promise<ScheduledTask>;
   loadTaskLogs(): Promise<void>;
   clearTaskLogs(): Promise<void>;
+
+  openQuality(): Promise<void>;
+  loadQualityProjects(): Promise<void>;
+  selectQualityProject(id: string): Promise<void>;
+  loadQualityRuns(projectId?: string): Promise<void>;
+  loadQualityRun(id: string): Promise<void>;
+  loadQualityPolicy(projectId: string): Promise<void>;
+  startQualityRun(projectId: string): Promise<void>;
+  qualityRunAction(id: string, action: "cancel" | "approve" | "reject" | "retry"): Promise<void>;
+  resolveQualityFinding(id: string, status: QualityFinding["status"], note?: string): Promise<void>;
+  loadQualityIncidents(projectId?: string): Promise<void>;
+  resolveQualityIncident(id: string, status: QualityIncident["status"], regressionTest?: string): Promise<void>;
+  loadQualityRules(projectId?: string): Promise<void>;
+  resolveQualityRule(id: string, status: QualityRule["status"]): Promise<void>;
 }
 
 const defaultConfig: AppConfig = {
@@ -576,6 +607,19 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({ scheduledTasks: tasks as ScheduledTask[] });
         break;
       }
+      case "quality.runUpdate": {
+        const run = params.run as QualityRun | undefined;
+        if (!run) break;
+        const runs = [...get().qualityRuns];
+        const idx = runs.findIndex((r) => r.id === run.id);
+        if (idx >= 0) runs[idx] = run;
+        else runs.unshift(run);
+        set({ qualityRuns: runs });
+        if (get().qualityRunId === run.id) {
+          void get().loadQualityRun(run.id);
+        }
+        break;
+      }
     }
   };
 
@@ -766,6 +810,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
     fileUpdateAt: 0,
     scheduledTasks: [],
     taskLogs: [],
+    qualityProjects: [],
+    qualityRuns: [],
+    qualityChecks: [],
+    qualityFindings: [],
+    qualityPolicy: null,
+    qualityProjectId: null,
+    qualityRunId: null,
+    qualityLoading: false,
+    qualityIncidents: [],
+    qualityRules: [],
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -2391,6 +2445,124 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         await getOrCall("task.clearLogs");
         set({ taskLogs: [] });
+      } catch {}
+    },
+
+    openQuality: async () => {
+      set({ screen: "quality" });
+      await get().loadQualityProjects();
+      await get().loadQualityRuns();
+      await get().loadQualityIncidents();
+      await get().loadQualityRules();
+    },
+
+    loadQualityProjects: async () => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("quality.project.list");
+        const projects = ((resp.projects as unknown[] | undefined) ?? []) as QualityProject[];
+        set({ qualityProjects: projects });
+        const selected = get().qualityProjectId;
+        if (!selected && projects.length > 0) {
+          await get().selectQualityProject(projects[0]!.id);
+        }
+      } catch {}
+    },
+
+    selectQualityProject: async (id: string) => {
+      set({ qualityProjectId: id, qualityRunId: null, qualityChecks: [], qualityFindings: [] });
+      await Promise.all([
+        get().loadQualityRuns(id),
+        get().loadQualityPolicy(id),
+        get().loadQualityIncidents(id),
+        get().loadQualityRules(id),
+      ]);
+    },
+
+    loadQualityRuns: async (projectId?: string) => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>(
+          "quality.run.list",
+          projectId ? { projectId, limit: 100 } : { limit: 100 },
+        );
+        set({ qualityRuns: ((resp.runs as unknown[] | undefined) ?? []) as QualityRun[] });
+      } catch {}
+    },
+
+    loadQualityRun: async (id: string) => {
+      set({ qualityLoading: true, qualityRunId: id });
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("quality.run.get", { id });
+        set({
+          qualityChecks: ((resp.checks as unknown[] | undefined) ?? []) as QualityCheck[],
+          qualityFindings: ((resp.findings as unknown[] | undefined) ?? []) as QualityFinding[],
+        });
+      } catch {
+      } finally {
+        set({ qualityLoading: false });
+      }
+    },
+
+    loadQualityPolicy: async (projectId: string) => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("quality.policy.get", { projectId });
+        set({ qualityPolicy: resp as unknown as QualityPolicyInfo });
+      } catch {}
+    },
+
+    startQualityRun: async (projectId: string) => {
+      const project = get().qualityProjects.find((p) => p.id === projectId);
+      await getOrCall("quality.run.start", {
+        projectId,
+        trigger: "interactive",
+        risk: "low",
+        policyVersion: project?.policyVersion ?? "",
+        maxFixRounds: 2,
+        timeoutMs: 600000,
+      });
+      await get().loadQualityRuns(projectId);
+    },
+
+    qualityRunAction: async (id: string, action: "cancel" | "approve" | "reject" | "retry") => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>(`quality.run.${action}`, { id });
+        await get().loadQualityRuns(get().qualityProjectId ?? undefined);
+        const nextId =
+          action === "retry"
+            ? String((resp.run as Record<string, unknown> | undefined)?.id ?? id)
+            : id;
+        await get().loadQualityRun(nextId);
+      } catch {}
+    },
+
+    resolveQualityFinding: async (id: string, status: QualityFinding["status"], note?: string) => {
+      try {
+        await getOrCall("quality.finding.resolve", { id, status, resolutionNote: note });
+        const runId = get().qualityRunId;
+        if (runId) await get().loadQualityRun(runId);
+      } catch {}
+    },
+
+    loadQualityIncidents: async (projectId?: string) => {
+      const resp = await getOrCall<{ incidents: QualityIncident[] }>("quality.incident.list", { projectId });
+      set({ qualityIncidents: resp.incidents });
+    },
+
+    resolveQualityIncident: async (id: string, status: QualityIncident["status"], regressionTest?: string) => {
+      try {
+        await getOrCall("quality.incident.resolve", { id, status, regressionTest });
+        await get().loadQualityIncidents(get().qualityProjectId ?? undefined);
+      } catch {}
+    },
+
+    loadQualityRules: async (projectId?: string) => {
+      const resp = await getOrCall<{ rules: QualityRule[] }>("quality.rule.list", { projectId });
+      set({ qualityRules: resp.rules });
+    },
+
+    resolveQualityRule: async (id: string, status: QualityRule["status"]) => {
+      try {
+        await getOrCall("quality.rule.resolve", { id, status });
+        await get().loadQualityRules(get().qualityProjectId ?? undefined);
       } catch {}
     },
   };

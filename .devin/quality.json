@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "autonomy": "observe",
+  "checks": [
+    {
+      "id": "hub-typecheck",
+      "cwd": "hub",
+      "argv": ["npx", "tsc", "--noEmit"],
+      "tier": "quick",
+      "timeoutMs": 120000,
+      "required": true
+    },
+    {
+      "id": "hub-test",
+      "cwd": "hub",
+      "argv": ["npm", "test"],
+      "tier": "full",
+      "timeoutMs": 300000,
+      "required": true
+    },
+    {
+      "id": "desktop-typecheck",
+      "cwd": "desktop",
+      "argv": ["npx", "tsc", "--noEmit"],
+      "tier": "quick",
+      "timeoutMs": 120000,
+      "required": true
+    },
+    {
+      "id": "android-compile",
+      "cwd": "android",
+      "argv": ["./gradlew", ":app:compileDebugKotlin"],
+      "tier": "full",
+      "timeoutMs": 600000,
+      "required": false,
+      "allowNetwork": true
+    }
+  ],
+  "protectedPaths": [
+    ".devin/quality.json",
+    "hub/src/quality/",
+    "hub/src/agent.ts",
+    "hub/src/scheduler.ts",
+    "deploy/"
+  ],
+  "riskRules": [
+    { "pattern": ".devin/quality.json", "risk": "critical", "reason": "质量策略自修改" },
+    { "pattern": "hub/src/quality/", "risk": "high", "reason": "质量引擎/权限路径" },
+    { "pattern": "deploy/", "risk": "high", "reason": "部署脚本" }
+  ],
+  "review": {
+    "enabled": false,
+    "blockSeverity": "major",
+    "minBlockingConfidence": 0.8,
+    "maxFixRounds": 0
+  }
+}

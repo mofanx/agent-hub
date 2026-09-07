@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
-import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString } from "./conductor.js";
+import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString, type QualityIntegration } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
@@ -151,8 +151,9 @@ export class RoomModeManager {
     private readonly agent: AgentOps,
     private readonly rooms: RoomManager,
     private readonly broadcast: (method: string, params: Record<string, unknown>) => void,
+    quality?: QualityIntegration,
   ) {
-    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n));
+    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), quality);
   }
 
   exportRuntime(): Record<string, unknown> {
