@@ -53,7 +53,7 @@ function matchPath(filePath: string, pattern: string): boolean {
     );
     return regex.test(filePath);
   }
-  return filePath === pattern || filePath.startsWith(pattern + "/");
+  return filePath === pattern || filePath.startsWith(pattern.endsWith("/") ? pattern : pattern + "/");
 }
 
 /**

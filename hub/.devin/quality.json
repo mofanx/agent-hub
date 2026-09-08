@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "id": "typecheck",
+      "cwd": ".",
+      "argv": [
+        "npx",
+        "tsc",
+        "--noEmit"
+      ],
+      "tier": "quick",
+      "timeoutMs": 120000,
+      "required": true
+    },
+    {
+      "id": "test",
+      "cwd": ".",
+      "argv": [
+        "npm",
+        "test"
+      ],
+      "tier": "full",
+      "timeoutMs": 300000,
+      "required": true
+    }
+  ],
+  "protectedPaths": [
+    ".devin/quality.json",
+    "src/quality/",
+    "src/agent.ts",
+    "src/scheduler.ts"
+  ],
+  "riskRules": [
+    { "pattern": ".devin/quality.json", "risk": "critical", "reason": "质量策略自修改" },
+    { "pattern": "src/quality/", "risk": "high", "reason": "质量引擎/权限路径" }
+  ],
+  "review": {
+    "enabled": true,
+    "blockSeverity": "major",
+    "minBlockingConfidence": 0.8,
+    "maxFixRounds": 2
+  },
+  "autonomy": "observe"
+}

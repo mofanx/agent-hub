@@ -114,8 +114,8 @@ export class LocalExecutionProvider implements ExecutionProvider {
 
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (killTimer) clearTimeout(killTimer);
-    stdoutStream.end();
-    stderrStream.end();
+    stdoutStream.destroy();
+    stderrStream.destroy();
     this.active.delete(key);
 
     const completedAt = Date.now();
