@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, FlaskConical, Play, RefreshCw, ShieldCheck, X, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, FlaskConical, Play, RefreshCw, ShieldCheck, X, XCircle, FileText } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import type { QualityRun, QualityCheck, QualityFinding, QualityStage, QualityIncident, QualityRule } from "../hub/types";
 
@@ -93,10 +93,17 @@ export function QualityScreen() {
             )}
             {store.qualityPolicy && (
               <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-dim)" }}>
-                策略：{store.qualityPolicy.source === "file" ? ".devin/quality.json" : "默认 observe"}
+                策略：{store.qualityPolicy.source === "file" ? ".devin/quality.json" : "默认（未配置）"}
                 {" · "}autonomy={store.qualityPolicy.policy.autonomy}
                 {" · "}checks={store.qualityPolicy.policy.checks.length}
                 {" · "}protectedPaths={store.qualityPolicy.policy.protectedPaths.length}
+                {store.qualityPolicy.source === "default" && store.qualityProjectId && (
+                  <div style={{ marginTop: 6 }}>
+                    <button onClick={() => void store.ensureQualityPolicy(store.qualityProjectId!)}>
+                      <FileText size={14} /> 初始化质量策略
+                    </button>
+                  </div>
+                )}
                 {store.qualityPolicy.errors.length > 0 && (
                   <div style={{ color: "var(--danger, #e53e3e)" }}>
                     {store.qualityPolicy.errors.map((e) => (

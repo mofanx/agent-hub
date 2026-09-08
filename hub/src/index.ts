@@ -3,6 +3,7 @@ import { networkInterfaces } from "node:os";
 import { randomBytes } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import fs from "node:fs";
 import path from "node:path";
 import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
@@ -321,6 +322,34 @@ const qualityService = new QualityService(store, qualityEmit, {
     };
   },
 });
+
+function resolveProjectRoot(connection: Connection): string | undefined {
+  if (connection.cwd) return connection.cwd;
+  const def = AGENT_DEFS[connection.agent];
+  if (def?.cwd) return def.cwd;
+  if (connection.local) return process.cwd();
+  return undefined;
+}
+
+function autoRegisterProject(connection: Connection): void {
+  const root = resolveProjectRoot(connection);
+  if (!root) return;
+  try {
+    if (!fs.existsSync(root)) return;
+  } catch {
+    return;
+  }
+  const existing = qualityService.listProjects().find((p) => p.connectionId === connection.id && p.root === root);
+  if (existing) return;
+  const project = qualityService.registerProject({ connectionId: connection.id, root });
+  console.log(`[hub] auto-registered quality project: ${project.id} (root=${root}, connection=${connection.id})`);
+}
+
+function autoRegisterAllProjects(): void {
+  for (const conn of store.listConnections()) {
+    autoRegisterProject(conn);
+  }
+}
 
 function findProjectForPaths(
   projects: ReturnType<QualityService["listProjects"]>,
@@ -736,6 +765,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
         settle(() => {
           localAgentErrors.delete(connection.id);
           console.log(`[hub] local agent ${connection.id} started`);
+          autoRegisterProject(connection);
           roomModeManager.resumeFlows();
           resolve();
         });
@@ -2304,6 +2334,10 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const id = String(req.params?.projectId ?? "");
       return qualityService.getPolicy(id);
     }
+    case "quality.policy.ensure": {
+      const id = String(req.params?.projectId ?? "");
+      return qualityService.ensurePolicy(id);
+    }
     // ── quality: runs ──────────────────────────────────────────────────
     case "quality.run.start": {
       const p = req.params ?? {};
@@ -2573,6 +2607,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall, runPermissionManager);
   agents.set(connectionId, a);
   a.ensureStarted().then(() => {
+    autoRegisterProject(connection);
     roomModeManager.resumeFlows();
   }).catch((err) => {
     logWarn("worker", `${connectionId} start failed: ${String(err)}`);
@@ -2630,7 +2665,8 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
 
     const channels = msg.channels;
     const hostname = String(msg.hostname ?? baseConnection.name);
-    console.log(`[hub] multiplex announce: ${channels.map(c => `${c.id}(${c.agent})`).join(", ")} from ${hostname}`);
+    const announceCwd = typeof (msg as Record<string, unknown>).cwd === "string" ? (msg as Record<string, unknown>).cwd as string : undefined;
+    console.log(`[hub] multiplex announce: ${channels.map(c => `${c.id}(${c.agent})`).join(", ")} from ${hostname}${announceCwd ? ` cwd=${announceCwd}` : ""}`);
 
     // 为每个通道创建虚拟 connection（如不存在）
     const channelIds: string[] = [];
@@ -2647,6 +2683,7 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
           agent: ch.agent,
           token: baseConnection.token,
           local: false,
+          ...(announceCwd ? { cwd: announceCwd } : {}),
         });
         console.log(`[hub] created virtual connection: ${virtualId} (agent=${ch.agent})`);
       } else if (virtualConn.name !== virtualName) {
@@ -2692,6 +2729,7 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       virtualAgents.set(ch.id, a);
 
       a.ensureStarted().then(() => {
+        autoRegisterProject(virtualConn);
         roomModeManager.resumeFlows();
       }).catch((err) => {
         logWarn("worker", `multiplex channel ${ch.id} start failed: ${String(err)}`);
@@ -2763,6 +2801,7 @@ wss.on("listening", () => {
   console.log(
     `[hub] restored: ${sessionMetas.size} sessions, ${rooms.list().length} rooms`,
   );
+  autoRegisterAllProjects();
   for (const addr of addrs) {
     console.log(`[hub] phone connect: ws://${addr}:${PORT}/?token=${TOKEN}`);
     console.log(`[hub] worker connect: ws://${addr}:${PORT}${WORKER_PATH}?token=<CONNECTION_TOKEN>`);

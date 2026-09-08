@@ -74,11 +74,13 @@ describe("QualityService", () => {
   });
 
   describe("policy", () => {
-    it("detectPolicy 无文件返回 errors + suggestions", () => {
+    it("detectPolicy 无文件返回生成的默认策略", () => {
       const p = service.registerProject({ connectionId: "c1", root: dir });
       const r = service.detectPolicy(p.id);
-      assert.ok(r.errors.length > 0);
-      assert.deepEqual(r.suggestions, []);
+      assert.ok(r.policy);
+      assert.equal(r.policy!.autonomy, "observe");
+      assert.equal(r.policy!.review.enabled, true);
+      assert.deepEqual(r.errors, []);
     });
     it("detectPolicy 有文件返回 policy", () => {
       fs.mkdirSync(path.join(dir, ".devin"));
@@ -100,11 +102,23 @@ describe("QualityService", () => {
       assert.equal(r.ok, false);
       assert.ok(r.errors.length > 0);
     });
-    it("getPolicy 无文件返回 default observe", () => {
+    it("getPolicy 无文件返回生成的默认策略", () => {
       const p = service.registerProject({ connectionId: "c1", root: dir });
       const r = service.getPolicy(p.id);
       assert.equal(r.source, "default");
       assert.equal(r.policy.autonomy, "observe");
+      assert.equal(r.policy.review.enabled, true);
+    });
+    it("ensurePolicy 生成并写入 quality.json", () => {
+      const p = service.registerProject({ connectionId: "c1", root: dir });
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+      fs.writeFileSync(path.join(dir, "tsconfig.json"), "{}");
+      const r = service.ensurePolicy(p.id);
+      assert.ok(fs.existsSync(r.path));
+      assert.ok(r.policy.checks.length > 0);
+      // 再次 getPolicy 应该 source=file
+      const after = service.getPolicy(p.id);
+      assert.equal(after.source, "file");
     });
   });
 

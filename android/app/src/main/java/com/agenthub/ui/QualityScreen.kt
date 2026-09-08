@@ -149,10 +149,16 @@ fun QualityScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         vm.qualityPolicy?.let { pol ->
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                "策略：${if (pol.source == "file") ".devin/quality.json" else "默认 observe"} · autonomy=${pol.autonomy} · checks=${pol.checkCount}",
+                                "策略：${if (pol.source == "file") ".devin/quality.json" else "默认（未配置）"} · autonomy=${pol.autonomy} · checks=${pol.checkCount}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (pol.source == "default" && vm.qualityProjectId != null) {
+                                Spacer(Modifier.height(6.dp))
+                                OutlinedButton(onClick = { vm.ensureQualityPolicy(vm.qualityProjectId!!) }) {
+                                    Text("初始化质量策略")
+                                }
+                            }
                             pol.errors.forEach { e ->
                                 Text(
                                     "⚠ $e",

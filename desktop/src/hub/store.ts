@@ -280,6 +280,7 @@ interface Actions {
   loadQualityRuns(projectId?: string): Promise<void>;
   loadQualityRun(id: string): Promise<void>;
   loadQualityPolicy(projectId: string): Promise<void>;
+  ensureQualityPolicy(projectId: string): Promise<void>;
   startQualityRun(projectId: string): Promise<void>;
   qualityRunAction(id: string, action: "cancel" | "approve" | "reject" | "retry"): Promise<void>;
   resolveQualityFinding(id: string, status: QualityFinding["status"], note?: string): Promise<void>;
@@ -2568,6 +2569,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const resp = await getOrCall<Record<string, unknown>>("quality.policy.get", { projectId });
         set({ qualityPolicy: resp as unknown as QualityPolicyInfo });
+      } catch {}
+    },
+
+    ensureQualityPolicy: async (projectId: string) => {
+      try {
+        await getOrCall("quality.policy.ensure", { projectId });
+        await get().loadQualityPolicy(projectId);
       } catch {}
     },
 

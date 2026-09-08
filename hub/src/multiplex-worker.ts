@@ -216,6 +216,7 @@ async function runOnce(channels: Channel[]): Promise<{ code: number; permanent: 
         channel: "__control__",
         method: "announce",
         hostname: getShortHostname(),
+        cwd: process.cwd(),
         channels: channels.map((c) => ({ id: c.id, agent: c.agent })),
       };
       ws.send(JSON.stringify(announce));

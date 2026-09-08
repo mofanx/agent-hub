@@ -20,7 +20,7 @@ import type {
 } from "./types.js";
 import { createRun, isTerminal, transition, IllegalTransitionError } from "./run.js";
 import { registerProject } from "./project.js";
-import { assertPolicy, defaultObservePolicy, loadPolicy, suggestChecksFromAgentsMd, validatePolicy } from "./policy.js";
+import { assertPolicy, defaultObservePolicy, loadPolicy, suggestChecksFromAgentsMd, validatePolicy, generateDefaultPolicy, writePolicy } from "./policy.js";
 import { canTransitionFindingStatus, isValidFindingStatus } from "./review.js";
 import {
   createIncident,
@@ -153,7 +153,7 @@ export class QualityService {
 
   // ── policy ──────────────────────────────────────────────────────────
 
-  /** 探测项目 policy：加载 .devin/quality.json，附带 AGENTS.md 建议。 */
+  /** 探测项目 policy：加载 .devin/quality.json，附带 AGENTS.md 建议。无文件时返回生成的默认策略。 */
   detectPolicy(projectId: string): {
     policy?: QualityPolicy | undefined;
     suggestions: ReturnType<typeof suggestChecksFromAgentsMd>;
@@ -166,6 +166,10 @@ export class QualityService {
     if (loaded.ok) {
       return { policy: loaded.policy, suggestions: suggestChecksFromAgentsMd(project), errors: [], path: loaded.path };
     }
+    // 无 quality.json 或文件无效时，生成合理的默认策略
+    if (loaded.reason === "not-found") {
+      return { policy: generateDefaultPolicy(project), suggestions: suggestChecksFromAgentsMd(project), errors: [], path: loaded.path };
+    }
     return { suggestions: suggestChecksFromAgentsMd(project), errors: loaded.errors, path: loaded.path };
   }
 
@@ -177,13 +181,23 @@ export class QualityService {
     return { ok: errors.length === 0, errors };
   }
 
-  /** 获取项目当前生效 policy（无配置返回 observe 默认）。 */
+  /** 获取项目当前生效 policy（无配置时返回根据项目类型生成的默认策略）。 */
   getPolicy(projectId: string): { policy: QualityPolicy; source: "file" | "default"; errors: string[] } {
     const project = this.store.getQualityProject(projectId);
     if (!project) return { policy: defaultObservePolicy(), source: "default", errors: ["unknown project"] };
     const loaded = loadPolicy(project);
     if (loaded.ok) return { policy: loaded.policy, source: "file", errors: [] };
+    if (loaded.reason === "not-found") return { policy: generateDefaultPolicy(project), source: "default", errors: [] };
     return { policy: defaultObservePolicy(), source: "default", errors: loaded.errors };
+  }
+
+  /** 为项目生成默认 quality.json 并写入磁盘，返回写入路径和策略。 */
+  ensurePolicy(projectId: string): { path: string; policy: QualityPolicy } {
+    const project = this.store.getQualityProject(projectId);
+    if (!project) throw new Error(`unknown project: ${projectId}`);
+    const policy = generateDefaultPolicy(project);
+    const filePath = writePolicy(project, policy);
+    return { path: filePath, policy };
   }
 
   // ── runs ────────────────────────────────────────────────────────────

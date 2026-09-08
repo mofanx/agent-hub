@@ -1620,6 +1620,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun ensureQualityPolicy(projectId: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.policy.ensure", buildJsonObject { put("projectId", projectId) })
+                loadQualityPolicy(projectId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun startQualityRun() {
         val projectId = qualityProjectId ?: return
         viewModelScope.launch {

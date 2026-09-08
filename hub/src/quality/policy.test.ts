@@ -9,10 +9,13 @@ import {
   PolicyValidationError,
   assertPolicy,
   defaultObservePolicy,
+  detectDefaultChecks,
+  generateDefaultPolicy,
   isProtectedPath,
   loadPolicy,
   suggestChecksFromAgentsMd,
   validatePolicy,
+  writePolicy,
 } from "./policy.js";
 import type { ProjectScope, QualityPolicy } from "./types.js";
 
@@ -234,6 +237,62 @@ describe("quality policy", () => {
       assert.equal(p.autonomy, "observe");
       assert.equal(p.review.enabled, false);
       assert.deepEqual(validatePolicy(p, makeScope(dir)), []);
+    });
+  });
+
+  describe("detectDefaultChecks", () => {
+    it("Node.js + TypeScript 项目生成 typecheck + test", () => {
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+      fs.writeFileSync(path.join(dir, "tsconfig.json"), "{}");
+      const checks = detectDefaultChecks(makeScope(dir));
+      const ids = checks.map((c) => c.id);
+      assert.ok(ids.includes("typecheck"));
+      assert.ok(ids.includes("test"));
+    });
+    it("无 tsconfig 不生成 typecheck", () => {
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+      const checks = detectDefaultChecks(makeScope(dir));
+      assert.ok(!checks.some((c) => c.id === "typecheck"));
+    });
+    it("无 test 脚本不生成 test check", () => {
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({}));
+      fs.writeFileSync(path.join(dir, "tsconfig.json"), "{}");
+      const checks = detectDefaultChecks(makeScope(dir));
+      assert.ok(checks.some((c) => c.id === "typecheck"));
+      assert.ok(!checks.some((c) => c.id === "test"));
+    });
+    it("空项目返回空 checks", () => {
+      assert.deepEqual(detectDefaultChecks(makeScope(dir)), []);
+    });
+  });
+
+  describe("generateDefaultPolicy", () => {
+    it("生成合法 policy，autonomy=observe，review.enabled=true", () => {
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+      fs.writeFileSync(path.join(dir, "tsconfig.json"), "{}");
+      const p = generateDefaultPolicy(makeScope(dir));
+      assert.equal(p.autonomy, "observe");
+      assert.equal(p.review.enabled, true);
+      assert.equal(p.review.maxFixRounds, 2);
+      assert.ok(p.checks.length > 0);
+      assert.deepEqual(validatePolicy(p, makeScope(dir)), []);
+    });
+    it("保护 .devin/quality.json 和 AGENTS.md", () => {
+      fs.writeFileSync(path.join(dir, "AGENTS.md"), "# test");
+      const p = generateDefaultPolicy(makeScope(dir));
+      assert.ok(p.protectedPaths.includes(POLICY_FILE));
+      assert.ok(p.protectedPaths.includes("AGENTS.md"));
+    });
+  });
+
+  describe("writePolicy", () => {
+    it("写入 .devin/quality.json 并可重新加载", () => {
+      const scope = makeScope(dir);
+      const p = generateDefaultPolicy(scope);
+      const file = writePolicy(scope, p);
+      assert.ok(fs.existsSync(file));
+      const loaded = loadPolicy(scope);
+      assert.equal(loaded.ok, true);
     });
   });
 

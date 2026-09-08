@@ -222,6 +222,126 @@ export function defaultObservePolicy(): QualityPolicy {
   };
 }
 
+/**
+ * 根据项目类型探测合理的默认 checks。
+ * 检测 package.json / tsconfig.json / Cargo.toml / go.mod / pom.xml 等，
+ * 生成对应的 typecheck / test 命令。
+ */
+export function detectDefaultChecks(scope: ProjectScope): CheckDefinition[] {
+  const checks: CheckDefinition[] = [];
+  const root = scope.root;
+
+  const has = (f: string): boolean => {
+    try { fs.accessSync(path.join(root, f)); return true; } catch { return false; }
+  };
+
+  // Node.js / TypeScript 项目
+  if (has("package.json")) {
+    if (has("tsconfig.json")) {
+      checks.push({
+        id: "typecheck",
+        cwd: ".",
+        argv: ["npx", "tsc", "--noEmit"],
+        tier: "quick",
+        timeoutMs: 120_000,
+        required: true,
+      });
+    }
+    // 检测是否有 test 脚本
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+      if (pkg.scripts && typeof pkg.scripts.test !== "undefined") {
+        // 如果 test 脚本不是默认的 "echo Error: no test specified"
+        if (pkg.scripts.test !== "Error: no test specified\" && exit 1") {
+          checks.push({
+            id: "test",
+            cwd: ".",
+            argv: ["npm", "test"],
+            tier: "full",
+            timeoutMs: 300_000,
+            required: false,
+          });
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Rust 项目
+  if (has("Cargo.toml")) {
+    checks.push({
+      id: "cargo-check",
+      cwd: ".",
+      argv: ["cargo", "check"],
+      tier: "quick",
+      timeoutMs: 120_000,
+      required: true,
+    });
+    checks.push({
+      id: "cargo-test",
+      cwd: ".",
+      argv: ["cargo", "test"],
+      tier: "full",
+      timeoutMs: 300_000,
+      required: false,
+    });
+  }
+
+  // Go 项目
+  if (has("go.mod")) {
+    checks.push({
+      id: "go-build",
+      cwd: ".",
+      argv: ["go", "build", "./..."],
+      tier: "quick",
+      timeoutMs: 120_000,
+      required: true,
+    });
+    checks.push({
+      id: "go-test",
+      cwd: ".",
+      argv: ["go", "test", "./..."],
+      tier: "full",
+      timeoutMs: 300_000,
+      required: false,
+    });
+  }
+
+  return checks;
+}
+
+/**
+ * 为项目生成一个合理的默认策略（无 quality.json 时使用）。
+ * 包含基础 checks（tsc/test 适配项目类型）、autonomy=observe、review.enabled=true。
+ */
+export function generateDefaultPolicy(scope: ProjectScope): QualityPolicy {
+  const checks = detectDefaultChecks(scope);
+  const protectedPaths: string[] = [POLICY_FILE];
+  // 如果有 AGENTS.md，也保护
+  try { fs.accessSync(path.join(scope.root, "AGENTS.md")); protectedPaths.push("AGENTS.md"); } catch { /* ignore */ }
+
+  return {
+    version: POLICY_VERSION,
+    checks,
+    protectedPaths,
+    riskRules: [],
+    review: {
+      enabled: true,
+      blockSeverity: "major",
+      minBlockingConfidence: 0.8,
+      maxFixRounds: 2,
+    },
+    autonomy: "observe",
+  };
+}
+
+/** 将 policy 序列化为 JSON 写入 <root>/.devin/quality.json。 */
+export function writePolicy(scope: ProjectScope, policy: QualityPolicy): string {
+  const file = path.join(scope.root, POLICY_FILE);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(policy, null, 2) + "\n", "utf8");
+  return file;
+}
+
 /** 校验某路径是否受保护（用于风险分类前置检查）。支持 `**` 递归通配。 */
 export function isProtectedPath(policy: QualityPolicy, filePath: string): boolean {
   const rel = path.isAbsolute(filePath)
