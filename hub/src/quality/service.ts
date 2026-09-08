@@ -140,6 +140,10 @@ export class QualityService {
     return this.store.getQualityProject(id);
   }
 
+  deleteProject(id: string): boolean {
+    return this.store.deleteQualityProject(id);
+  }
+
   /** 注册/刷新项目（按 connectionId + root）。 */
   registerProject(opts: Parameters<typeof registerProject>[0]): ProjectScope {
     const scope = registerProject(opts);

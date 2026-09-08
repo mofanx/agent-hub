@@ -339,7 +339,7 @@ function autoRegisterProject(connection: Connection): void {
   } catch {
     return;
   }
-  const existing = qualityService.listProjects().find((p) => p.connectionId === connection.id && p.root === root);
+  const existing = qualityService.listProjects().find((p) => p.root === root);
   if (existing) return;
   const project = qualityService.registerProject({ connectionId: connection.id, root });
   console.log(`[hub] auto-registered quality project: ${project.id} (root=${root}, connection=${connection.id})`);
@@ -2309,6 +2309,11 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const project = qualityService.getProject(id);
       if (!project) throw new Error(`unknown project: ${id}`);
       return { project };
+    }
+    case "quality.project.delete": {
+      const id = String(req.params?.id ?? "");
+      const deleted = qualityService.deleteProject(id);
+      return { deleted };
     }
     case "quality.project.register": {
       const p = req.params ?? {};
