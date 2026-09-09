@@ -20,6 +20,7 @@ import type {
   QualityProject,
   QualityRule,
   QualityRun,
+  WorkItem,
   RoomInfo,
   RoomModeConfig,
   RoleInfo,
@@ -119,6 +120,8 @@ interface State {
   qualityIncidents: QualityIncident[];
   qualityRules: QualityRule[];
   qualityAwaitingCount: number;
+  qualityError: string | null;
+  qualityWorkItems: WorkItem[];
 }
 
 interface Actions {
@@ -288,6 +291,8 @@ interface Actions {
   resolveQualityIncident(id: string, status: QualityIncident["status"], regressionTest?: string): Promise<void>;
   loadQualityRules(projectId?: string): Promise<void>;
   resolveQualityRule(id: string, status: QualityRule["status"]): Promise<void>;
+  loadQualityWorkItems(projectId?: string): Promise<void>;
+  clearQualityError(): void;
 }
 
 const defaultConfig: AppConfig = {
@@ -676,6 +681,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
     return resp as T;
   };
 
+  const fmtErr = (e: unknown): string =>
+    e instanceof Error ? e.message : typeof e === "string" ? e : JSON.stringify(e);
+
   const parseConnection = (o: Record<string, unknown>): ConnectionInfo => ({
     id: String(o.id ?? ""),
     name: String(o.name ?? ""),
@@ -867,6 +875,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     qualityIncidents: [],
     qualityRules: [],
     qualityAwaitingCount: 0,
+    qualityError: null,
+    qualityWorkItems: [],
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -2522,12 +2532,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const resp = await getOrCall<Record<string, unknown>>("quality.project.list");
         const projects = ((resp.projects as unknown[] | undefined) ?? []) as QualityProject[];
-        set({ qualityProjects: projects });
+        set({ qualityProjects: projects, qualityError: null });
         const selected = get().qualityProjectId;
         if (!selected && projects.length > 0) {
           await get().selectQualityProject(projects[0]!.id);
         }
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `加载项目失败：${fmtErr(e)}` });
+      }
     },
 
     selectQualityProject: async (id: string) => {
@@ -2537,6 +2549,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         get().loadQualityPolicy(id),
         get().loadQualityIncidents(id),
         get().loadQualityRules(id),
+        get().loadQualityWorkItems(id),
       ]);
     },
 
@@ -2548,7 +2561,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         );
         const runs = ((resp.runs as unknown[] | undefined) ?? []) as QualityRun[];
         set({ qualityRuns: runs, qualityAwaitingCount: runs.filter((r) => r.stage === "awaiting-approval").length });
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `加载运行记录失败：${fmtErr(e)}` });
+      }
     },
 
     loadQualityRun: async (id: string) => {
@@ -2559,7 +2574,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           qualityChecks: ((resp.checks as unknown[] | undefined) ?? []) as QualityCheck[],
           qualityFindings: ((resp.findings as unknown[] | undefined) ?? []) as QualityFinding[],
         });
-      } catch {
+      } catch (e) {
+        set({ qualityError: `加载运行详情失败：${fmtErr(e)}` });
       } finally {
         set({ qualityLoading: false });
       }
@@ -2567,29 +2583,37 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     loadQualityPolicy: async (projectId: string) => {
       try {
-        const resp = await getOrCall<Record<string, unknown>>("quality.policy.get", { projectId });
-        set({ qualityPolicy: resp as unknown as QualityPolicyInfo });
-      } catch {}
+        const resp = await getOrCall<QualityPolicyInfo>("quality.policy.get", { projectId });
+        set({ qualityPolicy: resp });
+      } catch (e) {
+        set({ qualityError: `加载策略失败：${fmtErr(e)}` });
+      }
     },
 
     ensureQualityPolicy: async (projectId: string) => {
       try {
         await getOrCall("quality.policy.ensure", { projectId });
         await get().loadQualityPolicy(projectId);
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `初始化策略失败：${fmtErr(e)}` });
+      }
     },
 
     startQualityRun: async (projectId: string) => {
-      const project = get().qualityProjects.find((p) => p.id === projectId);
-      await getOrCall("quality.run.start", {
-        projectId,
-        trigger: "interactive",
-        risk: "low",
-        policyVersion: project?.policyVersion ?? "",
-        maxFixRounds: 2,
-        timeoutMs: 600000,
-      });
-      await get().loadQualityRuns(projectId);
+      try {
+        const project = get().qualityProjects.find((p) => p.id === projectId);
+        await getOrCall("quality.run.start", {
+          projectId,
+          trigger: "interactive",
+          risk: "low",
+          policyVersion: project?.policyVersion ?? "",
+          maxFixRounds: 2,
+          timeoutMs: 600000,
+        });
+        await get().loadQualityRuns(projectId);
+      } catch (e) {
+        set({ qualityError: `发起质量运行失败：${fmtErr(e)}` });
+      }
     },
 
     qualityRunAction: async (id: string, action: "cancel" | "approve" | "reject" | "retry") => {
@@ -2601,7 +2625,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
             ? String((resp.run as Record<string, unknown> | undefined)?.id ?? id)
             : id;
         await get().loadQualityRun(nextId);
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `运行操作 ${action} 失败：${fmtErr(e)}` });
+      }
     },
 
     resolveQualityFinding: async (id: string, status: QualityFinding["status"], note?: string) => {
@@ -2609,32 +2635,58 @@ export const useHubStore = create<State & Actions>((set, get) => {
         await getOrCall("quality.finding.resolve", { id, status, resolutionNote: note });
         const runId = get().qualityRunId;
         if (runId) await get().loadQualityRun(runId);
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `处理 finding 失败：${fmtErr(e)}` });
+      }
     },
 
     loadQualityIncidents: async (projectId?: string) => {
-      const resp = await getOrCall<{ incidents: QualityIncident[] }>("quality.incident.list", { projectId });
-      set({ qualityIncidents: resp.incidents });
+      try {
+        const resp = await getOrCall<{ incidents: QualityIncident[] }>("quality.incident.list", { projectId });
+        set({ qualityIncidents: resp.incidents });
+      } catch (e) {
+        set({ qualityError: `加载 incident 失败：${fmtErr(e)}` });
+      }
     },
 
     resolveQualityIncident: async (id: string, status: QualityIncident["status"], regressionTest?: string) => {
       try {
         await getOrCall("quality.incident.resolve", { id, status, regressionTest });
         await get().loadQualityIncidents(get().qualityProjectId ?? undefined);
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `处理 incident 失败：${fmtErr(e)}` });
+      }
     },
 
     loadQualityRules: async (projectId?: string) => {
-      const resp = await getOrCall<{ rules: QualityRule[] }>("quality.rule.list", { projectId });
-      set({ qualityRules: resp.rules });
+      try {
+        const resp = await getOrCall<{ rules: QualityRule[] }>("quality.rule.list", { projectId });
+        set({ qualityRules: resp.rules });
+      } catch (e) {
+        set({ qualityError: `加载规则候选失败：${fmtErr(e)}` });
+      }
     },
 
     resolveQualityRule: async (id: string, status: QualityRule["status"]) => {
       try {
         await getOrCall("quality.rule.resolve", { id, status });
         await get().loadQualityRules(get().qualityProjectId ?? undefined);
-      } catch {}
+      } catch (e) {
+        set({ qualityError: `处理规则失败：${fmtErr(e)}` });
+      }
     },
+
+    loadQualityWorkItems: async (projectId?: string) => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("quality.work.list", projectId ? { projectId } : {});
+        const items = ((resp.items as unknown[] | undefined) ?? []) as WorkItem[];
+        set({ qualityWorkItems: items });
+      } catch (e) {
+        // work item RPC 可能尚未注册，静默降级
+      }
+    },
+
+    clearQualityError: () => set({ qualityError: null }),
   };
 
   // derived slashCommands after store is created

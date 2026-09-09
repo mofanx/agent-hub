@@ -63,14 +63,25 @@ private val STAGE_LABELS = mapOf(
     "reviewing" to "审查中",
     "fixing" to "修复中",
     "full-verifying" to "完整验证",
+    "requirement-verifying" to "需求验证",
     "awaiting-approval" to "等待审批",
     "accepted" to "已通过",
     "failed" to "失败",
+    "inconclusive" to "无法判定",
+    "waived" to "已豁免",
     "cancelled" to "已取消",
     "quarantined" to "已隔离",
+    "stale" to "已过期",
 )
 
-private val TERMINAL_STAGES = setOf("accepted", "failed", "cancelled", "quarantined")
+private val TERMINAL_STAGES = setOf("accepted", "failed", "inconclusive", "waived", "cancelled", "quarantined", "stale")
+
+private val OUTCOME_LABELS = mapOf(
+    "verified" to "已验证",
+    "failed" to "未通过",
+    "inconclusive" to "无法判定",
+    "waived" to "已豁免",
+)
 
 private fun fmtTime(ts: Long?): String =
     if (ts == null || ts <= 0) "—" else DateFormat.getDateTimeInstance().format(Date(ts))
@@ -118,6 +129,38 @@ fun QualityScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            vm.qualityError?.let { err ->
+                item {
+                    Card(
+                        Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                        ),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                "⚠",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Text(
+                                err,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { vm.clearQualityError() }) {
+                                Text("清除")
+                            }
+                        }
+                    }
+                }
+            }
             item {
                 Card(
                     Modifier.fillMaxWidth(),
@@ -234,12 +277,21 @@ fun QualityScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 "风险：${run.risk} · 触发：${run.trigger} · 修复轮次：${run.fixRound}/${run.maxFixRounds}\n" +
-                                    "判定：${run.verdict ?: "—"}${run.failureCode?.let { " · $it" } ?: ""}\n" +
+                                    "判定：${run.verdict ?: "—"}${run.failureCode?.let { " · $it" } ?: ""}" +
+                                    (run.outcome?.let { " · 结果：${OUTCOME_LABELS[it] ?: it}" } ?: "") + "\n" +
                                     "创建：${fmtTime(run.createdAt)} · 更新：${fmtTime(run.updatedAt)}" +
                                     (run.completedAt?.let { " · 完成：${fmtTime(it)}" } ?: ""),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            run.workItemId?.let { wid ->
+                                Text(
+                                    "WorkItem：$wid${run.generation?.let { " · 第 $it 代" } ?: ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             run.patchHash?.let {
                                 Text(
                                     "patchHash：$it",
@@ -360,8 +412,8 @@ fun QualityScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 private fun stageColor(stage: String): Color = when (stage) {
     "accepted" -> Color(0xFF2ECC71)
     "failed", "quarantined" -> MaterialTheme.colorScheme.error
-    "cancelled" -> MaterialTheme.colorScheme.onSurfaceVariant
-    "awaiting-approval" -> Color(0xFFF1C40F)
+    "cancelled", "stale" -> MaterialTheme.colorScheme.onSurfaceVariant
+    "inconclusive", "waived", "awaiting-approval" -> Color(0xFFF1C40F)
     else -> MaterialTheme.colorScheme.primary
 }
 

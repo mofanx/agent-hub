@@ -240,15 +240,20 @@ export type QualityStage =
   | "reviewing"
   | "fixing"
   | "full-verifying"
+  | "requirement-verifying"
   | "awaiting-approval"
   | "accepted"
   | "failed"
+  | "inconclusive"
+  | "waived"
   | "cancelled"
-  | "quarantined";
+  | "quarantined"
+  | "stale";
 
 export type QualityRisk = "low" | "medium" | "high" | "critical";
 export type QualityTrigger = "interactive" | "conductor" | "scheduled" | "incident";
 export type QualityVerdict = "pass" | "fail" | "needs-approval";
+export type QualityOutcome = "verified" | "failed" | "inconclusive" | "waived";
 
 export interface QualityRun {
   id: string;
@@ -271,6 +276,13 @@ export interface QualityRun {
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
+  // ── Phase 0 扩展：WorkItem 关联与策略快照 ──
+  workItemId?: string;
+  generation?: number;
+  policyHash?: string;
+  policySnapshotRef?: string;
+  changeSetId?: string;
+  outcome?: QualityOutcome;
 }
 
 export type CheckRunStatus =
@@ -338,7 +350,7 @@ export interface QualityCheckDef {
 }
 
 export interface QualityPolicy {
-  version: number;
+  version: 1;
   checks: QualityCheckDef[];
   protectedPaths: string[];
   riskRules: { pattern: string; risk: QualityRisk; reason: string }[];
@@ -353,9 +365,71 @@ export interface QualityPolicy {
 }
 
 export interface QualityPolicyInfo {
-  policy: QualityPolicy;
+  policy: QualityPolicy | QualityPolicyV2;
+  version: 1 | 2;
   source: string;
   errors: string[];
+}
+
+// ── Policy v2（Phase 0 §9.2）──
+
+export type EnforcementMode = "report" | "require-pass" | "require-approval";
+export type RemediationMode = "off" | "propose" | "isolated-fix" | "apply-low-risk";
+export type RequirementsMode = "off" | "suggest" | "require-high-risk";
+export type ReviewMode = "off" | "advisory" | "blocking";
+export type VerificationMode = "off" | "suggest" | "require-evidence";
+
+export interface QualityPolicyV2 {
+  version: 2;
+  checks: QualityCheckDef[];
+  protectedPaths: string[];
+  riskRules: { pattern: string; risk: QualityRisk; reason: string }[];
+  requirementRules: unknown[];
+  verificationRules: unknown[];
+  enforcement: { mode: EnforcementMode; approvalRisk: "high" | "critical" };
+  remediation: { mode: RemediationMode; maxFixRounds: number };
+  requirements: { mode: RequirementsMode; maxQuestions: number };
+  review: { mode: ReviewMode; blockSeverity: "critical" | "major"; minBlockingConfidence: number };
+  verification: { mode: VerificationMode };
+  evidence: { excludePaths: string[]; retentionDays: number; maxArtifactBytes: number };
+}
+
+export interface PolicyMigrationPreview {
+  v1: QualityPolicy;
+  v2: QualityPolicyV2;
+  changes: string[];
+}
+
+// ── WorkItem / WorkRequest / RequirementSpec（Phase 0 §8）──
+
+export interface WorkRequest {
+  id: string;
+  source: "room" | "session" | "scheduler" | "incident" | "manual";
+  mode?: string;
+  roomId?: string;
+  sessionId?: string;
+  intent: string;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkItem {
+  id: string;
+  requestId: string;
+  specId?: string;
+  specVersion?: number;
+  projectId: string;
+  roomId?: string;
+  taskId?: string;
+  sessionId?: string;
+  mode: string;
+  kind: "implementation" | "verification-only" | "remediation";
+  status: "planned" | "active" | "completed" | "cancelled";
+  currentRunId?: string;
+  currentGeneration: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface QualityIncident {

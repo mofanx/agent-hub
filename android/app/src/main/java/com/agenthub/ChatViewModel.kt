@@ -301,6 +301,9 @@ data class QualityRun(
     val patchHash: String? = null,
     val roomId: String? = null,
     val taskId: String? = null,
+    val workItemId: String? = null,
+    val generation: Int? = null,
+    val outcome: String? = null,
 )
 
 data class QualityCheck(
@@ -587,6 +590,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var qualityPolicy by mutableStateOf<QualityPolicyInfo?>(null)
     var qualityProjectId by mutableStateOf<String?>(null)
     var qualityRunId by mutableStateOf<String?>(null)
+    var qualityError by mutableStateOf<String?>(null)
     var qualityReturnScreen by mutableStateOf(Screen.Sessions)
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
@@ -1554,10 +1558,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = result["projects"]?.jsonArray ?: return@launch
                 qualityProjects.clear()
                 for (p in list) qualityProjects.add(parseQualityProject(p.jsonObject))
+                qualityError = null
                 if (qualityProjectId == null && qualityProjects.isNotEmpty()) {
                     selectQualityProject(qualityProjects.first().id)
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "加载项目失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1585,7 +1591,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 qualityRuns.clear()
                 for (r in list) qualityRuns.add(parseQualityRun(r.jsonObject))
                 qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }
-            } catch (_: Exception) {
+                qualityError = null
+            } catch (e: Exception) {
+                qualityError = "加载运行记录失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1599,7 +1607,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 result["checks"]?.jsonArray?.forEach { qualityChecks.add(parseQualityCheck(it.jsonObject)) }
                 qualityFindings.clear()
                 result["findings"]?.jsonArray?.forEach { qualityFindings.add(parseQualityFinding(it.jsonObject)) }
-            } catch (_: Exception) {
+                qualityError = null
+            } catch (e: Exception) {
+                qualityError = "加载运行详情失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1609,13 +1619,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call("quality.policy.get", buildJsonObject { put("projectId", projectId) })
                 val policy = result["policy"]?.jsonObject
+                val version = result["version"]?.jsonPrimitive?.intOrNull ?: 1
+                val autonomy = if (version == 2) {
+                    val enforcement = policy?.get("enforcement")?.jsonObject?.get("mode")?.jsonPrimitive?.contentOrNull ?: "report"
+                    val remediation = policy?.get("remediation")?.jsonObject?.get("mode")?.jsonPrimitive?.contentOrNull ?: "off"
+                    when (enforcement to remediation) {
+                        "report" to "off" -> "observe"
+                        "require-approval" to "propose" -> "propose"
+                        "require-pass" to "isolated-fix" -> "isolated-fix"
+                        "require-pass" to "apply-low-risk" -> "apply-low-risk"
+                        else -> "observe"
+                    }
+                } else {
+                    policy?.get("autonomy")?.jsonPrimitive?.contentOrNull ?: "observe"
+                }
                 qualityPolicy = QualityPolicyInfo(
                     source = result["source"]?.jsonPrimitive?.content ?: "default",
-                    autonomy = policy?.get("autonomy")?.jsonPrimitive?.content ?: "observe",
+                    autonomy = autonomy,
                     checkCount = policy?.get("checks")?.jsonArray?.size ?: 0,
                     errors = result["errors"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
                 )
-            } catch (_: Exception) {
+                qualityError = null
+            } catch (e: Exception) {
+                qualityError = "加载策略失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1625,7 +1651,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 hub.call("quality.policy.ensure", buildJsonObject { put("projectId", projectId) })
                 loadQualityPolicy(projectId)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "初始化策略失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1643,7 +1670,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("timeoutMs", 600000)
                 })
                 loadQualityRuns(projectId)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "发起质量运行失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1657,7 +1685,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     result["run"]?.jsonObject?.get("id")?.jsonPrimitive?.content ?: id
                 } else id
                 loadQualityRun(nextId)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "运行操作 $action 失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1686,6 +1715,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         patchHash = o["patchHash"]?.jsonPrimitive?.contentOrNull,
         roomId = o["roomId"]?.jsonPrimitive?.contentOrNull,
         taskId = o["taskId"]?.jsonPrimitive?.contentOrNull,
+        workItemId = o["workItemId"]?.jsonPrimitive?.contentOrNull,
+        generation = o["generation"]?.jsonPrimitive?.intOrNull,
+        outcome = o["outcome"]?.jsonPrimitive?.contentOrNull,
     )
 
     private fun parseQualityCheck(o: JsonObject) = QualityCheck(
@@ -1723,7 +1755,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("resolutionNote", note)
                 })
                 loadQualityRun(qualityRunId ?: "")
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "处理 finding 失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1736,7 +1769,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = result["incidents"]?.jsonArray ?: return@launch
                 qualityIncidents.clear()
                 for (i in list) qualityIncidents.add(parseQualityIncident(i.jsonObject))
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "加载 incident 失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1750,7 +1784,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (regressionTest.isNotBlank()) put("regressionTest", regressionTest)
                 })
                 loadQualityIncidents(qualityProjectId)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "处理 incident 失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1763,7 +1798,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = result["rules"]?.jsonArray ?: return@launch
                 qualityRules.clear()
                 for (r in list) qualityRules.add(parseQualityRule(r.jsonObject))
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "加载规则候选失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1776,9 +1812,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("status", status)
                 })
                 loadQualityRules(qualityProjectId)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                qualityError = "处理规则失败：${e.message ?: e.toString()}"
             }
         }
+    }
+
+    fun clearQualityError() {
+        qualityError = null
     }
 
     private fun parseQualityIncident(o: JsonObject) = QualityIncident(

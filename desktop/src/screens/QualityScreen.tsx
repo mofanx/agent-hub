@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, FlaskConical, Play, RefreshCw, ShieldCheck, X, XCircle, FileText } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, FlaskConical, Play, RefreshCw, ShieldCheck, X, XCircle, FileText } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import type { QualityRun, QualityCheck, QualityFinding, QualityStage, QualityIncident, QualityRule } from "../hub/types";
+import type { QualityRun, QualityCheck, QualityFinding, QualityStage, QualityIncident, QualityRule, QualityPolicyInfo } from "../hub/types";
 
 const STAGE_LABELS: Record<QualityStage, string> = {
   queued: "排队中",
@@ -12,19 +12,44 @@ const STAGE_LABELS: Record<QualityStage, string> = {
   reviewing: "审查中",
   fixing: "修复中",
   "full-verifying": "完整验证",
+  "requirement-verifying": "需求验证",
   "awaiting-approval": "等待审批",
   accepted: "已通过",
   failed: "失败",
+  inconclusive: "无法判定",
+  waived: "已豁免",
   cancelled: "已取消",
   quarantined: "已隔离",
+  stale: "已过期",
 };
 
-const TERMINAL: QualityStage[] = ["accepted", "failed", "cancelled", "quarantined"];
+const TERMINAL: QualityStage[] = ["accepted", "failed", "inconclusive", "waived", "cancelled", "quarantined", "stale"];
+
+function policyAutonomy(policy: QualityPolicyInfo["policy"]): string {
+  if (policy.version === 2) {
+    const e = policy.enforcement.mode;
+    const r = policy.remediation.mode;
+    if (e === "report" && r === "off") return "observe";
+    if (e === "require-approval" && r === "propose") return "propose";
+    if (e === "require-pass" && r === "isolated-fix") return "isolated-fix";
+    if (e === "require-pass" && r === "apply-low-risk") return "apply-low-risk";
+    return "observe";
+  }
+  return policy.autonomy;
+}
+
+const OUTCOME_LABELS: Record<string, string> = {
+  verified: "已验证",
+  failed: "未通过",
+  inconclusive: "无法判定",
+  waived: "已豁免",
+};
 
 function stageColor(stage: QualityStage): string {
   if (stage === "accepted") return "var(--success)";
   if (stage === "failed" || stage === "quarantined") return "var(--danger, #e53e3e)";
-  if (stage === "cancelled") return "var(--text-dim)";
+  if (stage === "cancelled" || stage === "stale") return "var(--text-dim)";
+  if (stage === "inconclusive" || stage === "waived") return "var(--warn)";
   if (stage === "awaiting-approval") return "var(--warn)";
   return "var(--accent)";
 }
@@ -70,6 +95,17 @@ export function QualityScreen() {
       </nav>
       <div className="settings-content">
         <div className="settings-inner">
+          {store.qualityError && (
+            <div className="card" style={{ borderColor: "var(--danger, #e53e3e)", marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <AlertTriangle size={15} style={{ color: "var(--danger, #e53e3e)", flexShrink: 0 }} />
+                <span style={{ flex: 1, fontSize: 13, color: "var(--danger, #e53e3e)" }}>{store.qualityError}</span>
+                <button className="icon-btn" title="清除" onClick={() => store.clearQualityError()}>
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
           <div className="card">
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <FlaskConical size={16} />
@@ -94,7 +130,7 @@ export function QualityScreen() {
             {store.qualityPolicy && (
               <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-dim)" }}>
                 策略：{store.qualityPolicy.source === "file" ? ".devin/quality.json" : "默认（未配置）"}
-                {" · "}autonomy={store.qualityPolicy.policy.autonomy}
+                {" · "}autonomy={policyAutonomy(store.qualityPolicy.policy)}
                 {" · "}checks={store.qualityPolicy.policy.checks.length}
                 {" · "}protectedPaths={store.qualityPolicy.policy.protectedPaths.length}
                 {store.qualityPolicy.source === "default" && store.qualityProjectId && (
@@ -152,8 +188,9 @@ export function QualityScreen() {
               </div>
               <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}>
                 <div>风险：{run.risk} · 触发：{run.trigger} · 修复轮次：{run.fixRound}/{run.budget.maxFixRounds}</div>
-                <div>判定：{run.verdict ?? "—"}{run.failureCode ? ` · ${run.failureCode}` : ""}</div>
+                <div>判定：{run.verdict ?? "—"}{run.failureCode ? ` · ${run.failureCode}` : ""}{run.outcome ? ` · 结果：${OUTCOME_LABELS[run.outcome] ?? run.outcome}` : ""}</div>
                 <div>创建：{fmt(run.createdAt)} · 更新：{fmt(run.updatedAt)}{run.completedAt ? ` · 完成：${fmt(run.completedAt)}` : ""}</div>
+                {run.workItemId && <div>WorkItem：<code style={{ fontSize: 11 }}>{run.workItemId}</code>{run.generation ? ` · 第 ${run.generation} 代` : ""}</div>}
                 {run.patchHash && <div>patchHash：<code style={{ fontSize: 11 }}>{run.patchHash}</code></div>}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -238,6 +275,32 @@ export function QualityScreen() {
               </div>
             )}
           </div>
+
+          {store.qualityWorkItems.length > 0 && (
+            <div className="card">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <strong style={{ flex: 1 }}>WorkItem</strong>
+                <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{store.qualityWorkItems.length}</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {store.qualityWorkItems.map((w) => (
+                  <div key={w.id} style={{ padding: "6px 8px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <code style={{ fontSize: 11 }}>{w.id}</code>
+                      <span style={{ flex: 1 }}>{w.kind}</span>
+                      <span style={{ color: "var(--text-dim)" }}>{w.status}</span>
+                      <span style={{ color: "var(--text-dim)" }}>第 {w.currentGeneration} 代</span>
+                    </div>
+                    {w.currentRunId && (
+                      <div style={{ color: "var(--text-dim)", marginTop: 4 }}>
+                        当前 run：<code style={{ fontSize: 11 }}>{w.currentRunId}</code>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
