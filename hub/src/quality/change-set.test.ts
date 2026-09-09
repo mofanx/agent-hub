@@ -174,6 +174,29 @@ describe("change-set collector", () => {
     assert.equal(cs.patchHash, "");
   });
 
+  it("collectChangeSet 使用 worktreePath 收集 worktree 的变更", () => {
+    gitCommit(tmpRoot, "ensure clean");
+    // 在主仓库写入一个文件（不应出现在 worktree 的 ChangeSet 中）
+    writeFile(tmpRoot, "src/main-only.ts", "export const main = 1;");
+    // 创建 worktree
+    spawn.sync("git", ["worktree", "add", path.join(tmpRoot, ".quality-worktrees", "run-wt")], { cwd: tmpRoot, encoding: "utf-8" });
+    const wtPath = path.join(tmpRoot, ".quality-worktrees", "run-wt");
+    // 在 worktree 中写入一个文件
+    writeFile(wtPath, "src/wt-only.ts", "export const wt = 1;");
+    const baseline = collectBaseline(project);
+    // 不传 worktreePath → 收集主仓库变更（包含 main-only.ts）
+    const csMain = collectChangeSet("run-1", project, baseline, {}, tmpRoot);
+    assert.ok(csMain.files.some((f) => f.path === "src/main-only.ts"), "主仓库应包含 main-only.ts");
+    // 传 worktreePath → 收集 worktree 变更（包含 wt-only.ts，不包含 main-only.ts）
+    const csWt = collectChangeSet("run-1", project, baseline, {}, tmpRoot, wtPath);
+    assert.ok(csWt.files.some((f) => f.path === "src/wt-only.ts"), "worktree 应包含 wt-only.ts");
+    assert.ok(!csWt.files.some((f) => f.path === "src/main-only.ts"), "worktree 不应包含 main-only.ts");
+    // 清理
+    spawn.sync("git", ["worktree", "remove", "--force", wtPath], { cwd: tmpRoot, encoding: "utf-8" });
+    fs.rmSync(path.join(tmpRoot, "src"), { recursive: true, force: true });
+    gitCommit(tmpRoot, "cleanup");
+  });
+
   it("detectContamination：baseline 干净时 implementer 写入不算污染", () => {
     gitCommit(tmpRoot, "ensure clean");
     const baseline = collectBaseline(project);

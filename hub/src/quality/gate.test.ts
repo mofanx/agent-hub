@@ -215,69 +215,143 @@ describe("gate", () => {
 
   describe("classifyResult", () => {
     it("全部 passed → passed=true", () => {
+      const defs = [makeCheck("c1", "quick"), makeCheck("c2", "quick")];
       const checks = [
         makeCheckRun("c1", "passed", 0),
         makeCheckRun("c2", "passed", 0),
       ];
-      const result = classifyResult("quick", checks);
+      const result = classifyResult("quick", checks, defs);
       assert.equal(result.passed, true);
       assert.equal(result.codeFailed, false);
       assert.equal(result.infraFailed, false);
     });
 
     it("非零 exitCode → failed，绝不 PASS（Q1-01）", () => {
+      const defs = [makeCheck("c1", "quick"), makeCheck("c2", "quick")];
       const checks = [
         makeCheckRun("c1", "passed", 0),
         makeCheckRun("c2", "failed", 1),
       ];
-      const result = classifyResult("quick", checks);
+      const result = classifyResult("quick", checks, defs);
       assert.equal(result.passed, false);
       assert.equal(result.codeFailed, true);
       assert.equal(result.infraFailed, false);
     });
 
     it("timeout 归类为 infra-failed 而非代码缺陷（Q1-02）", () => {
+      const defs = [makeCheck("c1", "quick"), makeCheck("c2", "quick")];
       const checks = [
         makeCheckRun("c1", "passed", 0),
         makeCheckRun("c2", "timeout"),
       ];
-      const result = classifyResult("quick", checks);
+      const result = classifyResult("quick", checks, defs);
       assert.equal(result.passed, false);
       assert.equal(result.codeFailed, false);
       assert.equal(result.infraFailed, true);
     });
 
     it("infra-failed 归类为基础设施失败", () => {
+      const defs = [makeCheck("c1", "quick")];
       const checks = [makeCheckRun("c1", "infra-failed")];
-      const result = classifyResult("quick", checks);
+      const result = classifyResult("quick", checks, defs);
       assert.equal(result.passed, false);
       assert.equal(result.codeFailed, false);
       assert.equal(result.infraFailed, true);
+      assert.equal(result.inconclusive, true);
     });
 
     it("cancelled 归类为取消而非代码缺陷", () => {
+      const defs = [makeCheck("c1", "quick")];
       const checks = [makeCheckRun("c1", "cancelled")];
-      const result = classifyResult("quick", checks);
+      const result = classifyResult("quick", checks, defs);
       assert.equal(result.passed, false);
       assert.equal(result.codeFailed, false);
       assert.equal(result.infraFailed, true);
       assert.equal(result.cancelled, true);
     });
 
-    it("空检查列表 → passed=false（无证据不能通过）", () => {
-      const result = classifyResult("quick", []);
-      assert.equal(result.passed, false);
+    it("空检查列表 → passed=true（vacuously，无 required 检查）", () => {
+      const result = classifyResult("quick", [], []);
+      assert.equal(result.passed, true);
+      assert.equal(result.requiredCount, 0);
+      assert.equal(result.optionalCount, 0);
     });
 
-    it("混合失败：code + infra 同时存在", () => {
+    it("optional 失败不阻断 passed", () => {
+      const defs = [
+        { ...makeCheck("c1", "quick"), required: true },
+        { ...makeCheck("c2", "quick"), required: false },
+      ];
+      const checks = [
+        makeCheckRun("c1", "passed", 0),
+        makeCheckRun("c2", "failed", 1),
+      ];
+      const result = classifyResult("quick", checks, defs);
+      assert.equal(result.passed, true);
+      assert.equal(result.codeFailed, false);
+      assert.equal(result.requiredCount, 1);
+      assert.equal(result.optionalCount, 1);
+    });
+
+    it("optional 基础设施失败不阻断 passed", () => {
+      const defs = [
+        { ...makeCheck("c1", "quick"), required: true },
+        { ...makeCheck("c2", "quick"), required: false },
+      ];
+      const checks = [
+        makeCheckRun("c1", "passed", 0),
+        makeCheckRun("c2", "timeout"),
+      ];
+      const result = classifyResult("quick", checks, defs);
+      assert.equal(result.passed, true);
+      assert.equal(result.inconclusive, false);
+      assert.equal(result.infraFailed, true);
+    });
+
+    it("required 失败阻断 passed", () => {
+      const defs = [
+        { ...makeCheck("c1", "quick"), required: true },
+        { ...makeCheck("c2", "quick"), required: false },
+      ];
+      const checks = [
+        makeCheckRun("c1", "failed", 1),
+        makeCheckRun("c2", "passed", 0),
+      ];
+      const result = classifyResult("quick", checks, defs);
+      assert.equal(result.passed, false);
+      assert.equal(result.codeFailed, true);
+    });
+
+    it("所有 required 检查 infra-failed → inconclusive", () => {
+      const defs = [
+        { ...makeCheck("c1", "quick"), required: true },
+        { ...makeCheck("c2", "quick"), required: false },
+      ];
+      const checks = [
+        makeCheckRun("c1", "timeout"),
+        makeCheckRun("c2", "passed", 0),
+      ];
+      const result = classifyResult("quick", checks, defs);
+      assert.equal(result.passed, false);
+      assert.equal(result.inconclusive, true);
+      assert.equal(result.codeFailed, false);
+      assert.equal(result.infraFailed, true);
+    });
+
+    it("code + infra 混合失败：code 优先于 inconclusive", () => {
+      const defs = [
+        { ...makeCheck("c1", "quick"), required: true },
+        { ...makeCheck("c2", "quick"), required: true },
+      ];
       const checks = [
         makeCheckRun("c1", "failed", 1),
         makeCheckRun("c2", "timeout"),
       ];
-      const result = classifyResult("full", checks);
+      const result = classifyResult("full", checks, defs);
       assert.equal(result.passed, false);
       assert.equal(result.codeFailed, true);
       assert.equal(result.infraFailed, true);
+      assert.equal(result.inconclusive, false);
     });
   });
 

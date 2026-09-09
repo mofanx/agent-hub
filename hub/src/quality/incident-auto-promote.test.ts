@@ -109,15 +109,15 @@ describe("incident auto-promote (P4)", () => {
       assert.equal(rules[0]!.status, "candidate");
     });
 
-    it("sourceRunId 不同但 description 相同 → 不同 fingerprint", () => {
-      // incidentFingerprint 包含 sourceRunId，所以不同 run 的同描述是不同 fingerprint
+    it("sourceRunId 不同但 description 相同 → 相同 fingerprint，触发自动沉淀", () => {
+      // incidentFingerprint 不含 sourceRunId（§8.3），跨 run 同描述聚类为同一 fingerprint
       service.createIncident({ projectId: project.id, description: "bug E", severity: "major", sourceRunId: "r1" });
       service.createIncident({ projectId: project.id, description: "bug E", severity: "major", sourceRunId: "r2" });
       service.createIncident({ projectId: project.id, description: "bug E", severity: "major", sourceRunId: "r3" });
 
       const rules = service.listRules(project.id);
-      // 3 个不同 fingerprint，各只有 1 条，不触发自动沉淀
-      assert.equal(rules.length, 0);
+      // 3 个相同 fingerprint，达到阈值，触发自动沉淀
+      assert.equal(rules.length, 1);
     });
 
     it("自动沉淀的 candidate fingerprint = ruleFingerprint(projectId, autoPromoteRuleText(desc))", () => {

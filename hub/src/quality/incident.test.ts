@@ -14,16 +14,16 @@ describe("incident helpers (Q3-01)", () => {
     assert.match(id, /^inc-[0-9a-f]{12}$/);
   });
 
-  it("incidentFingerprint 同输入产生同指纹", () => {
-    const fp1 = incidentFingerprint("p1", "desc", "run-1");
-    const fp2 = incidentFingerprint("p1", "desc", "run-1");
-    const fp3 = incidentFingerprint("p1", "desc", "run-2");
+  it("incidentFingerprint 同输入产生同指纹，不同 description 产生不同指纹", () => {
+    const fp1 = incidentFingerprint("p1", "desc");
+    const fp2 = incidentFingerprint("p1", "desc");
+    const fp3 = incidentFingerprint("p1", "other");
     assert.equal(fp1, fp2);
     assert.notEqual(fp1, fp3);
     assert.equal(fp1.length, 16);
   });
 
-  it("incidentFingerprint 无 sourceRunId 也稳定", () => {
+  it("incidentFingerprint 不含 sourceRunId，跨 run 稳定", () => {
     const fp1 = incidentFingerprint("p1", "desc");
     const fp2 = incidentFingerprint("p1", "desc");
     assert.equal(fp1, fp2);

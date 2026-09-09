@@ -3,6 +3,8 @@ import type {
   CheckRun,
   ProjectScope,
   QualityPolicy,
+  QualityPolicyV2,
+  PolicyMigrationPreview,
   QualityRun,
   QualityTrigger,
   QualityRisk,
@@ -17,10 +19,35 @@ import type {
   QualityBenchmark,
   BenchmarkRun,
   BenchmarkStatus,
+  WorkRequest,
+  RequirementSpec,
+  RequirementVerification,
+  WorkItem,
+  QualityObservation,
+  ClarificationRequest,
+  RequirementAssessment,
+  RequestIntent,
+  ActiveControl,
+  RuleDefinition,
+  RuleCandidateType,
+  PolicyExportPatch,
 } from "./types.js";
 import { createRun, isTerminal, transition, IllegalTransitionError } from "./run.js";
 import { registerProject } from "./project.js";
-import { assertPolicy, defaultObservePolicy, loadPolicy, suggestChecksFromAgentsMd, validatePolicy, generateDefaultPolicy, writePolicy } from "./policy.js";
+import { assertPolicy, defaultObservePolicy, loadPolicy, suggestChecksFromAgentsMd, validatePolicy, generateDefaultPolicy, writePolicy, validatePolicyV2, migrateV1ToV2, migrateV1ToV2Write, loadPolicyV2 } from "./policy.js";
+import {
+  classifyIntent,
+  assessGeneric,
+  assessProjectSpecific,
+  selectQuestions,
+  createClarificationRequest,
+  isExpired,
+  evaluateRequirement,
+  applyClarificationAnswers,
+  applyClarificationSkip,
+  applyClarificationCancel,
+  CLARIFICATION_TTL_MS,
+} from "./requirement.js";
 import { canTransitionFindingStatus, isValidFindingStatus } from "./review.js";
 import {
   createIncident,
@@ -42,8 +69,27 @@ import {
   buildSandboxPolicy,
   type SandboxResult,
 } from "./rule.js";
+import {
+  createObservation as createObservationRec,
+  canConfirmObservation,
+  confirmObservationToIncident,
+  createTypedRuleCandidate,
+  createShadowControl,
+  promoteShadowToActive,
+  retireActiveControl,
+  generateExportPatch,
+  loadActiveControlsIntoPolicy,
+  loadShadowControls,
+  createSandboxEvaluation,
+  verifyExportPatch,
+  isRuleTypeCompatible,
+  inferRuleType,
+  stableFingerprint,
+  FINGERPRINT_VERSION,
+  type SandboxEvaluationResult,
+} from "./learning.js";
 import { startBenchmark as createBenchmark } from "./eval.js";
-import type { Store } from "../store.js";
+import type { Store, QualityMetricRow } from "../store.js";
 
 /**
  * QualityService（设计文档 §4.1 / §13）。
@@ -57,10 +103,9 @@ import type { Store } from "../store.js";
  * 不直接执行 shell，不直接解析 reviewer 自由文本。
  */
 
-export type QualityEvent = {
-  method: "quality.runUpdate";
-  params: { runId: string; projectId: string; run: QualityRun };
-};
+export type QualityEvent =
+  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: QualityRun } }
+  | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: VerificationVerdict; records: RequirementVerification[] } };
 
 export type Emit = (event: QualityEvent) => void;
 
@@ -77,6 +122,11 @@ export type StartRunParams = {
   dirtyBaselineHash?: string | undefined;
   patchHash?: string | undefined;
   budget: { maxFixRounds: number; timeoutMs: number };
+  policyHash?: string | undefined;
+  policySnapshotRef?: string | undefined;
+  workItemId?: string | undefined;
+  generation?: number | undefined;
+  changeSetId?: string | undefined;
 };
 
 export type ReviewRunner = (run: QualityRun) => void;
@@ -222,6 +272,11 @@ export class QualityService {
       ...(params.dirtyBaselineHash !== undefined ? { dirtyBaselineHash: params.dirtyBaselineHash } : {}),
       ...(params.patchHash !== undefined ? { patchHash: params.patchHash } : {}),
       budget: params.budget,
+      ...(params.policyHash !== undefined ? { policyHash: params.policyHash } : {}),
+      ...(params.policySnapshotRef !== undefined ? { policySnapshotRef: params.policySnapshotRef } : {}),
+      ...(params.workItemId !== undefined ? { workItemId: params.workItemId } : {}),
+      ...(params.generation !== undefined ? { generation: params.generation } : {}),
+      ...(params.changeSetId !== undefined ? { changeSetId: params.changeSetId } : {}),
     });
     this.store.saveQualityRun(run);
     this.broadcast(run);
@@ -813,7 +868,48 @@ export class QualityService {
     if (to === "awaiting-approval" && this.onAwaitingApproval) {
       this.onAwaitingApproval(next);
     }
+    if (to === "requirement-verifying") {
+      this.autoRunVerification(next);
+    }
+    if (isTerminal(to)) {
+      this.recordRunMetric(next);
+    }
     return next;
+  }
+
+  /** 进入 requirement-verifying 阶段时自动触发 L3 验证（有 spec 的 run）。 */
+  private autoRunVerification(run: QualityRun): void {
+    console.log(`[hub] autoRunVerification: run=${run.id}, workItemId=${run.workItemId ?? "none"}`);
+    if (!run.workItemId) return;
+    const item = this.store.getWorkItem(run.workItemId);
+    console.log(`[hub] autoRunVerification: workItem=${run.workItemId}, specId=${item?.specId ?? "none"}, itemFound=${!!item}`);
+    if (!item?.specId) return;
+    const result = this.runVerification({ runId: run.id, specId: item.specId });
+    console.log(`[hub] autoRunVerification: runVerification result=${result ? "found" : "null"}, records=${result?.records?.length ?? 0}, verdict.block=${result?.verdict?.block}, matrix.overallStatus=${result?.matrix?.overallStatus}`);
+    if (result) {
+      this.emit({
+        method: "quality.verification.auto",
+        params: { runId: run.id, projectId: run.projectId, verdict: result.verdict, records: result.records },
+      });
+      // 按 L3 verdict 推进 run 到终态
+      const status = result.matrix.overallStatus;
+      let nextStage: "accepted" | "failed" | "inconclusive";
+      if (result.verdict.block) {
+        nextStage = "failed";
+      } else if (status === "passed" || status === "waived") {
+        nextStage = "accepted";
+      } else {
+        nextStage = "inconclusive";
+      }
+      try {
+        this.advance(run.id, nextStage);
+      } catch (err) {
+        // accepted 要求 patchHash；若无 patch 则降级为 inconclusive
+        if (nextStage === "accepted") {
+          try { this.advance(run.id, "inconclusive"); } catch { /* */ }
+        }
+      }
+    }
   }
 
   /** 直接持久化 run（供 ExecutionProvider 回写 check 后更新 run 用）。 */
@@ -829,6 +925,14 @@ export class QualityService {
     if (run) this.broadcast(run);
   }
 
+  /** 清除 run 的所有旧证据（check/finding/review decision/requirement verification）。修复后复验前调用。 */
+  clearRunEvidence(runId: string): { checks: number; findings: number; decisions: number; verifications: number } {
+    const result = this.store.clearRunEvidence(runId);
+    const run = this.store.getQualityRun(runId);
+    if (run) this.broadcast(run);
+    return result;
+  }
+
   private requireRun(id: string): QualityRun {
     const run = this.store.getQualityRun(id);
     if (!run) throw new Error(`unknown run: ${id}`);
@@ -840,6 +944,768 @@ export class QualityService {
     if (isTerminal(run.stage) && this.onTerminal) {
       this.onTerminal(run);
     }
+  }
+
+  // ── Phase 0（v3.0 §8）：WorkRequest / WorkItem / RequirementSpec / Observation ──
+
+  createWorkRequest(params: {
+    source: WorkRequest["source"];
+    intent: WorkRequest["intent"];
+    correlationId: string;
+    mode?: string;
+    roomId?: string;
+    sessionId?: string;
+    turnId?: string;
+    rawInputRef?: string;
+  }): WorkRequest {
+    const now = Date.now();
+    const req: WorkRequest = {
+      id: `wr-${crypto.randomBytes(8).toString("hex")}`,
+      source: params.source,
+      intent: params.intent,
+      correlationId: params.correlationId,
+      status: "received",
+      createdAt: now,
+      updatedAt: now,
+      ...(params.mode !== undefined ? { mode: params.mode } : {}),
+      ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
+      ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+      ...(params.turnId !== undefined ? { turnId: params.turnId } : {}),
+      ...(params.rawInputRef !== undefined ? { rawInputRef: params.rawInputRef } : {}),
+    };
+    this.store.saveWorkRequest(req);
+    return req;
+  }
+
+  getWorkRequest(id: string): WorkRequest | undefined {
+    return this.store.getWorkRequest(id);
+  }
+
+  listWorkRequests(roomId?: string, limit?: number): WorkRequest[] {
+    return this.store.listWorkRequests(roomId, limit);
+  }
+
+  updateWorkRequestStatus(id: string, status: WorkRequest["status"]): WorkRequest | undefined {
+    const req = this.store.getWorkRequest(id);
+    if (!req) return undefined;
+    const updated = { ...req, status, updatedAt: Date.now() };
+    this.store.saveWorkRequest(updated);
+    return updated;
+  }
+
+  createRequirementSpec(params: {
+    requestId: string;
+    goal: string;
+    scope?: { included: string[]; excluded: string[] };
+    acceptanceCriteria?: RequirementSpec["acceptanceCriteria"];
+    constraints?: string[];
+    risks?: string[];
+    clarifications?: RequirementSpec["clarifications"];
+    parentVersion?: number;
+  }): RequirementSpec {
+    const existing = this.store.listRequirementSpecs(params.requestId);
+    const version = existing.length > 0 ? Math.max(...existing.map((s) => s.version)) + 1 : 1;
+    const now = Date.now();
+    const spec: RequirementSpec = {
+      id: `rs-${crypto.randomBytes(8).toString("hex")}`,
+      requestId: params.requestId,
+      version,
+      goal: params.goal,
+      scope: params.scope ?? { included: [], excluded: [] },
+      acceptanceCriteria: params.acceptanceCriteria ?? [],
+      constraints: params.constraints ?? [],
+      risks: params.risks ?? [],
+      clarifications: params.clarifications ?? [],
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+      ...(params.parentVersion !== undefined ? { parentVersion: params.parentVersion } : {}),
+    };
+    this.store.saveRequirementSpec(spec);
+    return spec;
+  }
+
+  getRequirementSpec(id: string): RequirementSpec | undefined {
+    return this.store.getRequirementSpec(id);
+  }
+
+  listRequirementSpecs(requestId: string): RequirementSpec[] {
+    return this.store.listRequirementSpecs(requestId);
+  }
+
+  updateRequirementSpec(id: string, patch: Partial<Pick<RequirementSpec, "goal" | "scope" | "acceptanceCriteria" | "constraints" | "risks" | "clarifications" | "status">>): RequirementSpec | undefined {
+    const spec = this.store.getRequirementSpec(id);
+    if (!spec) return undefined;
+    const updated = { ...spec, ...patch, updatedAt: Date.now() };
+    this.store.saveRequirementSpec(updated);
+    return updated;
+  }
+
+  createWorkItem(params: {
+    requestId: string;
+    projectId: string;
+    mode: string;
+    kind?: WorkItem["kind"];
+    specId?: string;
+    specVersion?: number;
+    roomId?: string;
+    taskId?: string;
+    sessionId?: string;
+  }): WorkItem {
+    const now = Date.now();
+    const item: WorkItem = {
+      id: `wi-${crypto.randomBytes(8).toString("hex")}`,
+      requestId: params.requestId,
+      projectId: params.projectId,
+      mode: params.mode,
+      kind: params.kind ?? "implementation",
+      status: "planned",
+      currentGeneration: 0,
+      createdAt: now,
+      updatedAt: now,
+      ...(params.specId !== undefined ? { specId: params.specId } : {}),
+      ...(params.specVersion !== undefined ? { specVersion: params.specVersion } : {}),
+      ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
+      ...(params.taskId !== undefined ? { taskId: params.taskId } : {}),
+      ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+    };
+    this.store.saveWorkItem(item);
+    return item;
+  }
+
+  getWorkItem(id: string): WorkItem | undefined {
+    return this.store.getWorkItem(id);
+  }
+
+  listWorkItems(projectId?: string, limit?: number): WorkItem[] {
+    return this.store.listWorkItems(projectId, limit);
+  }
+
+  updateWorkItemStatus(id: string, status: WorkItem["status"], currentRunId?: string, currentGeneration?: number): WorkItem | undefined {
+    const item = this.store.getWorkItem(id);
+    if (!item) return undefined;
+    const updated: WorkItem = {
+      ...item,
+      status,
+      updatedAt: Date.now(),
+      ...(currentRunId !== undefined ? { currentRunId } : {}),
+      ...(currentGeneration !== undefined ? { currentGeneration } : {}),
+    };
+    this.store.saveWorkItem(updated);
+    return updated;
+  }
+
+  createObservation(params: {
+    projectId: string;
+    kind: QualityObservation["kind"];
+    attribution?: QualityObservation["attribution"];
+    runId?: string;
+    workItemId?: string;
+    fingerprint?: string;
+    fingerprintVersion?: number;
+    evidenceRefs?: string[];
+  }): QualityObservation {
+    const obs: QualityObservation = {
+      id: `obs-${crypto.randomBytes(8).toString("hex")}`,
+      projectId: params.projectId,
+      kind: params.kind,
+      attribution: params.attribution ?? "unknown",
+      evidenceRefs: params.evidenceRefs ?? [],
+      status: "open",
+      createdAt: Date.now(),
+      ...(params.runId !== undefined ? { runId: params.runId } : {}),
+      ...(params.workItemId !== undefined ? { workItemId: params.workItemId } : {}),
+      ...(params.fingerprint !== undefined ? { fingerprint: params.fingerprint } : {}),
+      ...(params.fingerprintVersion !== undefined ? { fingerprintVersion: params.fingerprintVersion } : {}),
+    };
+    this.store.saveObservation(obs);
+    return obs;
+  }
+
+  listObservations(projectId?: string, limit?: number): QualityObservation[] {
+    return this.store.listObservations(projectId, limit);
+  }
+
+  confirmObservation(id: string): QualityObservation | undefined {
+    const list = this.store.listObservations(undefined, 10000);
+    const obs = list.find((o) => o.id === id);
+    if (!obs) return undefined;
+    const updated = { ...obs, status: "confirmed" as const };
+    this.store.saveObservation(updated);
+    return updated;
+  }
+
+  // ── Phase 5 L4（v3.0 §12）：受控学习 ────────────────────────────────
+
+  /**
+   * 确认 candidate-attributable 的 Observation → 生成 Incident。
+   * 只有 candidate 归因的 Observation 才能确认。
+   * baseline/infrastructure/unknown 归因的 Observation 不能确认。
+   */
+  confirmObservationToIncident(id: string, confirmedBy: string): { incident: QualityIncident; observation: QualityObservation } | undefined {
+    const list = this.store.listObservations(undefined, 10000);
+    const obs = list.find((o) => o.id === id);
+    if (!obs) return undefined;
+    if (!canConfirmObservation(obs)) {
+      throw new Error(`observation ${id} cannot be confirmed (attribution=${obs.attribution})`);
+    }
+    const { incident, observation } = confirmObservationToIncident(obs, confirmedBy);
+    this.store.saveObservation(observation);
+    this.store.saveQualityIncident(incident);
+    this.maybeAutoPromote(incident);
+    return { incident, observation };
+  }
+
+  /** dismiss 非 candidate 的 Observation（baseline/infrastructure/unknown）。 */
+  dismissObservation(id: string): QualityObservation | undefined {
+    const list = this.store.listObservations(undefined, 10000);
+    const obs = list.find((o) => o.id === id);
+    if (!obs) return undefined;
+    const updated = { ...obs, status: "dismissed" as const };
+    this.store.saveObservation(updated);
+    return updated;
+  }
+
+  /** 创建类型化 RuleCandidate（check/risk/requirement/verification）。 */
+  createTypedRule(opts: {
+    projectId: string;
+    ruleType: RuleCandidateType;
+    ruleDefinition: RuleDefinition;
+    evidenceIncidentIds: string[];
+    measuredImpact?: string;
+  }): RuleCandidate {
+    const candidate = createTypedRuleCandidate(opts);
+    this.store.saveQualityRule(candidate);
+    return candidate;
+  }
+
+  /**
+   * 用户批准 rule candidate（candidate → approved）。
+   * 记录批准者和批准时间。
+   */
+  approveRule(id: string, approvedBy: string): RuleCandidate {
+    const candidate = this.store.getQualityRule(id);
+    if (!candidate) throw new Error(`unknown rule: ${id}`);
+    if (!isValidRuleStatus("approved")) throw new Error(`invalid rule status: approved`);
+    if (!canTransitionRuleStatus(candidate.status, "approved")) {
+      throw new Error(`illegal rule status transition: ${candidate.status} → approved`);
+    }
+    const updated: RuleCandidate = {
+      ...candidate,
+      status: "approved",
+      approvedBy,
+      approvedAt: Date.now(),
+    };
+    this.store.saveQualityRule(updated);
+    return updated;
+  }
+
+  /**
+   * 将 approved rule candidate 激活为 shadow ActiveControl（只观察不执行）。
+   * shadow → active 需要用户显式 promote。
+   */
+  activateRuleAsShadow(id: string, activatedBy: string): ActiveControl {
+    const candidate = this.store.getQualityRule(id);
+    if (!candidate) throw new Error(`unknown rule: ${id}`);
+    if (candidate.status !== "approved" && candidate.status !== "active") {
+      throw new Error(`rule ${id} must be approved or active to activate (status=${candidate.status})`);
+    }
+    if (!candidate.ruleDefinition) {
+      throw new Error(`rule ${id} has no ruleDefinition`);
+    }
+    const control = createShadowControl({
+      projectId: candidate.projectId,
+      ruleCandidateId: id,
+      rule: candidate.ruleDefinition,
+      activatedBy,
+      ...(candidate.ruleType !== undefined ? { ruleType: candidate.ruleType } : {}),
+    });
+    this.store.saveActiveControl(control);
+    // 更新 rule candidate 状态为 shadow
+    const updated: RuleCandidate = { ...candidate, status: "shadow" };
+    this.store.saveQualityRule(updated);
+    return control;
+  }
+
+  /**
+   * 将 shadow ActiveControl 提升为 active（开始执行）。
+   */
+  promoteShadowControl(controlId: string, activatedBy: string): ActiveControl | undefined {
+    const list = this.store.listActiveControls(undefined, true);
+    const control = list.find((c) => c.id === controlId);
+    if (!control) return undefined;
+    const updated = promoteShadowToActive(control, activatedBy);
+    this.store.saveActiveControl(updated);
+    return updated;
+  }
+
+  /**
+   * 回滚（retire）ActiveControl，记录回滚原因。
+   */
+  retireControl(controlId: string, retiredBy: string, reason: string): ActiveControl | undefined {
+    const list = this.store.listActiveControls(undefined, true);
+    const control = list.find((c) => c.id === controlId);
+    if (!control) return undefined;
+    const updated = retireActiveControl(control, retiredBy, reason);
+    this.store.saveActiveControl(updated);
+    return updated;
+  }
+
+  /** 列出 ActiveControl（可选包含 shadow）。 */
+  listActiveControls(projectId?: string, includeShadow = false): ActiveControl[] {
+    return this.store.listActiveControls(projectId, includeShadow);
+  }
+
+  /**
+   * 生成 policy 导出 patch（不自动写入 quality.json）。
+   * 包含规则定义和预期 hash，供用户审查后手动写入。
+   */
+  generateExportPatch(opts: {
+    projectId: string;
+    ruleCandidateId: string;
+    ruleType: RuleCandidateType;
+    rule: RuleDefinition;
+    exportedBy: string;
+  }): PolicyExportPatch {
+    const loaded = this.loadPolicyWithVersion(opts.projectId);
+    const currentPolicy = loaded.policy ?? ({} as QualityPolicy);
+    return generateExportPatch({
+      ...opts,
+      currentPolicy,
+    });
+  }
+
+  /**
+   * 验证导出 patch 的 expected hash 是否与当前 policy 匹配。
+   */
+  verifyExportPatch(patch: PolicyExportPatch, projectId: string): { valid: boolean; reason: string } {
+    const loaded = this.loadPolicyWithVersion(projectId);
+    const currentPolicy = loaded.policy ?? ({} as QualityPolicy);
+    return verifyExportPatch(patch, currentPolicy);
+  }
+
+  /**
+   * 加载活跃规则到 policy（运行时加载）。
+   * 只加载 status=active 的规则，shadow 规则不参与执行。
+   */
+  loadActiveControlsIntoPolicy(policy: QualityPolicy | QualityPolicyV2, projectId: string): QualityPolicy | QualityPolicyV2 {
+    const controls = this.store.listActiveControls(projectId, false);
+    return loadActiveControlsIntoPolicy(policy, controls);
+  }
+
+  /** 列出 shadow 规则（用于观察/日志，不执行）。 */
+  listShadowControls(projectId?: string): ActiveControl[] {
+    const controls = this.store.listActiveControls(projectId, true);
+    return loadShadowControls(controls);
+  }
+
+  /**
+   * sandbox 评测（只评测，不批准/激活）。
+   * sandbox 永远不能自动批准或激活规则。
+   */
+  evaluateRuleInSandbox(opts: {
+    ruleCandidateId: string;
+    passed: boolean;
+    checksTotal: number;
+    checksPassed: number;
+    checksFailed: number;
+    checkSummaries: string[];
+    falsePositiveRate?: number;
+    reason: string;
+  }): SandboxEvaluationResult {
+    return createSandboxEvaluation(opts);
+  }
+
+  /** 更新 rule candidate 的 sandbox 评测结果（只记录，不自动批准）。 */
+  recordSandboxEvaluation(ruleId: string, result: SandboxEvaluationResult): RuleCandidate | undefined {
+    const candidate = this.store.getQualityRule(ruleId);
+    if (!candidate) return undefined;
+    const updated: RuleCandidate = {
+      ...candidate,
+      sandboxPassed: result.passed,
+      measuredImpact: `sandbox: ${result.reason} (passed=${result.checksPassed}/${result.checksTotal}, fpRate=${result.falsePositiveRate ?? "n/a"})`,
+    };
+    this.store.saveQualityRule(updated);
+    return updated;
+  }
+
+  /** 类型匹配检查：rule type 是否与 incident type 兼容。 */
+  isRuleTypeCompatible(ruleType: RuleCandidateType, incident: QualityIncident): boolean {
+    return isRuleTypeCompatible(ruleType, incident);
+  }
+
+  /** 根据 incident type 推断合适的 rule type。 */
+  inferRuleType(incident: QualityIncident): RuleCandidateType {
+    return inferRuleType(incident);
+  }
+
+  // ── Policy v2（v3.0 §9.2）──────────────────────────────────────────
+
+  validatePolicyV2(projectId: string, policy: unknown): { ok: boolean; errors: string[] } {
+    const project = this.store.getQualityProject(projectId);
+    if (!project) return { ok: false, errors: ["unknown project"] };
+    const errors = validatePolicyV2(policy, project);
+    return { ok: errors.length === 0, errors };
+  }
+
+  /** 生成 v1 → v2 迁移预览（不写盘）。 */
+  previewPolicyMigration(projectId: string): PolicyMigrationPreview | undefined {
+    const project = this.store.getQualityProject(projectId);
+    if (!project) return undefined;
+    const loaded = loadPolicy(project);
+    if (!loaded.ok) return undefined;
+    return migrateV1ToV2(loaded.policy);
+  }
+
+  /** 执行 v1 → v2 原子迁移（写盘 + 备份旧文件）。 */
+  migratePolicyToV2(projectId: string, expectedOldHash?: string): { ok: boolean; errors: string[]; backupPath?: string; policy?: QualityPolicyV2 } {
+    const project = this.store.getQualityProject(projectId);
+    if (!project) return { ok: false, errors: ["unknown project"] };
+    const result = migrateV1ToV2Write(project, expectedOldHash);
+    if (!result.ok) return { ok: false, errors: result.errors };
+    return { ok: true, errors: [], backupPath: result.backupPath, policy: result.policy };
+  }
+
+  /** 加载 policy，自动识别 v1/v2。 */
+  loadPolicyWithVersion(projectId: string): {
+    policy?: QualityPolicy | QualityPolicyV2;
+    version: 1 | 2;
+    source: "file" | "default";
+    errors: string[];
+  } {
+    const project = this.store.getQualityProject(projectId);
+    if (!project) return { version: 1, source: "default", errors: ["unknown project"] };
+    const loaded = loadPolicyV2(project);
+    if (loaded.ok) return { policy: loaded.policy, version: loaded.version, source: "file", errors: [] };
+    if (loaded.reason === "not-found") {
+      return { policy: generateDefaultPolicy(project), version: 1, source: "default", errors: [] };
+    }
+    return { version: 1, source: "default", errors: loaded.errors };
+  }
+
+  // ── Phase 3 L0（v3.0 §6.2）：需求质量门 ────────────────────────────
+
+  /**
+   * 意图分类：确定性规则判断用户输入的意图类型。
+   * 只有 code-change 进入需求辅助。
+   */
+  classifyRequestIntent(text: string): RequestIntent {
+    return classifyIntent(text);
+  }
+
+  /**
+   * L0 完整流程：分类 → 创建 WorkRequest → 创建 RequirementSpec → 评估 → 生成 ClarificationRequest。
+   * 非 code-change 意图直接返回，不拦截。
+   * shadow/suggest 模式不阻断消息。
+   */
+  async handleL0Request(params: {
+    text: string;
+    source: WorkRequest["source"];
+    correlationId: string;
+    mode?: string;
+    roomId?: string;
+    sessionId?: string;
+    turnId?: string;
+    projectId?: string;
+    l0Mode?: "shadow" | "suggest" | "require";
+    modelCall?: (prompt: string) => Promise<string>;
+    modelTimeoutMs?: number;
+  }): Promise<{
+    request: WorkRequest;
+    spec?: RequirementSpec;
+    assessment?: RequirementAssessment;
+    clarificationRequest?: ClarificationRequest;
+    skipped: boolean;
+  }> {
+    const intent = classifyIntent(params.text);
+
+    // 非 code-change 不拦截
+    if (intent !== "code-change") {
+      const now = Date.now();
+      const request: WorkRequest = {
+        id: `wr-${crypto.randomBytes(8).toString("hex")}`,
+        source: params.source,
+        intent,
+        correlationId: params.correlationId,
+        status: "ready",
+        createdAt: now,
+        updatedAt: now,
+        ...(params.mode !== undefined ? { mode: params.mode } : {}),
+        ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
+        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+        ...(params.turnId !== undefined ? { turnId: params.turnId } : {}),
+      };
+      this.store.saveWorkRequest(request);
+      return { request, skipped: true };
+    }
+
+    // 创建 WorkRequest
+    const request = this.createWorkRequest({
+      source: params.source,
+      intent,
+      correlationId: params.correlationId,
+      ...(params.mode !== undefined ? { mode: params.mode } : {}),
+      ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
+      ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+      ...(params.turnId !== undefined ? { turnId: params.turnId } : {}),
+    });
+
+    // 创建 RequirementSpec v1
+    const spec = this.createRequirementSpec({
+      requestId: request.id,
+      goal: params.text,
+    });
+    this.updateRequirementSpec(spec.id, { status: "clarifying" });
+
+    // 获取项目级 policy（第二阶段）
+    let policy: QualityPolicyV2 | undefined;
+    if (params.projectId) {
+      const loaded = this.loadPolicyWithVersion(params.projectId);
+      if (loaded.version === 2 && loaded.policy) {
+        policy = loaded.policy as QualityPolicyV2;
+      }
+    }
+
+    // 执行 L0 评估
+    const assessment = await evaluateRequirement(
+      params.text, request, spec, policy,
+      {
+        mode: params.l0Mode ?? "shadow",
+        ...(params.modelCall !== undefined ? { modelCall: params.modelCall } : {}),
+        ...(params.modelTimeoutMs !== undefined ? { modelTimeoutMs: params.modelTimeoutMs } : {}),
+      },
+    );
+
+    // 更新 WorkRequest 状态
+    this.updateWorkRequestStatus(request.id, "clarifying");
+
+    // 生成 ClarificationRequest（如果有问题）
+    let clarificationRequest: ClarificationRequest | undefined;
+    if (assessment.selectedQuestions.length > 0) {
+      clarificationRequest = createClarificationRequest({
+        requestId: request.id,
+        specId: spec.id,
+        specVersion: spec.version,
+        questions: assessment.selectedQuestions.map((q) => ({
+          id: q.id,
+          dimension: q.dimension,
+          ...(q.ruleId !== undefined ? { ruleId: q.ruleId } : {}),
+          text: q.text,
+        })),
+        canSkip: true,
+        expiresAt: Date.now() + CLARIFICATION_TTL_MS,
+      });
+      this.store.saveClarificationRequest(clarificationRequest);
+
+      // 将问题写入 spec 的 clarifications
+      this.updateRequirementSpec(spec.id, {
+        clarifications: assessment.selectedQuestions.map((q) => ({
+          id: q.id,
+          dimension: q.dimension,
+          question: q.text,
+          status: "pending" as const,
+        })),
+      });
+    } else {
+      // 无问题 → spec 直接 accepted
+      this.updateRequirementSpec(spec.id, { status: "accepted" });
+      this.updateWorkRequestStatus(request.id, "ready");
+    }
+
+    return { request, spec, assessment, ...(clarificationRequest !== undefined ? { clarificationRequest } : {}), skipped: false };
+  }
+
+  /** 处理用户回答澄清问题。 */
+  answerClarification(params: {
+    clarificationRequestId: string;
+    answers: Array<{ questionId: string; answer: string }>;
+  }): { spec: RequirementSpec; request: WorkRequest; clarification: ClarificationRequest } | undefined {
+    const clarification = this.store.getClarificationRequest(params.clarificationRequestId);
+    if (!clarification) return undefined;
+    if (clarification.status !== "pending") return undefined;
+
+    // 过期保护
+    if (isExpired(clarification)) {
+      const updated = { ...clarification, status: "expired" as const, answeredAt: Date.now() };
+      this.store.saveClarificationRequest(updated);
+      return undefined;
+    }
+
+    const spec = this.store.getRequirementSpec(clarification.specId);
+    if (!spec) return undefined;
+
+    const request = this.store.getWorkRequest(clarification.requestId);
+    if (!request) return undefined;
+
+    const updatedSpec = applyClarificationAnswers(spec, params.answers, clarification);
+    this.store.saveRequirementSpec(updatedSpec);
+
+    const updatedClarification: ClarificationRequest = {
+      ...clarification,
+      status: "answered",
+      answeredAt: Date.now(),
+    };
+    this.store.saveClarificationRequest(updatedClarification);
+
+    this.updateWorkRequestStatus(request.id, "ready");
+    const updatedRequest = this.store.getWorkRequest(request.id)!;
+
+    return { spec: updatedSpec, request: updatedRequest, clarification: updatedClarification };
+  }
+
+  /** 处理用户跳过澄清。 */
+  skipClarification(clarificationRequestId: string): { spec: RequirementSpec; request: WorkRequest } | undefined {
+    const clarification = this.store.getClarificationRequest(clarificationRequestId);
+    if (!clarification) return undefined;
+    if (clarification.status !== "pending") return undefined;
+
+    const spec = this.store.getRequirementSpec(clarification.specId);
+    if (!spec) return undefined;
+
+    const request = this.store.getWorkRequest(clarification.requestId);
+    if (!request) return undefined;
+
+    const updatedSpec = applyClarificationSkip(spec, clarification);
+    this.store.saveRequirementSpec(updatedSpec);
+
+    const updatedClarification: ClarificationRequest = {
+      ...clarification,
+      status: "skipped",
+      answeredAt: Date.now(),
+    };
+    this.store.saveClarificationRequest(updatedClarification);
+
+    this.updateWorkRequestStatus(request.id, "ready");
+    const updatedRequest = this.store.getWorkRequest(request.id)!;
+
+    return { spec: updatedSpec, request: updatedRequest };
+  }
+
+  /** 处理用户取消澄清。 */
+  cancelClarification(clarificationRequestId: string): { spec: RequirementSpec; request: WorkRequest } | undefined {
+    const clarification = this.store.getClarificationRequest(clarificationRequestId);
+    if (!clarification) return undefined;
+
+    const spec = this.store.getRequirementSpec(clarification.specId);
+    if (!spec) return undefined;
+
+    const request = this.store.getWorkRequest(clarification.requestId);
+    if (!request) return undefined;
+
+    const updatedSpec = applyClarificationCancel(spec);
+    this.store.saveRequirementSpec(updatedSpec);
+
+    const updatedClarification: ClarificationRequest = {
+      ...clarification,
+      status: "cancelled",
+      answeredAt: Date.now(),
+    };
+    this.store.saveClarificationRequest(updatedClarification);
+
+    this.updateWorkRequestStatus(request.id, "cancelled");
+    const updatedRequest = this.store.getWorkRequest(request.id)!;
+
+    return { spec: updatedSpec, request: updatedRequest };
+  }
+
+  /** 获取待处理的澄清请求。 */
+  getPendingClarification(requestId: string): ClarificationRequest | undefined {
+    return this.store.getPendingClarificationRequest(requestId);
+  }
+
+  /** 列出澄清请求。 */
+  listClarificationRequests(requestId?: string, limit?: number): ClarificationRequest[] {
+    return this.store.listClarificationRequests(requestId, limit);
+  }
+
+  // ── 度量收集（§12）：run 终态时自动记录度量事件 ────────────────────
+
+  /** 在 run 进入终态时记录度量事件（由 advance/broadcast 触发）。 */
+  recordRunMetric(run: QualityRun): void {
+    const checks = this.store.listQualityChecks(run.id);
+    const passed = checks.filter((c) => c.status === "passed").length;
+    const failed = checks.filter((c) => c.status === "failed").length;
+    const infraFailed = checks.filter((c) => c.status === "infra-failed" || c.status === "timeout").length;
+    const durationMs = run.completedAt !== undefined && run.createdAt !== undefined
+      ? run.completedAt - run.createdAt
+      : undefined;
+    this.store.saveQualityMetric({
+      id: `metric-${run.id}`,
+      projectId: run.projectId,
+      ...(run.id !== undefined ? { runId: run.id } : {}),
+      ...(run.workItemId !== undefined ? { workItemId: run.workItemId } : {}),
+      kind: "run-terminal",
+      ...(run.stage !== undefined ? { stage: run.stage } : {}),
+      ...(run.outcome !== undefined ? { outcome: run.outcome } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      checkCount: checks.length,
+      checkPassed: passed,
+      checkFailed: failed,
+      checkInfraFailed: infraFailed,
+      hasPatch: run.patchHash !== undefined && run.patchHash !== "",
+      fixRounds: run.fixRound,
+      timestamp: Date.now(),
+    });
+  }
+
+  /** 查询项目度量事件。 */
+  listMetrics(projectId: string, kind?: string, limit?: number): QualityMetricRow[] {
+    return this.store.listQualityMetrics(projectId, kind, limit);
+  }
+
+  // ── Phase 4 L3（v3.0 §6.4）：需求验证门 ────────────────────────────
+
+  /** 运行 L3 需求验证，生成覆盖矩阵和验证记录。 */
+  runVerification(params: RunVerificationInput): RunVerificationResult | undefined {
+    const run = this.store.getQualityRun(params.runId);
+    if (!run) return undefined;
+    const spec = this.store.getRequirementSpec(params.specId);
+    if (!spec) return undefined;
+
+    const checkRuns = params.checkRuns ?? this.store.listQualityChecks(params.runId);
+    const findings = params.findings ?? this.store.listQualityFindings(params.runId);
+
+    const matrix = buildCoverageMatrix({
+      spec,
+      runId: params.runId,
+      checkRuns,
+      findings,
+      runtimeEvidence: params.runtimeEvidence ?? [],
+      manualEvidence: params.manualEvidence ?? [],
+      aiInference: params.aiInference,
+      waivers: params.waivers,
+    });
+
+    const loaded = this.loadPolicyWithVersion(run.projectId);
+    const verificationMode = loaded.policy && "verification" in loaded.policy
+      ? loaded.policy.verification.mode
+      : "off" as const;
+
+    const verdict = decideVerification(verificationMode, matrix);
+    const records = toVerificationRecords(matrix, spec);
+    for (const rec of records) this.store.saveRequirementVerification(rec);
+
+    return { verdict, records, matrix };
+  }
+
+  /** 获取 run 的验证记录列表。 */
+  listVerifications(runId: string): RequirementVerification[] {
+    return this.store.listRequirementVerifications(runId);
+  }
+
+  /** 用户放弃某条验收标准。 */
+  waiveCriterion(runId: string, criterionId: string, reason: string): RequirementVerification | undefined {
+    const records = this.store.listRequirementVerifications(runId);
+    const existing = records.find((r) => r.criterionId === criterionId);
+    if (!existing) return undefined;
+    const updated: RequirementVerification = {
+      ...existing,
+      status: "waived",
+      waiverReason: reason,
+      verifier: "user",
+    };
+    this.store.saveRequirementVerification(updated);
+    return updated;
   }
 }
 
@@ -889,3 +1755,35 @@ export function computeReviewerMetrics(decisions: ReviewerDecision[]): ReviewerM
 }
 
 export { IllegalTransitionError, assertPolicy };
+
+// ── L3 需求验证门（Phase 4）──────────────────────────────────────────
+
+import {
+  buildCoverageMatrix,
+  decideVerification,
+  toVerificationRecords,
+  type VerifySpecInput,
+  type CoverageMatrix,
+  type VerificationVerdict,
+} from "./verification.js";
+
+export type { CoverageMatrix, VerificationVerdict } from "./verification.js";
+
+export type RunVerificationInput = {
+  runId: string;
+  specId: string;
+  checkRuns?: CheckRun[];
+  findings?: ReviewFinding[];
+  runtimeEvidence?: { description: string; artifactRef?: string }[];
+  manualEvidence?: { instruction: string; verifier: string; artifactRef?: string }[];
+  aiInference?: { verifier: string; confidence: number; reasoning: string; expectationId: string }[];
+  waivers?: { criterionId: string; reason: string }[];
+};
+
+export type RunVerificationResult = {
+  verdict: VerificationVerdict;
+  records: RequirementVerification[];
+  matrix: CoverageMatrix;
+};
+
+export { buildCoverageMatrix, decideVerification, toVerificationRecords };

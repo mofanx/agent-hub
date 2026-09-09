@@ -12,6 +12,39 @@ import {
 } from "./execution.js";
 
 /**
+ * 检测 bwrap（bubblewrap）是否可用，用于 allowNetwork=false 时的网络隔离。
+ * 缓存结果，避免重复 fork。
+ */
+let bwrapAvailable: boolean | undefined;
+function isBwrapAvailable(): boolean {
+  if (bwrapAvailable !== undefined) return bwrapAvailable;
+  try {
+    const result = spawnCross.sync("bwrap", ["--version"], { stdio: "pipe" });
+    bwrapAvailable = result.status === 0;
+  } catch {
+    bwrapAvailable = false;
+  }
+  return bwrapAvailable;
+}
+
+/**
+ * 构造 bwrap 网络隔离 argv：--unshare-net + 只读根绑定 + 可写 cwd。
+ * 调用方需确保 bwrap 可用（isBwrapAvailable()）。
+ */
+function buildBwrapArgv(argv: string[], cwd: string): string[] {
+  return [
+    "bwrap",
+    "--unshare-net",
+    "--ro-bind", "/", "/",
+    "--dev", "/dev",
+    "--proc", "/proc",
+    "--bind", cwd, cwd,
+    "--",
+    ...argv,
+  ];
+}
+
+/**
  * LocalExecutionProvider（设计文档 §8.1）。
  *
  * - shell:false，argv 直接传递；
@@ -71,12 +104,24 @@ export class LocalExecutionProvider implements ExecutionProvider {
     const stdoutBuf: Buffer[] = [];
     const stderrBuf: Buffer[] = [];
 
-    const env = this.buildEnv();
+    const env = this.buildEnv(check);
     const startedAt = Date.now();
     const status: CheckRunStatus = "running";
     let finalStatus: CheckRunStatus = status;
 
-    const proc = spawnCross(check.argv[0]!, check.argv.slice(1), {
+    // allowNetwork=false 时用 bwrap 隔离网络；bwrap 不可用则降级为记录警告
+    const needIsolate = check.allowNetwork === false;
+    let execArgv = check.argv;
+    let networkIsolated = false;
+    if (needIsolate) {
+      if (isBwrapAvailable()) {
+        execArgv = buildBwrapArgv(check.argv, cwd);
+        networkIsolated = true;
+      }
+      // bwrap 不可用时不阻断执行，但会在 summary 中标注未隔离
+    }
+
+    const proc = spawnCross(execArgv[0]!, execArgv.slice(1), {
       cwd,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -89,13 +134,14 @@ export class LocalExecutionProvider implements ExecutionProvider {
 
     const stdoutStream = fs.createWriteStream(stdoutPath);
     const stderrStream = fs.createWriteStream(stderrPath);
+    let streamsDestroyed = false;
     proc.stdout?.on("data", (chunk: Buffer) => {
       stdoutBuf.push(chunk);
-      stdoutStream.write(chunk);
+      if (!streamsDestroyed) stdoutStream.write(chunk);
     });
     proc.stderr?.on("data", (chunk: Buffer) => {
       stderrBuf.push(chunk);
-      stderrStream.write(chunk);
+      if (!streamsDestroyed) stderrStream.write(chunk);
     });
 
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -114,8 +160,15 @@ export class LocalExecutionProvider implements ExecutionProvider {
 
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (killTimer) clearTimeout(killTimer);
+    streamsDestroyed = true;
     stdoutStream.destroy();
     stderrStream.destroy();
+    await new Promise<void>((resolve) => {
+      let pending = 2;
+      const done = () => { if (--pending === 0) resolve(); };
+      stdoutStream.once("close", done);
+      stderrStream.once("close", done);
+    });
     this.active.delete(key);
 
     const completedAt = Date.now();
@@ -135,7 +188,8 @@ export class LocalExecutionProvider implements ExecutionProvider {
       finalStatus = "failed";
     }
 
-    const summary = buildSummary(stdoutFull, stderrFull, finalStatus, exitCode);
+    const summary = buildSummary(stdoutFull, stderrFull, finalStatus, exitCode)
+      + (needIsolate ? (networkIsolated ? " [net-isolated]" : " [net-isolate-unavailable]") : "");
 
     const result: CheckRun = {
       id,
@@ -169,11 +223,24 @@ export class LocalExecutionProvider implements ExecutionProvider {
     return validateCwd(project, raw);
   }
 
-  private buildEnv(): Record<string, string> {
+  /**
+   * 构造子进程环境变量。
+   * - 基础白名单（DEFAULT_ENV_WHITELIST 或自定义 envWhitelist）始终注入；
+   * - check.envNames 中指定的额外变量从 process.env 注入；
+   * - extraEnv 始终注入（Hub 配置）；
+   * - allowNetwork=false 时通过 bwrap --unshare-net 隔离网络（bwrap 不可用则降级为记录）。
+   */
+  private buildEnv(check?: CheckDefinition): Record<string, string> {
     const env: Record<string, string> = {};
     for (const k of this.envWhitelist) {
       const v = process.env[k];
       if (v !== undefined) env[k] = v;
+    }
+    if (check?.envNames) {
+      for (const k of check.envNames) {
+        const v = process.env[k];
+        if (v !== undefined) env[k] = v;
+      }
     }
     for (const [k, v] of Object.entries(this.extraEnv)) env[k] = v;
     return env;

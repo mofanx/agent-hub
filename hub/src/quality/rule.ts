@@ -45,11 +45,12 @@ export function isValidRuleStatus(s: string): s is RuleCandidateStatus {
 export function canTransitionRuleStatus(from: RuleCandidateStatus, to: RuleCandidateStatus): boolean {
   if (from === to) return true;
   const allowed: Record<RuleCandidateStatus, readonly RuleCandidateStatus[]> = {
-    candidate: ["approved", "rejected"],
-    approved: ["active", "rejected", "candidate"],
-    active: ["retired", "candidate"],
+    candidate: ["approved", "rejected", "shadow"],
+    approved: ["active", "rejected", "candidate", "shadow"],
+    active: ["retired", "candidate", "shadow"],
     retired: ["candidate", "active"],
     rejected: ["candidate"],
+    shadow: ["approved", "rejected", "candidate"],
   };
   return allowed[from].includes(to);
 }

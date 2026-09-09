@@ -99,13 +99,14 @@ describe("CheckRun recovery", () => {
   });
 
   describe("recoverRun", () => {
-    it("implementing run → failed + failureCode=hub-restart", () => {
+    it("implementing run → inconclusive + failureCode=hub-restart，不误报代码失败", () => {
       const run = makeRun("p1", "r1", "implementing");
       const checks = [makeCheck("r1", "c1", "running"), makeCheck("r1", "c2", "queued")];
       const { run: nextRun, checks: nextChecks } = recoverRun(run, checks, 9000);
-      assert.equal(nextRun.stage, "failed");
+      assert.equal(nextRun.stage, "inconclusive");
       assert.equal(nextRun.failureCode, FAILURE_HUB_RESTART);
-      assert.equal(nextRun.verdict, "fail");
+      assert.equal(nextRun.verdict, undefined);
+      assert.equal(nextRun.outcome, "inconclusive");
       assert.equal(nextChecks.length, 2);
       assert.ok(nextChecks.every((c) => c.status === "infra-failed"));
     });
@@ -150,10 +151,10 @@ describe("CheckRun recovery", () => {
       assert.equal(summary.checks.length, 2);
 
       const got1 = store.getQualityRun("r1")!;
-      assert.equal(got1.stage, "failed");
+      assert.equal(got1.stage, "inconclusive");
       assert.equal(got1.failureCode, FAILURE_HUB_RESTART);
       const got2 = store.getQualityRun("r2")!;
-      assert.equal(got2.stage, "failed");
+      assert.equal(got2.stage, "inconclusive");
 
       const checks1 = store.listQualityChecks("r1");
       assert.equal(checks1[0]!.status, "infra-failed");

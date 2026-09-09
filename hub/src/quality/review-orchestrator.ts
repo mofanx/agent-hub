@@ -162,15 +162,41 @@ export class ReviewOrchestrator {
       ...(patch !== undefined ? { patch } : {}),
     });
 
-    // 6. 创建/复用 reviewer session
+    // 6. 创建/复用 reviewer session（独立于 implementer session）
     const existingSessionId = run.reviewerSessionId ?? this.reviewerSessions.get(runId);
     const reviewerSessionId = await this.sessionRunner.ensureSession({
       project,
       run,
       ...(existingSessionId !== undefined ? { existingSessionId } : {}),
     });
-    // 绑定只读权限
+    // 绑定只读权限（reviewer 角色，即使 bypass 开启也不能写）
     this.permissionManager.bindSession(reviewerSessionId, runId, "reviewer");
+    // 硬化：验证 reviewer session 确实被绑定为只读
+    if (!this.permissionManager.isReadOnlyEnforced(reviewerSessionId)) {
+      logWarn("review", `reviewer session ${reviewerSessionId} for run ${runId} not read-only enforced, aborting`);
+      this.service.saveReviewDecision({
+        id: `rd-${crypto.randomBytes(6).toString("hex")}`,
+        runId,
+        projectId: run.projectId,
+        verdict: "uncertain",
+        findingCount: 0,
+        blockingCount: 0,
+        parseError: "reviewer session not read-only enforced",
+        ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
+        reviewedAt: Date.now(),
+        outcome: "uncertain",
+        resolvedAt: Date.now(),
+        note: "read-only enforcement failed",
+      });
+      const failed = this.service.advance(runId, "failed");
+      return {
+        runId,
+        verdict: "uncertain",
+        findings: [],
+        parseError: "reviewer session not read-only enforced",
+        nextStage: failed.stage,
+      };
+    }
     this.reviewerSessions.set(runId, reviewerSessionId);
 
     // 7. 调用 reviewer，等待完整输出

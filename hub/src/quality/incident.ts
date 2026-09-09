@@ -21,17 +21,17 @@ export function newIncidentId(): string {
 }
 
 /**
- * 计算 incident fingerprint：sha256(projectId:description:sourceRunId?) 前 16 hex。
- * 同一项目下描述和来源 run 相同的 incident 会被视为同一事件。
+ * 计算 incident fingerprint：sha256(projectId:description) 前 16 hex。
+ * 同一项目下描述相同的 incident 会被视为同一事件（跨 run 聚类）。
+ * fingerprint 不包含 sourceRunId（易变），符合 §8.3 约束。
  */
 export function incidentFingerprint(
   projectId: string,
   description: string,
-  sourceRunId?: string,
 ): string {
   return crypto
     .createHash("sha256")
-    .update(`${projectId}:${description}:${sourceRunId ?? ""}`)
+    .update(`${projectId}:${description}`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -67,7 +67,7 @@ export function createIncident(opts: {
     projectId: opts.projectId,
     description: opts.description,
     severity: opts.severity,
-    fingerprint: opts.fingerprint ?? incidentFingerprint(opts.projectId, opts.description, opts.sourceRunId),
+    fingerprint: opts.fingerprint ?? incidentFingerprint(opts.projectId, opts.description),
     ...(opts.sourceRunId !== undefined ? { sourceRunId: opts.sourceRunId } : {}),
     ...(opts.reproduction !== undefined ? { reproduction: opts.reproduction } : {}),
     ...(opts.regressionTest !== undefined ? { regressionTest: opts.regressionTest } : {}),

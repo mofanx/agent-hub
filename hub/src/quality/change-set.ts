@@ -182,7 +182,7 @@ function hashUntrackedContent(gitRoot: string, status: string): string {
       // binary or unreadable, use stat
       try {
         const stat = fs.statSync(full);
-        parts.push(`${filePath}:${stat.size}`);
+        parts.push(`${filePath}:binary:${stat.size}`);
       } catch {
         parts.push(`${filePath}:unreadable`);
       }
@@ -191,14 +191,48 @@ function hashUntrackedContent(gitRoot: string, status: string): string {
   return parts.join("\n");
 }
 
+/** 计算文件的 sha256 hash（用于 untracked/binary 文件内容指纹）。 */
+export function hashFileContent(filePath: string): string {
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    return crypto.createHash("sha256").update(content).digest("hex");
+  } catch {
+    try {
+      const buf = fs.readFileSync(filePath);
+      return crypto.createHash("sha256").update(buf).digest("hex");
+    } catch {
+      return "unreadable";
+    }
+  }
+}
+
+/** 收集 untracked 文件的完整内容 hash 列表（含 binary）。 */
+export function collectUntrackedHashes(gitRoot: string): { path: string; hash: string; size: number }[] {
+  const status = git(gitRoot, ["status", "--porcelain", "--untracked-files=all"]);
+  const result: { path: string; hash: string; size: number }[] = [];
+  for (const line of status.split("\n")) {
+    if (!line.startsWith("??")) continue;
+    const filePath = line.slice(3).replace(/^"|"$/g, "");
+    const full = path.join(gitRoot, filePath);
+    try {
+      const stat = fs.statSync(full);
+      result.push({ path: filePath, hash: hashFileContent(full), size: stat.size });
+    } catch {
+      result.push({ path: filePath, hash: "unreadable", size: 0 });
+    }
+  }
+  return result;
+}
+
 export function collectChangeSet(
   runId: string,
   project: ProjectScope,
   baseline: Baseline,
   options: ChangeSetCollectorOptions = {},
   artifactDir: string,
+  worktreePath?: string,
 ): ChangeSet {
-  const root = project.gitRoot ?? project.root;
+  const root = worktreePath ?? project.gitRoot ?? project.root;
 
   if (!baseline.isGit) {
     return {
@@ -230,6 +264,29 @@ export function collectChangeSet(
 
   const riskReasons = classifyRisk(files, options);
   const patchArtifact = path.join(artifactDir, runId, "patch.diff");
+
+  // 实际写入 patch artifact 文件（含 tracked diff + untracked 文件内容）
+  fs.mkdirSync(path.dirname(patchArtifact), { recursive: true });
+  let patchContent = diff + diffCached;
+  // 追加 untracked 文件内容作为 patch 的一部分
+  for (const line of status.split("\n")) {
+    if (!line.startsWith("??")) continue;
+    const filePath = line.slice(3).replace(/^"|"$/g, "");
+    const full = path.join(root, filePath);
+    try {
+      const content = fs.readFileSync(full, "utf-8");
+      patchContent += `\n--- /dev/null\n+++ b/${filePath}\n${content.split("\n").map((l) => "+" + l).join("\n")}\n`;
+    } catch {
+      // binary file, 记录为 binary marker
+      try {
+        const stat = fs.statSync(full);
+        patchContent += `\n--- /dev/null\n+++ b/${filePath}\nBinary file: ${stat.size} bytes\n`;
+      } catch {
+        patchContent += `\n--- /dev/null\n+++ b/${filePath}\nUnreadable\n`;
+      }
+    }
+  }
+  fs.writeFileSync(patchArtifact, patchContent, "utf-8");
 
   return {
     runId,
@@ -263,4 +320,59 @@ export function detectContamination(
   if (currentDirty === null) return false;
   if (baseline.dirtyHash !== currentDirty && currentPatchHash === lastPatchHash) return true;
   return false;
+}
+
+// ── Baseline / 污染检测增强 API（v3.0 §8.5）───────────────────────────
+
+/** Baseline 快照：记录 run 开始时的仓库状态，用于事后对比。 */
+export type BaselineSnapshot = {
+  revision: string;
+  dirtyHash: string | null;
+  untrackedFiles: { path: string; hash: string; size: number }[];
+  timestamp: number;
+};
+
+/** 采集完整 baseline 快照（含 untracked 文件 hash 列表）。 */
+export function snapshotBaseline(project: ProjectScope): BaselineSnapshot {
+  const root = project.gitRoot ?? project.root;
+  if (!project.capabilities.git || !isGitRepo(root)) {
+    return { revision: "", dirtyHash: null, untrackedFiles: [], timestamp: Date.now() };
+  }
+  return {
+    revision: getHeadRevision(root),
+    dirtyHash: getDirtyHash(root),
+    untrackedFiles: collectUntrackedHashes(root),
+    timestamp: Date.now(),
+  };
+}
+
+/** 比较两个 baseline 快照，返回差异描述列表。 */
+export function diffBaselines(a: BaselineSnapshot, b: BaselineSnapshot): string[] {
+  const diffs: string[] = [];
+  if (a.revision !== b.revision) diffs.push(`revision: ${a.revision} → ${b.revision}`);
+  if (a.dirtyHash !== b.dirtyHash) diffs.push(`dirtyHash: ${a.dirtyHash ?? "null"} → ${b.dirtyHash ?? "null"}`);
+  const aPaths = new Set(a.untrackedFiles.map((f) => f.path));
+  const bPaths = new Set(b.untrackedFiles.map((f) => f.path));
+  for (const f of a.untrackedFiles) {
+    if (!bPaths.has(f.path)) diffs.push(`untracked removed: ${f.path}`);
+  }
+  for (const f of b.untrackedFiles) {
+    if (!aPaths.has(f.path)) diffs.push(`untracked added: ${f.path}`);
+  }
+  for (const f of a.untrackedFiles) {
+    const bFile = b.untrackedFiles.find((g) => g.path === f.path);
+    if (bFile && bFile.hash !== f.hash) diffs.push(`untracked modified: ${f.path}`);
+  }
+  return diffs;
+}
+
+/** 检测 run 执行期间是否有外部写入（基于 baseline 快照对比）。 */
+export function detectContaminationFromSnapshot(
+  project: ProjectScope,
+  baseline: BaselineSnapshot,
+): { contaminated: boolean; diffs: string[] } {
+  if (!baseline.dirtyHash) return { contaminated: false, diffs: [] };
+  const current = snapshotBaseline(project);
+  const diffs = diffBaselines(baseline, current);
+  return { contaminated: diffs.length > 0, diffs };
 }

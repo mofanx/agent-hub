@@ -11,8 +11,12 @@ import {
   defaultObservePolicy,
   detectDefaultChecks,
   generateDefaultPolicy,
+  getPolicyEnforcement,
+  getPolicyApprovalRisk,
   isProtectedPath,
   loadPolicy,
+  loadPolicyV2,
+  migrateV1ToV2Write,
   suggestChecksFromAgentsMd,
   validatePolicy,
   writePolicy,
@@ -267,13 +271,13 @@ describe("quality policy", () => {
   });
 
   describe("generateDefaultPolicy", () => {
-    it("生成合法 policy，autonomy=observe，review.enabled=true", () => {
+    it("生成低摩擦安全默认策略：observe 仅报告，review/fix 默认关闭", () => {
       fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
       fs.writeFileSync(path.join(dir, "tsconfig.json"), "{}");
       const p = generateDefaultPolicy(makeScope(dir));
       assert.equal(p.autonomy, "observe");
-      assert.equal(p.review.enabled, true);
-      assert.equal(p.review.maxFixRounds, 2);
+      assert.equal(p.review.enabled, false);
+      assert.equal(p.review.maxFixRounds, 0);
       assert.ok(p.checks.length > 0);
       assert.deepEqual(validatePolicy(p, makeScope(dir)), []);
     });
@@ -282,6 +286,29 @@ describe("quality policy", () => {
       const p = generateDefaultPolicy(makeScope(dir));
       assert.ok(p.protectedPaths.includes(POLICY_FILE));
       assert.ok(p.protectedPaths.includes("AGENTS.md"));
+    });
+  });
+
+  describe("getPolicyEnforcement", () => {
+    it("v1 observe 为 report，不阻断 Conductor 闭环", () => {
+      assert.equal(getPolicyEnforcement({ ...validPolicy(), autonomy: "observe" }), "report");
+    });
+
+    it("v1 propose 需要审批，修复模式需要通过", () => {
+      assert.equal(getPolicyEnforcement({ ...validPolicy(), autonomy: "propose" }), "require-approval");
+      assert.equal(getPolicyEnforcement({ ...validPolicy(), autonomy: "isolated-fix" }), "require-pass");
+    });
+  });
+
+  describe("getPolicyApprovalRisk", () => {
+    it("v1 默认 high", () => {
+      assert.equal(getPolicyApprovalRisk({ ...validPolicy(), autonomy: "observe" }), "high");
+      assert.equal(getPolicyApprovalRisk({ ...validPolicy(), autonomy: "propose" }), "high");
+    });
+
+    it("v2 返回 enforcement.approvalRisk", () => {
+      const v2 = { ...validPolicy(), version: 2 as unknown as 1, enforcement: { mode: "require-approval" as const, approvalRisk: "critical" as const } };
+      assert.equal(getPolicyApprovalRisk(v2 as unknown as QualityPolicy), "critical");
     });
   });
 
@@ -303,5 +330,66 @@ describe("quality policy", () => {
       assert.ok(isProtectedPath(p, "hub/src/quality/run.ts"));
       assert.equal(isProtectedPath(p, "hub/src/agent.ts"), false);
     });
+  });
+});
+
+describe("migrateV1ToV2Write", () => {
+  let dir: string;
+  let scope: ProjectScope;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-migrate-"));
+    scope = registerProject({ connectionId: "conn-1", root: dir });
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("成功迁移 v1 → v2 并备份旧文件", () => {
+    const v1 = generateDefaultPolicy(scope);
+    writePolicy(scope, v1);
+
+    const result = migrateV1ToV2Write(scope);
+    assert.ok(result.ok, `migration should succeed: ${(result as { errors: string[] }).errors?.join(", ")}`);
+    if (!result.ok) return;
+    assert.ok(fs.existsSync(result.backupPath));
+    assert.ok(fs.existsSync(result.path));
+
+    // 验证写入的是 v2
+    const loaded = loadPolicyV2(scope);
+    assert.ok(loaded.ok);
+    if (!loaded.ok) return;
+    assert.equal(loaded.version, 2);
+  });
+
+  it("hash 不匹配时拒绝写入", () => {
+    const v1 = generateDefaultPolicy(scope);
+    writePolicy(scope, v1);
+
+    const result = migrateV1ToV2Write(scope, "wronghash");
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "hash-mismatch");
+  });
+
+  it("无 policy 文件时返回 invalid-v1", () => {
+    const result = migrateV1ToV2Write(scope);
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "invalid-v1");
+  });
+
+  it("已迁移的 v2 policy 再次迁移返回 invalid-v1", () => {
+    const v1 = generateDefaultPolicy(scope);
+    writePolicy(scope, v1);
+    const first = migrateV1ToV2Write(scope);
+    assert.ok(first.ok);
+
+    // 再次迁移：此时文件已是 v2，validatePolicy(v1) 会失败
+    const second = migrateV1ToV2Write(scope);
+    assert.ok(!second.ok);
+    if (second.ok) return;
+    assert.equal(second.reason, "invalid-v1");
   });
 });

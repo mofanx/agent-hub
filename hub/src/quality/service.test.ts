@@ -79,7 +79,7 @@ describe("QualityService", () => {
       const r = service.detectPolicy(p.id);
       assert.ok(r.policy);
       assert.equal(r.policy!.autonomy, "observe");
-      assert.equal(r.policy!.review.enabled, true);
+      assert.equal(r.policy!.review.enabled, false);
       assert.deepEqual(r.errors, []);
     });
     it("detectPolicy 有文件返回 policy", () => {
@@ -107,7 +107,7 @@ describe("QualityService", () => {
       const r = service.getPolicy(p.id);
       assert.equal(r.source, "default");
       assert.equal(r.policy.autonomy, "observe");
-      assert.equal(r.policy.review.enabled, true);
+      assert.equal(r.policy.review.enabled, false);
     });
     it("ensurePolicy 生成并写入 quality.json", () => {
       const p = service.registerProject({ connectionId: "c1", root: dir });
@@ -283,7 +283,7 @@ describe("QualityService", () => {
       const summary = recoverInterruptedRuns(store);
       assert.equal(summary.runs.length, 1);
       const got = service2.getRun(run.id)!;
-      assert.equal(got.stage, "failed");
+      assert.equal(got.stage, "inconclusive");
       assert.equal(got.failureCode, "hub-restart");
     });
 

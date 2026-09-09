@@ -6,6 +6,7 @@ import type {
   CheckTier,
   ProjectScope,
   QualityPolicy,
+  QualityPolicyV2,
 } from "./types.js";
 import type { ExecutionProvider } from "./execution.js";
 import { checkRunId } from "./execution.js";
@@ -25,14 +26,20 @@ import { checkRunId } from "./execution.js";
 export type GateResult = {
   tier: CheckTier;
   checks: CheckRun[];
-  /** 所有 required 检查通过时为 true。 */
+  /** 所有 required 检查通过时为 true（optional 失败不阻断）。空 tier 视为通过。 */
   passed: boolean;
-  /** 代码缺陷导致的失败（exitCode !== 0 且非 infra）。 */
+  /** 代码缺陷导致的失败（required 检查 exitCode !== 0 且非 infra）。 */
   codeFailed: boolean;
   /** 基础设施失败（timeout / infra-failed / cancelled）。 */
   infraFailed: boolean;
   /** 被取消。 */
   cancelled: boolean;
+  /** 全部 required 检查均为 infra 失败，无法判定代码质量。 */
+  inconclusive: boolean;
+  /** 实际执行的 required 检查数。 */
+  requiredCount: number;
+  /** 实际执行的 optional 检查数。 */
+  optionalCount: number;
 };
 
 /** 判断 CheckRunStatus 是否属于基础设施失败而非代码缺陷（§9 / Q1-02）。 */
@@ -59,7 +66,7 @@ export function isCheckAffected(check: CheckDefinition, changeSet: ChangeSet | u
 
 /** 选择受影响的检查，按 tier 过滤。 */
 export function selectChecks(
-  policy: QualityPolicy,
+  policy: QualityPolicy | QualityPolicyV2,
   tier: CheckTier,
   changeSet: ChangeSet | undefined,
 ): CheckDefinition[] {
@@ -143,7 +150,7 @@ export class GateEngine {
    */
   async runGate(
     project: ProjectScope,
-    policy: QualityPolicy,
+    policy: QualityPolicy | QualityPolicyV2,
     tier: CheckTier,
     runId: string,
     changeSet: ChangeSet | undefined,
@@ -155,13 +162,12 @@ export class GateEngine {
     for (const check of checks) {
       const id = checkRunId(runId, check.id, attempt);
       const result = await this.exec.run(project, check, runId);
-      // 确保 id 包含 attempt（ExecutionProvider 可能用默认 attempt=1）
       const normalized: CheckRun = { ...result, id, attempt };
       results.push(normalized);
       this.onSaveCheck?.(normalized);
     }
 
-    return classifyResult(tier, results);
+    return classifyResult(tier, results, checks);
   }
 
   /** 取消指定 runId 下所有正在运行的 check。 */
@@ -179,30 +185,47 @@ export class GateEngine {
  * 硬约束（§9 / Q1-01 / Q1-02）：
  * - 非零 exitCode → failed，绝不 PASS；
  * - timeout / infra-failed / cancelled → infraFailed，不视为代码缺陷；
- * - passed 要求所有 required 检查通过（非 required 检查失败不阻断）。
+ * - passed 要求所有 required 检查通过（optional 失败不阻断）；
+ * - 空 tier（无受影响检查）视为 passed（vacuously true）；
+ * - 所有 required 检查均为 infra 失败 → inconclusive，无法判定代码质量。
  */
-export function classifyResult(tier: CheckTier, checks: CheckRun[]): GateResult {
+export function classifyResult(
+  tier: CheckTier,
+  checks: CheckRun[],
+  definitions: CheckDefinition[] = [],
+): GateResult {
   let codeFailed = false;
   let infraFailed = false;
   let cancelled = false;
   let requiredFailed = false;
+  let requiredInfraFailed = false;
+  let requiredCount = 0;
+  let optionalCount = 0;
+
+  const defMap = new Map(definitions.map((d) => [d.id, d]));
 
   for (const c of checks) {
+    const def = defMap.get(c.checkId);
+    const isRequired = def ? def.required : true;
+
     if (c.status === "passed") continue;
     if (isInfraFailure(c.status)) {
       infraFailed = true;
       if (c.status === "cancelled") cancelled = true;
+      if (isRequired) requiredInfraFailed = true;
     } else if (c.status === "failed") {
-      codeFailed = true;
-      // 非零 exitCode 的 required 检查阻断通过
-      // 注意：CheckRun 不携带 required 字段，由调用方在 selectChecks 时已过滤；
-      // 这里假设所有传入的 check 都是 required（selectChecks 不区分 required），
-      // 实际阻断逻辑由 passed 字段决定：任一非 passed 即不通过。
-      requiredFailed = true;
+      if (isRequired) {
+        codeFailed = true;
+        requiredFailed = true;
+      }
     }
   }
 
-  const passed = checks.length > 0 && !codeFailed && !infraFailed && !cancelled && !requiredFailed;
+  requiredCount = definitions.filter((d) => d.required).length;
+  optionalCount = definitions.filter((d) => !d.required).length;
 
-  return { tier, checks, passed, codeFailed, infraFailed, cancelled };
+  const inconclusive = requiredInfraFailed && !codeFailed && !requiredFailed;
+  const passed = !requiredFailed && !requiredInfraFailed;
+
+  return { tier, checks, passed, codeFailed, infraFailed, cancelled, inconclusive, requiredCount, optionalCount };
 }

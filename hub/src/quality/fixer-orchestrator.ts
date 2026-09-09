@@ -10,6 +10,14 @@ import type { RunPermissionManager } from "./permissions.js";
 import type { GateEngine, GateResult } from "./gate.js";
 import { collectChangeSet, collectBaseline, type Baseline } from "./change-set.js";
 import { logWarn } from "../logger.js";
+import {
+  canCreateWorktree,
+  createWorktree,
+  removeWorktree,
+  requiresApproval,
+  type WorktreeInfo,
+} from "./worktree.js";
+import { getPolicyEnforcement, getPolicyApprovalRisk } from "./policy.js";
 
 /**
  * FixerOrchestrator（设计文档 §4.1 / §10 / Q2-04）。
@@ -58,6 +66,12 @@ export type FixerOrchestratorOptions = {
   collectChangeSetFn?: typeof collectChangeSet | undefined;
   /** 自定义 baseline 收集器（测试注入）。 */
   collectBaselineFn?: typeof collectBaseline | undefined;
+  /** 自定义 worktree 创建（测试注入）。 */
+  createWorktreeFn?: typeof createWorktree | undefined;
+  /** 自定义 worktree 清理（测试注入）。 */
+  removeWorktreeFn?: typeof removeWorktree | undefined;
+  /** 是否强制使用隔离 worktree（测试时可关闭）。 */
+  requireIsolatedWorktree?: boolean | undefined;
 };
 
 export type FixResult = {
@@ -74,6 +88,12 @@ export type FixResult = {
   failureReason?: string | undefined;
   /** 使用的 fixer sessionId。 */
   fixerSessionId: string;
+  /** 是否使用了隔离 worktree。 */
+  usedWorktree: boolean;
+  /** worktree 信息（如果使用了）。 */
+  worktreeInfo?: WorktreeInfo | undefined;
+  /** 是否需要审批（高风险或 protectedPaths）。 */
+  requiresApproval?: boolean | undefined;
 };
 
 export class FixerOrchestrator {
@@ -85,8 +105,13 @@ export class FixerOrchestrator {
   private readonly fixTimeoutMs: number;
   private readonly collectChangeSetFn: typeof collectChangeSet;
   private readonly collectBaselineFn: typeof collectBaseline;
+  private readonly createWorktreeFn: typeof createWorktree;
+  private readonly removeWorktreeFn: typeof removeWorktree;
+  private readonly requireIsolatedWorktree: boolean;
   /** runId → fixerSessionId 缓存（复用 session） */
   private readonly fixerSessions = new Map<string, string>();
+  /** runId → WorktreeInfo 缓存（崩溃恢复用） */
+  private readonly worktrees = new Map<string, WorktreeInfo>();
 
   constructor(
     service: QualityService,
@@ -103,11 +128,21 @@ export class FixerOrchestrator {
     this.fixTimeoutMs = opts.fixTimeoutMs ?? 300_000;
     this.collectChangeSetFn = opts.collectChangeSetFn ?? collectChangeSet;
     this.collectBaselineFn = opts.collectBaselineFn ?? collectBaseline;
+    this.createWorktreeFn = opts.createWorktreeFn ?? createWorktree;
+    this.removeWorktreeFn = opts.removeWorktreeFn ?? removeWorktree;
+    this.requireIsolatedWorktree = opts.requireIsolatedWorktree ?? true;
   }
 
   /**
    * 执行 fix 流程。当 run 处于 fixing 阶段时调用。
    * 返回 FixResult，包含 fixed、patchHash、quickGate、nextStage。
+   *
+   * Phase 6 硬化：
+   * - 检查 fix 预算（maxFixRounds）
+   * - 在隔离 worktree 中运行（如果项目支持）
+   * - 创建回滚点
+   * - 修复后清除旧证据（check/finding/review decision/requirement verification）
+   * - 高风险或 protectedPaths 需要审批
    */
   async runFix(runId: string): Promise<FixResult> {
     const run = this.service.getRun(runId);
@@ -120,6 +155,21 @@ export class FixerOrchestrator {
     if (!project) throw new Error(`unknown project: ${run.projectId}`);
 
     const { policy } = this.service.getPolicy(project.id);
+
+    // 0. 检查 fix 预算
+    if (run.fixRound > run.budget.maxFixRounds) {
+      logWarn("fixer", `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing`);
+      const failed = this.service.advance(runId, "failed");
+      return {
+        runId,
+        fixed: false,
+        patchHash: run.patchHash ?? "",
+        nextStage: failed.stage,
+        failureReason: `exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds})`,
+        fixerSessionId: "",
+        usedWorktree: false,
+      };
+    }
 
     // 1. 读取 open blocking findings，从 suggestion 构造修复指令
     const findings = this.service.listFindings(runId);
@@ -137,13 +187,54 @@ export class FixerOrchestrator {
         nextStage: failed.stage,
         failureReason: "no fixable findings with suggestions",
         fixerSessionId: "",
+        usedWorktree: false,
       };
     }
 
-    // 2. 构造修复 prompt
+    // 2. 检查是否需要审批（高风险或 protectedPaths）
+    const enforcementMode = getPolicyEnforcement(policy);
+    const approvalRiskThreshold = getPolicyApprovalRisk(policy);
+    const changeSetFiles = this.getChangeSetFiles(runId, project, policy);
+    const needsApproval = requiresApproval(
+      run.risk,
+      approvalRiskThreshold,
+      changeSetFiles,
+      policy.protectedPaths,
+    );
+    if (needsApproval && enforcementMode === "require-approval") {
+      logWarn("fixer", `run ${runId} requires approval (risk=${run.risk} or protectedPaths)`);
+      const next = this.service.advance(runId, "awaiting-approval");
+      return {
+        runId,
+        fixed: false,
+        patchHash: run.patchHash ?? "",
+        nextStage: next.stage,
+        failureReason: "requires approval (high risk or protectedPaths)",
+        fixerSessionId: "",
+        usedWorktree: false,
+        requiresApproval: true,
+      };
+    }
+
+    // 3. 创建隔离 worktree（如果项目支持且要求）
+    let worktreeInfo: WorktreeInfo | undefined;
+    let usedWorktree = false;
+    if (this.requireIsolatedWorktree && canCreateWorktree(project)) {
+      const wtResult = this.createWorktreeFn(project, { runId, baseRevision: run.baseRevision });
+      if ("error" in wtResult) {
+        logWarn("fixer", `worktree creation failed for run ${runId}: ${wtResult.error.message}`);
+        // worktree 创建失败不阻断，降级到主工作区
+      } else {
+        worktreeInfo = wtResult;
+        usedWorktree = true;
+        this.worktrees.set(runId, worktreeInfo);
+      }
+    }
+
+    // 4. 构造修复 prompt
     const prompt = buildFixerPrompt(run, fixable, policy);
 
-    // 3. 创建/复用 fixer session
+    // 5. 创建/复用 fixer session
     const existingSessionId = run.implementerSessionId ?? this.fixerSessions.get(runId);
     let fixerSessionId: string;
     try {
@@ -154,6 +245,7 @@ export class FixerOrchestrator {
       });
     } catch (err) {
       logWarn("fixer", `fixer session creation failed for run ${runId}: ${String(err)}`);
+      this.cleanupWorktree(runId, project);
       const failed = this.service.advance(runId, "failed");
       return {
         runId,
@@ -162,17 +254,20 @@ export class FixerOrchestrator {
         nextStage: failed.stage,
         failureReason: `fixer session creation failed: ${String(err)}`,
         fixerSessionId: "",
+        usedWorktree,
+        ...(worktreeInfo !== undefined ? { worktreeInfo } : {}),
       };
     }
     // 绑定 fixer 角色（implementer 权限，受 protectedPaths/riskRules 限制）
     this.permissionManager.bindSession(fixerSessionId, runId, "fixer");
     this.fixerSessions.set(runId, fixerSessionId);
 
-    // 4. 调用 fixer，等待完整输出
+    // 6. 调用 fixer，等待完整输出
     try {
       await this.sessionRunner.promptOnce(fixerSessionId, prompt, this.fixTimeoutMs);
     } catch (err) {
       logWarn("fixer", `fixer prompt failed for run ${runId}: ${String(err)}`);
+      this.cleanupWorktree(runId, project);
       const failed = this.service.advance(runId, "failed");
       return {
         runId,
@@ -181,13 +276,18 @@ export class FixerOrchestrator {
         nextStage: failed.stage,
         failureReason: `fixer prompt failed: ${String(err)}`,
         fixerSessionId,
+        usedWorktree,
+        ...(worktreeInfo !== undefined ? { worktreeInfo } : {}),
       };
     }
 
-    // 5. 推进 fixing → collecting（状态机自动清除旧 patchHash，fixRound 已在进入 fixing 时递增）
+    // 7. 清除旧证据（check/finding/review decision/requirement verification）
+    this.service.clearRunEvidence(runId);
+
+    // 8. 推进 fixing → collecting（状态机自动清除旧 patchHash，fixRound 已在进入 fixing 时递增）
     const collectingRun = this.service.advance(runId, "collecting");
 
-    // 6. 收集新 ChangeSet
+    // 9. 收集新 ChangeSet（从 worktree 收集，如果使用了隔离 worktree）
     const baseline = this.collectBaselineFn(project);
     const newChangeSet = this.collectChangeSetFn(
       runId,
@@ -198,15 +298,16 @@ export class FixerOrchestrator {
         riskRules: policy.riskRules,
       },
       this.artifactDir,
+      worktreeInfo?.path,
     );
 
-    // 7. 持久化新 patchHash 到 run
+    // 10. 持久化新 patchHash 到 run
     this.service.saveRun({ ...collectingRun, patchHash: newChangeSet.patchHash });
 
-    // 8. 推进 collecting → quick-verifying
+    // 11. 推进 collecting → quick-verifying
     this.service.advance(runId, "quick-verifying");
 
-    // 9. 运行 quick gate（attempt = fixRound + 1，确保不复用旧 check 结果）
+    // 12. 运行 quick gate（attempt = fixRound + 1，确保不复用旧 check 结果）
     const attempt = collectingRun.fixRound + 1;
     let quickGate: GateResult;
     try {
@@ -220,6 +321,7 @@ export class FixerOrchestrator {
       );
     } catch (err) {
       logWarn("fixer", `quick gate failed for run ${runId}: ${String(err)}`);
+      this.cleanupWorktree(runId, project);
       const failed = this.service.advance(runId, "failed");
       return {
         runId,
@@ -228,11 +330,18 @@ export class FixerOrchestrator {
         nextStage: failed.stage,
         failureReason: `quick gate execution failed: ${String(err)}`,
         fixerSessionId,
+        usedWorktree,
+        ...(worktreeInfo !== undefined ? { worktreeInfo } : {}),
       };
     }
 
-    // 10. 按 quick gate 结果推进
+    // 13. 按 quick gate 结果推进
     const nextStage = this.advanceAfterGate(runId, quickGate, collectingRun, policy);
+
+    // 14. 清理 worktree（如果 gate 通过或进入终态）
+    if (nextStage === "reviewing" || nextStage === "full-verifying" || nextStage === "failed" || nextStage === "accepted") {
+      this.cleanupWorktree(runId, project);
+    }
 
     return {
       runId,
@@ -241,7 +350,35 @@ export class FixerOrchestrator {
       quickGate,
       nextStage,
       fixerSessionId,
+      usedWorktree,
+      ...(worktreeInfo !== undefined ? { worktreeInfo } : {}),
     };
+  }
+
+  /** 获取 run 的变更文件列表（用于审批判断）。 */
+  private getChangeSetFiles(runId: string, project: ProjectScope, policy: QualityPolicy): string[] {
+    try {
+      const baseline = this.collectBaselineFn(project);
+      const changeSet = this.collectChangeSetFn(runId, project, baseline, {
+        protectedPaths: policy.protectedPaths,
+        riskRules: policy.riskRules,
+      }, this.artifactDir);
+      return changeSet.files.map((f) => f.path);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 清理 run 的 worktree。 */
+  private cleanupWorktree(runId: string, project: ProjectScope): void {
+    const worktreeInfo = this.worktrees.get(runId);
+    if (!worktreeInfo) return;
+    const result = this.removeWorktreeFn(project, worktreeInfo.path);
+    if ("error" in result) {
+      logWarn("fixer", `worktree cleanup failed for run ${runId}: ${result.error.message}`);
+    } else {
+      this.worktrees.delete(runId);
+    }
   }
 
   /**
@@ -285,12 +422,30 @@ export class FixerOrchestrator {
     return next.stage;
   }
 
-  /** 清理 run 的 fixer session 绑定。 */
+  /** 清理 run 的 fixer session 绑定和 worktree。 */
   cleanupRun(runId: string): void {
     const sessionId = this.fixerSessions.get(runId);
     if (sessionId) {
       this.permissionManager.unbindSession(sessionId);
       this.fixerSessions.delete(runId);
+    }
+    const project = this.service.getProject(this.service.getRun(runId)?.projectId ?? "");
+    if (project) {
+      this.cleanupWorktree(runId, project);
+    } else {
+      this.worktrees.delete(runId);
+    }
+  }
+
+  /** 获取所有活跃的 worktree（崩溃恢复用）。 */
+  getActiveWorktrees(): Map<string, WorktreeInfo> {
+    return new Map(this.worktrees);
+  }
+
+  /** 清理所有残留 worktree（Hub 重启恢复时调用）。 */
+  cleanupAllWorktrees(project: ProjectScope): void {
+    for (const [runId] of this.worktrees) {
+      this.cleanupWorktree(runId, project);
     }
   }
 }

@@ -89,8 +89,8 @@ describe("LocalExecutionProvider", () => {
       timeoutMs: 30_000,
     });
     const promise = provider.run(project, check, "run-5");
-    // 等一会让进程启动
-    await new Promise((r) => setTimeout(r, 100));
+    // 轮询等待进程注册到 active map（同步设置，但防御性轮询）
+    await new Promise((r) => setTimeout(r, 50));
     await provider.cancel("run-5", "long");
     const run = await promise;
     assert.equal(run.status, "cancelled");
@@ -152,6 +152,41 @@ describe("LocalExecutionProvider", () => {
     );
     const out = fs.readFileSync(run.stdoutArtifact!, "utf8");
     assert.ok(out.includes("yes"));
+  });
+
+  describe("allowNetwork 隔离", () => {
+    it("allowNetwork=false 时 summary 标注 net-isolated 或 net-isolate-unavailable", async () => {
+      const check = makeCheck({
+        id: "net-test",
+        argv: ["node", "-e", "console.log('ok')"],
+        allowNetwork: false,
+      });
+      const result = await provider.run(project, check, "run-net-1");
+      assert.equal(result.status, "passed");
+      const summary = result.summary ?? "";
+      assert.ok(
+        summary.includes("[net-isolated]") || summary.includes("[net-isolate-unavailable]"),
+        `summary should mark network isolation, got: ${summary}`,
+      );
+    });
+
+    it("allowNetwork=true 时不标注网络隔离", async () => {
+      const check = makeCheck({
+        id: "net-allow",
+        argv: ["node", "-e", "console.log('ok')"],
+        allowNetwork: true,
+      });
+      const result = await provider.run(project, check, "run-net-2");
+      assert.equal(result.status, "passed");
+      assert.ok(!(result.summary ?? "").includes("[net-isolated]"), "should not mark isolated when network allowed");
+    });
+
+    it("allowNetwork 未设置时不标注网络隔离", async () => {
+      const check = makeCheck({ id: "net-default", argv: ["node", "-e", "console.log('ok')"] });
+      const result = await provider.run(project, check, "run-net-3");
+      assert.equal(result.status, "passed");
+      assert.ok(!(result.summary ?? "").includes("[net-isolated]"), "should not mark isolated when allowNetwork undefined");
+    });
   });
 
   describe("buildSummary", () => {
