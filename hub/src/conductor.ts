@@ -49,6 +49,14 @@ type Flow = {
 export type ConductorNotice = { roomId: string; message: string };
 
 export interface QualityIntegration {
+  prepareRunForTask?(opts: {
+    roomId: string;
+    taskId: string;
+    sessionId: string;
+    task: string;
+  }): { runId?: string; ready: boolean };
+  completeRunForTask?(runId: string, output: string, artifacts: TaskArtifact[]): void;
+  cancelRunForTask?(runId: string): void;
   startRunForTask(opts: {
     roomId: string;
     taskId: string;
@@ -59,6 +67,8 @@ export interface QualityIntegration {
   onRunTerminal(runId: string, cb: (accepted: boolean) => void): void;
   /** 恢复重启前注册的 run terminal 回调：若 run 已终态立即回调，否则重新注册 */
   recoverRun(runId: string, cb: (accepted: boolean) => void): void;
+  /** 查询 run 的 enforcement 模式（用于依赖解锁控制） */
+  getRunEnforcement?(runId: string): "report" | "require-pass" | "require-approval" | undefined;
 }
 
 const PLAN_RESULT_LEN = 4000;
@@ -110,9 +120,10 @@ export class ConductorOrchestrator {
     if (!flow) return [];
     const touched = new Set<string>();
     for (const t of flow.tasks.values()) {
-      if (t.status === "pending" || t.status === "running") {
+      if (t.status === "pending" || t.status === "running" || t.status === "verifying") {
         touched.add(t.sessionId);
       }
+      if (t.qualityRunId) this.quality?.cancelRunForTask?.(t.qualityRunId);
     }
     this.flows.delete(roomId);
     this.emitFlow?.(roomId);
@@ -202,6 +213,10 @@ export class ConductorOrchestrator {
           (t) => t.sessionId === sessionId && t.status === "running",
         );
         if (running) {
+          if (running.qualityRunId) {
+            this.quality?.cancelRunForTask?.(running.qualityRunId);
+            delete running.qualityRunId;
+          }
           running.status = "pending";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
           this.notice({
@@ -349,8 +364,9 @@ export class ConductorOrchestrator {
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
 
+          const preparedRunId = running.qualityRunId;
           const hasFileChanges = result.artifacts.some((a) => a.type === "file");
-          const runId = hasFileChanges
+          const runId = preparedRunId ?? (hasFileChanges
             ? this.quality?.startRunForTask({
                 roomId: flow.roomId,
                 taskId: running.id,
@@ -358,8 +374,9 @@ export class ConductorOrchestrator {
                 output,
                 artifacts: result.artifacts,
               })
-            : undefined;
+            : undefined);
           if (runId) {
+            if (preparedRunId) this.quality?.completeRunForTask?.(runId, output, result.artifacts);
             running.status = "verifying";
             running.qualityRunId = runId;
             running.verifyingSince = Date.now();
@@ -372,11 +389,19 @@ export class ConductorOrchestrator {
               const task = flow.tasks.get(running.id);
               if (!task || task.status !== "verifying") return;
               task.awaitingApproval = false;
-              if (accepted) {
+              // 按 enforcement 控制依赖解锁：
+              // - require-pass: 只有 accepted=true 才解锁下游
+              // - require-approval: accepted=true 解锁，accepted=false 但有审批记录也可解锁（审批通过）
+              // - report: 无论 accepted 与否都解锁（仅报告，不阻断）
+              const enforcement = this.quality?.getRunEnforcement?.(runId) ?? "require-pass";
+              const shouldUnlock = enforcement === "report" ? true : accepted;
+              if (shouldUnlock) {
                 task.status = "done";
                 this.notice({
                   roomId: flow.roomId,
-                  message: `@${name} 子任务 ${running.id} 质量验证通过`,
+                  message: accepted
+                    ? `@${name} 子任务 ${running.id} 质量验证通过`
+                    : `@${name} 子任务 ${running.id} 质量验证未通过（report 仅报告，不阻断后续任务）`,
                 });
               } else {
                 task.status = "failed";
@@ -657,6 +682,19 @@ export class ConductorOrchestrator {
         skippedBusy = true;
         continue;
       }
+      if (!t.qualityRunId && this.quality?.prepareRunForTask) {
+        const prepared = this.quality.prepareRunForTask({
+          roomId: flow.roomId,
+          taskId: t.id,
+          sessionId: t.sessionId,
+          task: t.task,
+        });
+        if (!prepared.ready) {
+          skippedBusy = true;
+          continue;
+        }
+        if (prepared.runId) t.qualityRunId = prepared.runId;
+      }
       t.status = "running";
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       assignments.push(`@${name}：${t.task}`);
@@ -686,6 +724,10 @@ export class ConductorOrchestrator {
         artifactContext,
       );
       this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
+        if (t.qualityRunId) {
+          this.quality?.cancelRunForTask?.(t.qualityRunId);
+          delete t.qualityRunId;
+        }
         t.retries = (t.retries ?? 0) + 1;
         const msg = String(err);
         if (t.retries >= 3) {

@@ -409,6 +409,49 @@ describe("conductor", () => {
     assert.equal(flow2, undefined, "flow should be cleaned up after dependency failure cascade");
   });
 
+  it("report 模式下质量未通过仍完成任务，但不能提示为验证通过", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "quality-report",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const terminalCallbacks = new Map<string, (accepted: boolean) => void>();
+    const notices: string[] = [];
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask: () => "qrun-t1",
+      onRunTerminal(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+      recoverRun() {},
+      getRunEnforcement: () => "report",
+    };
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      (n) => notices.push(n.message),
+      qualityIntegration,
+    );
+
+    await orchestrator.start(qRoom, "任务", [{ id: "t1", to: "worker1", task: "改文件" }]);
+    await orchestrator.onPromptDone(
+      "worker1",
+      '```json\n{"text":"done","artifacts":[{"type":"file","path":"/a.ts","summary":"改"}]}\n```',
+    );
+    terminalCallbacks.get("qrun-t1")!(false);
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+
+    const flow = orchestrator.getFlow(qRoom.roomId)!;
+    const task = (flow.tasks as { id: string; status: string }[]).find((t) => t.id === "t1");
+    assert.equal(task?.status, "done");
+    assert.ok(notices.some((m) => m.includes("仅报告")));
+    assert.ok(!notices.some((m) => m.includes("质量验证通过")));
+  });
+
   it("Q1-03: 无文件 artifact 时不启动质量验证，直接 done", async () => {
     const rooms = new RoomManager();
     const qRoom = rooms.create(

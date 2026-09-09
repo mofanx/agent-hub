@@ -1,3 +1,4 @@
+// dogfood test: L0-L4 全链路验证注释 — 2026-09-09
 import { WebSocketServer, WebSocket } from "ws";
 import { networkInterfaces } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -30,7 +31,7 @@ import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { WorkerExecutionProvider, isQualityControlFrame, type QualityControlFrame } from "./quality/execution-worker.js";
 import { QualityService, type Emit, type QualityEvent } from "./quality/service.js";
-import { recoverInterruptedRuns } from "./quality/recovery.js";
+import { recoverInterruptedRuns, FAILURE_HUB_RESTART } from "./quality/recovery.js";
 import { isTerminal } from "./quality/run.js";
 import { RunPermissionManager } from "./quality/permissions.js";
 import { ReviewOrchestrator, type ReviewerSessionRunner } from "./quality/review-orchestrator.js";
@@ -38,9 +39,15 @@ import { FixerOrchestrator, type FixerSessionRunner } from "./quality/fixer-orch
 import { GateEngine, type GateResult } from "./quality/gate.js";
 import type { ExecutionProvider } from "./quality/execution.js";
 import { LocalExecutionProvider } from "./quality/execution-local.js";
-import { collectChangeSet, collectBaseline } from "./quality/change-set.js";
-import type { ChangeSet, CheckTier, QualityPolicy, QualityRisk, QualityRun, QualityTrigger } from "./quality/types.js";
+import { RoutingExecutionProvider } from "./quality/execution.js";
+import { collectChangeSet, collectBaseline, type Baseline } from "./quality/change-set.js";
+import { defaultObservePolicy, getPolicyEnforcement, getPolicyMaxFixRounds, hashPolicy, isPolicyReviewEnabled, readPolicySnapshot, writePolicySnapshot } from "./quality/policy.js";
+import { classifyChangeSet } from "./quality/risk.js";
+import type { ChangeSet, CheckTier, ProjectScope, QualityPolicy, QualityPolicyV2, QualityRisk, QualityRun, QualityTrigger, WorkItem } from "./quality/types.js";
 import type { QualityIntegration } from "./conductor.js";
+import { WriterLeaseManager } from "./quality/lease.js";
+import { RunContextRegistry } from "./quality/run-context.js";
+import { DirtyTracker } from "./quality/dirty-tracker.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -58,15 +65,60 @@ const localStarts = new Map<string, Promise<void>>();
 const localAgentErrors = new Map<string, string>();
 const workerExecProviders = new Map<string, WorkerExecutionProvider>();
 const localExecProvider = new LocalExecutionProvider();
+const routingExecProvider = new RoutingExecutionProvider(localExecProvider, workerExecProviders);
 const store = new Store();
 const modelManager = new ModelManager();
 const qualityRunCallbacks = new Map<string, (accepted: boolean) => void>();
 const runPermissionManager = new RunPermissionManager();
+const writerLeaseManager = new WriterLeaseManager();
+const runContextRegistry = new RunContextRegistry();
+const dirtyTracker = new DirtyTracker();
+// L0 创建的 WorkRequest/RequirementSpec 缓存，供后续 triggerGateForSession 复用
+const l0PendingSpecs = new Map<string, { requestId: string; specId: string; specVersion: number }>();
 const qualityEmit: Emit = (event: QualityEvent) => {
   broadcast(event as HubEvent);
+  if (event.method !== "quality.runUpdate") return;
   const { runId, run } = event.params;
   if (isTerminal(run.stage)) {
     runPermissionManager.unbindRun(runId);
+    writerLeaseManager.releaseByRunId(runId);
+    for (const sessionId of runContextRegistry.unbindRun(runId)) dirtyTracker.clearDirty(sessionId);
+    if (run.workItemId) {
+      qualityService.updateWorkItemStatus(run.workItemId, run.stage === "cancelled" ? "cancelled" : "completed", run.id, run.generation);
+    }
+    // L4 自动回流：run 终态 failed/inconclusive 时自动创建 Observation
+    if (run.stage === "failed" || run.stage === "inconclusive") {
+      const isInfra = run.failureCode === FAILURE_HUB_RESTART;
+      let attribution: "candidate" | "infrastructure" | "unknown";
+      let kind: "check-failure" | "infra-failure" | "verification-gap";
+      if (isInfra) {
+        attribution = "infrastructure";
+        kind = "infra-failure";
+      } else if (run.stage === "inconclusive") {
+        // inconclusive 且非 hub-restart：区分无检查/无 patch vs 真实代码失败
+        const checks = qualityService.listChecks(runId);
+        const hasPatch = run.patchHash !== undefined && run.patchHash !== "";
+        if (checks.length === 0 || !hasPatch) {
+          // 无检查或无 patch → 无法归因到候选变更，标记为 unknown
+          attribution = "unknown";
+          kind = "verification-gap";
+        } else {
+          attribution = "candidate";
+          kind = "check-failure";
+        }
+      } else {
+        attribution = "candidate";
+        kind = "check-failure";
+      }
+      qualityService.createObservation({
+        projectId: run.projectId,
+        kind,
+        attribution,
+        runId: run.id,
+        ...(run.workItemId !== undefined ? { workItemId: run.workItemId } : {}),
+        evidenceRefs: [],
+      });
+    }
     broadcast({
       method: "quality.approvalResolved",
       params: { requestId: `quality-approval-${runId}`, outcome: run.stage },
@@ -74,7 +126,7 @@ const qualityEmit: Emit = (event: QualityEvent) => {
     const cb = qualityRunCallbacks.get(runId);
     if (cb) {
       qualityRunCallbacks.delete(runId);
-      cb(run.stage === "accepted");
+      cb(run.stage === "accepted" || run.stage === "waived");
     }
   }
 };
@@ -143,12 +195,9 @@ const fixerSessionRunner: FixerSessionRunner = {
   },
 };
 
-/** GateEngine 使用的 ExecutionProvider：优先用 workerExecProviders，否则 LocalExecutionProvider。 */
+/** GateEngine 使用的 ExecutionProvider：RoutingExecutionProvider 按 project.connectionId 路由。 */
 function resolveGateExecProvider(): ExecutionProvider {
-  for (const provider of workerExecProviders.values()) {
-    return provider;
-  }
-  return localExecProvider;
+  return routingExecProvider;
 }
 
 let fixerOrchestrator: FixerOrchestrator | undefined;
@@ -176,14 +225,33 @@ const fixerRunner = (run: { id: string; stage: string }) => {
   });
 };
 
-/**
- * 通用 gate runner 工厂：在 quick-verifying / full-verifying 阶段执行 gate 检查并按结果自动推进。
- *
- * 推进规则：
- * - passed → quick: review.enabled ? reviewing : full-verifying；full: autonomy=observe ? awaiting-approval : accepted
- * - codeFailed → 有 fix 预算 ? fixing : failed
- * - infraFailed/cancelled → failed
- */
+function policyForRun(run: QualityRun, project: NonNullable<ReturnType<QualityService["getProject"]>>): QualityPolicy | QualityPolicyV2 | undefined {
+  if (run.policySnapshotRef) {
+    const snapshot = readPolicySnapshot(run.policySnapshotRef, project);
+    if (snapshot && (!run.policyHash || hashPolicy(snapshot) === run.policyHash)) return snapshot;
+    logWarn("gate-runner", `invalid policy snapshot for run ${run.id}`);
+    return undefined;
+  }
+  const loaded = qualityService.loadPolicyWithVersion(project.id);
+  return loaded.policy ? qualityService.loadActiveControlsIntoPolicy(loaded.policy, project.id) : undefined;
+}
+
+function baselineForRun(run: QualityRun, project: NonNullable<ReturnType<QualityService["getProject"]>>): Baseline {
+  if (run.baseRevision !== undefined || run.dirtyBaselineHash !== undefined) {
+    return {
+      revision: run.baseRevision ?? "",
+      dirtyHash: run.dirtyBaselineHash ?? null,
+      isGit: project.capabilities.git,
+    };
+  }
+  return collectBaseline(project);
+}
+
+function higherRisk(a: QualityRisk, b: QualityRisk): QualityRisk {
+  const order: QualityRisk[] = ["low", "medium", "high", "critical"];
+  return order.indexOf(a) >= order.indexOf(b) ? a : b;
+}
+
 function makeGateRunner(tier: CheckTier): (run: { id: string; stage: string }) => void {
   return (run) => {
     const stage = tier === "quick" ? "quick-verifying" : "full-verifying";
@@ -194,83 +262,102 @@ function makeGateRunner(tier: CheckTier): (run: { id: string; stage: string }) =
     const project = qualityService.getProject(current.projectId);
     if (!project) {
       logWarn("gate-runner", `unknown project ${current.projectId} for run ${runId}`);
-      try { qualityService.advance(runId, "failed"); } catch { /* */ }
+      try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
       return;
     }
-    const { policy } = qualityService.getPolicy(current.projectId);
-    const baseline = collectBaseline(project);
+    const policy = policyForRun(current, project);
+    if (!policy) {
+      try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
+      return;
+    }
+    const baseline = baselineForRun(current, project);
     let changeSet: ChangeSet | undefined;
+    let runForAdvance = current;
     try {
       changeSet = collectChangeSet(runId, project, baseline, {
         protectedPaths: policy.protectedPaths,
         riskRules: policy.riskRules,
       }, qualityArtifactDir);
-      qualityService.saveRun({ ...current, patchHash: changeSet.patchHash });
+      const classified = classifyChangeSet(changeSet.files, policy);
+      runForAdvance = {
+        ...current,
+        patchHash: changeSet.patchHash,
+        changeSetId: changeSet.patchHash,
+        risk: higherRisk(current.risk, classified.risk),
+      };
+      qualityService.saveRun(runForAdvance);
     } catch (err) {
       logWarn("gate-runner", `changeSet collection failed for run ${runId}: ${String(err)}`);
-      changeSet = undefined;
     }
     const gate = new GateEngine(resolveGateExecProvider(), {
       onSaveCheck: (check) => qualityService.saveCheck(check),
     });
     const attempt = current.fixRound + 1;
     gate.runGate(project, policy, tier, runId, changeSet, attempt).then((result) => {
-      advanceAfterGate(runId, result, current, policy, tier);
+      advanceAfterGate(runId, result, qualityService.getRun(runId) ?? runForAdvance, policy, tier);
     }).catch((err) => {
       logError("gate-runner", err);
-      try { qualityService.advance(runId, "failed"); } catch { /* */ }
+      try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
     });
   };
 }
 
-/**
- * gate 完成后按结果推进 run 状态。
- * - quick passed → review.enabled ? reviewing : full-verifying
- * - full passed → autonomy=observe ? awaiting-approval : accepted（需 patchHash）
- * - codeFailed → 有 fix 预算 ? fixing : failed
- * - infraFailed/cancelled → failed
- */
+function requiresRiskApproval(policy: QualityPolicy | QualityPolicyV2, risk: QualityRisk): boolean {
+  if (getPolicyEnforcement(policy) !== "require-approval") return false;
+  if (policy.version === 1) return true;
+  const order: QualityRisk[] = ["low", "medium", "high", "critical"];
+  return order.indexOf(risk) >= order.indexOf(policy.enforcement.approvalRisk);
+}
+
 function advanceAfterGate(
   runId: string,
   gate: GateResult,
   run: QualityRun,
-  policy: QualityPolicy,
+  policy: QualityPolicy | QualityPolicyV2,
   tier: CheckTier,
 ): void {
   if (gate.passed) {
     if (tier === "quick") {
-      if (policy.review.enabled) {
-        qualityService.advance(runId, "reviewing");
-      } else {
-        qualityService.advance(runId, "full-verifying");
-      }
+      console.log(`[hub] gate-runner: quick gate passed, advancing to full-verifying for run ${runId}`);
+      qualityService.advance(runId, isPolicyReviewEnabled(policy) ? "reviewing" : "full-verifying");
+      return;
+    }
+    const checks = qualityService.listChecks(runId);
+    console.log(`[hub] gate-runner: full gate passed for run ${runId}, checks=${checks.length}, patchHash=${run.patchHash ?? "none"}, workItemId=${run.workItemId ?? "none"}`);
+    if (!checks.some((check) => check.status === "passed")) {
+      qualityService.advance(runId, "inconclusive");
+    } else if (!run.patchHash) {
+      qualityService.advance(runId, "inconclusive");
     } else {
-      // full gate 通过
-      if (policy.autonomy === "observe") {
+      // L3 接入：full-verifying 通过后，若有 spec 且 verification 模式非 off，进入 requirement-verifying
+      const hasSpec = run.workItemId !== undefined && qualityService.getWorkItem(run.workItemId)?.specId !== undefined;
+      const verificationMode = "verification" in policy ? policy.verification.mode : "off";
+      console.log(`[hub] gate-runner: L3 check for run ${runId}: hasSpec=${hasSpec}, verificationMode=${verificationMode}, workItemId=${run.workItemId ?? "none"}`);
+      if (hasSpec && verificationMode !== "off") {
+        try { qualityService.advance(runId, "requirement-verifying"); console.log(`[hub] gate-runner: advanced to requirement-verifying for run ${runId}`); return; } catch (err) { console.log(`[hub] gate-runner: advance to requirement-verifying failed: ${String(err)}`); }
+      }
+      if (requiresRiskApproval(policy, run.risk)) {
+        console.log(`[hub] gate-runner: advancing to awaiting-approval for run ${runId}`);
         qualityService.advance(runId, "awaiting-approval");
       } else {
-        // autonomy=auto-apply 需要 patchHash 才能 accepted
-        if (run.patchHash) {
-          qualityService.advance(runId, "accepted");
-        } else {
-          qualityService.advance(runId, "awaiting-approval");
-        }
+        console.log(`[hub] gate-runner: advancing to accepted for run ${runId}`);
+        qualityService.advance(runId, "accepted");
       }
     }
     return;
   }
-  if (gate.infraFailed || gate.cancelled) {
-    logWarn("gate-runner", `run ${runId} ${tier} gate infra-failed/cancelled, failing`);
-    try { qualityService.advance(runId, "failed"); } catch { /* */ }
+  if (gate.inconclusive || (!gate.codeFailed && gate.infraFailed)) {
+    logWarn("gate-runner", `run ${runId} ${tier} gate inconclusive`);
+    console.log(`[hub] gate-runner: ${tier} gate inconclusive for run ${runId}, gate=${JSON.stringify({ passed: gate.passed, inconclusive: gate.inconclusive, codeFailed: gate.codeFailed, infraFailed: gate.infraFailed })}`);
+    try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
     return;
   }
-  // codeFailed：检查 fix 预算
-  if (run.fixRound >= run.budget.maxFixRounds) {
-    logWarn("gate-runner", `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing after ${tier} gate`);
-    try { qualityService.advance(runId, "failed"); } catch { /* */ }
+  if (gate.codeFailed && run.fixRound < run.budget.maxFixRounds) {
+    try { qualityService.advance(runId, "fixing"); } catch { /* */ }
     return;
   }
-  try { qualityService.advance(runId, "fixing"); } catch { /* */ }
+  console.log(`[hub] gate-runner: ${tier} gate fallback to ${gate.codeFailed ? "failed" : "inconclusive"} for run ${runId}, gate=${JSON.stringify({ passed: gate.passed, codeFailed: gate.codeFailed, infraFailed: gate.infraFailed })}`);
+  try { qualityService.advance(runId, gate.codeFailed ? "failed" : "inconclusive"); } catch { /* */ }
 }
 
 const quickRunner = makeGateRunner("quick");
@@ -351,15 +438,197 @@ function autoRegisterAllProjects(): void {
   }
 }
 
+function isInside(root: string, target: string): boolean {
+  const rel = path.relative(root, target);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 function findProjectForPaths(
   projects: ReturnType<QualityService["listProjects"]>,
   filePaths: string[],
 ): ReturnType<QualityService["getProject"]> | undefined {
-  for (const p of projects) {
-    const root = p.root.endsWith("/") ? p.root : p.root + "/";
-    if (filePaths.some((fp) => fp.startsWith(root) || fp === p.root)) return p;
+  const matches = projects.filter((project) => {
+    const root = project.gitRoot ?? project.root;
+    return filePaths.length > 0 && filePaths.every((filePath) => isInside(root, path.resolve(filePath)));
+  });
+  return matches.sort((a, b) => (b.gitRoot ?? b.root).length - (a.gitRoot ?? a.root).length)[0];
+}
+
+function findProjectForSession(sessionId: string, filePaths: string[] = []): ProjectScope | undefined {
+  const projects = qualityService.listProjects();
+  const meta = sessionMetas.get(sessionId);
+  const cwd = meta?.cwd ? path.resolve(meta.cwd) : undefined;
+  const resolvedPaths = filePaths.map((filePath) => path.isAbsolute(filePath)
+    ? path.resolve(filePath)
+    : path.resolve(cwd ?? process.cwd(), filePath));
+  if (resolvedPaths.length > 0) {
+    const byPaths = findProjectForPaths(projects, resolvedPaths);
+    if (byPaths) return byPaths;
   }
-  return projects[0];
+  if (!cwd) return undefined;
+  const owner = owners.get(sessionId);
+  const matches = projects
+    .filter((project) => isInside(project.gitRoot ?? project.root, cwd))
+    .sort((a, b) => {
+      const specificity = (b.gitRoot ?? b.root).length - (a.gitRoot ?? a.root).length;
+      if (specificity !== 0) return specificity;
+      return Number(b.connectionId === owner) - Number(a.connectionId === owner);
+    });
+  return matches[0];
+}
+
+type PreparedQualityRun = { run: QualityRun; workItem: WorkItem; project: ProjectScope };
+
+/**
+ * L0 横切评估：在消息派发给 agent 之前运行意图分类 + 需求评估。
+ * shadow 模式不阻断：无论 L0 结果如何，都继续执行原流程。
+ * 仅 code-change 意图触发完整评估；有 clarification 时广播 clarificationRequired 事件。
+ */
+async function runL0Intercept(params: {
+  text: string;
+  source: "room" | "session";
+  correlationId: string;
+  mode?: string;
+  roomId?: string;
+  sessionId?: string;
+}): Promise<void> {
+  try {
+    const intent = qualityService.classifyRequestIntent(params.text);
+    if (intent !== "code-change") return;
+
+    // 尝试解析项目（room 入口可能无法确定项目，此时只运行通用评估）
+    let projectId: string | undefined;
+    if (params.sessionId) {
+      const project = findProjectForSession(params.sessionId);
+      projectId = project?.id;
+    }
+
+    const result = await qualityService.handleL0Request({
+      text: params.text,
+      source: params.source,
+      correlationId: params.correlationId,
+      ...(params.mode !== undefined ? { mode: params.mode } : {}),
+      ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
+      ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+      ...(projectId !== undefined ? { projectId } : {}),
+      l0Mode: "shadow",
+    });
+
+    if (result.clarificationRequest) {
+      broadcast({
+        method: "requirement.clarificationRequired",
+        params: {
+          requestId: result.request.id,
+          clarificationRequestId: result.clarificationRequest.id,
+          specId: result.clarificationRequest.specId,
+          specVersion: result.clarificationRequest.specVersion,
+          questions: result.clarificationRequest.questions,
+          canSkip: result.clarificationRequest.canSkip,
+          expiresAt: result.clarificationRequest.expiresAt ?? null,
+        },
+      } as HubEvent);
+    }
+    // 缓存 L0 创建的 request/spec，供后续 triggerGateForSession 复用
+    if (result.spec && params.sessionId) {
+      l0PendingSpecs.set(params.sessionId, {
+        requestId: result.request.id,
+        specId: result.spec.id,
+        specVersion: result.spec.version,
+      });
+    }
+  } catch (err) {
+    // L0 评估失败 → 安全降级，不阻断消息
+    logError("L0 intercept", String(err));
+  }
+}
+
+function prepareQualityRun(opts: {
+  sessionId: string;
+  trigger: QualityTrigger;
+  risk: QualityRisk;
+  mode: string;
+  roomId?: string;
+  taskId?: string;
+  filePaths?: string[];
+  requestId?: string;
+  specId?: string;
+  specVersion?: number;
+  reviewerSessionId?: string;
+}): PreparedQualityRun | undefined {
+  const project = findProjectForSession(opts.sessionId, opts.filePaths);
+  if (!project) return undefined;
+  const loaded = qualityService.loadPolicyWithVersion(project.id);
+  const fallback = qualityService.getPolicy(project.id).policy;
+  const policy = qualityService.loadActiveControlsIntoPolicy(loaded.policy ?? fallback, project.id);
+  const request = opts.requestId
+    ? qualityService.getWorkRequest(opts.requestId)
+    : qualityService.createWorkRequest({
+        source: opts.roomId ? "room" : "session",
+        intent: "code-change",
+        correlationId: `${opts.roomId ?? opts.sessionId}:${opts.taskId ?? Date.now()}`,
+        mode: opts.mode,
+        ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
+        sessionId: opts.sessionId,
+      });
+  if (!request) return undefined;
+  qualityService.updateWorkRequestStatus(request.id, "dispatched");
+  const workItem = qualityService.createWorkItem({
+    requestId: request.id,
+    projectId: project.id,
+    mode: opts.mode,
+    sessionId: opts.sessionId,
+    ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
+    ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
+    ...(opts.specId !== undefined ? { specId: opts.specId } : {}),
+    ...(opts.specVersion !== undefined ? { specVersion: opts.specVersion } : {}),
+  });
+  const baseline = collectBaseline(project);
+  const policyHash = hashPolicy(policy);
+  let run = qualityService.startRun({
+    projectId: project.id,
+    trigger: opts.trigger,
+    risk: opts.risk,
+    implementerSessionId: opts.sessionId,
+    ...(opts.reviewerSessionId !== undefined ? { reviewerSessionId: opts.reviewerSessionId } : {}),
+    policyVersion: String(policy.version),
+    policyHash,
+    workItemId: workItem.id,
+    generation: 1,
+    ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
+    ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
+    ...(baseline.revision ? { baseRevision: baseline.revision } : {}),
+    ...(baseline.dirtyHash !== null ? { dirtyBaselineHash: baseline.dirtyHash } : {}),
+    budget: { maxFixRounds: getPolicyMaxFixRounds(policy), timeoutMs: 60000 },
+  });
+  const snapshot = writePolicySnapshot(policy, qualityArtifactDir, run.id);
+  run = { ...run, policyHash: snapshot.hash, policySnapshotRef: snapshot.ref };
+  qualityService.saveRun(run);
+  qualityService.updateWorkItemStatus(workItem.id, "active", run.id, 1);
+  qualityService.advance(run.id, "preflight");
+  const lease = writerLeaseManager.acquire(project.id, opts.sessionId, run.id);
+  if (!lease.ok) {
+    qualityService.advance(run.id, "inconclusive");
+    return { run: qualityService.getRun(run.id)!, workItem, project };
+  }
+  runPermissionManager.bindSession(opts.sessionId, run.id, "implementer");
+  if (opts.reviewerSessionId) {
+    runPermissionManager.bindSession(opts.reviewerSessionId, run.id, "reviewer");
+  }
+  runContextRegistry.bind(opts.sessionId, {
+    runId: run.id,
+    ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
+    role: "implementer",
+  }, opts.roomId);
+  qualityService.advance(run.id, "implementing");
+  return { run: qualityService.getRun(run.id)!, workItem, project };
+}
+
+function completeQualityRun(runId: string): QualityRun | undefined {
+  const run = qualityService.getRun(runId);
+  if (!run || isTerminal(run.stage)) return run;
+  if (run.stage !== "implementing") return run;
+  qualityService.advance(runId, "collecting");
+  return qualityService.advance(runId, "quick-verifying");
 }
 
 const qualityIntegration: QualityIntegration = {
@@ -373,38 +642,34 @@ const qualityIntegration: QualityIntegration = {
     if (!project) return undefined;
     const { policy } = qualityService.getPolicy(project.id);
     const reviewerSessionId = policy.review.reviewerSessionId;
-    const run = qualityService.startRun({
-      projectId: project.id,
+    if (!opts.sessionId) return undefined;
+    const prepared = prepareQualityRun({
+      sessionId: opts.sessionId,
       trigger: "conductor",
+      risk: "medium",
+      mode: "conductor",
       ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
       ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
-      ...(opts.sessionId !== undefined ? { implementerSessionId: opts.sessionId } : {}),
+      filePaths,
       ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
-      risk: "medium",
-      policyVersion: String(policy.version),
-      budget: { maxFixRounds: policy.review.maxFixRounds ?? 2, timeoutMs: 60000 },
     });
-    if (opts.sessionId) {
-      runPermissionManager.bindSession(opts.sessionId, run.id, "implementer");
+    if (!prepared) return undefined;
+    // Conductor 任务派发后 agent 尚未实现，run 停留在 implementing
+    return prepared.run.id;
+  },
+  completeRunForTask(runId, _output, _artifacts) {
+    completeQualityRun(runId);
+  },
+  cancelRunForTask(runId) {
+    const run = qualityService.getRun(runId);
+    if (run && !isTerminal(run.stage)) {
+      qualityService.cancelRun(runId);
     }
-    if (reviewerSessionId) {
-      runPermissionManager.bindSession(reviewerSessionId, run.id, "reviewer");
-    }
-    // 状态机自驱：Conductor 创建 run 后立即把它从 queued 推到 quick-verifying，触发 gate runner
-    try {
-      qualityService.advance(run.id, "preflight");
-      qualityService.advance(run.id, "implementing");
-      qualityService.advance(run.id, "collecting");
-      qualityService.advance(run.id, "quick-verifying");
-    } catch (err) {
-      logError("quality auto-advance", `run ${run.id} failed to advance: ${String(err)}`);
-    }
-    return run.id;
   },
   onRunTerminal(runId, cb) {
     const run = qualityService.getRun(runId);
     if (run && isTerminal(run.stage)) {
-      cb(run.stage === "accepted");
+      cb(run.stage === "accepted" || run.stage === "waived");
     } else {
       qualityRunCallbacks.set(runId, cb);
     }
@@ -416,10 +681,19 @@ const qualityIntegration: QualityIntegration = {
       return;
     }
     if (isTerminal(run.stage)) {
-      cb(run.stage === "accepted");
+      cb(run.stage === "accepted" || run.stage === "waived");
       return;
     }
     qualityRunCallbacks.set(runId, cb);
+  },
+  getRunEnforcement(runId) {
+    const run = qualityService.getRun(runId);
+    if (!run) return undefined;
+    const project = qualityService.getProject(run.projectId);
+    if (!project) return undefined;
+    const policy = policyForRun(run, project);
+    if (!policy) return "require-pass";
+    return getPolicyEnforcement(policy);
   },
 };
 
@@ -936,14 +1210,12 @@ function onTurnEnd(sessionId: string, text: string): void {
   }
 }
 
-const sessionsWithFileChanges = new Set<string>();
-
 function onFileWrite(sessionId: string, relPath: string, existed: boolean, content?: string): void {
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
   const author = meta.name;
   const summary = existed ? "修改" : "新增";
-  sessionsWithFileChanges.add(sessionId);
+  dirtyTracker.markDirty(sessionId, "file", [relPath]);
 
   sessionLedger.addFile(sessionId, { author, summary, path: relPath });
   // fs 通道掌握准确的 existed 信息，由它修正/产生 add/modify 事件（与 tool_call edit 去重）
@@ -982,7 +1254,7 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
   };
   const action = actionMap[kind] ?? "command";
   if (kind === "edit" || kind === "delete" || kind === "move") {
-    sessionsWithFileChanges.add(sessionId);
+    dirtyTracker.markDirty(sessionId, "tool", paths);
   }
 
   for (const relPath of paths) {
@@ -1036,14 +1308,14 @@ function onAgentEvent(event: HubEvent): void {
       .onPromptDone(sessionId!, internalOutput)
       .then((handled) => {
         persistState();
-        if (!handled && sessionsWithFileChanges.has(sessionId!)) {
+        if (!handled && dirtyTracker.isDirty(sessionId!)) {
           triggerGateForSession(sessionId!, internalOutput);
         }
-        sessionsWithFileChanges.delete(sessionId!);
+        dirtyTracker.clearDirty(sessionId!);
       })
       .catch((err) => {
         logError("room-modes", err);
-        sessionsWithFileChanges.delete(sessionId!);
+        dirtyTracker.clearDirty(sessionId!);
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
@@ -1071,24 +1343,27 @@ function triggerGateForSession(sessionId: string, output: string): void {
   const ledgerFiles = sessionLedger.getArtifacts(sessionId)
     .filter((a) => a.path)
     .map((a) => a.path!);
-  const allPaths = [...new Set([...filePaths, ...ledgerFiles])];
+  const dirtyPaths = dirtyTracker.collectPaths(sessionId);
+  const allPaths = [...new Set([...filePaths, ...ledgerFiles, ...dirtyPaths])];
   const project = findProjectForPaths(projects, allPaths);
   if (!project) return;
   const { policy } = qualityService.getPolicy(project.id);
   const reviewerSessionId = policy.review.reviewerSessionId;
-  const run = qualityService.startRun({
-    projectId: project.id,
+  // 复用 L0 创建的 WorkRequest/RequirementSpec，打通 L0-L3 链路
+  const l0Spec = l0PendingSpecs.get(sessionId);
+  if (l0Spec) l0PendingSpecs.delete(sessionId);
+  const prepared = prepareQualityRun({
+    sessionId,
     trigger: "interactive",
-    implementerSessionId: sessionId,
-    ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
     risk: "medium",
-    policyVersion: String(policy.version),
-    budget: { maxFixRounds: policy.review.maxFixRounds ?? 2, timeoutMs: 60000 },
+    mode: "session",
+    filePaths: allPaths,
+    ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
+    ...(l0Spec ? { requestId: l0Spec.requestId, specId: l0Spec.specId, specVersion: l0Spec.specVersion } : {}),
   });
-  runPermissionManager.bindSession(sessionId, run.id, "implementer");
-  if (reviewerSessionId) {
-    runPermissionManager.bindSession(reviewerSessionId, run.id, "reviewer");
-  }
+  if (!prepared) return;
+  // agent 已完成实现，直接推进到 quick-verifying
+  completeQualityRun(prepared.run.id);
 }
 
 function broadcast(event: HubEvent): void {
@@ -2066,6 +2341,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
           : historyText,
       });
+      // L0 横切：shadow 模式不阻断，仅广播 clarificationRequired
+      await runL0Intercept({
+        text: historyText,
+        source: "room",
+        correlationId: `room-${roomId}-${Date.now()}`,
+        mode: room.mode,
+        roomId,
+      });
       const result = await roomModeManager.handle(room, historyText, {
         note: roomNote,
         quote,
@@ -2116,6 +2399,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         kind: "user",
         author: "我",
         text: historyText,
+      });
+
+      // L0 横切：shadow 模式不阻断，仅广播 clarificationRequired
+      await runL0Intercept({
+        text: historyText,
+        source: "session",
+        correlationId: `session-${sessionId}-${Date.now()}`,
+        sessionId,
       });
 
       if (note) {
@@ -2337,7 +2628,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "quality.policy.get": {
       const id = String(req.params?.projectId ?? "");
-      return qualityService.getPolicy(id);
+      const project = qualityService.getProject(id);
+      if (!project) throw new Error(`unknown project: ${id}`);
+      const loaded = qualityService.loadPolicyWithVersion(id);
+      return {
+        policy: loaded.policy ?? defaultObservePolicy(),
+        version: loaded.version,
+        source: loaded.source,
+        errors: loaded.errors,
+      };
     }
     case "quality.policy.ensure": {
       const id = String(req.params?.projectId ?? "");
@@ -2358,6 +2657,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         ...(p.baseRevision !== undefined ? { baseRevision: String(p.baseRevision) } : {}),
         ...(p.dirtyBaselineHash !== undefined ? { dirtyBaselineHash: String(p.dirtyBaselineHash) } : {}),
         ...(p.patchHash !== undefined ? { patchHash: String(p.patchHash) } : {}),
+        ...(p.workItemId !== undefined ? { workItemId: String(p.workItemId) } : {}),
+        ...(p.generation !== undefined ? { generation: Number(p.generation) } : {}),
         budget: {
           maxFixRounds: Number(p.maxFixRounds ?? 2),
           timeoutMs: Number(p.timeoutMs ?? 60000),
@@ -2568,6 +2869,318 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const ok = qualityService.deleteBenchmark(id);
       if (!ok) throw new Error(`unknown benchmark: ${id}`);
       return { ok: true };
+    }
+    // ── Phase 3 L0：需求质量门 RPC ────────────────────────────────────
+    case "requirement.classify": {
+      const text = String(req.params?.text ?? "");
+      const intent = qualityService.classifyRequestIntent(text);
+      return { intent };
+    }
+    case "requirement.evaluate": {
+      const text = String(req.params?.text ?? "");
+      const source = String(req.params?.source ?? "room") as "room" | "session" | "scheduler" | "incident" | "manual";
+      const correlationId = String(req.params?.correlationId ?? `corr-${Date.now()}`);
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      const roomId = req.params?.roomId !== undefined ? String(req.params.roomId) : undefined;
+      const sessionId = req.params?.sessionId !== undefined ? String(req.params.sessionId) : undefined;
+      const l0Mode = (req.params?.l0Mode as "shadow" | "suggest" | "require" | undefined) ?? "shadow";
+      const result = await qualityService.handleL0Request({
+        text, source, correlationId,
+        ...(projectId !== undefined ? { projectId } : {}),
+        ...(roomId !== undefined ? { roomId } : {}),
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        l0Mode,
+      });
+      if (result.clarificationRequest) {
+        broadcast({
+          method: "requirement.clarificationRequired",
+          params: {
+            requestId: result.request.id,
+            clarificationRequestId: result.clarificationRequest.id,
+            specId: result.clarificationRequest.specId,
+            specVersion: result.clarificationRequest.specVersion,
+            questions: result.clarificationRequest.questions,
+            canSkip: result.clarificationRequest.canSkip,
+            expiresAt: result.clarificationRequest.expiresAt ?? null,
+          },
+        } as HubEvent);
+      }
+      return result;
+    }
+    case "requirement.clarificationAnswer": {
+      const clarificationRequestId = String(req.params?.clarificationRequestId ?? "");
+      const answers = (req.params?.answers as Array<{ questionId: string; answer: string }>) ?? [];
+      const result = qualityService.answerClarification({ clarificationRequestId, answers });
+      if (!result) throw new Error("clarification not found, already resolved, or expired");
+      broadcast({
+        method: "requirement.clarificationAnswer",
+        params: { clarificationRequestId, specId: result.spec.id, specVersion: result.spec.version },
+      } as HubEvent);
+      broadcast({
+        method: "requirement.specUpdate",
+        params: { requestId: result.request.id, specId: result.spec.id, specVersion: result.spec.version, status: result.spec.status },
+      } as HubEvent);
+      return { spec: result.spec, request: result.request };
+    }
+    case "requirement.clarificationSkip": {
+      const clarificationRequestId = String(req.params?.clarificationRequestId ?? "");
+      const result = qualityService.skipClarification(clarificationRequestId);
+      if (!result) throw new Error("clarification not found or already resolved");
+      broadcast({
+        method: "requirement.clarificationSkip",
+        params: { clarificationRequestId, specId: result.spec.id, specVersion: result.spec.version },
+      } as HubEvent);
+      broadcast({
+        method: "requirement.specUpdate",
+        params: { requestId: result.request.id, specId: result.spec.id, specVersion: result.spec.version, status: result.spec.status },
+      } as HubEvent);
+      return { spec: result.spec, request: result.request };
+    }
+    case "requirement.clarificationCancel": {
+      const clarificationRequestId = String(req.params?.clarificationRequestId ?? "");
+      const result = qualityService.cancelClarification(clarificationRequestId);
+      if (!result) throw new Error("clarification not found");
+      broadcast({
+        method: "requirement.specUpdate",
+        params: { requestId: result.request.id, specId: result.spec.id, specVersion: result.spec.version, status: result.spec.status },
+      } as HubEvent);
+      return { spec: result.spec, request: result.request };
+    }
+    case "requirement.clarificationList": {
+      const requestId = req.params?.requestId !== undefined ? String(req.params.requestId) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { clarifications: qualityService.listClarificationRequests(requestId, limit) };
+    }
+    case "requirement.specList": {
+      const requestId = String(req.params?.requestId ?? "");
+      return { specs: qualityService.listRequirementSpecs(requestId) };
+    }
+    case "requirement.specGet": {
+      const id = String(req.params?.id ?? "");
+      const spec = qualityService.getRequirementSpec(id);
+      if (!spec) throw new Error(`unknown spec: ${id}`);
+      return { spec };
+    }
+    case "requirement.specUpdate": {
+      const id = String(req.params?.id ?? "");
+      const patch = req.params ?? {};
+      const updated = qualityService.updateRequirementSpec(id, {
+        ...(patch.goal !== undefined ? { goal: String(patch.goal) } : {}),
+        ...(patch.acceptanceCriteria !== undefined ? { acceptanceCriteria: patch.acceptanceCriteria as any } : {}),
+        ...(patch.constraints !== undefined ? { constraints: patch.constraints as string[] } : {}),
+        ...(patch.status !== undefined ? { status: String(patch.status) as any } : {}),
+      });
+      if (!updated) throw new Error(`unknown spec: ${id}`);
+      broadcast({ method: "requirement.specUpdate", params: { specId: updated.id, specVersion: updated.version, status: updated.status } } as HubEvent);
+      return { spec: updated };
+    }
+    case "requirement.workRequestList": {
+      const roomId = req.params?.roomId !== undefined ? String(req.params.roomId) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { requests: qualityService.listWorkRequests(roomId, limit) };
+    }
+    case "quality.work.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { items: qualityService.listWorkItems(projectId, limit) };
+    }
+    case "quality.work.create": {
+      const requestId = String(req.params?.requestId ?? "");
+      const projectId = String(req.params?.projectId ?? "");
+      const mode = String(req.params?.mode ?? "mention");
+      const kind = req.params?.kind !== undefined ? String(req.params.kind) : undefined;
+      const specId = req.params?.specId !== undefined ? String(req.params.specId) : undefined;
+      const specVersion = req.params?.specVersion !== undefined ? Number(req.params.specVersion) : undefined;
+      const roomId = req.params?.roomId !== undefined ? String(req.params.roomId) : undefined;
+      const taskId = req.params?.taskId !== undefined ? String(req.params.taskId) : undefined;
+      const sessionId = req.params?.sessionId !== undefined ? String(req.params.sessionId) : undefined;
+      const item = qualityService.createWorkItem({
+        requestId, projectId, mode,
+        ...(kind !== undefined ? { kind: kind as "implementation" | "verification-only" | "remediation" } : {}),
+        ...(specId !== undefined ? { specId } : {}),
+        ...(specVersion !== undefined ? { specVersion } : {}),
+        ...(roomId !== undefined ? { roomId } : {}),
+        ...(taskId !== undefined ? { taskId } : {}),
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      });
+      return { workItem: item };
+    }
+    // ── Phase 4 L3：需求验证门 RPC ────────────────────────────────────
+    case "quality.verification.run": {
+      const runId = String(req.params?.runId ?? "");
+      const specId = String(req.params?.specId ?? "");
+      const runtimeEvidence = req.params?.runtimeEvidence as { description: string; artifactRef?: string }[] | undefined;
+      const manualEvidence = req.params?.manualEvidence as { instruction: string; verifier: string; artifactRef?: string }[] | undefined;
+      const aiInference = req.params?.aiInference as { verifier: string; confidence: number; reasoning: string; expectationId: string }[] | undefined;
+      const waivers = req.params?.waivers as { criterionId: string; reason: string }[] | undefined;
+      const result = qualityService.runVerification({
+        runId, specId,
+        ...(runtimeEvidence !== undefined ? { runtimeEvidence } : {}),
+        ...(manualEvidence !== undefined ? { manualEvidence } : {}),
+        ...(aiInference !== undefined ? { aiInference } : {}),
+        ...(waivers !== undefined ? { waivers } : {}),
+      });
+      if (!result) throw new Error(`verification failed: run ${runId} or spec ${specId} not found`);
+      return result;
+    }
+    case "quality.verification.list": {
+      const runId = String(req.params?.runId ?? "");
+      return { verifications: qualityService.listVerifications(runId) };
+    }
+    case "quality.verification.waive": {
+      const runId = String(req.params?.runId ?? "");
+      const criterionId = String(req.params?.criterionId ?? "");
+      const reason = String(req.params?.reason ?? "");
+      const result = qualityService.waiveCriterion(runId, criterionId, reason);
+      if (!result) throw new Error(`criterion ${criterionId} not found for run ${runId}`);
+      return { verification: result };
+    }
+    // ── Phase 5 L4：受控学习 RPC ─────────────────────────────────────
+    case "quality.observation.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { observations: qualityService.listObservations(projectId, limit) };
+    }
+    case "quality.metric.list": {
+      const projectId = String(req.params?.projectId ?? "");
+      const kind = req.params?.kind !== undefined ? String(req.params.kind) : undefined;
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { metrics: qualityService.listMetrics(projectId, kind, limit) };
+    }
+    case "quality.observation.create": {
+      const projectId = String(req.params?.projectId ?? "");
+      const kind = String(req.params?.kind ?? "") as "check-failure" | "infra-failure" | "finding" | "verification-gap" | "user-feedback" | "contamination";
+      const attribution = String(req.params?.attribution ?? "unknown") as "candidate" | "baseline" | "infrastructure" | "unknown";
+      const runId = req.params?.runId !== undefined ? String(req.params.runId) : undefined;
+      const workItemId = req.params?.workItemId !== undefined ? String(req.params.workItemId) : undefined;
+      const fingerprint = req.params?.fingerprint !== undefined ? String(req.params.fingerprint) : undefined;
+      const evidenceRefs = (req.params?.evidenceRefs as string[]) ?? [];
+      const obs = qualityService.createObservation({
+        projectId, kind, attribution,
+        ...(runId !== undefined ? { runId } : {}),
+        ...(workItemId !== undefined ? { workItemId } : {}),
+        ...(fingerprint !== undefined ? { fingerprint } : {}),
+        evidenceRefs,
+      });
+      return { observation: obs };
+    }
+    case "quality.observation.confirm": {
+      const id = String(req.params?.id ?? "");
+      const result = qualityService.confirmObservation(id);
+      if (!result) throw new Error(`observation ${id} not found`);
+      return { observation: result };
+    }
+    case "quality.observation.confirmToIncident": {
+      const id = String(req.params?.id ?? "");
+      const confirmedBy = String(req.params?.confirmedBy ?? "user");
+      const result = qualityService.confirmObservationToIncident(id, confirmedBy);
+      if (!result) throw new Error(`observation ${id} not found or not candidate`);
+      return result;
+    }
+    case "quality.observation.dismiss": {
+      const id = String(req.params?.id ?? "");
+      const result = qualityService.dismissObservation(id);
+      if (!result) throw new Error(`observation ${id} not found`);
+      return { observation: result };
+    }
+    case "quality.rule.createTyped": {
+      const projectId = String(req.params?.projectId ?? "");
+      const ruleType = String(req.params?.ruleType ?? "") as "check" | "risk" | "requirement" | "verification";
+      const ruleDefinition = req.params?.ruleDefinition as unknown;
+      const evidenceIncidentIds = (req.params?.evidenceIncidentIds as string[]) ?? [];
+      const measuredImpact = req.params?.measuredImpact !== undefined ? String(req.params.measuredImpact) : undefined;
+      const candidate = qualityService.createTypedRule({
+        projectId, ruleType, ruleDefinition: ruleDefinition as never,
+        evidenceIncidentIds,
+        ...(measuredImpact !== undefined ? { measuredImpact } : {}),
+      });
+      return { rule: candidate };
+    }
+    case "quality.rule.approve": {
+      const id = String(req.params?.id ?? "");
+      const approvedBy = String(req.params?.approvedBy ?? "user");
+      const result = qualityService.approveRule(id, approvedBy);
+      return { rule: result };
+    }
+    case "quality.rule.activateShadow": {
+      const id = String(req.params?.id ?? "");
+      const activatedBy = String(req.params?.activatedBy ?? "user");
+      const control = qualityService.activateRuleAsShadow(id, activatedBy);
+      return { control };
+    }
+    case "quality.control.promote": {
+      const controlId = String(req.params?.controlId ?? "");
+      const activatedBy = String(req.params?.activatedBy ?? "user");
+      const result = qualityService.promoteShadowControl(controlId, activatedBy);
+      if (!result) throw new Error(`control ${controlId} not found`);
+      return { control: result };
+    }
+    case "quality.control.retire": {
+      const controlId = String(req.params?.controlId ?? "");
+      const retiredBy = String(req.params?.retiredBy ?? "user");
+      const reason = String(req.params?.reason ?? "");
+      const result = qualityService.retireControl(controlId, retiredBy, reason);
+      if (!result) throw new Error(`control ${controlId} not found`);
+      return { control: result };
+    }
+    case "quality.control.list": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      const includeShadow = req.params?.includeShadow === true;
+      return { controls: qualityService.listActiveControls(projectId, includeShadow) };
+    }
+    case "quality.control.listShadow": {
+      const projectId = req.params?.projectId !== undefined ? String(req.params.projectId) : undefined;
+      return { controls: qualityService.listShadowControls(projectId) };
+    }
+    case "quality.policy.exportPatch": {
+      const projectId = String(req.params?.projectId ?? "");
+      const ruleCandidateId = String(req.params?.ruleCandidateId ?? "");
+      const ruleType = String(req.params?.ruleType ?? "") as "check" | "risk" | "requirement" | "verification";
+      const ruleDefinition = req.params?.ruleDefinition as unknown;
+      const exportedBy = String(req.params?.exportedBy ?? "user");
+      const patch = qualityService.generateExportPatch({
+        projectId, ruleCandidateId, ruleType,
+        rule: ruleDefinition as never,
+        exportedBy,
+      });
+      return { patch };
+    }
+    case "quality.policy.verifyPatch": {
+      const patch = req.params?.patch as unknown;
+      const projectId = String(req.params?.projectId ?? "");
+      const result = qualityService.verifyExportPatch(patch as never, projectId);
+      return result;
+    }
+    case "quality.rule.evaluateSandbox": {
+      const ruleCandidateId = String(req.params?.ruleCandidateId ?? "");
+      const passed = req.params?.passed === true;
+      const checksTotal = Number(req.params?.checksTotal ?? 0);
+      const checksPassed = Number(req.params?.checksPassed ?? 0);
+      const checksFailed = Number(req.params?.checksFailed ?? 0);
+      const checkSummaries = (req.params?.checkSummaries as string[]) ?? [];
+      const falsePositiveRate = req.params?.falsePositiveRate !== undefined ? Number(req.params.falsePositiveRate) : undefined;
+      const reason = String(req.params?.reason ?? "");
+      const result = qualityService.evaluateRuleInSandbox({
+        ruleCandidateId, passed, checksTotal, checksPassed, checksFailed,
+        checkSummaries,
+        ...(falsePositiveRate !== undefined ? { falsePositiveRate } : {}),
+        reason,
+      });
+      return { evaluation: result };
+    }
+    case "quality.rule.recordSandbox": {
+      const ruleId = String(req.params?.ruleId ?? "");
+      const result = req.params?.result as unknown;
+      const updated = qualityService.recordSandboxEvaluation(ruleId, result as never);
+      if (!updated) throw new Error(`rule ${ruleId} not found`);
+      return { rule: updated };
+    }
+    case "quality.policy.migrate": {
+      const projectId = String(req.params?.projectId ?? "");
+      const expectedOldHash = req.params?.expectedOldHash !== undefined ? String(req.params.expectedOldHash) : undefined;
+      const result = qualityService.migratePolicyToV2(projectId, expectedOldHash);
+      if (!result.ok) throw new Error(`migration failed: ${result.errors.join(", ")}`);
+      return result;
     }
     default:
       throw new Error(`unknown method: ${req.method}`);

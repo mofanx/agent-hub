@@ -56,6 +56,7 @@ export type HubEvent =
   | { method: "agent.status"; params: { status: string; detail?: string } }
   | { method: "task.update"; params: { tasks: unknown[] } }
   | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } }
+  | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: unknown; records: unknown[] } }
   | { method: "quality.awaitingApproval"; params: { runId: string; projectId: string; roomId: string | null } }
   | {
       method: "quality.approvalRequest";
@@ -68,7 +69,11 @@ export type HubEvent =
         options: { optionId: string; name: string }[];
       };
     }
-  | { method: "quality.approvalResolved"; params: { requestId: string; outcome: string } };
+  | { method: "quality.approvalResolved"; params: { requestId: string; outcome: string } }
+  | { method: "requirement.clarificationRequired"; params: { requestId: string; clarificationRequestId: string; specId: string; specVersion: number; questions: unknown[]; canSkip: boolean; expiresAt: number | null } }
+  | { method: "requirement.clarificationAnswer"; params: { clarificationRequestId: string; specId: string; specVersion: number } }
+  | { method: "requirement.clarificationSkip"; params: { clarificationRequestId: string; specId: string; specVersion: number } }
+  | { method: "requirement.specUpdate"; params: { requestId: string; specId: string; specVersion: number; status: string } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 

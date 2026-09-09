@@ -11,10 +11,18 @@ import type {
   ReviewFinding,
   QualityIncident,
   RuleCandidate,
+  RuleDefinition,
   ReviewerDecision,
   ReviewerDecisionOutcome,
   QualityBenchmark,
   BenchmarkRun,
+  WorkRequest,
+  RequirementSpec,
+  WorkItem,
+  RequirementVerification,
+  QualityObservation,
+  ActiveControl,
+  ClarificationRequest,
 } from "./quality/types.js";
 
 export type Connection = {
@@ -310,6 +318,144 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_quality_benchmark_runs_benchmark
         ON quality_benchmark_runs(benchmark_id, agent);
+      CREATE TABLE IF NOT EXISTS quality_work_requests (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        mode TEXT,
+        room_id TEXT,
+        session_id TEXT,
+        correlation_id TEXT NOT NULL,
+        turn_id TEXT,
+        raw_input_ref TEXT,
+        intent TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'received',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_work_requests_room
+        ON quality_work_requests(room_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_quality_work_requests_session
+        ON quality_work_requests(session_id, created_at);
+      CREATE TABLE IF NOT EXISTS quality_requirement_specs (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        parent_version INTEGER,
+        goal TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT '{}',
+        acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+        constraints TEXT NOT NULL DEFAULT '[]',
+        risks TEXT NOT NULL DEFAULT '[]',
+        clarifications TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_requirement_specs_request
+        ON quality_requirement_specs(request_id, version);
+      CREATE TABLE IF NOT EXISTS quality_work_items (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        spec_id TEXT,
+        spec_version INTEGER,
+        project_id TEXT NOT NULL,
+        room_id TEXT,
+        task_id TEXT,
+        session_id TEXT,
+        mode TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'implementation',
+        status TEXT NOT NULL DEFAULT 'planned',
+        current_run_id TEXT,
+        current_generation INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_work_items_project
+        ON quality_work_items(project_id, status);
+      CREATE INDEX IF NOT EXISTS idx_quality_work_items_request
+        ON quality_work_items(request_id);
+      CREATE TABLE IF NOT EXISTS quality_requirement_verifications (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        spec_id TEXT NOT NULL,
+        spec_version INTEGER NOT NULL,
+        criterion_id TEXT NOT NULL,
+        expectation_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        method TEXT NOT NULL,
+        evidence_refs TEXT NOT NULL DEFAULT '[]',
+        verifier TEXT NOT NULL,
+        confidence REAL,
+        waiver_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_requirement_verifications_run
+        ON quality_requirement_verifications(run_id);
+      CREATE TABLE IF NOT EXISTS quality_observations (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        run_id TEXT,
+        work_item_id TEXT,
+        kind TEXT NOT NULL,
+        attribution TEXT NOT NULL DEFAULT 'unknown',
+        fingerprint TEXT,
+        fingerprint_version INTEGER,
+        evidence_refs TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_observations_project
+        ON quality_observations(project_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_quality_observations_fingerprint
+        ON quality_observations(project_id, fingerprint);
+      CREATE TABLE IF NOT EXISTS quality_active_controls (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        rule_candidate_id TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        activated_at INTEGER NOT NULL,
+        activated_by TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        retired_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_active_controls_project
+        ON quality_active_controls(project_id, status);
+      CREATE TABLE IF NOT EXISTS quality_clarification_requests (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        spec_id TEXT NOT NULL,
+        spec_version INTEGER NOT NULL,
+        questions TEXT NOT NULL DEFAULT '[]',
+        can_skip INTEGER NOT NULL DEFAULT 1,
+        expires_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        answered_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_clarification_requests_request
+        ON quality_clarification_requests(request_id, status);
+      CREATE TABLE IF NOT EXISTS quality_metrics (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        run_id TEXT,
+        work_item_id TEXT,
+        kind TEXT NOT NULL,
+        stage TEXT,
+        outcome TEXT,
+        duration_ms INTEGER,
+        check_count INTEGER,
+        check_passed INTEGER,
+        check_failed INTEGER,
+        check_infra_failed INTEGER,
+        has_patch INTEGER,
+        fix_rounds INTEGER,
+        cost_tokens INTEGER,
+        cost_model_calls INTEGER,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quality_metrics_project
+        ON quality_metrics(project_id, kind, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_quality_metrics_run
+        ON quality_metrics(run_id);
     `);
     this.migrateSchema();
     this.seedRoles();
@@ -328,6 +474,34 @@ export class Store {
       { table: "roles", column: "cwd", def: "TEXT" },
       { table: "roles", column: "persona", def: "TEXT NOT NULL DEFAULT ''" },
       { table: "roles", column: "builtin", def: "INTEGER NOT NULL DEFAULT 0" },
+      // Phase 0（v3.0 §8.2）：quality_runs 扩展列
+      { table: "quality_runs", column: "work_item_id", def: "TEXT" },
+      { table: "quality_runs", column: "generation", def: "INTEGER" },
+      { table: "quality_runs", column: "policy_hash", def: "TEXT" },
+      { table: "quality_runs", column: "policy_snapshot_ref", def: "TEXT" },
+      { table: "quality_runs", column: "change_set_id", def: "TEXT" },
+      { table: "quality_runs", column: "outcome", def: "TEXT" },
+      // Phase 0（v3.0 §8.3）：quality_incidents 扩展列
+      { table: "quality_incidents", column: "type", def: "TEXT" },
+      { table: "quality_incidents", column: "fingerprint_version", def: "INTEGER" },
+      { table: "quality_incidents", column: "source_observation_ids", def: "TEXT NOT NULL DEFAULT '[]'" },
+      // Phase 5（v3.0 §12）：受控学习扩展列
+      { table: "quality_incidents", column: "confirmed_at", def: "INTEGER" },
+      { table: "quality_incidents", column: "confirmed_by", def: "TEXT" },
+      { table: "quality_rules", column: "rule_type", def: "TEXT" },
+      { table: "quality_rules", column: "rule_definition", def: "TEXT" },
+      { table: "quality_rules", column: "fingerprint_version", def: "INTEGER" },
+      { table: "quality_rules", column: "sandbox_passed", def: "INTEGER" },
+      { table: "quality_rules", column: "approved_by", def: "TEXT" },
+      { table: "quality_rules", column: "approved_at", def: "INTEGER" },
+      { table: "quality_observations", column: "confirmed_at", def: "INTEGER" },
+      { table: "quality_observations", column: "confirmed_by", def: "TEXT" },
+      { table: "quality_observations", column: "attribution_reason", def: "TEXT" },
+      { table: "quality_observations", column: "description", def: "TEXT" },
+      { table: "quality_observations", column: "severity", def: "TEXT" },
+      { table: "quality_active_controls", column: "retired_by", def: "TEXT" },
+      { table: "quality_active_controls", column: "retire_reason", def: "TEXT" },
+      { table: "quality_active_controls", column: "rule_type", def: "TEXT" },
     ];
     for (const { table, column, def } of columns) {
       try {
@@ -739,8 +913,9 @@ export class Store {
         `INSERT INTO quality_runs(id, project_id, room_id, task_id, implementer_session_id,
            reviewer_session_id, trigger, stage, risk, policy_version, base_revision,
            dirty_baseline_hash, patch_hash, fix_round, max_fix_rounds, timeout_ms,
-           verdict, failure_code, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           verdict, failure_code, created_at, updated_at, completed_at,
+           work_item_id, generation, policy_hash, policy_snapshot_ref, change_set_id, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            project_id = excluded.project_id,
            room_id = excluded.room_id,
@@ -760,7 +935,13 @@ export class Store {
            verdict = excluded.verdict,
            failure_code = excluded.failure_code,
            updated_at = excluded.updated_at,
-           completed_at = excluded.completed_at`,
+           completed_at = excluded.completed_at,
+           work_item_id = excluded.work_item_id,
+           generation = excluded.generation,
+           policy_hash = excluded.policy_hash,
+           policy_snapshot_ref = excluded.policy_snapshot_ref,
+           change_set_id = excluded.change_set_id,
+           outcome = excluded.outcome`,
       )
       .run(
         run.id, run.projectId, run.roomId ?? null, run.taskId ?? null,
@@ -770,6 +951,8 @@ export class Store {
         run.fixRound, run.budget.maxFixRounds, run.budget.timeoutMs,
         run.verdict ?? null, run.failureCode ?? null,
         run.createdAt, run.updatedAt, run.completedAt ?? null,
+        run.workItemId ?? null, run.generation ?? null, run.policyHash ?? null,
+        run.policySnapshotRef ?? null, run.changeSetId ?? null, run.outcome ?? null,
       );
   }
 
@@ -799,6 +982,35 @@ export class Store {
 
   deleteQualityRun(id: string): boolean {
     return this.db.prepare("DELETE FROM quality_runs WHERE id = ?").run(id).changes > 0;
+  }
+
+  /** 清除 run 的所有旧 check 结果（修复后复验前调用）。 */
+  clearQualityChecks(runId: string): number {
+    return this.db.prepare("DELETE FROM quality_checks WHERE run_id = ?").run(runId).changes;
+  }
+
+  /** 清除 run 的所有旧 finding（修复后复验前调用）。 */
+  clearQualityFindings(runId: string): number {
+    return this.db.prepare("DELETE FROM quality_findings WHERE run_id = ?").run(runId).changes;
+  }
+
+  /** 清除 run 的所有旧 review decision（修复后复验前调用）。 */
+  clearReviewDecisions(runId: string): number {
+    return this.db.prepare("DELETE FROM quality_review_decisions WHERE run_id = ?").run(runId).changes;
+  }
+
+  /** 清除 run 的所有旧 requirement verification（修复后复验前调用）。 */
+  clearRequirementVerifications(runId: string): number {
+    return this.db.prepare("DELETE FROM quality_requirement_verifications WHERE run_id = ?").run(runId).changes;
+  }
+
+  /** 清除 run 的所有旧证据（check + finding + review decision + requirement verification）。 */
+  clearRunEvidence(runId: string): { checks: number; findings: number; decisions: number; verifications: number } {
+    const checks = this.clearQualityChecks(runId);
+    const findings = this.clearQualityFindings(runId);
+    const decisions = this.clearReviewDecisions(runId);
+    const verifications = this.clearRequirementVerifications(runId);
+    return { checks, findings, decisions, verifications };
   }
 
   // ── quality: checks ────────────────────────────────────────────────
@@ -894,20 +1106,29 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO quality_incidents(id, project_id, source_run_id, description, fingerprint,
-           severity, reproduction, regression_test, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           severity, reproduction, regression_test, status, type, fingerprint_version, source_observation_ids,
+           confirmed_at, confirmed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            description = excluded.description,
            fingerprint = excluded.fingerprint,
            severity = excluded.severity,
            reproduction = excluded.reproduction,
            regression_test = excluded.regression_test,
-           status = excluded.status`,
+           status = excluded.status,
+           type = excluded.type,
+           fingerprint_version = excluded.fingerprint_version,
+           source_observation_ids = excluded.source_observation_ids,
+           confirmed_at = excluded.confirmed_at,
+           confirmed_by = excluded.confirmed_by`,
       )
       .run(
         i.id, i.projectId, i.sourceRunId ?? null, i.description,
         i.fingerprint, i.severity, i.reproduction ?? null,
         i.regressionTest ?? null, i.status,
+        i.type ?? null, i.fingerprintVersion ?? null,
+        JSON.stringify(i.sourceObservationIds ?? []),
+        i.confirmedAt ?? null, i.confirmedBy ?? null,
       );
   }
 
@@ -942,20 +1163,33 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO quality_rules(id, project_id, fingerprint, rule, evidence_incident_ids,
-           recurrence, measured_impact, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           recurrence, measured_impact, status, rule_type, rule_definition,
+           fingerprint_version, sandbox_passed, approved_by, approved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            fingerprint = excluded.fingerprint,
            rule = excluded.rule,
            evidence_incident_ids = excluded.evidence_incident_ids,
            recurrence = excluded.recurrence,
            measured_impact = excluded.measured_impact,
-           status = excluded.status`,
+           status = excluded.status,
+           rule_type = excluded.rule_type,
+           rule_definition = excluded.rule_definition,
+           fingerprint_version = excluded.fingerprint_version,
+           sandbox_passed = excluded.sandbox_passed,
+           approved_by = excluded.approved_by,
+           approved_at = excluded.approved_at`,
       )
       .run(
         r.id, r.projectId, r.fingerprint, r.rule,
         JSON.stringify(r.evidenceIncidentIds), r.recurrence,
         r.measuredImpact ?? null, r.status,
+        r.ruleType ?? null,
+        r.ruleDefinition ? JSON.stringify(r.ruleDefinition) : null,
+        r.fingerprintVersion ?? null,
+        r.sandboxPassed !== undefined ? (r.sandboxPassed ? 1 : 0) : null,
+        r.approvedBy ?? null,
+        r.approvedAt ?? null,
       );
   }
 
@@ -1121,6 +1355,286 @@ export class Store {
       .run(outcome, Date.now(), note ?? existing.note ?? null, id);
     return true;
   }
+
+  // ── Phase 0（v3.0 §8）：WorkRequest / WorkItem / RequirementSpec / Observation CRUD ──
+
+  saveWorkRequest(r: WorkRequest): void {
+    this.db.prepare(`INSERT INTO quality_work_requests
+      (id, source, mode, room_id, session_id, correlation_id, turn_id, raw_input_ref, intent, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        source=excluded.source, mode=excluded.mode, room_id=excluded.room_id, session_id=excluded.session_id,
+        correlation_id=excluded.correlation_id, turn_id=excluded.turn_id, raw_input_ref=excluded.raw_input_ref,
+        intent=excluded.intent, status=excluded.status, updated_at=excluded.updated_at`).run(
+      r.id, r.source, r.mode ?? null, r.roomId ?? null, r.sessionId ?? null, r.correlationId,
+      r.turnId ?? null, r.rawInputRef ?? null, r.intent, r.status, r.createdAt, r.updatedAt,
+    );
+  }
+
+  getWorkRequest(id: string): WorkRequest | undefined {
+    const row = this.db.prepare("SELECT * FROM quality_work_requests WHERE id = ?").get(id) as QualityWorkRequestRow | undefined;
+    return row ? rowToWorkRequest(row) : undefined;
+  }
+
+  listWorkRequests(roomId?: string, limit = 100): WorkRequest[] {
+    const sql = roomId
+      ? "SELECT * FROM quality_work_requests WHERE room_id = ? ORDER BY created_at DESC LIMIT ?"
+      : "SELECT * FROM quality_work_requests ORDER BY created_at DESC LIMIT ?";
+    const rows = (roomId
+      ? this.db.prepare(sql).all(roomId, limit)
+      : this.db.prepare(sql).all(limit)) as QualityWorkRequestRow[];
+    return rows.map(rowToWorkRequest);
+  }
+
+  saveRequirementSpec(s: RequirementSpec): void {
+    this.db.prepare(`INSERT INTO quality_requirement_specs
+      (id, request_id, version, parent_version, goal, scope, acceptance_criteria, constraints, risks, clarifications, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        goal=excluded.goal, scope=excluded.scope, acceptance_criteria=excluded.acceptance_criteria,
+        constraints=excluded.constraints, risks=excluded.risks, clarifications=excluded.clarifications,
+        status=excluded.status, updated_at=excluded.updated_at`).run(
+      s.id, s.requestId, s.version, s.parentVersion ?? null, s.goal,
+      JSON.stringify(s.scope), JSON.stringify(s.acceptanceCriteria), JSON.stringify(s.constraints),
+      JSON.stringify(s.risks), JSON.stringify(s.clarifications), s.status, s.createdAt, s.updatedAt,
+    );
+  }
+
+  getRequirementSpec(id: string): RequirementSpec | undefined {
+    const row = this.db.prepare("SELECT * FROM quality_requirement_specs WHERE id = ?").get(id) as QualityRequirementSpecRow | undefined;
+    return row ? rowToRequirementSpec(row) : undefined;
+  }
+
+  listRequirementSpecs(requestId: string): RequirementSpec[] {
+    const rows = this.db.prepare("SELECT * FROM quality_requirement_specs WHERE request_id = ? ORDER BY version ASC").all(requestId) as QualityRequirementSpecRow[];
+    return rows.map(rowToRequirementSpec);
+  }
+
+  saveWorkItem(w: WorkItem): void {
+    this.db.prepare(`INSERT INTO quality_work_items
+      (id, request_id, spec_id, spec_version, project_id, room_id, task_id, session_id, mode, kind, status, current_run_id, current_generation, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        spec_id=excluded.spec_id, spec_version=excluded.spec_version, status=excluded.status,
+        current_run_id=excluded.current_run_id, current_generation=excluded.current_generation, updated_at=excluded.updated_at`).run(
+      w.id, w.requestId, w.specId ?? null, w.specVersion ?? null, w.projectId, w.roomId ?? null,
+      w.taskId ?? null, w.sessionId ?? null, w.mode, w.kind, w.status, w.currentRunId ?? null,
+      w.currentGeneration, w.createdAt, w.updatedAt,
+    );
+  }
+
+  getWorkItem(id: string): WorkItem | undefined {
+    const row = this.db.prepare("SELECT * FROM quality_work_items WHERE id = ?").get(id) as QualityWorkItemRow | undefined;
+    return row ? rowToWorkItem(row) : undefined;
+  }
+
+  listWorkItems(projectId?: string, limit = 100): WorkItem[] {
+    const sql = projectId
+      ? "SELECT * FROM quality_work_items WHERE project_id = ? ORDER BY created_at DESC LIMIT ?"
+      : "SELECT * FROM quality_work_items ORDER BY created_at DESC LIMIT ?";
+    const rows = (projectId
+      ? this.db.prepare(sql).all(projectId, limit)
+      : this.db.prepare(sql).all(limit)) as QualityWorkItemRow[];
+    return rows.map(rowToWorkItem);
+  }
+
+  saveRequirementVerification(v: RequirementVerification): void {
+    this.db.prepare(`INSERT INTO quality_requirement_verifications
+      (id, run_id, spec_id, spec_version, criterion_id, expectation_id, status, method, evidence_refs, verifier, confidence, waiver_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status=excluded.status, evidence_refs=excluded.evidence_refs, confidence=excluded.confidence,
+        waiver_reason=excluded.waiver_reason`).run(
+      v.id, v.runId, v.specId, v.specVersion, v.criterionId, v.expectationId, v.status, v.method,
+      JSON.stringify(v.evidenceRefs), v.verifier, v.confidence ?? null, v.waiverReason ?? null,
+    );
+  }
+
+  listRequirementVerifications(runId: string): RequirementVerification[] {
+    const rows = this.db.prepare("SELECT * FROM quality_requirement_verifications WHERE run_id = ?").all(runId) as QualityRequirementVerificationRow[];
+    return rows.map(rowToRequirementVerification);
+  }
+
+  saveObservation(o: QualityObservation): void {
+    this.db.prepare(`INSERT INTO quality_observations
+      (id, project_id, run_id, work_item_id, kind, attribution, fingerprint, fingerprint_version,
+       evidence_refs, status, created_at, confirmed_at, confirmed_by, attribution_reason, description, severity)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        attribution=excluded.attribution, fingerprint=excluded.fingerprint, status=excluded.status,
+        confirmed_at=excluded.confirmed_at, confirmed_by=excluded.confirmed_by,
+        attribution_reason=excluded.attribution_reason, description=excluded.description,
+        severity=excluded.severity`).run(
+      o.id, o.projectId, o.runId ?? null, o.workItemId ?? null, o.kind, o.attribution,
+      o.fingerprint ?? null, o.fingerprintVersion ?? null, JSON.stringify(o.evidenceRefs),
+      o.status, o.createdAt,
+      o.confirmedAt ?? null, o.confirmedBy ?? null,
+      o.attributionReason ?? null, o.description ?? null, o.severity ?? null,
+    );
+  }
+
+  listObservations(projectId?: string, limit = 100): QualityObservation[] {
+    const sql = projectId
+      ? "SELECT * FROM quality_observations WHERE project_id = ? ORDER BY created_at DESC LIMIT ?"
+      : "SELECT * FROM quality_observations ORDER BY created_at DESC LIMIT ?";
+    const rows = (projectId
+      ? this.db.prepare(sql).all(projectId, limit)
+      : this.db.prepare(sql).all(limit)) as QualityObservationRow[];
+    return rows.map(rowToObservation);
+  }
+
+  saveActiveControl(c: ActiveControl): void {
+    this.db.prepare(`INSERT INTO quality_active_controls
+      (id, project_id, rule_candidate_id, rule, activated_at, activated_by, status, retired_at,
+       retired_by, retire_reason, rule_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status=excluded.status, retired_at=excluded.retired_at,
+        retired_by=excluded.retired_by, retire_reason=excluded.retire_reason,
+        rule_type=excluded.rule_type`).run(
+      c.id, c.projectId, c.ruleCandidateId, JSON.stringify(c.rule), c.activatedAt,
+      c.activatedBy, c.status, c.retiredAt ?? null,
+      c.retiredBy ?? null, c.retireReason ?? null, c.ruleType ?? null,
+    );
+  }
+
+  listActiveControls(projectId?: string, includeShadow = false): ActiveControl[] {
+    const statusFilter = includeShadow ? "status IN ('active', 'shadow')" : "status = 'active'";
+    const sql = projectId
+      ? `SELECT * FROM quality_active_controls WHERE project_id = ? AND ${statusFilter} ORDER BY activated_at DESC`
+      : `SELECT * FROM quality_active_controls WHERE ${statusFilter} ORDER BY activated_at DESC`;
+    const rows = (projectId
+      ? this.db.prepare(sql).all(projectId)
+      : this.db.prepare(sql).all()) as QualityActiveControlRow[];
+    return rows.map(rowToActiveControl);
+  }
+
+  // ── Phase 3 L0（v3.0 §6.3）：ClarificationRequest CRUD ──────────────
+
+  saveClarificationRequest(r: ClarificationRequest): void {
+    this.db.prepare(`INSERT INTO quality_clarification_requests
+      (id, request_id, spec_id, spec_version, questions, can_skip, expires_at, status, created_at, answered_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        questions=excluded.questions, can_skip=excluded.can_skip,
+        expires_at=excluded.expires_at, status=excluded.status, answered_at=excluded.answered_at`).run(
+      r.id, r.requestId, r.specId, r.specVersion, JSON.stringify(r.questions),
+      r.canSkip ? 1 : 0, r.expiresAt ?? null, r.status, r.createdAt, r.answeredAt ?? null,
+    );
+  }
+
+  getClarificationRequest(id: string): ClarificationRequest | undefined {
+    const row = this.db.prepare("SELECT * FROM quality_clarification_requests WHERE id = ?").get(id) as QualityClarificationRequestRow | undefined;
+    return row ? rowToClarificationRequest(row) : undefined;
+  }
+
+  getPendingClarificationRequest(requestId: string): ClarificationRequest | undefined {
+    const row = this.db.prepare("SELECT * FROM quality_clarification_requests WHERE request_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1").get(requestId) as QualityClarificationRequestRow | undefined;
+    return row ? rowToClarificationRequest(row) : undefined;
+  }
+
+  listClarificationRequests(requestId?: string, limit = 50): ClarificationRequest[] {
+    const sql = requestId
+      ? "SELECT * FROM quality_clarification_requests WHERE request_id = ? ORDER BY created_at DESC LIMIT ?"
+      : "SELECT * FROM quality_clarification_requests ORDER BY created_at DESC LIMIT ?";
+    const rows = (requestId
+      ? this.db.prepare(sql).all(requestId, limit)
+      : this.db.prepare(sql).all(limit)) as QualityClarificationRequestRow[];
+    return rows.map(rowToClarificationRequest);
+  }
+
+  // ── 度量收集（§12）─────────────────────────────────────────────────
+
+  saveQualityMetric(m: QualityMetricRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO quality_metrics(id, project_id, run_id, work_item_id, kind,
+           stage, outcome, duration_ms, check_count, check_passed, check_failed,
+           check_infra_failed, has_patch, fix_rounds, cost_tokens, cost_model_calls, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           stage = excluded.stage,
+           outcome = excluded.outcome,
+           duration_ms = excluded.duration_ms,
+           check_count = excluded.check_count,
+           check_passed = excluded.check_passed,
+           check_failed = excluded.check_failed,
+           check_infra_failed = excluded.check_infra_failed,
+           has_patch = excluded.has_patch,
+           fix_rounds = excluded.fix_rounds,
+           cost_tokens = excluded.cost_tokens,
+           cost_model_calls = excluded.cost_model_calls`,
+      )
+      .run(
+        m.id, m.projectId, m.runId ?? null, m.workItemId ?? null, m.kind,
+        m.stage ?? null, m.outcome ?? null, m.durationMs ?? null,
+        m.checkCount ?? null, m.checkPassed ?? null, m.checkFailed ?? null,
+        m.checkInfraFailed ?? null,
+        m.hasPatch === undefined ? null : (m.hasPatch ? 1 : 0),
+        m.fixRounds ?? null,
+        m.costTokens ?? null, m.costModelCalls ?? null, m.timestamp,
+      );
+  }
+
+  listQualityMetrics(projectId: string, kind?: string, limit = 100): QualityMetricRow[] {
+    const sql = kind
+      ? "SELECT * FROM quality_metrics WHERE project_id = ? AND kind = ? ORDER BY timestamp DESC LIMIT ?"
+      : "SELECT * FROM quality_metrics WHERE project_id = ? ORDER BY timestamp DESC LIMIT ?";
+    const rows = (kind
+      ? this.db.prepare(sql).all(projectId, kind, limit)
+      : this.db.prepare(sql).all(projectId, limit)) as QualityMetricDbRow[];
+    return rows.map(rowToMetric);
+  }
+}
+
+export type QualityMetricRow = {
+  id: string;
+  projectId: string;
+  runId?: string;
+  workItemId?: string;
+  kind: string;
+  stage?: string;
+  outcome?: string;
+  durationMs?: number;
+  checkCount?: number;
+  checkPassed?: number;
+  checkFailed?: number;
+  checkInfraFailed?: number;
+  hasPatch?: boolean;
+  fixRounds?: number;
+  costTokens?: number;
+  costModelCalls?: number;
+  timestamp: number;
+};
+
+type QualityMetricDbRow = {
+  id: string; project_id: string; run_id: string | null; work_item_id: string | null;
+  kind: string; stage: string | null; outcome: string | null; duration_ms: number | null;
+  check_count: number | null; check_passed: number | null; check_failed: number | null;
+  check_infra_failed: number | null; has_patch: number | null; fix_rounds: number | null;
+  cost_tokens: number | null; cost_model_calls: number | null; timestamp: number;
+};
+
+function rowToMetric(r: QualityMetricDbRow): QualityMetricRow {
+  return {
+    id: r.id,
+    projectId: r.project_id,
+    ...(r.run_id !== null ? { runId: r.run_id } : {}),
+    ...(r.work_item_id !== null ? { workItemId: r.work_item_id } : {}),
+    kind: r.kind,
+    ...(r.stage !== null ? { stage: r.stage } : {}),
+    ...(r.outcome !== null ? { outcome: r.outcome } : {}),
+    ...(r.duration_ms !== null ? { durationMs: r.duration_ms } : {}),
+    ...(r.check_count !== null ? { checkCount: r.check_count } : {}),
+    ...(r.check_passed !== null ? { checkPassed: r.check_passed } : {}),
+    ...(r.check_failed !== null ? { checkFailed: r.check_failed } : {}),
+    ...(r.check_infra_failed !== null ? { checkInfraFailed: r.check_infra_failed } : {}),
+    ...(r.has_patch !== null ? { hasPatch: r.has_patch === 1 } : {}),
+    ...(r.fix_rounds !== null ? { fixRounds: r.fix_rounds } : {}),
+    ...(r.cost_tokens !== null ? { costTokens: r.cost_tokens } : {}),
+    ...(r.cost_model_calls !== null ? { costModelCalls: r.cost_model_calls } : {}),
+    timestamp: r.timestamp,
+  };
 }
 
 // ── row mappers ───────────────────────────────────────────────────────
@@ -1159,6 +1673,8 @@ type QualityRunRow = {
   patch_hash: string | null; fix_round: number; max_fix_rounds: number;
   timeout_ms: number; verdict: string | null; failure_code: string | null;
   created_at: number; updated_at: number; completed_at: number | null;
+  work_item_id: string | null; generation: number | null; policy_hash: string | null;
+  policy_snapshot_ref: string | null; change_set_id: string | null; outcome: string | null;
 };
 
 function rowToRun(r: QualityRunRow): QualityRun {
@@ -1183,6 +1699,12 @@ function rowToRun(r: QualityRunRow): QualityRun {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     completedAt: r.completed_at ?? undefined,
+    ...(r.work_item_id !== null && r.work_item_id !== undefined ? { workItemId: r.work_item_id } : {}),
+    ...(r.generation !== null && r.generation !== undefined ? { generation: r.generation } : {}),
+    ...(r.policy_hash !== null && r.policy_hash !== undefined ? { policyHash: r.policy_hash } : {}),
+    ...(r.policy_snapshot_ref !== null && r.policy_snapshot_ref !== undefined ? { policySnapshotRef: r.policy_snapshot_ref } : {}),
+    ...(r.change_set_id !== null && r.change_set_id !== undefined ? { changeSetId: r.change_set_id } : {}),
+    ...(r.outcome !== null && r.outcome !== undefined ? { outcome: r.outcome as QualityRun["outcome"] } : {}),
   };
 }
 
@@ -1242,6 +1764,8 @@ type QualityIncidentRow = {
   id: string; project_id: string; source_run_id: string | null;
   description: string; fingerprint: string; severity: string;
   reproduction: string | null; regression_test: string | null; status: string;
+  type: string | null; fingerprint_version: number | null; source_observation_ids: string | null;
+  confirmed_at: number | null; confirmed_by: string | null;
 };
 
 function rowToIncident(r: QualityIncidentRow): QualityIncident {
@@ -1255,6 +1779,11 @@ function rowToIncident(r: QualityIncidentRow): QualityIncident {
     reproduction: r.reproduction ?? undefined,
     regressionTest: r.regression_test ?? undefined,
     status: r.status as QualityIncident["status"],
+    ...(r.type !== null ? { type: r.type as QualityIncident["type"] } : {}),
+    ...(r.fingerprint_version !== null ? { fingerprintVersion: r.fingerprint_version } : {}),
+    ...(r.source_observation_ids !== null ? { sourceObservationIds: JSON.parse(r.source_observation_ids) as string[] } : {}),
+    ...(r.confirmed_at !== null ? { confirmedAt: r.confirmed_at } : {}),
+    ...(r.confirmed_by !== null ? { confirmedBy: r.confirmed_by } : {}),
   };
 }
 
@@ -1262,11 +1791,18 @@ type QualityRuleRow = {
   id: string; project_id: string; fingerprint: string; rule: string;
   evidence_incident_ids: string; recurrence: number;
   measured_impact: string | null; status: string;
+  rule_type: string | null; rule_definition: string | null;
+  fingerprint_version: number | null; sandbox_passed: number | null;
+  approved_by: string | null; approved_at: number | null;
 };
 
 function rowToRule(r: QualityRuleRow): RuleCandidate {
   let ids: string[] = [];
   try { ids = JSON.parse(r.evidence_incident_ids) as string[]; } catch { /* keep empty */ }
+  let ruleDefinition: RuleDefinition | undefined;
+  try {
+    if (r.rule_definition) ruleDefinition = JSON.parse(r.rule_definition) as RuleDefinition;
+  } catch { /* keep undefined */ }
   return {
     id: r.id,
     projectId: r.project_id,
@@ -1276,6 +1812,12 @@ function rowToRule(r: QualityRuleRow): RuleCandidate {
     recurrence: r.recurrence,
     measuredImpact: r.measured_impact ?? undefined,
     status: r.status as RuleCandidate["status"],
+    ...(r.rule_type !== null ? { ruleType: r.rule_type as RuleCandidate["ruleType"] } : {}),
+    ...(ruleDefinition !== undefined ? { ruleDefinition } : {}),
+    ...(r.fingerprint_version !== null ? { fingerprintVersion: r.fingerprint_version } : {}),
+    ...(r.sandbox_passed !== null ? { sandboxPassed: r.sandbox_passed === 1 } : {}),
+    ...(r.approved_by !== null ? { approvedBy: r.approved_by } : {}),
+    ...(r.approved_at !== null ? { approvedAt: r.approved_at } : {}),
   };
 }
 
@@ -1351,5 +1893,178 @@ function rowToBenchmarkRun(r: QualityBenchmarkRunRow): BenchmarkRun {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     ...(r.completed_at !== null ? { completedAt: r.completed_at } : {}),
+  };
+}
+
+// ── Phase 0 row mappers ──────────────────────────────────────────────
+
+type QualityWorkRequestRow = {
+  id: string; source: string; mode: string | null; room_id: string | null;
+  session_id: string | null; correlation_id: string; turn_id: string | null;
+  raw_input_ref: string | null; intent: string; status: string;
+  created_at: number; updated_at: number;
+};
+
+function rowToWorkRequest(r: QualityWorkRequestRow): WorkRequest {
+  return {
+    id: r.id,
+    source: r.source as WorkRequest["source"],
+    ...(r.mode !== null ? { mode: r.mode } : {}),
+    ...(r.room_id !== null ? { roomId: r.room_id } : {}),
+    ...(r.session_id !== null ? { sessionId: r.session_id } : {}),
+    correlationId: r.correlation_id,
+    ...(r.turn_id !== null ? { turnId: r.turn_id } : {}),
+    ...(r.raw_input_ref !== null ? { rawInputRef: r.raw_input_ref } : {}),
+    intent: r.intent as WorkRequest["intent"],
+    status: r.status as WorkRequest["status"],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+type QualityRequirementSpecRow = {
+  id: string; request_id: string; version: number; parent_version: number | null;
+  goal: string; scope: string; acceptance_criteria: string; constraints: string;
+  risks: string; clarifications: string; status: string;
+  created_at: number; updated_at: number;
+};
+
+function rowToRequirementSpec(r: QualityRequirementSpecRow): RequirementSpec {
+  return {
+    id: r.id,
+    requestId: r.request_id,
+    version: r.version,
+    ...(r.parent_version !== null ? { parentVersion: r.parent_version } : {}),
+    goal: r.goal,
+    scope: JSON.parse(r.scope) as RequirementSpec["scope"],
+    acceptanceCriteria: JSON.parse(r.acceptance_criteria) as RequirementSpec["acceptanceCriteria"],
+    constraints: JSON.parse(r.constraints) as string[],
+    risks: JSON.parse(r.risks) as string[],
+    clarifications: JSON.parse(r.clarifications) as RequirementSpec["clarifications"],
+    status: r.status as RequirementSpec["status"],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+type QualityWorkItemRow = {
+  id: string; request_id: string; spec_id: string | null; spec_version: number | null;
+  project_id: string; room_id: string | null; task_id: string | null; session_id: string | null;
+  mode: string; kind: string; status: string; current_run_id: string | null;
+  current_generation: number; created_at: number; updated_at: number;
+};
+
+function rowToWorkItem(r: QualityWorkItemRow): WorkItem {
+  return {
+    id: r.id,
+    requestId: r.request_id,
+    ...(r.spec_id !== null ? { specId: r.spec_id } : {}),
+    ...(r.spec_version !== null ? { specVersion: r.spec_version } : {}),
+    projectId: r.project_id,
+    ...(r.room_id !== null ? { roomId: r.room_id } : {}),
+    ...(r.task_id !== null ? { taskId: r.task_id } : {}),
+    ...(r.session_id !== null ? { sessionId: r.session_id } : {}),
+    mode: r.mode,
+    kind: r.kind as WorkItem["kind"],
+    status: r.status as WorkItem["status"],
+    ...(r.current_run_id !== null ? { currentRunId: r.current_run_id } : {}),
+    currentGeneration: r.current_generation,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+type QualityRequirementVerificationRow = {
+  id: string; run_id: string; spec_id: string; spec_version: number;
+  criterion_id: string; expectation_id: string; status: string; method: string;
+  evidence_refs: string; verifier: string; confidence: number | null; waiver_reason: string | null;
+};
+
+function rowToRequirementVerification(r: QualityRequirementVerificationRow): RequirementVerification {
+  return {
+    id: r.id,
+    runId: r.run_id,
+    specId: r.spec_id,
+    specVersion: r.spec_version,
+    criterionId: r.criterion_id,
+    expectationId: r.expectation_id,
+    status: r.status as RequirementVerification["status"],
+    method: r.method as RequirementVerification["method"],
+    evidenceRefs: JSON.parse(r.evidence_refs) as string[],
+    verifier: r.verifier,
+    ...(r.confidence !== null ? { confidence: r.confidence } : {}),
+    ...(r.waiver_reason !== null ? { waiverReason: r.waiver_reason } : {}),
+  };
+}
+
+type QualityObservationRow = {
+  id: string; project_id: string; run_id: string | null; work_item_id: string | null;
+  kind: string; attribution: string; fingerprint: string | null; fingerprint_version: number | null;
+  evidence_refs: string; status: string; created_at: number;
+  confirmed_at: number | null; confirmed_by: string | null;
+  attribution_reason: string | null; description: string | null; severity: string | null;
+};
+
+function rowToObservation(r: QualityObservationRow): QualityObservation {
+  return {
+    id: r.id,
+    projectId: r.project_id,
+    ...(r.run_id !== null ? { runId: r.run_id } : {}),
+    ...(r.work_item_id !== null ? { workItemId: r.work_item_id } : {}),
+    kind: r.kind as QualityObservation["kind"],
+    attribution: r.attribution as QualityObservation["attribution"],
+    ...(r.fingerprint !== null ? { fingerprint: r.fingerprint } : {}),
+    ...(r.fingerprint_version !== null ? { fingerprintVersion: r.fingerprint_version } : {}),
+    evidenceRefs: JSON.parse(r.evidence_refs) as string[],
+    status: r.status as QualityObservation["status"],
+    createdAt: r.created_at,
+    ...(r.confirmed_at !== null ? { confirmedAt: r.confirmed_at } : {}),
+    ...(r.confirmed_by !== null ? { confirmedBy: r.confirmed_by } : {}),
+    ...(r.attribution_reason !== null ? { attributionReason: r.attribution_reason } : {}),
+    ...(r.description !== null ? { description: r.description } : {}),
+    ...(r.severity !== null ? { severity: r.severity } : {}),
+  };
+}
+
+type QualityActiveControlRow = {
+  id: string; project_id: string; rule_candidate_id: string; rule: string;
+  activated_at: number; activated_by: string; status: string; retired_at: number | null;
+  retired_by: string | null; retire_reason: string | null; rule_type: string | null;
+};
+
+function rowToActiveControl(r: QualityActiveControlRow): ActiveControl {
+  return {
+    id: r.id,
+    projectId: r.project_id,
+    ruleCandidateId: r.rule_candidate_id,
+    rule: JSON.parse(r.rule) as ActiveControl["rule"],
+    activatedAt: r.activated_at,
+    activatedBy: r.activated_by,
+    status: r.status as ActiveControl["status"],
+    ...(r.retired_at !== null ? { retiredAt: r.retired_at } : {}),
+    ...(r.retired_by !== null ? { retiredBy: r.retired_by } : {}),
+    ...(r.retire_reason !== null ? { retireReason: r.retire_reason } : {}),
+    ...(r.rule_type !== null ? { ruleType: r.rule_type as ActiveControl["ruleType"] } : {}),
+  };
+}
+
+type QualityClarificationRequestRow = {
+  id: string; request_id: string; spec_id: string; spec_version: number;
+  questions: string; can_skip: number; expires_at: number | null;
+  status: string; created_at: number; answered_at: number | null;
+};
+
+function rowToClarificationRequest(r: QualityClarificationRequestRow): ClarificationRequest {
+  return {
+    id: r.id,
+    requestId: r.request_id,
+    specId: r.spec_id,
+    specVersion: r.spec_version,
+    questions: JSON.parse(r.questions) as ClarificationRequest["questions"],
+    canSkip: r.can_skip === 1,
+    ...(r.expires_at !== null ? { expiresAt: r.expires_at } : {}),
+    status: r.status as ClarificationRequest["status"],
+    createdAt: r.created_at,
+    ...(r.answered_at !== null ? { answeredAt: r.answered_at } : {}),
   };
 }
