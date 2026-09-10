@@ -35,6 +35,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 import com.agenthub.ui.Strings
@@ -264,6 +265,8 @@ data class FlowTask(
     val failureMessage: String? = null,
     val output: String? = null,
     val retries: Int = 0,
+    val awaitingApproval: Boolean = false,
+    val quality: QualitySummary? = null,
 )
 
 data class FlowProgress(
@@ -309,6 +312,22 @@ data class QualityRun(
     val workItemId: String? = null,
     val generation: Int? = null,
     val outcome: String? = null,
+    val implementerSessionId: String? = null,
+)
+
+data class QualitySummary(
+    val runId: String,
+    val stage: String,
+    val enforcement: String,
+    val fixRound: Int = 0,
+    val maxFixRounds: Int = 0,
+    val passedChecks: Int = 0,
+    val failedChecks: Int = 0,
+    val findings: Int = 0,
+    val blockingFindings: Int = 0,
+    val verdict: String? = null,
+    val failureCode: String? = null,
+    val awaitingApproval: Boolean = false,
 )
 
 data class QualityCheck(
@@ -592,6 +611,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val qualityIncidents = mutableStateListOf<QualityIncident>()
     val qualityRules = mutableStateListOf<QualityRule>()
     var qualityAwaitingCount by mutableStateOf(0)
+    var sessionQuality by mutableStateOf<QualitySummary?>(null)
     var qualityPolicy by mutableStateOf<QualityPolicyInfo?>(null)
     var qualityProjectId by mutableStateOf<String?>(null)
     var qualityRunId by mutableStateOf<String?>(null)
@@ -1619,6 +1639,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun loadSessionQuality(sessionId: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.run.listBySession", buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("limit", 1)
+                })
+                val runs = result["runs"]?.jsonArray ?: return@launch
+                if (runs.isEmpty()) { sessionQuality = null; return@launch }
+                val run = parseQualityRun(runs[0]!!.jsonObject)
+                if (run.stage == "stale" || run.stage == "cancelled") { sessionQuality = null; return@launch }
+                val detail = hub.call("quality.run.get", buildJsonObject { put("id", run.id) })
+                val checks = detail["checks"]?.jsonArray ?: emptyList()
+                val passed = checks.count { it.jsonObject["status"]?.jsonPrimitive?.content == "passed" }
+                val failed = checks.count { it.jsonObject["status"]?.jsonPrimitive?.content == "failed" }
+                sessionQuality = QualitySummary(
+                    runId = run.id,
+                    stage = run.stage,
+                    enforcement = "require-pass",
+                    fixRound = run.fixRound,
+                    maxFixRounds = run.maxFixRounds,
+                    passedChecks = passed,
+                    failedChecks = failed,
+                    findings = 0,
+                    blockingFindings = 0,
+                    verdict = run.verdict,
+                    failureCode = run.failureCode,
+                    awaitingApproval = run.stage == "awaiting-approval",
+                )
+            } catch (e: Exception) { sessionQuality = null }
+        }
+    }
+
     private fun loadQualityPolicy(projectId: String) {
         viewModelScope.launch {
             try {
@@ -1723,6 +1776,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         workItemId = o["workItemId"]?.jsonPrimitive?.contentOrNull,
         generation = o["generation"]?.jsonPrimitive?.intOrNull,
         outcome = o["outcome"]?.jsonPrimitive?.contentOrNull,
+        implementerSessionId = o["implementerSessionId"]?.jsonPrimitive?.contentOrNull,
     )
 
     private fun parseQualityCheck(o: JsonObject) = QualityCheck(
@@ -2201,6 +2255,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.Chat
         loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
         viewModelScope.launch { refreshSessionArtifacts(session.sessionId) }
+        sessionQuality = null
+        viewModelScope.launch { loadSessionQuality(session.sessionId) }
         refreshCurrentModel()
     }
 
@@ -2222,6 +2278,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 listTab.value = 1
                 currentRoom = updatedRoom
                 currentSession = null
+                sessionQuality = null
                 if (!isSameRoom) {
                     currentArtifacts.clear()
                     currentEvents.clear()
@@ -2401,6 +2458,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun parseFlowTask(obj: JsonObject): FlowTask {
         val artifacts = obj["artifacts"]?.jsonArray?.map { parseFlowArtifact(it.jsonObject) } ?: emptyList()
+        val quality = obj["quality"]?.jsonObject?.let { parseQualitySummary(it) }
         return FlowTask(
             id = obj["id"]?.jsonPrimitive?.content ?: "",
             sessionId = obj["sessionId"]?.jsonPrimitive?.content ?: "",
@@ -2413,8 +2471,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             failureMessage = obj["failureMessage"]?.jsonPrimitive?.contentOrNull,
             output = obj["output"]?.jsonPrimitive?.contentOrNull,
             retries = obj["retries"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            awaitingApproval = obj["awaitingApproval"]?.jsonPrimitive?.booleanOrNull ?: false,
+            quality = quality,
         )
     }
+
+    private fun parseQualitySummary(o: JsonObject) = QualitySummary(
+        runId = o["runId"]?.jsonPrimitive?.content ?: "",
+        stage = o["stage"]?.jsonPrimitive?.content ?: "",
+        enforcement = o["enforcement"]?.jsonPrimitive?.content ?: "require-pass",
+        fixRound = o["fixRound"]?.jsonPrimitive?.intOrNull ?: 0,
+        maxFixRounds = o["maxFixRounds"]?.jsonPrimitive?.intOrNull ?: 0,
+        passedChecks = o["passedChecks"]?.jsonPrimitive?.intOrNull ?: 0,
+        failedChecks = o["failedChecks"]?.jsonPrimitive?.intOrNull ?: 0,
+        findings = o["findings"]?.jsonPrimitive?.intOrNull ?: 0,
+        blockingFindings = o["blockingFindings"]?.jsonPrimitive?.intOrNull ?: 0,
+        verdict = o["verdict"]?.jsonPrimitive?.contentOrNull,
+        failureCode = o["failureCode"]?.jsonPrimitive?.contentOrNull,
+        awaitingApproval = o["awaitingApproval"]?.jsonPrimitive?.booleanOrNull ?: false,
+    )
 
     private fun parseFlowArtifact(obj: JsonObject): FlowArtifact {
         return FlowArtifact(
@@ -3769,6 +3844,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (idx >= 0) qualityRuns[idx] = parsed else qualityRuns.add(0, parsed)
                 qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }
                 if (qualityRunId == parsed.id) loadQualityRun(parsed.id)
+                if (currentSession != null && parsed.implementerSessionId == currentSession!!.sessionId) {
+                    if (parsed.stage != "stale" && parsed.stage != "cancelled") {
+                        val checkStats = p["checkStats"]?.jsonObject
+                        val findingStats = p["findingStats"]?.jsonObject
+                        sessionQuality = QualitySummary(
+                            runId = parsed.id,
+                            stage = parsed.stage,
+                            enforcement = "require-pass",
+                            fixRound = parsed.fixRound,
+                            maxFixRounds = parsed.maxFixRounds,
+                            passedChecks = checkStats?.get("passed")?.jsonPrimitive?.intOrNull ?: 0,
+                            failedChecks = checkStats?.get("failed")?.jsonPrimitive?.intOrNull ?: 0,
+                            findings = findingStats?.get("total")?.jsonPrimitive?.intOrNull ?: 0,
+                            blockingFindings = findingStats?.get("blocking")?.jsonPrimitive?.intOrNull ?: 0,
+                            verdict = parsed.verdict,
+                            failureCode = parsed.failureCode,
+                            awaitingApproval = parsed.stage == "awaiting-approval",
+                        )
+                    } else {
+                        sessionQuality = null
+                    }
+                }
             }
             "quality.awaitingApproval" -> {
                 qualityAwaitingCount = qualityRuns.count { it.stage == "awaiting-approval" }

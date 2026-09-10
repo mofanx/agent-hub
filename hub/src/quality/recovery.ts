@@ -67,8 +67,7 @@ export function recoverRun(
     // stale generation：旧 generation 的 run 标记为 stale
     nextRun = { ...run, stage: "stale", updatedAt: now, completedAt: now, outcome: "inconclusive" };
   } else {
-    nextRun = transition(run, "inconclusive");
-    nextRun = { ...nextRun, failureCode: FAILURE_HUB_RESTART };
+    nextRun = transition(run, "inconclusive", FAILURE_HUB_RESTART);
   }
   return { run: nextRun, checks: updatedChecks };
 }

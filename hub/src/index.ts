@@ -171,7 +171,7 @@ const reviewRunner = (run: { id: string; stage: string }) => {
     logError("review-orchestrator", err);
     // 安全失败：推进到 failed
     try {
-      qualityService.advance(run.id, "failed");
+      qualityService.advance(run.id, "failed", "review-error");
     } catch { /* run 可能已终态 */ }
   });
 };
@@ -220,7 +220,7 @@ const fixerRunner = (run: { id: string; stage: string }) => {
   fixerOrchestrator.runFix(run.id).catch((err) => {
     logError("fixer-orchestrator", err);
     try {
-      qualityService.advance(run.id, "failed");
+      qualityService.advance(run.id, "failed", "fixer-error");
     } catch { /* run 可能已终态 */ }
   });
 };
@@ -262,12 +262,12 @@ function makeGateRunner(tier: CheckTier): (run: { id: string; stage: string }) =
     const project = qualityService.getProject(current.projectId);
     if (!project) {
       logWarn("gate-runner", `unknown project ${current.projectId} for run ${runId}`);
-      try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
+      try { qualityService.advance(runId, "inconclusive", "infra-no-project"); } catch { /* */ }
       return;
     }
     const policy = policyForRun(current, project);
     if (!policy) {
-      try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
+      try { qualityService.advance(runId, "inconclusive", "infra-no-policy"); } catch { /* */ }
       return;
     }
     const baseline = baselineForRun(current, project);
@@ -297,7 +297,7 @@ function makeGateRunner(tier: CheckTier): (run: { id: string; stage: string }) =
       advanceAfterGate(runId, result, qualityService.getRun(runId) ?? runForAdvance, policy, tier);
     }).catch((err) => {
       logError("gate-runner", err);
-      try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
+      try { qualityService.advance(runId, "inconclusive", "l1-infra-failed"); } catch { /* */ }
     });
   };
 }
@@ -325,9 +325,9 @@ function advanceAfterGate(
     const checks = qualityService.listChecks(runId);
     console.log(`[hub] gate-runner: full gate passed for run ${runId}, checks=${checks.length}, patchHash=${run.patchHash ?? "none"}, workItemId=${run.workItemId ?? "none"}`);
     if (!checks.some((check) => check.status === "passed")) {
-      qualityService.advance(runId, "inconclusive");
+      qualityService.advance(runId, "inconclusive", "l1-no-passed-checks");
     } else if (!run.patchHash) {
-      qualityService.advance(runId, "inconclusive");
+      qualityService.advance(runId, "inconclusive", "no-patch");
     } else {
       // L3 接入：full-verifying 通过后，若有 spec 且 verification 模式非 off，进入 requirement-verifying
       const hasSpec = run.workItemId !== undefined && qualityService.getWorkItem(run.workItemId)?.specId !== undefined;
@@ -349,7 +349,7 @@ function advanceAfterGate(
   if (gate.inconclusive || (!gate.codeFailed && gate.infraFailed)) {
     logWarn("gate-runner", `run ${runId} ${tier} gate inconclusive`);
     console.log(`[hub] gate-runner: ${tier} gate inconclusive for run ${runId}, gate=${JSON.stringify({ passed: gate.passed, inconclusive: gate.inconclusive, codeFailed: gate.codeFailed, infraFailed: gate.infraFailed })}`);
-    try { qualityService.advance(runId, "inconclusive"); } catch { /* */ }
+    try { qualityService.advance(runId, "inconclusive", "l1-inconclusive"); } catch { /* */ }
     return;
   }
   if (gate.codeFailed && run.fixRound < run.budget.maxFixRounds) {
@@ -357,7 +357,7 @@ function advanceAfterGate(
     return;
   }
   console.log(`[hub] gate-runner: ${tier} gate fallback to ${gate.codeFailed ? "failed" : "inconclusive"} for run ${runId}, gate=${JSON.stringify({ passed: gate.passed, codeFailed: gate.codeFailed, infraFailed: gate.infraFailed })}`);
-  try { qualityService.advance(runId, gate.codeFailed ? "failed" : "inconclusive"); } catch { /* */ }
+  try { qualityService.advance(runId, gate.codeFailed ? "failed" : "inconclusive", gate.codeFailed ? "l1-check-failed" : "l1-inconclusive"); } catch { /* */ }
 }
 
 const quickRunner = makeGateRunner("quick");
@@ -607,7 +607,7 @@ function prepareQualityRun(opts: {
   qualityService.advance(run.id, "preflight");
   const lease = writerLeaseManager.acquire(project.id, opts.sessionId, run.id);
   if (!lease.ok) {
-    qualityService.advance(run.id, "inconclusive");
+    qualityService.advance(run.id, "inconclusive", "lease-failed");
     return { run: qualityService.getRun(run.id)!, workItem, project };
   }
   runPermissionManager.bindSession(opts.sessionId, run.id, "implementer");
@@ -694,6 +694,29 @@ const qualityIntegration: QualityIntegration = {
     const policy = policyForRun(run, project);
     if (!policy) return "require-pass";
     return getPolicyEnforcement(policy);
+  },
+  getRunSummary(runId) {
+    const run = qualityService.getRun(runId);
+    if (!run) return undefined;
+    const checks = qualityService.listChecks(runId);
+    const findings = qualityService.listFindings(runId);
+    const project = qualityService.getProject(run.projectId);
+    const policy = project ? policyForRun(run, project) : undefined;
+    const enforcement = policy ? getPolicyEnforcement(policy) : "require-pass";
+    return {
+      runId,
+      stage: run.stage,
+      enforcement,
+      fixRound: run.fixRound,
+      maxFixRounds: run.budget.maxFixRounds,
+      passedChecks: checks.filter((c) => c.status === "passed").length,
+      failedChecks: checks.filter((c) => c.status === "failed").length,
+      findings: findings.length,
+      blockingFindings: findings.filter((f) => f.blocking).length,
+      ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
+      ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
+      awaitingApproval: run.stage === "awaiting-approval",
+    };
   },
 };
 
@@ -2709,13 +2732,19 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
       return { runs: qualityService.listRuns(projectId, limit) };
     }
+    case "quality.run.listBySession": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const limit = req.params?.limit !== undefined ? Number(req.params.limit) : undefined;
+      return { runs: qualityService.listRunsBySession(sessionId, limit) };
+    }
     case "quality.run.get": {
       const id = String(req.params?.id ?? "");
       const run = qualityService.getRun(id);
       if (!run) throw new Error(`unknown run: ${id}`);
       const checks = qualityService.listChecks(id);
       const findings = qualityService.listFindings(id);
-      return { run, checks, findings };
+      const verifications = qualityService.listVerifications(id);
+      return { run, checks, findings, verifications };
     }
     case "quality.run.cancel": {
       const id = String(req.params?.id ?? "");

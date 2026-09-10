@@ -65,7 +65,7 @@ export class IllegalTransitionError extends Error {
  * - fixing → collecting 时 fixRound +1；
  * - full-verifying → accepted 时要求 patchHash 已存在。
  */
-export function transition(run: QualityRun, to: QualityStage): QualityRun {
+export function transition(run: QualityRun, to: QualityStage, failureCode?: string): QualityRun {
   if (!canTransition(run.stage, to)) throw new IllegalTransitionError(run.stage, to);
 
   const now = Date.now();
@@ -89,8 +89,10 @@ export function transition(run: QualityRun, to: QualityStage): QualityRun {
     } else if (to === "failed") {
       next.verdict = "fail";
       next.outcome = "failed";
+      if (failureCode !== undefined) next.failureCode = failureCode;
     } else if (to === "inconclusive") {
       next.outcome = "inconclusive";
+      if (failureCode !== undefined) next.failureCode = failureCode;
     } else if (to === "waived") {
       next.outcome = "waived";
     }

@@ -88,6 +88,21 @@ export interface FileTreeNode {
   size?: number;
 }
 
+export interface QualitySummary {
+  runId: string;
+  stage: string;
+  enforcement: string;
+  fixRound: number;
+  maxFixRounds: number;
+  passedChecks: number;
+  failedChecks: number;
+  findings: number;
+  blockingFindings: number;
+  verdict?: string;
+  failureCode?: string;
+  awaitingApproval: boolean;
+}
+
 export interface FlowTask {
   id: string;
   sessionId: string;
@@ -100,6 +115,8 @@ export interface FlowTask {
   failureMessage?: string;
   output?: string;
   retries?: number;
+  awaitingApproval?: boolean;
+  quality?: QualitySummary;
 }
 
 export interface ArtifactInfo {

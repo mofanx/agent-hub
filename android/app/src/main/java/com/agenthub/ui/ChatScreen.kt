@@ -93,6 +93,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
@@ -157,6 +158,7 @@ import com.agenthub.ContextUsage
 import com.agenthub.FlowArtifact
 import com.agenthub.FlowInfo
 import com.agenthub.FlowTask
+import com.agenthub.QualitySummary
 import com.agenthub.TokenUsage
 
 private fun formatNumber(n: Long): String = when {
@@ -448,6 +450,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         "blackboard" -> if (isRoom) BlackboardPanel(vm)
                         "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
                         "event" -> EventPanel(vm.currentEvents, vm)
+                    }
+                    if (!isRoom && vm.sessionQuality != null) {
+                        QualityStatusBar(vm.sessionQuality!!, vm)
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -1638,6 +1643,120 @@ private fun RawChatBubble(
     }
 }
 
+private val STAGE_LABELS = mapOf(
+    "queued" to "排队中", "preflight" to "预检中", "implementing" to "实现中", "collecting" to "收集变更",
+    "quick-verifying" to "L1 快速检查", "full-verifying" to "L1 完整检查", "fixing" to "自动修复中",
+    "reviewing" to "AI 审查中", "requirement-verifying" to "L3 需求验证", "awaiting-approval" to "等待审批",
+    "accepted" to "验证通过", "failed" to "验证未通过", "inconclusive" to "无法判定",
+    "waived" to "已豁免", "cancelled" to "已取消", "quarantined" to "已隔离", "stale" to "已过期",
+)
+
+private val FAILURE_CODE_LABELS = mapOf(
+    "l1-check-failed" to "L1 确定性检查未通过",
+    "l1-infra-failed" to "检查基础设施失败",
+    "l1-inconclusive" to "L1 检查无法判定",
+    "l1-no-passed-checks" to "无通过的检查",
+    "l3-verification-failed" to "L3 需求验证未通过",
+    "l3-inconclusive" to "L3 需求证据不足",
+    "fixer-budget-exhausted" to "自动修复预算耗尽",
+    "fixer-session-error" to "修复会话创建失败",
+    "fixer-prompt-error" to "修复执行失败",
+    "fixer-quick-gate-error" to "修复后检查失败",
+    "fixer-infra-failed" to "修复基础设施失败",
+    "fixer-no-fixable" to "无可修复的问题",
+    "fixer-error" to "修复流程异常",
+    "review-error" to "AI 审查异常",
+    "hub-restart" to "Hub 重启导致中断",
+    "infra-no-project" to "未找到质量项目",
+    "infra-no-policy" to "未找到质量策略",
+    "no-patch" to "无代码变更",
+    "lease-failed" to "写锁获取失败",
+)
+
+private fun qualityStageLabel(stage: String) = STAGE_LABELS[stage] ?: stage
+private fun qualityFailureLabel(code: String?) = code?.let { FAILURE_CODE_LABELS[it] ?: it }
+
+@Composable
+private fun QualityStatusBar(q: QualitySummary, vm: ChatViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+    val label = qualityStageLabel(q.stage)
+    val fixInfo = if (q.stage == "fixing") " (${q.fixRound}/${q.maxFixRounds})" else ""
+    val checkInfo = if (q.passedChecks + q.failedChecks > 0) " · L1 ${q.passedChecks}/${q.passedChecks + q.failedChecks}" else ""
+    val failLabel = qualityFailureLabel(q.failureCode)
+    val isTerminal = q.stage in listOf("accepted", "failed", "inconclusive", "waived", "cancelled")
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🛡", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(4.dp))
+                Text("$label$fixInfo$checkInfo", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                failLabel?.let {
+                    Spacer(Modifier.width(6.dp))
+                    Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                }
+                if (q.awaitingApproval) {
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = { vm.qualityRunAction(q.runId, "approve") },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) { Text("批准", style = MaterialTheme.typography.labelSmall) }
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedButton(
+                        onClick = { vm.qualityRunAction(q.runId, "reject") },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) { Text("拒绝", style = MaterialTheme.typography.labelSmall) }
+                } else if (!isTerminal) {
+                    Spacer(Modifier.weight(1f))
+                    Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                }
+            }
+            if (expanded) {
+                Spacer(Modifier.height(4.dp))
+                QualitySummaryCard(q, q.runId, vm)
+                Text("run: ${q.runId}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 2.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun QualitySummaryCard(q: QualitySummary, runId: String?, vm: ChatViewModel) {
+    val label = qualityStageLabel(q.stage)
+    val fixInfo = if (q.stage == "fixing") " (${q.fixRound}/${q.maxFixRounds})" else ""
+    val checkInfo = if (q.passedChecks + q.failedChecks > 0) " · L1 ${q.passedChecks}通过 ${q.failedChecks}失败" else ""
+    val findingInfo = if (q.findings > 0) " · ${q.findings} findings${if (q.blockingFindings > 0) " (${q.blockingFindings} blocking)" else ""}" else ""
+    val failLabel = qualityFailureLabel(q.failureCode)
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(4.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(8.dp)) {
+            Text("🛡 $label$fixInfo$checkInfo$findingInfo", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            failLabel?.let {
+                Spacer(Modifier.height(2.dp))
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (q.awaitingApproval && runId != null) {
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = { vm.qualityRunAction(runId, "approve") },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    ) { Text("批准", style = MaterialTheme.typography.labelSmall) }
+                    OutlinedButton(
+                        onClick = { vm.qualityRunAction(runId, "reject") },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    ) { Text("拒绝", style = MaterialTheme.typography.labelSmall) }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
     if (flow == null || flow.tasks.isEmpty()) return
@@ -1697,7 +1816,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->
-                    FlowTaskRow(task, showRetry) { vm.retryTask(task.id) }
+                    FlowTaskRow(task, showRetry, vm) { vm.retryTask(task.id) }
                 }
             }
         }
@@ -1705,7 +1824,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
 }
 
 @Composable
-private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, onRetry: () -> Unit) {
+private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, onRetry: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val icon = when (task.status) {
         "done" -> "✓"
@@ -1724,7 +1843,9 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, onRetry: () -> Unit)
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() || task.retries > 0
+    val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() || task.retries > 0 || task.quality != null
+    val isFixing = task.quality?.stage == "fixing"
+    val showRetryBtn = showRetry && task.status == "failed" && !isFixing
     Column(Modifier.padding(vertical = 3.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1776,9 +1897,13 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, onRetry: () -> Unit)
                     Spacer(Modifier.height(2.dp))
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
+                task.quality?.let { q ->
+                    Spacer(Modifier.height(4.dp))
+                    QualitySummaryCard(q, task.qualityRunId, vm)
+                }
             }
         }
-        if (showRetry && task.status == "failed") {
+        if (showRetryBtn) {
             Spacer(Modifier.height(4.dp))
             OutlinedButton(
                 onClick = onRetry,

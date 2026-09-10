@@ -980,6 +980,13 @@ export class Store {
     return rows.map(rowToRun);
   }
 
+  listQualityRunsBySession(sessionId: string, limit = 100): QualityRun[] {
+    const rows = this.db
+      .prepare("SELECT * FROM quality_runs WHERE implementer_session_id = ? ORDER BY updated_at DESC LIMIT ?")
+      .all(sessionId, limit) as QualityRunRow[];
+    return rows.map(rowToRun);
+  }
+
   deleteQualityRun(id: string): boolean {
     return this.db.prepare("DELETE FROM quality_runs WHERE id = ?").run(id).changes > 0;
   }

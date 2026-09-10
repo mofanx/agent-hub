@@ -159,7 +159,7 @@ export class FixerOrchestrator {
     // 0. 检查 fix 预算
     if (run.fixRound > run.budget.maxFixRounds) {
       logWarn("fixer", `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing`);
-      const failed = this.service.advance(runId, "failed");
+      const failed = this.service.advance(runId, "failed", "fixer-budget-exhausted");
       return {
         runId,
         fixed: false,
@@ -179,7 +179,7 @@ export class FixerOrchestrator {
 
     if (fixable.length === 0) {
       logWarn("fixer", `run ${runId} has no fixable findings (open+blocking+suggestion), failing`);
-      const failed = this.service.advance(runId, "failed");
+      const failed = this.service.advance(runId, "failed", "fixer-no-fixable");
       return {
         runId,
         fixed: false,
@@ -246,7 +246,7 @@ export class FixerOrchestrator {
     } catch (err) {
       logWarn("fixer", `fixer session creation failed for run ${runId}: ${String(err)}`);
       this.cleanupWorktree(runId, project);
-      const failed = this.service.advance(runId, "failed");
+      const failed = this.service.advance(runId, "failed", "fixer-session-error");
       return {
         runId,
         fixed: false,
@@ -268,7 +268,7 @@ export class FixerOrchestrator {
     } catch (err) {
       logWarn("fixer", `fixer prompt failed for run ${runId}: ${String(err)}`);
       this.cleanupWorktree(runId, project);
-      const failed = this.service.advance(runId, "failed");
+      const failed = this.service.advance(runId, "failed", "fixer-prompt-error");
       return {
         runId,
         fixed: false,
@@ -322,7 +322,7 @@ export class FixerOrchestrator {
     } catch (err) {
       logWarn("fixer", `quick gate failed for run ${runId}: ${String(err)}`);
       this.cleanupWorktree(runId, project);
-      const failed = this.service.advance(runId, "failed");
+      const failed = this.service.advance(runId, "failed", "fixer-quick-gate-error");
       return {
         runId,
         fixed: false,
@@ -402,7 +402,7 @@ export class FixerOrchestrator {
 
     if (gate.infraFailed || gate.cancelled) {
       logWarn("fixer", `run ${runId} quick gate infra-failed/cancelled, failing`);
-      const next = this.service.advance(runId, "failed");
+      const next = this.service.advance(runId, "failed", "fixer-infra-failed");
       return next.stage;
     }
 
@@ -413,7 +413,7 @@ export class FixerOrchestrator {
         "fixer",
         `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing after quick gate`,
       );
-      const next = this.service.advance(runId, "failed");
+      const next = this.service.advance(runId, "failed", "fixer-budget-exhausted");
       return next.stage;
     }
 

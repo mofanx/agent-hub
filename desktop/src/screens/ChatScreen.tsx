@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
-import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, QualitySummary, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
@@ -748,6 +748,10 @@ export function ChatScreen() {
           </>
         )}
       </div>
+
+      {store.sessionQuality && !isRoom && (
+        <QualityStatusBar quality={store.sessionQuality} store={store} />
+      )}
 
       <div className="chat-body">
         <div className="chat-main">
@@ -2077,6 +2081,108 @@ function renderMarkdown(text: string): string {
   }
 }
 
+const STAGE_LABELS: Record<string, string> = {
+  "queued": "排队中", "preflight": "预检中", "implementing": "实现中", "collecting": "收集变更",
+  "quick-verifying": "L1 快速检查", "full-verifying": "L1 完整检查", "fixing": "自动修复中",
+  "reviewing": "AI 审查中", "requirement-verifying": "L3 需求验证", "awaiting-approval": "等待审批",
+  "accepted": "验证通过", "failed": "验证未通过", "inconclusive": "无法判定",
+  "waived": "已豁免", "cancelled": "已取消", "quarantined": "已隔离", "stale": "已过期",
+};
+
+const FAILURE_CODE_LABELS: Record<string, string> = {
+  "l1-check-failed": "L1 确定性检查未通过",
+  "l1-infra-failed": "检查基础设施失败",
+  "l1-inconclusive": "L1 检查无法判定",
+  "l1-no-passed-checks": "无通过的检查",
+  "l3-verification-failed": "L3 需求验证未通过",
+  "l3-inconclusive": "L3 需求证据不足",
+  "fixer-budget-exhausted": "自动修复预算耗尽",
+  "fixer-session-error": "修复会话创建失败",
+  "fixer-prompt-error": "修复执行失败",
+  "fixer-quick-gate-error": "修复后检查失败",
+  "fixer-infra-failed": "修复基础设施失败",
+  "fixer-no-fixable": "无可修复的问题",
+  "fixer-error": "修复流程异常",
+  "review-error": "AI 审查异常",
+  "hub-restart": "Hub 重启导致中断",
+  "infra-no-project": "未找到质量项目",
+  "infra-no-policy": "未找到质量策略",
+  "no-patch": "无代码变更",
+  "lease-failed": "写锁获取失败",
+};
+
+function qualityStageLabel(stage: string): string {
+  return STAGE_LABELS[stage] ?? stage;
+}
+
+function qualityFailureLabel(code?: string): string | undefined {
+  if (!code) return undefined;
+  return FAILURE_CODE_LABELS[code] ?? code;
+}
+
+function QualitySummaryView({ q, onApprove, onReject }: { q: QualitySummary; onApprove?: () => void; onReject?: () => void }) {
+  const label = qualityStageLabel(q.stage);
+  const fixInfo = q.stage === "fixing" ? ` (${q.fixRound}/${q.maxFixRounds})` : "";
+  const checkInfo = q.passedChecks + q.failedChecks > 0 ? ` · L1 ${q.passedChecks}通过 ${q.failedChecks}失败` : "";
+  const findingInfo = q.findings > 0 ? ` · ${q.findings} findings${q.blockingFindings > 0 ? ` (${q.blockingFindings} blocking)` : ""}` : "";
+  const failLabel = qualityFailureLabel(q.failureCode);
+  return (
+    <div className="quality-summary">
+      <div className="quality-summary-line">
+        <Shield size={11} /> {label}{fixInfo}{checkInfo}{findingInfo}
+        {q.enforcement !== "require-pass" && <span className="quality-enforcement-tag">{q.enforcement}</span>}
+      </div>
+      {failLabel && <div className="quality-summary-fail">{failLabel}</div>}
+      {q.awaitingApproval && onApprove && onReject && (
+        <div className="quality-approval-buttons">
+          <button onClick={onApprove}><Check size={11} /> 批准</button>
+          <button className="secondary" onClick={onReject}><X size={11} /> 拒绝</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QualityStatusBar({ quality, store }: { quality: QualitySummary; store: { qualityRunAction: (id: string, action: "cancel" | "approve" | "reject" | "retry") => Promise<void> } }) {
+  const [expanded, setExpanded] = useState(false);
+  const isTerminal = ["accepted", "failed", "inconclusive", "waived", "cancelled"].includes(quality.stage);
+  const label = qualityStageLabel(quality.stage);
+  const fixInfo = quality.stage === "fixing" ? ` (${quality.fixRound}/${quality.maxFixRounds})` : "";
+  const checkInfo = quality.passedChecks + quality.failedChecks > 0
+    ? ` · L1 ${quality.passedChecks}/${quality.passedChecks + quality.failedChecks}`
+    : "";
+  const failLabel = qualityFailureLabel(quality.failureCode);
+  const icon = quality.stage === "accepted" ? <Check size={13} />
+    : quality.stage === "failed" ? <ShieldAlert size={13} />
+    : quality.stage === "inconclusive" ? <ShieldAlert size={13} />
+    : quality.awaitingApproval ? <ShieldAlert size={13} />
+    : <Shield size={13} />;
+  const handleApprove = async () => { try { await store.qualityRunAction(quality.runId, "approve"); } catch { /* ignore */ } };
+  const handleReject = async () => { try { await store.qualityRunAction(quality.runId, "reject"); } catch { /* ignore */ } };
+  return (
+    <div className="quality-status-bar" onClick={() => setExpanded(!expanded)} style={{ cursor: "pointer" }}>
+      <div className="quality-status-bar-main">
+        {icon}
+        <span>{label}{fixInfo}{checkInfo}</span>
+        {failLabel && <span className="quality-status-fail">{failLabel}</span>}
+        {quality.awaitingApproval && (
+          <span className="quality-approval-inline" onClick={(e) => e.stopPropagation()}>
+            <button onClick={handleApprove}><Check size={11} /> 批准</button>
+            <button className="secondary" onClick={handleReject}><X size={11} /> 拒绝</button>
+          </span>
+        )}
+        {!isTerminal && !quality.awaitingApproval && <span className="quality-status-hint">点击查看详情</span>}
+      </div>
+      {expanded && (
+        <div className="quality-status-detail" onClick={(e) => e.stopPropagation()}>
+          <QualitySummaryView q={quality} onApprove={handleApprove} onReject={handleReject} />
+          <div className="quality-status-runid">run: {quality.runId}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const store = useHubStore();
@@ -2092,7 +2198,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     ) : (
       <Circle size={11} />
     );
-  const hasDetail = task.output || task.failureMessage || task.dependsOn.length > 0 || task.retries;
+  const hasDetail = task.output || task.failureMessage || task.dependsOn.length > 0 || task.retries || task.quality;
   const handleRetry = async () => {
     const client = store.client;
     const roomId = store.currentRoom?.roomId;
@@ -2101,6 +2207,16 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
       await client.call("room.retryTasks", { roomId, taskIds: [task.id] });
     } catch { /* ignore */ }
   };
+  const handleApprove = async () => {
+    if (!task.qualityRunId) return;
+    try { await store.qualityRunAction(task.qualityRunId, "approve"); } catch { /* ignore */ }
+  };
+  const handleReject = async () => {
+    if (!task.qualityRunId) return;
+    try { await store.qualityRunAction(task.qualityRunId, "reject"); } catch { /* ignore */ }
+  };
+  const isFixing = task.quality?.stage === "fixing";
+  const showRetryBtn = showRetry && task.status === "failed" && !isFixing;
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
@@ -2129,9 +2245,14 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
             {task.failureMessage && (
               <div className="flow-task-error">{task.failureMessage}</div>
             )}
+            {task.quality && (
+              <div className="flow-task-quality">
+                <QualitySummaryView q={task.quality} onApprove={handleApprove} onReject={handleReject} />
+              </div>
+            )}
           </div>
         )}
-        {showRetry && task.status === "failed" && (
+        {showRetryBtn && (
           <button className="flow-task-retry-btn" onClick={handleRetry}>
             <RotateCcw size={11} /> 重试
           </button>

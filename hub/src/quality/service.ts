@@ -104,7 +104,7 @@ import type { Store, QualityMetricRow } from "../store.js";
  */
 
 export type QualityEvent =
-  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: QualityRun } }
+  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: QualityRun; checkStats?: { passed: number; failed: number; infraFailed: number }; findingStats?: { total: number; blocking: number } } }
   | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: VerificationVerdict; records: RequirementVerification[] } };
 
 export type Emit = (event: QualityEvent) => void;
@@ -289,6 +289,10 @@ export class QualityService {
 
   listRuns(projectId?: string, limit?: number): QualityRun[] {
     return this.store.listQualityRuns(projectId, limit);
+  }
+
+  listRunsBySession(sessionId: string, limit?: number): QualityRun[] {
+    return this.store.listQualityRunsBySession(sessionId, limit);
   }
 
   listChecks(runId: string): CheckRun[] {
@@ -848,9 +852,9 @@ export class QualityService {
    * 通用推进：将 run 从当前 stage 推进到 `to`，持久化并广播。
    * 供内部编排（GateEngine/ReviewOrchestrator）使用。
    */
-  advance(id: string, to: QualityRun["stage"]): QualityRun {
+  advance(id: string, to: QualityRun["stage"], failureCode?: string): QualityRun {
     const run = this.requireRun(id);
-    const next = transition(run, to);
+    const next = transition(run, to, failureCode);
     this.store.saveQualityRun(next);
     this.broadcast(next);
     if (to === "reviewing" && this.reviewRunner) {
@@ -902,11 +906,11 @@ export class QualityService {
         nextStage = "inconclusive";
       }
       try {
-        this.advance(run.id, nextStage);
+        this.advance(run.id, nextStage, nextStage === "failed" ? "l3-verification-failed" : nextStage === "inconclusive" ? "l3-inconclusive" : undefined);
       } catch (err) {
         // accepted 要求 patchHash；若无 patch 则降级为 inconclusive
         if (nextStage === "accepted") {
-          try { this.advance(run.id, "inconclusive"); } catch { /* */ }
+          try { this.advance(run.id, "inconclusive", "l3-inconclusive"); } catch { /* */ }
         }
       }
     }
@@ -940,7 +944,25 @@ export class QualityService {
   }
 
   private broadcast(run: QualityRun): void {
-    this.emit({ method: "quality.runUpdate", params: { runId: run.id, projectId: run.projectId, run } });
+    const checks = this.store.listQualityChecks(run.id);
+    const findings = this.store.listQualityFindings(run.id);
+    this.emit({
+      method: "quality.runUpdate",
+      params: {
+        runId: run.id,
+        projectId: run.projectId,
+        run,
+        checkStats: {
+          passed: checks.filter((c) => c.status === "passed").length,
+          failed: checks.filter((c) => c.status === "failed").length,
+          infraFailed: checks.filter((c) => c.status === "infra-failed" || c.status === "timeout").length,
+        },
+        findingStats: {
+          total: findings.length,
+          blocking: findings.filter((f) => f.blocking).length,
+        },
+      },
+    });
     if (isTerminal(run.stage) && this.onTerminal) {
       this.onTerminal(run);
     }

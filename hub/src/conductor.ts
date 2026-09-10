@@ -34,6 +34,7 @@ type FlowTask = {
   qualityRunId?: string;
   verifyingSince?: number;
   awaitingApproval?: boolean;
+  quality?: QualitySummary;
 };
 
 type Flow = {
@@ -47,6 +48,21 @@ type Flow = {
 };
 
 export type ConductorNotice = { roomId: string; message: string };
+
+export type QualitySummary = {
+  runId: string;
+  stage: string;
+  enforcement: "require-pass" | "require-approval" | "report";
+  fixRound: number;
+  maxFixRounds: number;
+  passedChecks: number;
+  failedChecks: number;
+  findings: number;
+  blockingFindings: number;
+  verdict?: string;
+  failureCode?: string;
+  awaitingApproval: boolean;
+};
 
 export interface QualityIntegration {
   prepareRunForTask?(opts: {
@@ -69,11 +85,39 @@ export interface QualityIntegration {
   recoverRun(runId: string, cb: (accepted: boolean) => void): void;
   /** 查询 run 的 enforcement 模式（用于依赖解锁控制） */
   getRunEnforcement?(runId: string): "report" | "require-pass" | "require-approval" | undefined;
+  /** 查询 run 的质量摘要（用于 getFlow 关联展示） */
+  getRunSummary?(runId: string): QualitySummary | undefined;
 }
 
 const PLAN_RESULT_LEN = 4000;
 const VERIFYING_TIMEOUT_MS = 5 * 60 * 1000;
 const BUSY_RETRY_MS = 5000;
+
+const FAILURE_CODE_LABELS: Record<string, string> = {
+  "l1-check-failed": "L1 确定性检查未通过",
+  "l1-infra-failed": "检查基础设施失败",
+  "l1-inconclusive": "L1 检查无法判定",
+  "l1-no-passed-checks": "无通过的检查",
+  "l3-verification-failed": "L3 需求验证未通过",
+  "l3-inconclusive": "L3 需求证据不足",
+  "fixer-budget-exhausted": "自动修复预算耗尽",
+  "fixer-session-error": "修复会话创建失败",
+  "fixer-prompt-error": "修复执行失败",
+  "fixer-quick-gate-error": "修复后检查失败",
+  "fixer-infra-failed": "修复基础设施失败",
+  "fixer-no-fixable": "无可修复的问题",
+  "fixer-error": "修复流程异常",
+  "review-error": "AI 审查异常",
+  "hub-restart": "Hub 重启导致中断",
+  "infra-no-project": "未找到质量项目",
+  "infra-no-policy": "未找到质量策略",
+  "no-patch": "无代码变更",
+  "lease-failed": "写锁获取失败",
+};
+
+function failureCodeLabel(code: string): string {
+  return FAILURE_CODE_LABELS[code] ?? code;
+}
 const PROMPT_RETRY_MS = 5000;
 const SUMMARIZE_RETRY_MS = 5000;
 
@@ -150,6 +194,8 @@ export class ConductorOrchestrator {
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
         ...(t.retries !== undefined && t.retries > 0 ? { retries: t.retries } : {}),
+        ...(t.awaitingApproval ? { awaitingApproval: true } : {}),
+        ...(t.qualityRunId !== undefined && this.quality?.getRunSummary ? { quality: this.quality.getRunSummary(t.qualityRunId) } : {}),
       };
     });
     const done = tasks.filter((t) => t.status === "done").length;
@@ -405,11 +451,9 @@ export class ConductorOrchestrator {
               const task = flow.tasks.get(running.id);
               if (!task || task.status !== "verifying") return;
               task.awaitingApproval = false;
-              // 按 enforcement 控制依赖解锁：
-              // - require-pass: 只有 accepted=true 才解锁下游
-              // - require-approval: accepted=true 解锁，accepted=false 但有审批记录也可解锁（审批通过）
-              // - report: 无论 accepted 与否都解锁（仅报告，不阻断）
               const enforcement = this.quality?.getRunEnforcement?.(runId) ?? "require-pass";
+              const summary = this.quality?.getRunSummary?.(runId);
+              const fc = summary?.failureCode;
               const shouldUnlock = enforcement === "report" ? true : accepted;
               if (shouldUnlock) {
                 task.status = "done";
@@ -421,7 +465,7 @@ export class ConductorOrchestrator {
                 });
               } else {
                 task.status = "failed";
-                task.failureMessage = "质量验证未通过";
+                task.failureMessage = fc ? failureCodeLabel(fc) : "质量验证未通过";
                 this.notice({
                   roomId: flow.roomId,
                   message: `@${name} 子任务 ${running.id} 质量验证未通过`,
@@ -908,6 +952,9 @@ export class ConductorOrchestrator {
           status: t.status,
           ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
           ...(t.awaitingApproval ? { awaitingApproval: true } : {}),
+          ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
+          ...(t.retries !== undefined ? { retries: t.retries } : {}),
+          ...(t.verifyingSince !== undefined ? { verifyingSince: t.verifyingSince } : {}),
         })),
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
@@ -959,6 +1006,8 @@ export class ConductorOrchestrator {
           status,
           ...(qualityRunId ? { qualityRunId } : {}),
           ...(awaitingApproval && status === "verifying" ? { awaitingApproval: true, verifyingSince: Date.now() } : {}),
+          ...(typeof o.failureMessage === "string" ? { failureMessage: o.failureMessage } : {}),
+          ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
         });
       }
       const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;
@@ -1001,7 +1050,8 @@ export class ConductorOrchestrator {
               this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证通过` });
             } else {
               task.status = "failed";
-              task.failureMessage = "质量验证未通过";
+              const fc = this.quality?.getRunSummary?.(taskRef.qualityRunId ?? "")?.failureCode;
+              task.failureMessage = fc ? failureCodeLabel(fc) : "质量验证未通过";
               this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证未通过` });
             }
             this.emitFlow?.(flowRef.roomId);

@@ -20,6 +20,7 @@ import type {
   QualityProject,
   QualityRule,
   QualityRun,
+  QualitySummary,
   WorkItem,
   RoomInfo,
   RoomModeConfig,
@@ -120,6 +121,8 @@ interface State {
   qualityIncidents: QualityIncident[];
   qualityRules: QualityRule[];
   qualityAwaitingCount: number;
+  sessionQuality: QualitySummary | null;
+  loadSessionQuality: (sessionId: string) => Promise<void>;
   qualityError: string | null;
   qualityWorkItems: WorkItem[];
 }
@@ -625,6 +628,29 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (get().qualityRunId === run.id) {
           void get().loadQualityRun(run.id);
         }
+        const cs = get().currentSession;
+        if (cs && run.implementerSessionId === cs.sessionId) {
+          if (run.stage !== "stale" && run.stage !== "cancelled") {
+            const checkStats = params.checkStats as { passed: number; failed: number; infraFailed: number } | undefined;
+            const findingStats = params.findingStats as { total: number; blocking: number } | undefined;
+            set({ sessionQuality: {
+              runId: run.id,
+              stage: run.stage,
+              enforcement: "require-pass",
+              fixRound: run.fixRound,
+              maxFixRounds: run.budget.maxFixRounds,
+              passedChecks: checkStats?.passed ?? 0,
+              failedChecks: checkStats?.failed ?? 0,
+              findings: findingStats?.total ?? 0,
+              blockingFindings: findingStats?.blocking ?? 0,
+              ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
+              ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
+              awaitingApproval: run.stage === "awaiting-approval",
+            } });
+          } else {
+            set({ sessionQuality: null });
+          }
+        }
         break;
       }
       case "quality.awaitingApproval": {
@@ -875,6 +901,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     qualityIncidents: [],
     qualityRules: [],
     qualityAwaitingCount: 0,
+    sessionQuality: null,
     qualityError: null,
     qualityWorkItems: [],
 
@@ -1254,6 +1281,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         currentArtifacts: null,
         currentEvents: null,
         blackboard: null,
+        flow: null,
+        sessionQuality: null,
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
@@ -1268,6 +1297,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
       get().refreshArtifacts({ sessionId: session.sessionId });
+      void get().loadSessionQuality(session.sessionId);
     },
 
     openRoom: async (room: RoomInfo, anchorAt?: number) => {
@@ -1300,6 +1330,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         lastBlackboardAt: 0,
         screen: "room",
         ...(isSameRoom ? {} : { flow: null }),
+        sessionQuality: null,
         historyHasMore: false,
         historyLoading: false,
         historySearchContext: anchorAt != null,
@@ -2579,6 +2610,32 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } finally {
         set({ qualityLoading: false });
       }
+    },
+
+    loadSessionQuality: async (sessionId: string) => {
+      try {
+        const resp = await getOrCall<{ runs: QualityRun[] }>("quality.run.listBySession", { sessionId, limit: 1 });
+        const runs = resp.runs ?? [];
+        if (runs.length === 0) { set({ sessionQuality: null }); return; }
+        const run = runs[0]!;
+        if (run.stage === "stale" || run.stage === "cancelled") { set({ sessionQuality: null }); return; }
+        const checks = await getOrCall<{ checks: QualityCheck[] }>("quality.run.get", { id: run.id }).catch(() => ({ checks: [] }));
+        const qChecks = (checks as Record<string, unknown>).checks as QualityCheck[] | undefined;
+        set({ sessionQuality: {
+          runId: run.id,
+          stage: run.stage,
+          enforcement: "require-pass",
+          fixRound: run.fixRound,
+          maxFixRounds: run.budget.maxFixRounds,
+          passedChecks: qChecks?.filter((c) => c.status === "passed").length ?? 0,
+          failedChecks: qChecks?.filter((c) => c.status === "failed").length ?? 0,
+          findings: 0,
+          blockingFindings: 0,
+          ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
+          ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
+          awaitingApproval: run.stage === "awaiting-approval",
+        } });
+      } catch { set({ sessionQuality: null }); }
     },
 
     loadQualityPolicy: async (projectId: string) => {
