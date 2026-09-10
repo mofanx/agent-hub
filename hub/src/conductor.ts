@@ -658,15 +658,15 @@ export class ConductorOrchestrator {
       const values = [...flow.tasks.values()];
       const hasActive = values.some((t) => t.status === "running" || t.status === "verifying");
       if (hasActive) return;
-      const allDone = values.every((t) => t.status === "done");
-      if (allDone) {
+      const doneCount = values.filter((t) => t.status === "done").length;
+      if (doneCount > 0) {
         await this.summarize(flow, room);
       } else {
         const failedTasks = values.filter((t) => t.status === "failed");
         const names = failedTasks.map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId);
         this.notice({
           roomId: flow.roomId,
-          message: `以下子任务执行失败：${names.join("、")}，指挥家无法进行汇总`,
+          message: `所有子任务均失败（${names.join("、")}），无法汇总`,
         });
         flow.phase = "done";
         this.emitFlow?.(flow.roomId);
@@ -769,12 +769,18 @@ export class ConductorOrchestrator {
   private async summarize(flow: Flow, room: Room): Promise<void> {
     flow.phase = "summarizing";
     this.emitFlow?.(flow.roomId);
+    const failedTasks = [...flow.tasks.values()].filter((t) => t.status === "failed");
+    const hasFailures = failedTasks.length > 0;
     // 按照 task 在 tasks Map 中的创建顺序（即指挥家给出的顺序）生成汇总
     const lines: string[] = [];
     for (const t of flow.tasks.values()) {
+      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      if (t.status === "failed") {
+        lines.push(`- [${t.id}] @${name}: 失败（${t.failureMessage ?? "未知原因"}）`);
+        continue;
+      }
       const result = flow.results.get(t.id);
       if (!result) continue;
-      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       const artifacts = result.artifacts
         .map((a) => {
           const parts = [`[${a.type}]`];
@@ -788,13 +794,33 @@ export class ConductorOrchestrator {
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
       ].join("\n"));
     }
-    const prompt = [
-      `你是群聊「${room.name}」的指挥家。你之前派发的子任务已全部完成，结果如下：`,
+    const promptLines: string[] = [
+      `你是群聊「${room.name}」的指挥家。`,
+      hasFailures
+        ? `你之前派发的子任务部分完成、部分失败，结果如下：`
+        : `你之前派发的子任务已全部完成，结果如下：`,
       ...lines,
       "",
-      "请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复。如果涉及文件修改，请引用文件路径。",
-    ].join("\n");
-    this.notice({ roomId: flow.roomId, message: "子任务全部完成，指挥家汇总中…" });
+    ];
+    if (hasFailures) {
+      const failedNames = failedTasks
+        .map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId)
+        .join("、");
+      promptLines.push(
+        `以下子任务未能完成：${failedNames}。`,
+        "请在汇总中：",
+        "1. 基于已完成的子任务给出可交付的部分成果；",
+        "2. 明确标注哪些部分未完成及其影响；",
+        "3. 建议用户是否需要重新派发失败的部分。",
+        "",
+      );
+    }
+    promptLines.push("请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复。如果涉及文件修改，请引用文件路径。");
+    const prompt = promptLines.join("\n");
+    this.notice({
+      roomId: flow.roomId,
+      message: hasFailures ? "子任务部分完成，指挥家降级汇总中…" : "子任务全部完成，指挥家汇总中…",
+    });
     try {
       await this.agent.prompt(room.conductorId!, prompt);
     } catch (err) {
