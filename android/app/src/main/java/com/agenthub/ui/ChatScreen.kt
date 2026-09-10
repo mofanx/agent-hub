@@ -21,6 +21,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -443,7 +444,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     var expandedTop by remember(sessionKey) { mutableStateOf<String?>(null) }
                     ChatTopCapsules(vm, expandedTop, showRoomExtras = isRoom) { expandedTop = it }
                     when (expandedTop) {
-                        "flow" -> if (isRoom) FlowPanel(vm.flow, vm.currentRoom!!.mode)
+                        "flow" -> if (isRoom) FlowPanel(vm.flow, vm.currentRoom!!.mode, vm)
                         "blackboard" -> if (isRoom) BlackboardPanel(vm)
                         "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
                         "event" -> EventPanel(vm.currentEvents, vm)
@@ -1638,11 +1639,20 @@ private fun RawChatBubble(
 }
 
 @Composable
-private fun FlowPanel(flow: FlowInfo?, roomMode: String) {
+private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
     if (flow == null || flow.tasks.isEmpty()) return
     var collapsed by remember { mutableStateOf(false) }
     val progress = flow.progress
     val title = if (roomMode == "conductor") "指挥编排" else "编排进度"
+    val phaseLabel = when (flow.phase) {
+        "planning" -> "规划中"
+        "working" -> "执行中"
+        "summarizing" -> "汇总中"
+        "awaiting-retry" -> "等待重试"
+        "done" -> "已完成"
+        else -> ""
+    }
+    val showRetry = flow.phase == "awaiting-retry"
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1657,13 +1667,29 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    "${if (collapsed) "▸" else "▾"} $title",
-                    style = MaterialTheme.typography.titleSmall,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${if (collapsed) "▸" else "▾"} $title",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    if (phaseLabel.isNotEmpty()) {
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(4.dp),
+                        ) {
+                            Text(
+                                phaseLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
+                }
                 Text(
                     "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行" +
-                        if (progress.failed > 0) " · ${progress.failed} 失败" else "",
+                        if (progress.failed > 0) " · ${progress.failed} 失败" else "" +
+                        if (progress.verifying > 0) " · ${progress.verifying} 验证中" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1671,7 +1697,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String) {
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->
-                    FlowTaskRow(task)
+                    FlowTaskRow(task, showRetry) { vm.retryTask(task.id) }
                 }
             }
         }
@@ -1679,24 +1705,31 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String) {
 }
 
 @Composable
-private fun FlowTaskRow(task: FlowTask) {
+private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, onRetry: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
     val icon = when (task.status) {
         "done" -> "✓"
         "running" -> "▶"
+        "verifying" -> "🛡"
         "failed" -> "✗"
         else -> "○"
     }
     val iconColor = when (task.status) {
         "done" -> MaterialTheme.colorScheme.primary
         "running" -> MaterialTheme.colorScheme.tertiary
+        "verifying" -> Color(0xFFE0A800)
         "failed" -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.outline
     }
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() || task.retries > 0
     Column(Modifier.padding(vertical = 3.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = if (hasDetail) Modifier.clickable { expanded = !expanded } else Modifier,
+        ) {
             Text(icon, color = iconColor, modifier = Modifier.width(20.dp))
             Text("@${task.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(6.dp))
@@ -1708,6 +1741,52 @@ private fun FlowTaskRow(task: FlowTask) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (task.status == "verifying") {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(4.dp),
+                ) {
+                    Text("验证中", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                }
+                Spacer(Modifier.width(4.dp))
+            }
+            if (task.retries > 0) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(4.dp),
+                ) {
+                    Text("重试 ${task.retries}", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                }
+                Spacer(Modifier.width(4.dp))
+            }
+            if (hasDetail) {
+                Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+            }
+        }
+        if (expanded && hasDetail) {
+            Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+                if (task.dependsOn.isNotEmpty()) {
+                    Text("依赖: ${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                task.output?.let {
+                    Spacer(Modifier.height(2.dp))
+                    Text(it.take(500), style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis)
+                }
+                task.failureMessage?.let {
+                    Spacer(Modifier.height(2.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        if (showRetry && task.status == "failed") {
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = onRetry,
+                modifier = Modifier.padding(start = 20.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+            ) {
+                Text("↻ 重试", style = MaterialTheme.typography.labelMedium)
+            }
         }
         if (task.artifacts.isNotEmpty()) {
             Row(

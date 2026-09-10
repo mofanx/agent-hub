@@ -260,6 +260,10 @@ data class FlowTask(
     val task: String,
     val dependsOn: List<String> = emptyList(),
     val artifacts: List<FlowArtifact> = emptyList(),
+    val qualityRunId: String? = null,
+    val failureMessage: String? = null,
+    val output: String? = null,
+    val retries: Int = 0,
 )
 
 data class FlowProgress(
@@ -267,6 +271,7 @@ data class FlowProgress(
     val running: Int = 0,
     val pending: Int = 0,
     val failed: Int = 0,
+    val verifying: Int = 0,
     val total: Int = 0,
 )
 
@@ -2387,6 +2392,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 running = progress?.get("running")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 pending = progress?.get("pending")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 failed = progress?.get("failed")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                verifying = progress?.get("verifying")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 total = progress?.get("total")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
             ),
             tasks = tasks?.map { parseFlowTask(it.jsonObject) } ?: emptyList(),
@@ -2403,6 +2409,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             task = obj["task"]?.jsonPrimitive?.content ?: "",
             dependsOn = obj["dependsOn"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
             artifacts = artifacts,
+            qualityRunId = obj["qualityRunId"]?.jsonPrimitive?.contentOrNull,
+            failureMessage = obj["failureMessage"]?.jsonPrimitive?.contentOrNull,
+            output = obj["output"]?.jsonPrimitive?.contentOrNull,
+            retries = obj["retries"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
         )
     }
 
@@ -2876,6 +2886,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 busyIds.remove(session.sessionId)
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "send failed"))
+            }
+        }
+    }
+
+    fun retryTask(taskId: String) {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                val taskIds = buildJsonArray { add(taskId) }
+                hub.call("room.retryTasks", buildJsonObject {
+                    put("roomId", room.roomId)
+                    put("taskIds", taskIds)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, "重试失败: ${e.message}"))
             }
         }
     }

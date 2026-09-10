@@ -1234,6 +1234,7 @@
 .flow-task-done { border-left: 3px solid var(--success); opacity: 0.85; }
 .flow-task-pending { border-left: 3px solid var(--border-strong); }
 .flow-task-failed { border-left: 3px solid var(--danger); }
+.flow-task-verifying { border-left: 3px solid var(--warning, #e0a800); }
 
 .flow-task-status {
   width: 1.1rem;
@@ -1248,6 +1249,7 @@
 .flow-status-done { color: var(--success); }
 .flow-status-failed { color: var(--danger); }
 .flow-status-pending { color: var(--muted); }
+.flow-status-verifying { color: var(--warning, #e0a800); }
 
 .flow-task-body {
   flex: 1;
@@ -1842,4 +1844,86 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 0.5rem 0.75rem 0.25rem;
+}
+
+.flow-phase-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.08rem 0.35rem;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+.flow-task-badge {
+  font-size: 0.66rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.flow-task-expand {
+  font-size: 0.7rem;
+  color: var(--muted);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.flow-task-detail {
+  margin-top: 0.3rem;
+  padding: 0.4rem;
+  background: var(--surface);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.flow-task-meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.flow-task-output {
+  font-size: 0.75rem;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 8rem;
+  overflow-y: auto;
+}
+
+.flow-task-error {
+  font-size: 0.72rem;
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.flow-task-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  cursor: pointer;
+  font-family: inherit;
+  margin-top: 0.25rem;
+  align-self: flex-start;
+}
+
+.flow-task-retry-btn:hover {
+  background: var(--danger);
+  color: var(--surface);
 }

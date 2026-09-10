@@ -96,6 +96,10 @@ export interface FlowTask {
   task: string;
   dependsOn: string[];
   artifacts: FlowArtifact[];
+  qualityRunId?: string;
+  failureMessage?: string;
+  output?: string;
+  retries?: number;
 }
 
 export interface ArtifactInfo {

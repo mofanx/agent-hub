@@ -19,7 +19,9 @@ import {
   Package,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
+  Shield,
   ShieldAlert,
   SlashSquare,
   Square,
@@ -1543,13 +1545,22 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
     localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
   }, [collapsed]);
   if (!flow) return null;
-  const { progress, tasks } = flow;
+  const { progress, tasks, phase } = flow;
   if (tasks.length === 0) return null;
   const title = roomMode === "conductor" ? "指挥编排" : "编排进度";
+  const phaseLabel: Record<string, string> = {
+    planning: "规划中",
+    working: "执行中",
+    summarizing: "汇总中",
+    "awaiting-retry": "等待重试",
+    done: "已完成",
+  };
+  const phaseTag = phaseLabel[phase] ?? "";
+  const showRetry = phase === "awaiting-retry";
   const content = (
     <div className="flow-tasks">
       {tasks.map((t) => (
-        <FlowTaskItem key={t.id} task={t} />
+        <FlowTaskItem key={t.id} task={t} showRetry={showRetry} />
       ))}
     </div>
   );
@@ -1561,10 +1572,12 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
       <div className="flow-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
         <span className="flow-title">
           {collapsed ? "▸ " : "▾ "}{title}
+          {phaseTag && <span className="flow-phase-tag">{phaseTag}</span>}
         </span>
         <span className="flow-progress">
           {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
           {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
+          {progress.verifying ? ` · ${progress.verifying} 验证中` : ""}
         </span>
       </div>
       {!collapsed && content}
@@ -2064,25 +2077,65 @@ function renderMarkdown(text: string): string {
   }
 }
 
-function FlowTaskItem({ task }: { task: FlowTask }) {
+function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const store = useHubStore();
   const statusIcon =
     task.status === "done" ? (
       <Check size={12} />
     ) : task.status === "running" ? (
       <Loader2 size={12} className="spin" />
+    ) : task.status === "verifying" ? (
+      <Shield size={12} />
     ) : task.status === "failed" ? (
       <X size={12} />
     ) : (
       <Circle size={11} />
     );
+  const hasDetail = task.output || task.failureMessage || task.dependsOn.length > 0 || task.retries;
+  const handleRetry = async () => {
+    const client = store.client;
+    const roomId = store.currentRoom?.roomId;
+    if (!client || !roomId) return;
+    try {
+      await client.call("room.retryTasks", { roomId, taskIds: [task.id] });
+    } catch { /* ignore */ }
+  };
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
       <div className="flow-task-body">
-        <div className="flow-task-line">
+        <div className="flow-task-line" onClick={() => hasDetail && setExpanded(!expanded)} style={hasDetail ? { cursor: "pointer" } : undefined}>
           <span className="flow-task-name">@{task.name}</span>
           <span className="flow-task-desc" title={task.task}>{task.task}</span>
+          {task.status === "verifying" && task.qualityRunId && (
+            <span className="flow-task-badge">验证中</span>
+          )}
+          {task.retries && task.retries > 0 && (
+            <span className="flow-task-badge">重试 {task.retries}</span>
+          )}
+          {hasDetail && (
+            <span className="flow-task-expand">{expanded ? "▾" : "▸"}</span>
+          )}
         </div>
+        {expanded && hasDetail && (
+          <div className="flow-task-detail">
+            {task.dependsOn.length > 0 && (
+              <div className="flow-task-meta">依赖: {task.dependsOn.join(", ")}</div>
+            )}
+            {task.output && (
+              <div className="flow-task-output">{task.output}</div>
+            )}
+            {task.failureMessage && (
+              <div className="flow-task-error">{task.failureMessage}</div>
+            )}
+          </div>
+        )}
+        {showRetry && task.status === "failed" && (
+          <button className="flow-task-retry-btn" onClick={handleRetry}>
+            <RotateCcw size={11} /> 重试
+          </button>
+        )}
         {task.artifacts.length > 0 && (
           <div className="flow-artifacts">
             {task.artifacts.map((a, i) => (

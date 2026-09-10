@@ -2044,6 +2044,18 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!room) throw new Error("unknown room");
       return { flow: roomModeManager.getFlow(roomId) };
     }
+    case "room.retryTasks": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const rawIds = req.params?.taskIds;
+      const taskIds = Array.isArray(rawIds)
+        ? (rawIds as unknown[]).map((s) => String(s)).filter(Boolean)
+        : undefined;
+      const retried = roomModeManager.retryFailedTasks(roomId, taskIds);
+      persistState();
+      return { retried };
+    }
     case "session.artifacts": {
       const sessionId = String(req.params?.sessionId ?? "");
       if (!sessionId) throw new Error("sessionId required");

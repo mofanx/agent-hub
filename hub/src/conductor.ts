@@ -147,6 +147,9 @@ export class ConductorOrchestrator {
         dependsOn: t.dependsOn,
         artifacts: result?.artifacts ?? [],
         ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
+        ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
+        ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
+        ...(t.retries !== undefined && t.retries > 0 ? { retries: t.retries } : {}),
       };
     });
     const done = tasks.filter((t) => t.status === "done").length;
