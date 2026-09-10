@@ -190,6 +190,16 @@ export class RoomModeManager {
     this.conductor.notifyAwaitingApproval(runId);
   }
 
+  /** 检查房间是否有等待重试的 flow */
+  hasAwaitingRetry(roomId: string): boolean {
+    return this.conductor.hasAwaitingRetry(roomId);
+  }
+
+  /** 重试失败的子任务 */
+  retryFailedTasks(roomId: string, taskIds?: string[]): boolean {
+    return this.conductor.retryFailedTasks(roomId, taskIds);
+  }
+
   /** 向指定房间广播 room.notice 消息 */
   broadcastRoomNotice(roomId: string, message: string): void {
     this.notice({ roomId, message });

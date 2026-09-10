@@ -894,4 +894,199 @@ describe("conductor", () => {
     );
   });
 
+  it("降级汇总后进入 awaiting-retry，重试指令恢复 failed 任务", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "retry-test",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const terminalCallbacks = new Map<string, (accepted: boolean) => void>();
+    const conductorPrompts: string[] = [];
+    const workerPrompts: { sessionId: string; content: string }[] = [];
+
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask(opts) {
+        return `qrun-${opts.taskId}`;
+      },
+      onRunTerminal(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+      recoverRun(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+    };
+
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          if (sessionId === "conductor") conductorPrompts.push(String(content));
+          else workerPrompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (n) => notices.push(n.message),
+      qualityIntegration,
+      undefined,
+      0,
+    );
+
+    await orchestrator.start(qRoom, "任务");
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"改前端"},{"id":"t2","to":"worker2","task":"改后端"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    // 两个 worker 都完成
+    const w1Output = '```json\n{"text":"前端改好了","artifacts":[{"type":"file","path":"/a.ts","summary":"改"}]}\n```';
+    await orchestrator.onPromptDone("worker1", w1Output);
+    const w2Output = '```json\n{"text":"后端改好了","artifacts":[{"type":"file","path":"/b.ts","summary":"改"}]}\n```';
+    await orchestrator.onPromptDone("worker2", w2Output);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    // t1 通过，t2 失败
+    terminalCallbacks.get("qrun-t1")!(true);
+    terminalCallbacks.get("qrun-t2")!(false);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    // 应进入降级汇总
+    assert.ok(notices.some((m) => m.includes("降级汇总")), "should enter partial summary");
+
+    // 指挥家完成汇总
+    await orchestrator.onPromptDone("conductor", "汇总完成，t2 失败");
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    // 应进入 awaiting-retry
+    assert.ok(orchestrator.hasAwaitingRetry(qRoom.roomId), "should be awaiting-retry");
+    assert.ok(
+      notices.some((m) => m.includes("重试") && m.includes("新消息继续")),
+      "should notify retry option",
+    );
+
+    // 重试
+    const retried = orchestrator.retryFailedTasks(qRoom.roomId);
+    assert.ok(retried, "retry should succeed");
+
+    const flow = orchestrator.getFlow(qRoom.roomId);
+    assert.ok(flow);
+    assert.equal((flow as { phase: string }).phase, "working");
+    const tasks = flow!.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "done");
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "running");
+
+    // worker2 应该收到新的 prompt
+    assert.ok(
+      workerPrompts.some((p) => p.sessionId === "worker2" && p.content.includes("改后端")),
+      "worker2 should receive retry prompt",
+    );
+  });
+
+  it("awaiting-retry 时指定 task ID 只重试指定任务", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "retry-specific",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+        { sessionId: "worker3", name: "c" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const terminalCallbacks = new Map<string, (accepted: boolean) => void>();
+    const workerPrompts: { sessionId: string; content: string }[] = [];
+
+    const qualityIntegration: import("./conductor.js").QualityIntegration = {
+      startRunForTask(opts) {
+        return `qrun-${opts.taskId}`;
+      },
+      onRunTerminal(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+      recoverRun(runId, cb) {
+        terminalCallbacks.set(runId, cb);
+      },
+    };
+
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          if (sessionId !== "conductor") workerPrompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      qualityIntegration,
+      undefined,
+      0,
+    );
+
+    await orchestrator.start(qRoom, "任务");
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"任务一"},{"id":"t2","to":"worker2","task":"任务二"},{"id":"t3","to":"worker3","task":"任务三"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    for (const w of ["worker1", "worker2", "worker3"]) {
+      const output = '```json\n{"text":"done","artifacts":[{"type":"file","path":"/x.ts","summary":"改"}]}\n```';
+      await orchestrator.onPromptDone(w, output);
+    }
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    // t1 通过，t2 和 t3 失败
+    terminalCallbacks.get("qrun-t1")!(true);
+    terminalCallbacks.get("qrun-t2")!(false);
+    terminalCallbacks.get("qrun-t3")!(false);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    await orchestrator.onPromptDone("conductor", "汇总");
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    assert.ok(orchestrator.hasAwaitingRetry(qRoom.roomId));
+
+    // 只重试 t3
+    workerPrompts.length = 0;
+    const retried = orchestrator.retryFailedTasks(qRoom.roomId, ["t3"]);
+    assert.ok(retried);
+
+    const flow = orchestrator.getFlow(qRoom.roomId);
+    const tasks = flow!.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "done");
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "failed");
+    assert.equal(tasks.find((t) => t.id === "t3")?.status, "running");
+
+    // 只有 worker3 收到新 prompt
+    assert.ok(workerPrompts.some((p) => p.sessionId === "worker3"));
+    assert.ok(!workerPrompts.some((p) => p.sessionId === "worker2"));
+  });
+
+  it("非 awaiting-retry 状态调用 retryFailedTasks 返回 false", async () => {
+    const rooms = new RoomManager();
+    const qRoom = rooms.create(
+      "no-retry",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+
+    assert.equal(orchestrator.retryFailedTasks(qRoom.roomId), false);
+    assert.equal(orchestrator.hasAwaitingRetry(qRoom.roomId), false);
+  });
+
 });

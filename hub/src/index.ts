@@ -1390,6 +1390,15 @@ function parseSlash(text: string): SlashCmd | null {
   return { command: head.toLowerCase(), mentions };
 }
 
+function parseRetryCommand(text: string): { taskIds?: string[] } | null {
+  const t = text.trim().toLowerCase();
+  if (t === "重试" || t === "retry") return {};
+  const m = t.match(/^(?:重试|retry)\s+(.+)$/);
+  if (!m) return null;
+  const ids = m[1]!.split(/\s+/).filter(Boolean);
+  return ids.length > 0 ? { taskIds: ids } : {};
+}
+
 function agentForSession(sessionId: string): AcpAgent | undefined {
   const key = owners.get(sessionId);
   return key ? agents.get(key) : undefined;
@@ -2349,6 +2358,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         mode: room.mode,
         roomId,
       });
+      // 重试指令拦截：awaiting-retry 的 flow 优先处理，不进入 cancelActive
+      const retryMatch = parseRetryCommand(historyText);
+      if (retryMatch && roomModeManager.hasAwaitingRetry(roomId)) {
+        const retried = roomModeManager.retryFailedTasks(roomId, retryMatch.taskIds);
+        if (retried) {
+          persistState();
+          return { sent: [], skipped: [] };
+        }
+      }
       const result = await roomModeManager.handle(room, historyText, {
         note: roomNote,
         quote,

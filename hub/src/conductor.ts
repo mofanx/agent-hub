@@ -38,7 +38,7 @@ type FlowTask = {
 
 type Flow = {
   roomId: string;
-  phase: "planning" | "working" | "summarizing" | "done";
+  phase: "planning" | "working" | "summarizing" | "awaiting-retry" | "done";
   /** 任务以 taskId 为 key */
   tasks: Map<string, FlowTask>;
   /** 结果以 taskId 为 key */
@@ -342,9 +342,22 @@ export class ConductorOrchestrator {
           for (const a of result.artifacts) {
             this.commitArtifact(roomId, a, sessionId);
           }
-          flow.phase = "done";
-          this.emitFlow?.(roomId);
-          this.flows.delete(roomId);
+          const hasFailed = [...flow.tasks.values()].some((t) => t.status === "failed");
+          if (hasFailed) {
+            flow.phase = "awaiting-retry";
+            this.emitFlow?.(roomId);
+            const failedIds = [...flow.tasks.values()]
+              .filter((t) => t.status === "failed")
+              .map((t) => t.id);
+            this.notice({
+              roomId,
+              message: `部分子任务失败（${failedIds.join(", ")}），发送"重试"重新派发失败任务，或发送新消息继续`,
+            });
+          } else {
+            flow.phase = "done";
+            this.emitFlow?.(roomId);
+            this.flows.delete(roomId);
+          }
           return roomId;
         }
       }
@@ -845,6 +858,38 @@ export class ConductorOrchestrator {
         this.scheduleTasks(flow, room).catch((e) => logError("conductor resume schedule", e));
       }
     }
+  }
+
+  /** 检查房间是否有等待重试的 flow */
+  hasAwaitingRetry(roomId: string): boolean {
+    const flow = this.flows.get(roomId);
+    return flow?.phase === "awaiting-retry";
+  }
+
+  /** 重试失败的子任务：把 failed 任务回退为 pending 并重新调度 */
+  retryFailedTasks(roomId: string, taskIds?: string[]): boolean {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase !== "awaiting-retry") return false;
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      this.flows.delete(roomId);
+      return false;
+    }
+    const failed = [...flow.tasks.values()].filter(
+      (t) => t.status === "failed" && (!taskIds || taskIds.includes(t.id)),
+    );
+    if (failed.length === 0) return false;
+    for (const t of failed) {
+      t.status = "pending";
+      delete t.failureMessage;
+      t.retries = 0;
+    }
+    flow.phase = "working";
+    this.emitFlow?.(roomId);
+    const failedIds = failed.map((t) => t.id);
+    this.notice({ roomId, message: `重试失败子任务：${failedIds.join(", ")}` });
+    this.scheduleTasks(flow, room).catch((e) => logError("conductor retry schedule", e));
+    return true;
   }
 
   export(): Record<string, unknown> {
