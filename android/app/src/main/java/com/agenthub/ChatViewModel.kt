@@ -48,6 +48,34 @@ data class Attachment(
     val name: String = "",
 )
 
+data class ClarificationQuestion(
+    val id: String,
+    val dimension: String,
+    val text: String,
+)
+
+data class AcceptanceCriterion(
+    val id: String,
+    val description: String,
+    val required: Boolean = true,
+    val evidenceMode: String = "any",
+    val expectations: List<String> = emptyList(),
+)
+
+data class RequirementSpec(
+    val id: String,
+    val requestId: String,
+    val version: Int,
+    val goal: String = "",
+    val scopeIncluded: List<String> = emptyList(),
+    val scopeExcluded: List<String> = emptyList(),
+    val acceptanceCriteria: List<AcceptanceCriterion> = emptyList(),
+    val constraints: List<String> = emptyList(),
+    val risks: List<String> = emptyList(),
+    val clarifications: List<ClarificationQuestion> = emptyList(),
+    val status: String = "draft",
+)
+
 data class ModelInfo(
     val uid: String,
     val label: String,
@@ -118,6 +146,45 @@ sealed class ChatItem {
         override val at: Long = 0,
     ) : ChatItem() {
         override val text: String get() = title
+    }
+    data class Clarification(
+        override val id: Long,
+        val clarificationRequestId: String,
+        val requestId: String,
+        val specId: String,
+        val specVersion: Int,
+        val questions: List<ClarificationQuestion>,
+        val canSkip: Boolean = true,
+        val answers: Map<String, String> = emptyMap(),
+        val status: String = "pending",
+        override val author: String = "需求澄清",
+        override val at: Long = 0,
+    ) : ChatItem() {
+        override val text: String get() = "需要澄清的需求"
+    }
+    data class ReviewPrompt(
+        override val id: Long,
+        val runId: String,
+        val kind: String,
+        val roomId: String?,
+        val answered: String? = null,
+        override val author: String = "AI 审查",
+        override val at: Long = 0,
+    ) : ChatItem() {
+        override val text: String get() = when (kind) {
+            "add-reviewer" -> "当前群聊即将进入 AI 审查，是否拉入审查 AI？"
+            else -> "当前代码改动即将进入 AI 审查，是否创建审查群聊？"
+        }
+    }
+    data class Review(
+        override val id: Long,
+        val runId: String,
+        val verdict: String,
+        val findings: List<QualityFinding>,
+        override val author: String = "AI 审查",
+        override val at: Long = 0,
+    ) : ChatItem() {
+        override val text: String get() = "Review 完成 · $verdict · ${findings.size} 条发现"
     }
 }
 
@@ -356,6 +423,21 @@ data class QualityFinding(
     val status: String = "open",
 )
 
+data class RequirementVerification(
+    val id: String,
+    val runId: String,
+    val specId: String = "",
+    val specVersion: Int = 0,
+    val criterionId: String,
+    val expectationId: String = "",
+    val status: String,
+    val method: String = "",
+    val evidenceRefs: List<String> = emptyList(),
+    val verifier: String = "",
+    val confidence: Double? = null,
+    val waiverReason: String? = null,
+)
+
 data class QualityIncident(
     val id: String,
     val projectId: String,
@@ -384,6 +466,38 @@ data class QualityPolicyInfo(
     val autonomy: String = "observe",
     val checkCount: Int = 0,
     val errors: List<String> = emptyList(),
+    val version: Int = 1,
+    val reviewConfig: ReviewConfigV2? = null,
+    val requirementsMode: String = "off",
+    val requirementsMaxQuestions: Int = 3,
+    val verificationMode: String = "off",
+)
+
+data class ReviewTriggerConfig(
+    val minDiffLines: Int = 10,
+    val skipPatterns: List<String> = emptyList(),
+)
+
+data class ReviewTierMapping(
+    val default: String = "standard",
+    val byRisk: Map<String, String> = emptyMap(),
+    val byFileType: List<ReviewFileTypeMapping> = emptyList(),
+)
+
+data class ReviewFileTypeMapping(
+    val pattern: String = "",
+    val tier: String = "standard",
+)
+
+data class ReviewConfigV2(
+    val mode: String = "off",
+    val blockSeverity: String = "major",
+    val minBlockingConfidence: Double = 0.8,
+    val trigger: ReviewTriggerConfig = ReviewTriggerConfig(),
+    val tierMapping: ReviewTierMapping = ReviewTierMapping(),
+    val model: String = "",
+    val reviewerAgent: String? = null,
+    val reviewerModel: String? = null,
 )
 
 data class ArtifactInfo(
@@ -531,6 +645,7 @@ fun buildWsUrl(address: String, token: String): String {
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val hub = HubClient(viewModelScope)
     private val prefs = app.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
+    suspend fun hubCall(method: String, params: JsonObject): JsonObject = hub.call(method, params)
 
     val profiles = mutableStateListOf<ConnProfile>()
 
@@ -585,6 +700,78 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         @Volatile
         var appForeground = true
         const val LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]"
+
+        val STAGE_LABELS = mapOf(
+            "queued" to "排队中", "preflight" to "预检中", "implementing" to "实现中",
+            "collecting" to "收集变更", "quick-verifying" to "L1 快速检查",
+            "full-verifying" to "L1 完整检查", "fixing" to "自动修复中",
+            "reviewing" to "AI 审查中", "reviewed" to "审查完成",
+            "requirement-verifying" to "L3 需求验证",
+            "awaiting-approval" to "等待审批", "accepted" to "验证通过",
+            "failed" to "验证未通过", "inconclusive" to "无法判定",
+            "waived" to "已豁免", "cancelled" to "已取消",
+            "quarantined" to "已隔离", "stale" to "已过期",
+        )
+        val FAILURE_CODE_LABELS = mapOf(
+            "l1-check-failed" to "L1 确定性检查未通过",
+            "l1-infra-failed" to "检查基础设施失败",
+            "l1-inconclusive" to "L1 检查无法判定",
+            "l1-no-passed-checks" to "无通过的检查",
+            "l3-verification-failed" to "L3 需求验证未通过",
+            "l3-inconclusive" to "L3 需求证据不足",
+            "fixer-budget-exhausted" to "自动修复预算耗尽",
+            "fixer-session-error" to "修复会话创建失败",
+            "fixer-prompt-error" to "修复执行失败",
+            "fixer-quick-gate-error" to "修复后检查失败",
+            "fixer-infra-failed" to "修复基础设施失败",
+            "fixer-no-fixable" to "无可修复的问题",
+            "fixer-error" to "修复流程异常",
+            "review-error" to "AI 审查异常",
+            "hub-restart" to "Hub 重启导致中断",
+            "infra-no-project" to "未找到质量项目",
+            "infra-no-policy" to "未找到质量策略",
+            "no-patch" to "无代码变更",
+            "lease-failed" to "写锁获取失败",
+        )
+        val TERMINAL_STAGES = setOf(
+            "accepted", "failed", "inconclusive", "waived", "cancelled", "quarantined", "stale"
+        )
+
+        fun stageLabel(stage: String): String = STAGE_LABELS[stage] ?: stage
+        fun failureLabel(code: String?): String? = if (code == null) null else FAILURE_CODE_LABELS[code] ?: code
+        fun actionGuide(stage: String, failureCode: String?, isRoom: Boolean = false): String? {
+            if (stage == "fixing" || stage == "awaiting-approval" || stage == "accepted") return null
+            if (stage == "reviewed") return "审查完成，请在质量面板中确认后续操作"
+            if (!TERMINAL_STAGES.contains(stage)) return null
+            if (stage == "inconclusive") return "无法判定质量结论，请检查检查配置或重新发送消息"
+            if (stage == "failed") {
+                val guides = mapOf(
+                    "fixer-budget-exhausted" to "修复预算耗尽，请向 AI 描述失败原因并要求修复",
+                    "l1-check-failed" to "L1 检查未通过，请向 AI 描述失败并要求修复",
+                    "l3-verification-failed" to "需求验证未通过，请查看未满足的验收标准",
+                    "fixer-session-error" to "质量流程异常，可重新发送消息触发验证",
+                    "fixer-prompt-error" to "质量流程异常，可重新发送消息触发验证",
+                    "fixer-infra-failed" to "检查基础设施异常，请检查环境后重试",
+                    "l1-infra-failed" to "检查基础设施异常，请检查环境后重试",
+                )
+                val base = guides[failureCode]
+                return if (isRoom) base?.let { "$it，或点击重试按钮重新派发任务" } ?: "可点击重试按钮重新派发任务" else base
+            }
+            return null
+        }
+        fun compactQualityProgress(stage: String, fixRound: Int, maxFixRounds: Int, passed: Int, failed: Int, awaitingApproval: Boolean): String? {
+            if (awaitingApproval) return "待审批"
+            if (stage == "reviewed") return "待确认"
+            if (stage == "fixing") return "修复 $fixRound/$maxFixRounds"
+            if (stage == "quick-verifying" || stage == "full-verifying") {
+                val total = passed + failed
+                return if (total > 0) "L1 $passed/$total" else "L1"
+            }
+            if (stage == "requirement-verifying") return "L3"
+            if (stage == "reviewing") return "审查"
+            if (stage == "collecting") return "收集"
+            return null
+        }
     }
 
     var screen by mutableStateOf(Screen.Sessions)
@@ -608,6 +795,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val qualityRuns = mutableStateListOf<QualityRun>()
     val qualityChecks = mutableStateListOf<QualityCheck>()
     val qualityFindings = mutableStateListOf<QualityFinding>()
+    val qualityVerifications = mutableStateListOf<RequirementVerification>()
+    var currentRequirementSpec by mutableStateOf<RequirementSpec?>(null)
     val qualityIncidents = mutableStateListOf<QualityIncident>()
     val qualityRules = mutableStateListOf<QualityRule>()
     var qualityAwaitingCount by mutableStateOf(0)
@@ -1628,10 +1817,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = hub.call("quality.run.get", buildJsonObject { put("id", id) })
+                val run = result["run"]?.jsonObject?.let { parseQualityRun(it) }
+                // 若 run 属于其他项目，自动切换项目并加载该项目的 run 列表
+                if (run != null && run.projectId != qualityProjectId) {
+                    if (!qualityProjects.any { it.id == run.projectId }) {
+                        loadQualityProjects()
+                    }
+                    qualityProjectId = run.projectId
+                    loadQualityRuns(run.projectId)
+                } else if (run != null && !qualityRuns.any { it.id == run.id }) {
+                    qualityRuns.add(0, run)
+                }
                 qualityChecks.clear()
                 result["checks"]?.jsonArray?.forEach { qualityChecks.add(parseQualityCheck(it.jsonObject)) }
                 qualityFindings.clear()
                 result["findings"]?.jsonArray?.forEach { qualityFindings.add(parseQualityFinding(it.jsonObject)) }
+                qualityVerifications.clear()
+                result["verifications"]?.jsonArray?.forEach { qualityVerifications.add(parseRequirementVerification(it.jsonObject)) }
                 qualityError = null
             } catch (e: Exception) {
                 qualityError = "加载运行详情失败：${e.message ?: e.toString()}"
@@ -1644,11 +1846,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call("quality.run.listBySession", buildJsonObject {
                     put("sessionId", sessionId)
-                    put("limit", 1)
+                    put("limit", 5)
                 })
                 val runs = result["runs"]?.jsonArray ?: return@launch
                 if (runs.isEmpty()) { sessionQuality = null; return@launch }
-                val run = parseQualityRun(runs[0]!!.jsonObject)
+                val parsed = runs.map { parseQualityRun(it.jsonObject) }
+                // 优先取非终态 run，其次取最新终态 run
+                val activeRun = parsed.find { !TERMINAL_STAGES.contains(it.stage) && it.stage != "stale" && it.stage != "cancelled" }
+                val run = activeRun ?: parsed[0]
                 if (run.stage == "stale" || run.stage == "cancelled") { sessionQuality = null; return@launch }
                 val detail = hub.call("quality.run.get", buildJsonObject { put("id", run.id) })
                 val checks = detail["checks"]?.jsonArray ?: emptyList()
@@ -1691,11 +1896,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     policy?.get("autonomy")?.jsonPrimitive?.contentOrNull ?: "observe"
                 }
+                val reviewConfig = if (version == 2) parseReviewConfigV2(policy?.get("review")?.jsonObject) else null
+                val requirements = policy?.get("requirements")?.jsonObject
+                val verification = policy?.get("verification")?.jsonObject
                 qualityPolicy = QualityPolicyInfo(
                     source = result["source"]?.jsonPrimitive?.content ?: "default",
                     autonomy = autonomy,
                     checkCount = policy?.get("checks")?.jsonArray?.size ?: 0,
                     errors = result["errors"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+                    version = version,
+                    reviewConfig = reviewConfig,
+                    requirementsMode = requirements?.get("mode")?.jsonPrimitive?.contentOrNull ?: "off",
+                    requirementsMaxQuestions = requirements?.get("maxQuestions")?.jsonPrimitive?.content?.toIntOrNull() ?: 3,
+                    verificationMode = verification?.get("mode")?.jsonPrimitive?.contentOrNull ?: "off",
                 )
                 qualityError = null
             } catch (e: Exception) {
@@ -1704,13 +1917,131 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun parseReviewConfigV2(r: JsonObject?): ReviewConfigV2? {
+        if (r == null) return null
+        val trigger = r["trigger"]?.jsonObject
+        val tierMapping = r["tierMapping"]?.jsonObject
+        return ReviewConfigV2(
+            mode = r["mode"]?.jsonPrimitive?.contentOrNull ?: "off",
+            blockSeverity = r["blockSeverity"]?.jsonPrimitive?.contentOrNull ?: "major",
+            minBlockingConfidence = r["minBlockingConfidence"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.8,
+            trigger = ReviewTriggerConfig(
+                minDiffLines = trigger?.get("minDiffLines")?.jsonPrimitive?.intOrNull ?: 10,
+                skipPatterns = trigger?.get("skipPatterns")?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+            ),
+            tierMapping = ReviewTierMapping(
+                default = tierMapping?.get("default")?.jsonPrimitive?.contentOrNull ?: "standard",
+                byRisk = tierMapping?.get("byRisk")?.jsonObject?.mapValues { it.value.jsonPrimitive.contentOrNull ?: "" } ?: emptyMap(),
+                byFileType = tierMapping?.get("byFileType")?.jsonArray?.mapNotNull { parseFileTypeMapping(it.jsonObject) } ?: emptyList(),
+            ),
+            reviewerAgent = r["reviewerAgent"]?.jsonPrimitive?.contentOrNull,
+            reviewerModel = r["reviewerModel"]?.jsonPrimitive?.contentOrNull,
+            model = r["model"]?.jsonPrimitive?.contentOrNull ?: "",
+        )
+    }
+
+    private fun parseFileTypeMapping(obj: JsonObject): ReviewFileTypeMapping? {
+        val pattern = obj["pattern"]?.jsonPrimitive?.contentOrNull ?: return null
+        val tier = obj["tier"]?.jsonPrimitive?.contentOrNull ?: "standard"
+        return ReviewFileTypeMapping(pattern = pattern, tier = tier)
+    }
+
     fun ensureQualityPolicy(projectId: String) {
         viewModelScope.launch {
             try {
                 hub.call("quality.policy.ensure", buildJsonObject { put("projectId", projectId) })
+                // ensure 生成的是 v1；立即迁移到 v2，使 Review 配置可编辑
+                val after = hub.call("quality.policy.get", buildJsonObject { put("projectId", projectId) })
+                if (after["version"]?.jsonPrimitive?.intOrNull == 1) {
+                    hub.call("quality.policy.migrate", buildJsonObject { put("projectId", projectId) })
+                }
                 loadQualityPolicy(projectId)
             } catch (e: Exception) {
                 qualityError = "初始化策略失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    /** 已存在 v1 策略时，迁移到 v2 以显示 Review 配置。 */
+    fun migrateQualityPolicy(projectId: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.policy.migrate", buildJsonObject { put("projectId", projectId) })
+                loadQualityPolicy(projectId)
+            } catch (e: Exception) {
+                qualityError = "迁移策略失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    fun saveQualityPolicy(projectId: String, reviewConfig: ReviewConfigV2) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.policy.get", buildJsonObject { put("projectId", projectId) })
+                val policy = result["policy"]?.jsonObject ?: return@launch
+                val updatedReview = buildJsonObject {
+                    put("mode", reviewConfig.mode)
+                    put("blockSeverity", reviewConfig.blockSeverity)
+                    put("minBlockingConfidence", reviewConfig.minBlockingConfidence)
+                    put("trigger", buildJsonObject {
+                        put("minDiffLines", reviewConfig.trigger.minDiffLines)
+                        put("skipPatterns", buildJsonArray { reviewConfig.trigger.skipPatterns.forEach { add(it) } })
+                    })
+                    put("tierMapping", buildJsonObject {
+                        put("default", reviewConfig.tierMapping.default)
+                        put("byRisk", buildJsonObject {
+                            for ((risk, tier) in reviewConfig.tierMapping.byRisk) {
+                                put(risk, tier)
+                            }
+                        })
+                        put("byFileType", buildJsonArray {
+                            for (m in reviewConfig.tierMapping.byFileType) {
+                                add(buildJsonObject {
+                                    put("pattern", m.pattern)
+                                    put("tier", m.tier)
+                                })
+                            }
+                        })
+                    })
+                    put("model", reviewConfig.model)
+                    reviewConfig.reviewerAgent?.let { put("reviewerAgent", it) }
+                    reviewConfig.reviewerModel?.let { put("reviewerModel", it) }
+                }
+                val updatedPolicy = JsonObject(policy.toMutableMap().apply { put("review", updatedReview) })
+                hub.call("quality.policy.update", buildJsonObject {
+                    put("projectId", projectId)
+                    put("policy", updatedPolicy)
+                })
+                loadQualityPolicy(projectId)
+            } catch (e: Exception) {
+                qualityError = "保存策略失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    fun saveRequirementVerificationPolicy(projectId: String, requirementsMode: String, requirementsMaxQuestions: Int, verificationMode: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("quality.policy.get", buildJsonObject { put("projectId", projectId) })
+                val policy = result["policy"]?.jsonObject ?: return@launch
+                val updatedRequirements = buildJsonObject {
+                    put("mode", requirementsMode)
+                    put("maxQuestions", requirementsMaxQuestions)
+                }
+                val updatedVerification = buildJsonObject {
+                    put("mode", verificationMode)
+                }
+                val updatedPolicy = JsonObject(policy.toMutableMap().apply {
+                    put("requirements", updatedRequirements)
+                    put("verification", updatedVerification)
+                })
+                hub.call("quality.policy.update", buildJsonObject {
+                    put("projectId", projectId)
+                    put("policy", updatedPolicy)
+                })
+                loadQualityPolicy(projectId)
+            } catch (e: Exception) {
+                qualityError = "保存需求/验证策略失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1745,6 +2076,83 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 loadQualityRun(nextId)
             } catch (e: Exception) {
                 qualityError = "运行操作 $action 失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    fun advanceQualityRun(id: String, to: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.run.advance", buildJsonObject {
+                    put("id", id)
+                    put("to", to)
+                })
+                loadQualityRuns(qualityProjectId)
+                loadQualityRun(id)
+            } catch (e: Exception) {
+                qualityError = "推进运行失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    fun respondReviewPrompt(runId: String, action: String) {
+        viewModelScope.launch {
+            try {
+                val currentSessionId = currentSession?.sessionId
+                val result = hub.call("quality.review.promptResponse", buildJsonObject {
+                    put("runId", runId)
+                    put("action", action)
+                    if (currentSessionId != null) put("userSessionId", currentSessionId)
+                })
+                val roomObj = result["room"]?.jsonObject
+                if (roomObj != null) {
+                    val updatedRoom = parseRoom(roomObj)
+                    val existingIdx = rooms.indexOfFirst { it.roomId == updatedRoom.roomId }
+                    if (existingIdx >= 0) rooms[existingIdx] = updatedRoom else rooms.add(updatedRoom)
+                    openRoom(updatedRoom)
+                }
+                val idx = chatItems.indexOfLast { it is ChatItem.ReviewPrompt && it.runId == runId }
+                if (idx >= 0) {
+                    chatItems[idx] = (chatItems[idx] as ChatItem.ReviewPrompt).copy(answered = action)
+                }
+            } catch (e: Exception) {
+                qualityError = "审查协作决策失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    fun deleteQualityProject(id: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.project.delete", buildJsonObject { put("id", id) })
+                if (qualityProjectId == id) {
+                    qualityProjectId = null
+                    qualityRunId = null
+                    qualityChecks.clear()
+                    qualityFindings.clear()
+                    qualityVerifications.clear()
+                    qualityRuns.clear()
+                }
+                loadQualityProjects()
+            } catch (e: Exception) {
+                qualityError = "删除项目失败：${e.message ?: e.toString()}"
+            }
+        }
+    }
+
+    fun deleteQualityRun(id: String) {
+        viewModelScope.launch {
+            try {
+                hub.call("quality.run.delete", buildJsonObject { put("id", id) })
+                if (qualityRunId == id) {
+                    qualityRunId = null
+                    qualityChecks.clear()
+                    qualityFindings.clear()
+                    qualityVerifications.clear()
+                }
+                loadQualityRuns(qualityProjectId)
+            } catch (e: Exception) {
+                qualityError = "删除运行失败：${e.message ?: e.toString()}"
             }
         }
     }
@@ -1790,6 +2198,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         stdoutArtifact = o["stdoutArtifact"]?.jsonPrimitive?.contentOrNull,
         stderrArtifact = o["stderrArtifact"]?.jsonPrimitive?.contentOrNull,
     )
+    fun parseQualityCheckPublic(o: JsonObject) = parseQualityCheck(o)
+    fun parseQualityFindingPublic(o: JsonObject) = parseQualityFinding(o)
+    fun parseRequirementVerificationPublic(o: JsonObject) = parseRequirementVerification(o)
 
     private fun parseQualityFinding(o: JsonObject) = QualityFinding(
         id = o["id"]?.jsonPrimitive?.content ?: "",
@@ -1803,6 +2214,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         line = o["line"]?.jsonPrimitive?.intOrNull,
         blocking = o["blocking"]?.jsonPrimitive?.content?.toBoolean() ?: false,
         status = o["status"]?.jsonPrimitive?.content ?: "open",
+    )
+
+    private fun parseRequirementVerification(o: JsonObject) = RequirementVerification(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        runId = o["runId"]?.jsonPrimitive?.content ?: "",
+        specId = o["specId"]?.jsonPrimitive?.content ?: "",
+        specVersion = o["specVersion"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        criterionId = o["criterionId"]?.jsonPrimitive?.content ?: "",
+        expectationId = o["expectationId"]?.jsonPrimitive?.content ?: "",
+        status = o["status"]?.jsonPrimitive?.content ?: "inconclusive",
+        method = o["method"]?.jsonPrimitive?.content ?: "",
+        evidenceRefs = o["evidenceRefs"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        verifier = o["verifier"]?.jsonPrimitive?.content ?: "",
+        confidence = o["confidence"]?.jsonPrimitive?.content?.toDoubleOrNull(),
+        waiverReason = o["waiverReason"]?.jsonPrimitive?.contentOrNull,
     )
 
     fun resolveQualityFinding(id: String, status: String, note: String = "") {
@@ -2980,6 +3406,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun cancelFlow() {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
+                flow = null
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, "取消编排失败: ${e.message}"))
+            }
+        }
+    }
+
     fun sendRoomMessage(text: String) {
         val room = currentRoom ?: return
         if (text.isBlank() && pendingAttachments.isEmpty()) return
@@ -3679,6 +4117,104 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun answerClarification(clarificationRequestId: String, answers: Map<String, String>) {
+        val idx = chatItems.indexOfLast { it is ChatItem.Clarification && it.clarificationRequestId == clarificationRequestId }
+        if (idx >= 0) {
+            chatItems[idx] = (chatItems[idx] as ChatItem.Clarification).copy(answers = answers, status = "answered")
+        }
+        viewModelScope.launch {
+            try {
+                hub.call("requirement.clarificationAnswer", buildJsonObject {
+                    put("clarificationRequestId", clarificationRequestId)
+                    put("answers", buildJsonArray {
+                        answers.forEach { (qid, ans) ->
+                            add(buildJsonObject {
+                                put("questionId", qid)
+                                put("answer", ans)
+                            })
+                        }
+                    })
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, "提交澄清回答失败: ${e.message}", "需求澄清"))
+            }
+        }
+    }
+
+    fun skipClarification(clarificationRequestId: String) {
+        updateClarificationStatus(clarificationRequestId, "skipped")
+        viewModelScope.launch {
+            try {
+                hub.call("requirement.clarificationSkip", buildJsonObject {
+                    put("clarificationRequestId", clarificationRequestId)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, "跳过澄清失败: ${e.message}", "需求澄清"))
+            }
+        }
+    }
+
+    fun cancelClarification(clarificationRequestId: String) {
+        updateClarificationStatus(clarificationRequestId, "cancelled")
+        viewModelScope.launch {
+            try {
+                hub.call("requirement.clarificationCancel", buildJsonObject {
+                    put("clarificationRequestId", clarificationRequestId)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, "取消澄清失败: ${e.message}", "需求澄清"))
+            }
+        }
+    }
+
+    private fun updateClarificationStatus(clarificationRequestId: String, status: String) {
+        val idx = chatItems.indexOfLast { it is ChatItem.Clarification && it.clarificationRequestId == clarificationRequestId }
+        if (idx >= 0) {
+            val item = chatItems[idx] as ChatItem.Clarification
+            chatItems[idx] = item.copy(status = status)
+        }
+    }
+
+    fun loadRequirementSpec(specId: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("requirement.specGet", buildJsonObject { put("id", specId) })
+                result["spec"]?.jsonObject?.let { currentRequirementSpec = parseRequirementSpec(it) }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun parseRequirementSpec(o: JsonObject): RequirementSpec = RequirementSpec(
+        id = o["id"]?.jsonPrimitive?.content ?: "",
+        requestId = o["requestId"]?.jsonPrimitive?.content ?: "",
+        version = o["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
+        goal = o["goal"]?.jsonPrimitive?.content ?: "",
+        scopeIncluded = o["scope"]?.jsonObject?.get("included")?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        scopeExcluded = o["scope"]?.jsonObject?.get("excluded")?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        acceptanceCriteria = o["acceptanceCriteria"]?.jsonArray?.map { c ->
+            val co = c.jsonObject
+            AcceptanceCriterion(
+                id = co["id"]?.jsonPrimitive?.content ?: "",
+                description = co["description"]?.jsonPrimitive?.content ?: "",
+                required = co["required"]?.jsonPrimitive?.content?.toBoolean() ?: true,
+                evidenceMode = co["evidenceMode"]?.jsonPrimitive?.content ?: "any",
+                expectations = co["expectedEvidence"]?.jsonArray?.map { it.jsonObject["description"]?.jsonPrimitive?.content ?: it.jsonObject["instruction"]?.jsonPrimitive?.content ?: it.jsonObject["rubric"]?.jsonPrimitive?.content ?: it.jsonObject["checkId"]?.jsonPrimitive?.content ?: "" } ?: emptyList(),
+            )
+        } ?: emptyList(),
+        constraints = o["constraints"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        risks = o["risks"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        clarifications = o["clarifications"]?.jsonArray?.map { q ->
+            val qo = q.jsonObject
+            ClarificationQuestion(
+                id = qo["id"]?.jsonPrimitive?.content ?: "",
+                dimension = qo["dimension"]?.jsonPrimitive?.content ?: "",
+                text = qo["question"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList(),
+        status = o["status"]?.jsonPrimitive?.content ?: "draft",
+    )
+
     private fun inScope(sessionId: String): Boolean {
         val room = currentRoom
         if (room != null) return room.members.any { it.first == sessionId }
@@ -3848,23 +4384,53 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (parsed.stage != "stale" && parsed.stage != "cancelled") {
                         val checkStats = p["checkStats"]?.jsonObject
                         val findingStats = p["findingStats"]?.jsonObject
-                        sessionQuality = QualitySummary(
-                            runId = parsed.id,
-                            stage = parsed.stage,
-                            enforcement = "require-pass",
-                            fixRound = parsed.fixRound,
-                            maxFixRounds = parsed.maxFixRounds,
-                            passedChecks = checkStats?.get("passed")?.jsonPrimitive?.intOrNull ?: 0,
-                            failedChecks = checkStats?.get("failed")?.jsonPrimitive?.intOrNull ?: 0,
-                            findings = findingStats?.get("total")?.jsonPrimitive?.intOrNull ?: 0,
-                            blockingFindings = findingStats?.get("blocking")?.jsonPrimitive?.intOrNull ?: 0,
-                            verdict = parsed.verdict,
-                            failureCode = parsed.failureCode,
-                            awaitingApproval = parsed.stage == "awaiting-approval",
-                        )
+                        val isCurrentActive = sessionQuality != null && !TERMINAL_STAGES.contains(sessionQuality!!.stage) && sessionQuality!!.runId != parsed.id
+                        val isNewEarly = parsed.stage == "queued" || parsed.stage == "preflight"
+                        if (!(isCurrentActive && isNewEarly)) {
+                            sessionQuality = QualitySummary(
+                                runId = parsed.id,
+                                stage = parsed.stage,
+                                enforcement = "require-pass",
+                                fixRound = parsed.fixRound,
+                                maxFixRounds = parsed.maxFixRounds,
+                                passedChecks = checkStats?.get("passed")?.jsonPrimitive?.intOrNull ?: 0,
+                                failedChecks = checkStats?.get("failed")?.jsonPrimitive?.intOrNull ?: 0,
+                                findings = findingStats?.get("total")?.jsonPrimitive?.intOrNull ?: 0,
+                                blockingFindings = findingStats?.get("blocking")?.jsonPrimitive?.intOrNull ?: 0,
+                                verdict = parsed.verdict,
+                                failureCode = parsed.failureCode,
+                                awaitingApproval = parsed.stage == "awaiting-approval",
+                            )
+                        }
                     } else {
                         sessionQuality = null
                     }
+                }
+                // 群聊 task.quality 实时更新
+                val f = flow
+                val cr = currentRoom
+                if (f != null && cr != null && parsed.taskId != null && parsed.roomId == cr.roomId) {
+                    val checkStats = p["checkStats"]?.jsonObject
+                    val findingStats = p["findingStats"]?.jsonObject
+                    val updatedTasks = f.tasks.map { t ->
+                        if (t.qualityRunId == parsed.id) {
+                            t.copy(quality = QualitySummary(
+                                runId = parsed.id,
+                                stage = parsed.stage,
+                                enforcement = "require-pass",
+                                fixRound = parsed.fixRound,
+                                maxFixRounds = parsed.maxFixRounds,
+                                passedChecks = checkStats?.get("passed")?.jsonPrimitive?.intOrNull ?: 0,
+                                failedChecks = checkStats?.get("failed")?.jsonPrimitive?.intOrNull ?: 0,
+                                findings = findingStats?.get("total")?.jsonPrimitive?.intOrNull ?: 0,
+                                blockingFindings = findingStats?.get("blocking")?.jsonPrimitive?.intOrNull ?: 0,
+                                verdict = parsed.verdict,
+                                failureCode = parsed.failureCode,
+                                awaitingApproval = parsed.stage == "awaiting-approval",
+                            ))
+                        } else t
+                    }
+                    flow = f.copy(tasks = updatedTasks)
                 }
             }
             "quality.awaitingApproval" -> {
@@ -3900,6 +4466,109 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         chatItems[idx] = item.copy(answered = outcome)
                     }
                 }
+            }
+            "requirement.clarificationRequired" -> {
+                val p = obj["params"]!!.jsonObject
+                val clarificationRequestId = p["clarificationRequestId"]!!.jsonPrimitive.content
+                val requestId = p["requestId"]!!.jsonPrimitive.content
+                val specId = p["specId"]!!.jsonPrimitive.content
+                val specVersion = p["specVersion"]!!.jsonPrimitive.content.toIntOrNull() ?: 1
+                val questions = p["questions"]?.jsonArray?.map { q ->
+                    val qo = q.jsonObject
+                    ClarificationQuestion(
+                        id = qo["id"]?.jsonPrimitive?.content ?: "",
+                        dimension = qo["dimension"]?.jsonPrimitive?.content ?: "",
+                        text = qo["question"]?.jsonPrimitive?.content
+                            ?: qo["text"]?.jsonPrimitive?.content
+                            ?: "",
+                    )
+                } ?: emptyList()
+                val canSkip = p["canSkip"]?.jsonPrimitive?.content?.toBoolean() ?: true
+                val existingIdx = chatItems.indexOfLast { it is ChatItem.Clarification && it.clarificationRequestId == clarificationRequestId }
+                if (existingIdx >= 0) {
+                    chatItems[existingIdx] = (chatItems[existingIdx] as ChatItem.Clarification).copy(
+                        questions = questions,
+                        canSkip = canSkip,
+                        status = "pending",
+                    )
+                } else {
+                    chatItems.add(
+                        ChatItem.Clarification(
+                            id = ++itemSeq,
+                            clarificationRequestId = clarificationRequestId,
+                            requestId = requestId,
+                            specId = specId,
+                            specVersion = specVersion,
+                            questions = questions,
+                            canSkip = canSkip,
+                            author = "需求澄清",
+                            at = System.currentTimeMillis(),
+                        )
+                    )
+                }
+            }
+            "requirement.clarificationAnswer" -> {
+                val p = obj["params"]!!.jsonObject
+                val clarificationRequestId = p["clarificationRequestId"]!!.jsonPrimitive.content
+                val idx = chatItems.indexOfLast { it is ChatItem.Clarification && it.clarificationRequestId == clarificationRequestId }
+                if (idx >= 0) {
+                    val item = chatItems[idx] as ChatItem.Clarification
+                    chatItems[idx] = item.copy(status = "answered")
+                }
+            }
+            "requirement.clarificationSkip" -> {
+                val p = obj["params"]!!.jsonObject
+                val clarificationRequestId = p["clarificationRequestId"]!!.jsonPrimitive.content
+                val idx = chatItems.indexOfLast { it is ChatItem.Clarification && it.clarificationRequestId == clarificationRequestId }
+                if (idx >= 0) {
+                    val item = chatItems[idx] as ChatItem.Clarification
+                    chatItems[idx] = item.copy(status = "skipped")
+                }
+            }
+            "requirement.specUpdate" -> {
+                val p = obj["params"]!!.jsonObject
+                val specId = p["specId"]?.jsonPrimitive?.content
+                val status = p["status"]?.jsonPrimitive?.contentOrNull
+                if (specId != null && status == "accepted") {
+                    loadRequirementSpec(specId)
+                }
+            }
+            "quality.review.prompt" -> {
+                val p = obj["params"]!!.jsonObject
+                val runId = p["runId"]!!.jsonPrimitive.content
+                val kind = p["kind"]?.jsonPrimitive?.content ?: "create-review-room"
+                val roomId = p["roomId"]?.jsonPrimitive?.contentOrNull
+                val implementerSessionId = p["implementerSessionId"]?.jsonPrimitive?.contentOrNull
+                if (currentRoom?.roomId != null && currentRoom?.roomId != roomId) return
+                if (currentRoom == null && currentSession?.sessionId != implementerSessionId) return
+                chatItems.add(
+                    ChatItem.ReviewPrompt(
+                        id = ++itemSeq,
+                        runId = runId,
+                        kind = kind,
+                        roomId = roomId,
+                        at = System.currentTimeMillis(),
+                    )
+                )
+            }
+            "quality.reviewed" -> {
+                val p = obj["params"]!!.jsonObject
+                val runId = p["runId"]!!.jsonPrimitive.content
+                val roomId = p["roomId"]?.jsonPrimitive?.contentOrNull
+                val implementerSessionId = p["implementerSessionId"]?.jsonPrimitive?.contentOrNull
+                val findings = p["findings"]?.jsonArray?.map { parseQualityFindingPublic(it.jsonObject) } ?: emptyList()
+                val verdict = p["verdict"]?.jsonPrimitive?.content ?: "uncertain"
+                if (currentRoom?.roomId != null && currentRoom?.roomId != roomId) return
+                if (currentRoom == null && currentSession?.sessionId != implementerSessionId && currentRoom?.roomId != roomId) return
+                chatItems.add(
+                    ChatItem.Review(
+                        id = ++itemSeq,
+                        runId = runId,
+                        verdict = verdict,
+                        findings = findings,
+                        at = System.currentTimeMillis(),
+                    )
+                )
             }
         }
     }

@@ -69,7 +69,7 @@ describe("review metrics (Q2-07)", () => {
     sessionRunner = new MockSessionRunner();
     orchestrator = new ReviewOrchestrator(service, permissionManager, sessionRunner, {
       artifactDir: dir,
-      reviewTimeoutMs: 5000,
+
       collectBaselineFn: () => ({ revision: "", dirtyHash: null, isGit: false }) as Baseline,
       collectChangeSetFn: (
         runId: string,
@@ -340,7 +340,7 @@ describe("review metrics (Q2-07)", () => {
       };
       const failingOrch = new ReviewOrchestrator(service, permissionManager, failingRunner, {
         artifactDir: dir,
-        reviewTimeoutMs: 5000,
+  
         collectBaselineFn: () => ({ revision: "", dirtyHash: null, isGit: false }) as Baseline,
         collectChangeSetFn: (runId: string): ChangeSet => ({
           runId, baseRevision: undefined, patchArtifact: "", patchHash: "h1",

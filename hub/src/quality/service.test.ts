@@ -792,3 +792,49 @@ describe("QualityService", () => {
     });
   });
 });
+
+describe("QualityService spec lookup & prompt context", () => {
+  let dir: string;
+  let store: Store;
+  let service: QualityService;
+
+  beforeEach(() => {
+    dir = tmpDir();
+    store = new Store(dir);
+    service = new QualityService(store, () => {});
+    service.registerProject({ connectionId: "c1", root: dir });
+  });
+  afterEach(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("findCurrentSpec 无记录时返回 undefined", () => {
+    assert.equal(service.findCurrentSpec({ sessionId: "none" }), undefined);
+    assert.equal(service.findCurrentSpec({ roomId: "none" }), undefined);
+  });
+
+  it("findCurrentSpec 按 sessionId 返回最新 spec", async () => {
+    const r = await service.handleL0Request({
+      text: "实现登录功能",
+      source: "session",
+      correlationId: "c1",
+      sessionId: "s1",
+    });
+    const current = service.findCurrentSpec({ sessionId: "s1" });
+    assert.ok(current);
+    assert.equal(current!.request.id, r.request.id);
+    assert.equal(current!.spec.id, r.spec!.id);
+  });
+
+  it("buildSpecPromptContext 格式化 goal 与验收标准", async () => {
+    const r = await service.handleL0Request({
+      text: "实现登录功能",
+      source: "session",
+      correlationId: "c2",
+      sessionId: "s2",
+    });
+    const ctx = service.buildSpecPromptContext(r.spec!);
+    assert.match(ctx, /需求目标/);
+  });
+});

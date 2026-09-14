@@ -7,8 +7,9 @@ import { ReviewOrchestrator, type ReviewerSessionRunner } from "./review-orchest
 import { QualityService } from "./service.js";
 import { RunPermissionManager } from "./permissions.js";
 import { Store } from "../store.js";
-import type { ChangeSet, ProjectScope, QualityPolicy, QualityRun } from "./types.js";
+import type { ChangeSet, ProjectScope, QualityPolicy, QualityPolicyV2, QualityRun, ReviewTier } from "./types.js";
 import type { Baseline, ChangeSetCollectorOptions } from "./change-set.js";
+import { defaultReviewConfig } from "./policy.js";
 
 function makeTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "review-orch-"));
@@ -43,19 +44,52 @@ function makePolicy(): QualityPolicy {
   };
 }
 
+function makePolicyV2(): QualityPolicyV2 {
+  const base = defaultReviewConfig();
+  return {
+    version: 2,
+    checks: [],
+    protectedPaths: [],
+    riskRules: [],
+    requirementRules: [],
+    verificationRules: [],
+    enforcement: { mode: "report", approvalRisk: "high" },
+    remediation: { mode: "off", maxFixRounds: 2 },
+    requirements: { mode: "off", maxQuestions: 3 },
+    review: {
+      ...base,
+      mode: "advisory",
+      tierMapping: {
+        default: "standard",
+        byRisk: { low: "light", medium: "standard", high: "deep", critical: "deep" },
+        byFileType: [{ pattern: "**/*.md", tier: "light" }],
+      },
+      model: "claude/sonnet",
+    },
+    verification: { mode: "off" },
+    evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10485760 },
+  };
+}
+
 /** Mock session runner：记录调用，返回预设输出。 */
 class MockSessionRunner implements ReviewerSessionRunner {
   public prompts: { sessionId: string; text: string }[] = [];
   public nextOutput = "";
   public nextStopReason = "end_turn";
   public createdSessions = 0;
+  public lastModel?: string | undefined;
+  public lastTier?: ReviewTier | undefined;
   private sessionCounter = 0;
 
   async ensureSession(opts: {
     project: ProjectScope;
     run: QualityRun;
     existingSessionId?: string | undefined;
+    model?: string | undefined;
+    tier?: ReviewTier | undefined;
   }): Promise<string> {
+    this.lastModel = opts.model;
+    this.lastTier = opts.tier;
     if (opts.existingSessionId) return opts.existingSessionId;
     return `rev-session-${++this.sessionCounter}`;
   }
@@ -63,7 +97,6 @@ class MockSessionRunner implements ReviewerSessionRunner {
   async promptOnce(
     sessionId: string,
     text: string,
-    _timeoutMs?: number,
   ): Promise<{ output: string; stopReason: string }> {
     this.prompts.push({ sessionId, text });
     return { output: this.nextOutput, stopReason: this.nextStopReason };
@@ -98,7 +131,6 @@ describe("ReviewOrchestrator", () => {
     sessionRunner = new MockSessionRunner();
     orchestrator = new ReviewOrchestrator(service, permissionManager, sessionRunner, {
       artifactDir: dir,
-      reviewTimeoutMs: 5000,
       collectBaselineFn: () => ({ revision: "", dirtyHash: null, isGit: false }) as Baseline,
       collectChangeSetFn: (
         runId: string,
@@ -397,7 +429,6 @@ describe("ReviewOrchestrator", () => {
     };
     const failingOrchestrator = new ReviewOrchestrator(service, permissionManager, failingRunner, {
       artifactDir: dir,
-      reviewTimeoutMs: 5000,
       collectBaselineFn: () => ({ revision: "", dirtyHash: null, isGit: false }) as Baseline,
       collectChangeSetFn: (runId: string): ChangeSet => ({
         runId, baseRevision: undefined, patchArtifact: "", patchHash: "h1",
@@ -459,5 +490,213 @@ describe("ReviewOrchestrator", () => {
     const result = await orchestrator.runReview(run.id);
     // needsFix 因有 blocking finding → fixing
     assert.equal(result.nextStage, "fixing");
+  });
+
+  it("advisory 模式 + blocking finding → 推进到 reviewed（等人决策）", async () => {
+    const v2 = makePolicyV2();
+    v2.review.mode = "advisory";
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "medium",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({
+      verdict: "needs-fix",
+      findings: [
+        { severity: "major", confidence: 0.9, category: "correctness", claim: "bug", evidence: "ev", suggestion: "fix it" },
+      ],
+    });
+
+    const result = await orchestrator.runReview(run.id);
+    assert.equal(result.nextStage, "reviewed");
+  });
+
+  it("advisory 模式 + verdict=pass 无 blocking → 推进到 full-verifying", async () => {
+    const v2 = makePolicyV2();
+    v2.review.mode = "advisory";
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "low",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({ verdict: "pass", findings: [] });
+
+    const result = await orchestrator.runReview(run.id);
+    assert.equal(result.nextStage, "full-verifying");
+  });
+
+  it("advisory 模式 + verdict=uncertain → 推进到 awaiting-approval", async () => {
+    const v2 = makePolicyV2();
+    v2.review.mode = "advisory";
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "low",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = "cannot determine";
+
+    const result = await orchestrator.runReview(run.id);
+    assert.equal(result.nextStage, "awaiting-approval");
+  });
+
+  it("blocking 模式 + blocking finding → 推进到 fixing", async () => {
+    const v2 = makePolicyV2();
+    v2.review.mode = "blocking";
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "medium",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({
+      verdict: "needs-fix",
+      findings: [
+        { severity: "major", confidence: 0.9, category: "correctness", claim: "bug", evidence: "ev", suggestion: "fix it" },
+      ],
+    });
+
+    const result = await orchestrator.runReview(run.id);
+    assert.equal(result.nextStage, "fixing");
+  });
+
+  it("v2 policy 按风险选择 light tier", async () => {
+    const v2 = makePolicyV2();
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "low",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({ verdict: "pass", findings: [] });
+    await orchestrator.runReview(run.id);
+
+    assert.equal(sessionRunner.lastTier, "light");
+    assert.equal(sessionRunner.lastModel, "claude/sonnet");
+  });
+
+  it("v2 policy 按文件类型命中 deep tier", async () => {
+    const v2 = makePolicyV2();
+    v2.review.tierMapping.byFileType = [{ pattern: "src/foo.ts", tier: "deep" }];
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "low",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({ verdict: "pass", findings: [] });
+    await orchestrator.runReview(run.id);
+
+    assert.equal(sessionRunner.lastTier, "deep");
+    assert.equal(sessionRunner.lastModel, "claude/sonnet");
+  });
+
+  it("v2 policy 使用配置的单一模型", async () => {
+    const v2 = makePolicyV2();
+    v2.review.model = "claude/opus";
+    fs.mkdirSync(path.join(dir, ".devin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".devin", "quality.json"), JSON.stringify(v2));
+
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "critical",
+      policyVersion: "2",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({ verdict: "pass", findings: [] });
+    await orchestrator.runReview(run.id);
+
+    assert.equal(sessionRunner.lastTier, "deep");
+    assert.equal(sessionRunner.lastModel, "claude/opus");
+  });
+
+  it("v1 policy 回退到默认 standard tier", async () => {
+    const run = service.startRun({
+      projectId: project.id,
+      trigger: "interactive",
+      risk: "medium",
+      policyVersion: "1",
+      budget: { maxFixRounds: 2, timeoutMs: 60000 },
+    });
+    service.advance(run.id, "preflight");
+    service.advance(run.id, "implementing");
+    service.advance(run.id, "collecting");
+    service.advance(run.id, "quick-verifying");
+    service.advance(run.id, "reviewing");
+
+    sessionRunner.nextOutput = JSON.stringify({ verdict: "pass", findings: [] });
+    await orchestrator.runReview(run.id);
+
+    assert.equal(sessionRunner.lastTier, "standard");
+    assert.equal(sessionRunner.lastModel, "");
   });
 });

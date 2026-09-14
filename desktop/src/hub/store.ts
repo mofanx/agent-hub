@@ -17,10 +17,14 @@ import type {
   QualityFinding,
   QualityIncident,
   QualityPolicyInfo,
+  QualityPolicyV2,
   QualityProject,
   QualityRule,
   QualityRun,
   QualitySummary,
+  RequirementSpec,
+  RequirementVerification,
+  ClarificationRequest,
   WorkItem,
   RoomInfo,
   RoomModeConfig,
@@ -35,6 +39,7 @@ import type {
   TaskLog,
 } from "./types";
 import { HubClient } from "./client";
+import { TERMINAL_STAGES } from "./quality-labels";
 import {
   loadConfig,
   saveConfig,
@@ -114,6 +119,7 @@ interface State {
   qualityRuns: QualityRun[];
   qualityChecks: QualityCheck[];
   qualityFindings: QualityFinding[];
+  qualityVerifications: RequirementVerification[];
   qualityPolicy: QualityPolicyInfo | null;
   qualityProjectId: string | null;
   qualityRunId: string | null;
@@ -125,6 +131,12 @@ interface State {
   loadSessionQuality: (sessionId: string) => Promise<void>;
   qualityError: string | null;
   qualityWorkItems: WorkItem[];
+  requirementSpecs: RequirementSpec[];
+  currentSpec: RequirementSpec | null;
+  clarificationRequests: ClarificationRequest[];
+  sessionProjectId: string | null;
+  sessionPolicy: QualityPolicyInfo | null;
+  shownSpecRunIds: Set<string>;
 }
 
 interface Actions {
@@ -207,6 +219,7 @@ interface Actions {
   sendPrompt(text: string): void;
   sendRoomMessage(text: string): void;
   stopCurrent(): void;
+  cancelFlow(): Promise<void>;
   answerPermission(requestId: string, optionId: string, optionName: string): void;
 
   search(query: string): Promise<void>;
@@ -287,8 +300,12 @@ interface Actions {
   loadQualityRun(id: string): Promise<void>;
   loadQualityPolicy(projectId: string): Promise<void>;
   ensureQualityPolicy(projectId: string): Promise<void>;
+  saveQualityPolicy(projectId: string, policy: QualityPolicyV2): Promise<void>;
   startQualityRun(projectId: string): Promise<void>;
   qualityRunAction(id: string, action: "cancel" | "approve" | "reject" | "retry"): Promise<void>;
+  advanceQualityRun(id: string, to: "full-verifying" | "fixing" | "cancelled"): Promise<void>;
+  deleteQualityProject(id: string): Promise<void>;
+  deleteQualityRun(id: string): Promise<void>;
   resolveQualityFinding(id: string, status: QualityFinding["status"], note?: string): Promise<void>;
   loadQualityIncidents(projectId?: string): Promise<void>;
   resolveQualityIncident(id: string, status: QualityIncident["status"], regressionTest?: string): Promise<void>;
@@ -296,6 +313,15 @@ interface Actions {
   resolveQualityRule(id: string, status: QualityRule["status"]): Promise<void>;
   loadQualityWorkItems(projectId?: string): Promise<void>;
   clearQualityError(): void;
+
+  answerClarification(clarificationRequestId: string, answers: Array<{ questionId: string; answer: string }>): Promise<void>;
+  skipClarification(clarificationRequestId: string): Promise<void>;
+  cancelClarification(clarificationRequestId: string): Promise<void>;
+  listRequirementSpecs(requestId: string): Promise<void>;
+  loadRequirementSpec(id: string): Promise<void>;
+  updateRequirementSpec(id: string, patch: Partial<Pick<RequirementSpec, "goal" | "acceptanceCriteria" | "constraints" | "status">>): Promise<void>;
+  saveRequirementVerificationPolicy(projectId: string, patch: { requirements?: { mode?: QualityPolicyV2["requirements"]["mode"]; maxQuestions?: number }; verification?: { mode?: QualityPolicyV2["verification"]["mode"] } }): Promise<void>;
+  loadSessionProjectPolicy(): Promise<void>;
 }
 
 const defaultConfig: AppConfig = {
@@ -633,22 +659,77 @@ export const useHubStore = create<State & Actions>((set, get) => {
           if (run.stage !== "stale" && run.stage !== "cancelled") {
             const checkStats = params.checkStats as { passed: number; failed: number; infraFailed: number } | undefined;
             const findingStats = params.findingStats as { total: number; blocking: number } | undefined;
-            set({ sessionQuality: {
-              runId: run.id,
-              stage: run.stage,
-              enforcement: "require-pass",
-              fixRound: run.fixRound,
-              maxFixRounds: run.budget.maxFixRounds,
-              passedChecks: checkStats?.passed ?? 0,
-              failedChecks: checkStats?.failed ?? 0,
-              findings: findingStats?.total ?? 0,
-              blockingFindings: findingStats?.blocking ?? 0,
-              ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
-              ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
-              awaitingApproval: run.stage === "awaiting-approval",
-            } });
+            const current = get().sessionQuality;
+            const isCurrentActive = current && !TERMINAL_STAGES.has(current.stage) && current.runId !== run.id;
+            const isNewEarly = run.stage === "queued" || run.stage === "preflight";
+            if (isCurrentActive && isNewEarly) {
+              // 当前有活跃 run，新 run 刚开始，不覆盖
+            } else {
+              set({ sessionQuality: {
+                runId: run.id,
+                stage: run.stage,
+                enforcement: "require-pass",
+                fixRound: run.fixRound,
+                maxFixRounds: run.budget.maxFixRounds,
+                passedChecks: checkStats?.passed ?? 0,
+                failedChecks: checkStats?.failed ?? 0,
+                findings: findingStats?.total ?? 0,
+                blockingFindings: findingStats?.blocking ?? 0,
+                ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
+                ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
+                awaitingApproval: run.stage === "awaiting-approval",
+              } });
+            }
+            // 进入 requirement-verifying 或终态时，加载 spec 用于 SpecSummaryCard
+            if ((run.stage === "requirement-verifying" || TERMINAL_STAGES.has(run.stage)) && !get().shownSpecRunIds.has(run.id)) {
+              set({ shownSpecRunIds: new Set(get().shownSpecRunIds).add(run.id) });
+              void getOrCall<Record<string, unknown>>("quality.run.get", { id: run.id })
+                .then((detail) => {
+                  const verifs = (detail.verifications as Array<{ specId: string }> | undefined) ?? [];
+                  const firstSpecId = verifs.find((v) => v.specId)?.specId;
+                  if (firstSpecId) void get().loadRequirementSpec(firstSpecId);
+                })
+                .catch(() => {});
+            }
           } else {
             set({ sessionQuality: null });
+          }
+        }
+        // 群聊 task.quality 实时更新：不依赖 conductor emitFlow
+        const flow = get().flow;
+        const currentRoom = get().currentRoom;
+        if (flow && currentRoom && run.taskId && run.roomId === currentRoom.roomId) {
+          const checkStats = params.checkStats as { passed: number; failed: number; infraFailed: number } | undefined;
+          const findingStats = params.findingStats as { total: number; blocking: number } | undefined;
+          const updatedTasks = flow.tasks.map((t) =>
+            t.qualityRunId === run.id
+              ? { ...t, quality: {
+                  runId: run.id,
+                  stage: run.stage,
+                  enforcement: "require-pass",
+                  fixRound: run.fixRound,
+                  maxFixRounds: run.budget.maxFixRounds,
+                  passedChecks: checkStats?.passed ?? 0,
+                  failedChecks: checkStats?.failed ?? 0,
+                  findings: findingStats?.total ?? 0,
+                  blockingFindings: findingStats?.blocking ?? 0,
+                  ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
+                  ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
+                  awaitingApproval: run.stage === "awaiting-approval",
+                } as QualitySummary }
+              : t
+          );
+          set({ flow: { ...flow, tasks: updatedTasks } });
+          // 群聊：进入 requirement-verifying 或终态时，加载 spec 用于 SpecSummaryCard
+          if ((run.stage === "requirement-verifying" || TERMINAL_STAGES.has(run.stage)) && !get().shownSpecRunIds.has(run.id)) {
+            set({ shownSpecRunIds: new Set(get().shownSpecRunIds).add(run.id) });
+            void getOrCall<Record<string, unknown>>("quality.run.get", { id: run.id })
+              .then((detail) => {
+                const verifs = (detail.verifications as Array<{ specId: string }> | undefined) ?? [];
+                const firstSpecId = verifs.find((v) => v.specId)?.specId;
+                if (firstSpecId) void get().loadRequirementSpec(firstSpecId);
+              })
+              .catch(() => {});
           }
         }
         break;
@@ -694,6 +775,86 @@ export const useHubStore = create<State & Actions>((set, get) => {
             items[idx] = { ...p, answered: outcome };
             set({ chatItems: items });
           }
+        }
+        break;
+      }
+      case "requirement.clarificationRequired": {
+        const clarificationRequestId = String(params.clarificationRequestId ?? "");
+        const specId = String(params.specId ?? "");
+        const specVersion = Number(params.specVersion ?? 0);
+        const questions = (params.questions as Array<{ id: string; dimension: string; text: string }> | undefined) ?? [];
+        const canSkip = Boolean(params.canSkip ?? false);
+        const expiresAt = params.expiresAt !== undefined && params.expiresAt !== null ? Number(params.expiresAt) : undefined;
+        const next: ChatItem = {
+          kind: "clarification",
+          at: Date.now(),
+          clarificationRequestId,
+          specId,
+          specVersion,
+          questions,
+          canSkip,
+          expiresAt,
+          answered: null,
+          author: "需求",
+        };
+        set({ chatItems: [...get().chatItems, next] });
+        const cr: ClarificationRequest = {
+          id: clarificationRequestId,
+          requestId: String(params.requestId ?? ""),
+          specId,
+          specVersion,
+          questions: questions.map((q) => ({ id: q.id, dimension: q.dimension as ClarificationRequest["questions"][number]["dimension"], text: q.text })),
+          canSkip,
+          expiresAt,
+          status: "pending",
+          createdAt: Date.now(),
+        };
+        set({ clarificationRequests: [...get().clarificationRequests.filter((c) => c.id !== cr.id), cr] });
+        ensurePermission().then(() => {
+          showNotification("需求澄清", `共 ${questions.length} 个问题待回答`).catch(() => {});
+        });
+        break;
+      }
+      case "requirement.clarificationAnswer":
+      case "requirement.clarificationSkip":
+      case "requirement.clarificationCancel": {
+        const clarificationRequestId = String(params.clarificationRequestId ?? "");
+        const outcome = method === "requirement.clarificationAnswer" ? "answered" : method === "requirement.clarificationSkip" ? "skipped" : "cancelled";
+        const items = [...get().chatItems];
+        const idx = findLastIndex(items, (it) => it.kind === "clarification" && it.clarificationRequestId === clarificationRequestId);
+        if (idx >= 0) {
+          const c = items[idx];
+          if (c.kind === "clarification" && c.answered === null) {
+            items[idx] = { ...c, answered: outcome };
+            set({ chatItems: items });
+          }
+        }
+        set({ clarificationRequests: get().clarificationRequests.map((c) => c.id === clarificationRequestId ? { ...c, status: outcome } : c) });
+        break;
+      }
+      case "requirement.specUpdate": {
+        const specId = String(params.specId ?? "");
+        const specVersion = Number(params.specVersion ?? 0);
+        const status = params.status as RequirementSpec["status"] | undefined;
+        const cur = get().currentSpec;
+        if (cur && cur.id === specId) {
+          void get().loadRequirementSpec(specId);
+        }
+        if (status) {
+          set({ requirementSpecs: get().requirementSpecs.map((s) => s.id === specId ? { ...s, version: specVersion, status } : s) });
+        }
+        break;
+      }
+      case "quality.verification.auto": {
+        const runId = String(params.runId ?? "");
+        const records = (params.records as Array<{ specId: string }> | undefined) ?? [];
+        const firstSpecId = records.find((r) => r.specId)?.specId;
+        if (firstSpecId) {
+          void get().loadRequirementSpec(firstSpecId);
+        }
+        const shown = get().shownSpecRunIds;
+        if (!shown.has(runId)) {
+          set({ shownSpecRunIds: new Set(shown).add(runId) });
         }
         break;
       }
@@ -894,6 +1055,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     qualityRuns: [],
     qualityChecks: [],
     qualityFindings: [],
+    qualityVerifications: [],
     qualityPolicy: null,
     qualityProjectId: null,
     qualityRunId: null,
@@ -904,6 +1066,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
     sessionQuality: null,
     qualityError: null,
     qualityWorkItems: [],
+    requirementSpecs: [],
+    currentSpec: null,
+    clarificationRequests: [],
+    sessionProjectId: null,
+    sessionPolicy: null,
+    shownSpecRunIds: new Set(),
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -1294,6 +1462,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historyHasMore: false,
         historyLoading: false,
         historySearchContext: anchorAt != null,
+        shownSpecRunIds: new Set(),
       });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
       get().refreshArtifacts({ sessionId: session.sessionId });
@@ -1334,6 +1503,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historyHasMore: false,
         historyLoading: false,
         historySearchContext: anchorAt != null,
+        shownSpecRunIds: new Set(),
       });
       get().loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt);
       get().syncBusyIdsFromList(get().sessions);
@@ -1575,6 +1745,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
       targets.forEach((sid) => {
         getOrCall("session.cancel", { sessionId: sid }).catch(() => {});
       });
+    },
+
+    cancelFlow: async () => {
+      const roomId = get().currentRoom?.roomId;
+      if (!roomId) return;
+      try {
+        await getOrCall("room.flow.cancel", { roomId });
+        set({ flow: null });
+      } catch (e) {
+        set({ qualityError: `取消编排失败：${fmtErr(e)}` });
+      }
     },
 
     answerPermission: (requestId, optionId, optionName) => {
@@ -2574,7 +2755,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     selectQualityProject: async (id: string) => {
-      set({ qualityProjectId: id, qualityRunId: null, qualityChecks: [], qualityFindings: [] });
+      set({ qualityProjectId: id, qualityRunId: null, qualityChecks: [], qualityFindings: [], qualityVerifications: [] });
       await Promise.all([
         get().loadQualityRuns(id),
         get().loadQualityPolicy(id),
@@ -2601,10 +2782,23 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ qualityLoading: true, qualityRunId: id });
       try {
         const resp = await getOrCall<Record<string, unknown>>("quality.run.get", { id });
-        set({
-          qualityChecks: ((resp.checks as unknown[] | undefined) ?? []) as QualityCheck[],
-          qualityFindings: ((resp.findings as unknown[] | undefined) ?? []) as QualityFinding[],
-        });
+        const run = resp.run as QualityRun | undefined;
+        const checks = ((resp.checks as unknown[] | undefined) ?? []) as QualityCheck[];
+        const findings = ((resp.findings as unknown[] | undefined) ?? []) as QualityFinding[];
+        const verifications = ((resp.verifications as unknown[] | undefined) ?? []) as RequirementVerification[];
+        // 若 run 属于其他项目，自动切换项目并加载该项目的 run 列表
+        if (run && run.projectId !== get().qualityProjectId) {
+          const projects = get().qualityProjects;
+          if (!projects.some((p) => p.id === run.projectId)) {
+            await get().loadQualityProjects();
+          }
+          set({ qualityProjectId: run.projectId });
+          await get().loadQualityRuns(run.projectId);
+        } else if (run && !get().qualityRuns.some((r) => r.id === run.id)) {
+          // run 不在当前列表中，加入它
+          set({ qualityRuns: [run, ...get().qualityRuns] });
+        }
+        set({ qualityChecks: checks, qualityFindings: findings, qualityVerifications: verifications });
       } catch (e) {
         set({ qualityError: `加载运行详情失败：${fmtErr(e)}` });
       } finally {
@@ -2614,11 +2808,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     loadSessionQuality: async (sessionId: string) => {
       try {
-        const resp = await getOrCall<{ runs: QualityRun[] }>("quality.run.listBySession", { sessionId, limit: 1 });
+        const resp = await getOrCall<{ runs: QualityRun[] }>("quality.run.listBySession", { sessionId, limit: 5 });
         const runs = resp.runs ?? [];
-        if (runs.length === 0) { set({ sessionQuality: null }); return; }
-        const run = runs[0]!;
-        if (run.stage === "stale" || run.stage === "cancelled") { set({ sessionQuality: null }); return; }
+        if (runs.length === 0) { set({ sessionQuality: null, sessionProjectId: null, sessionPolicy: null }); return; }
+        // 优先取非终态 run，其次取最新终态 run
+        const activeRun = runs.find((r) => !TERMINAL_STAGES.has(r.stage) && r.stage !== "stale" && r.stage !== "cancelled");
+        const run = activeRun ?? runs[0]!;
+        if (run.stage === "stale" || run.stage === "cancelled") { set({ sessionQuality: null, sessionProjectId: null, sessionPolicy: null }); return; }
+        set({ sessionProjectId: run.projectId });
+        void getOrCall<QualityPolicyInfo>("quality.policy.get", { projectId: run.projectId })
+          .then((policy) => set({ sessionPolicy: policy }))
+          .catch(() => set({ sessionPolicy: null }));
         const checks = await getOrCall<{ checks: QualityCheck[] }>("quality.run.get", { id: run.id }).catch(() => ({ checks: [] }));
         const qChecks = (checks as Record<string, unknown>).checks as QualityCheck[] | undefined;
         set({ sessionQuality: {
@@ -2635,7 +2835,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
           awaitingApproval: run.stage === "awaiting-approval",
         } });
-      } catch { set({ sessionQuality: null }); }
+      } catch { set({ sessionQuality: null, sessionProjectId: null, sessionPolicy: null }); }
     },
 
     loadQualityPolicy: async (projectId: string) => {
@@ -2653,6 +2853,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
         await get().loadQualityPolicy(projectId);
       } catch (e) {
         set({ qualityError: `初始化策略失败：${fmtErr(e)}` });
+      }
+    },
+
+    saveQualityPolicy: async (projectId: string, policy: QualityPolicyV2) => {
+      try {
+        await getOrCall("quality.policy.update", { projectId, policy });
+        await get().loadQualityPolicy(projectId);
+      } catch (e) {
+        set({ qualityError: `保存策略失败：${fmtErr(e)}` });
       }
     },
 
@@ -2684,6 +2893,40 @@ export const useHubStore = create<State & Actions>((set, get) => {
         await get().loadQualityRun(nextId);
       } catch (e) {
         set({ qualityError: `运行操作 ${action} 失败：${fmtErr(e)}` });
+      }
+    },
+
+    advanceQualityRun: async (id: string, to: "full-verifying" | "fixing" | "cancelled") => {
+      try {
+        await getOrCall("quality.run.advance", { id, to });
+        await get().loadQualityRuns(get().qualityProjectId ?? undefined);
+        await get().loadQualityRun(id);
+      } catch (e) {
+        set({ qualityError: `推进运行到 ${to} 失败：${fmtErr(e)}` });
+      }
+    },
+
+    deleteQualityProject: async (id: string) => {
+      try {
+        await getOrCall("quality.project.delete", { id });
+        if (get().qualityProjectId === id) {
+          set({ qualityProjectId: null, qualityRunId: null, qualityChecks: [], qualityFindings: [], qualityVerifications: [], qualityRuns: [] });
+        }
+        await get().loadQualityProjects();
+      } catch (e) {
+        set({ qualityError: `删除项目失败：${fmtErr(e)}` });
+      }
+    },
+
+    deleteQualityRun: async (id: string) => {
+      try {
+        await getOrCall("quality.run.delete", { id });
+        if (get().qualityRunId === id) {
+          set({ qualityRunId: null, qualityChecks: [], qualityFindings: [], qualityVerifications: [] });
+        }
+        await get().loadQualityRuns(get().qualityProjectId ?? undefined);
+      } catch (e) {
+        set({ qualityError: `删除运行失败：${fmtErr(e)}` });
       }
     },
 
@@ -2744,6 +2987,101 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     clearQualityError: () => set({ qualityError: null }),
+
+    answerClarification: async (clarificationRequestId: string, answers: Array<{ questionId: string; answer: string }>) => {
+      try {
+        await getOrCall("requirement.clarificationAnswer", { clarificationRequestId, answers });
+      } catch (e) {
+        set({ qualityError: `回答澄清失败：${fmtErr(e)}` });
+      }
+    },
+
+    skipClarification: async (clarificationRequestId: string) => {
+      try {
+        await getOrCall("requirement.clarificationSkip", { clarificationRequestId });
+      } catch (e) {
+        set({ qualityError: `跳过澄清失败：${fmtErr(e)}` });
+      }
+    },
+
+    cancelClarification: async (clarificationRequestId: string) => {
+      try {
+        await getOrCall("requirement.clarificationCancel", { clarificationRequestId });
+      } catch (e) {
+        set({ qualityError: `取消澄清失败：${fmtErr(e)}` });
+      }
+    },
+
+    listRequirementSpecs: async (requestId: string) => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("requirement.specList", { requestId });
+        const specs = ((resp.specs as unknown[] | undefined) ?? []) as RequirementSpec[];
+        set({ requirementSpecs: specs, currentSpec: specs.length > 0 ? specs[specs.length - 1] : null });
+      } catch (e) {
+        set({ qualityError: `加载需求规格失败：${fmtErr(e)}` });
+      }
+    },
+
+    loadRequirementSpec: async (id: string) => {
+      try {
+        const resp = await getOrCall<Record<string, unknown>>("requirement.specGet", { id });
+        const spec = resp.spec as RequirementSpec | undefined;
+        if (spec) {
+          set({ currentSpec: spec, requirementSpecs: get().requirementSpecs.map((s) => s.id === id ? spec : s) });
+        }
+      } catch (e) {
+        set({ qualityError: `加载需求规格失败：${fmtErr(e)}` });
+      }
+    },
+
+    updateRequirementSpec: async (id: string, patch: Partial<Pick<RequirementSpec, "goal" | "acceptanceCriteria" | "constraints" | "status">>) => {
+      try {
+        await getOrCall("requirement.specUpdate", { id, ...patch });
+        await get().loadRequirementSpec(id);
+      } catch (e) {
+        set({ qualityError: `更新需求规格失败：${fmtErr(e)}` });
+      }
+    },
+
+    saveRequirementVerificationPolicy: async (projectId: string, patch: { requirements?: { mode?: QualityPolicyV2["requirements"]["mode"]; maxQuestions?: number }; verification?: { mode?: QualityPolicyV2["verification"]["mode"] } }) => {
+      try {
+        const existing = get().sessionPolicy ?? get().qualityPolicy;
+        if (!existing || existing.version !== 2) {
+          await get().loadQualityPolicy(projectId);
+        }
+        const base = (get().sessionPolicy ?? get().qualityPolicy);
+        if (!base || base.version !== 2) throw new Error("策略不可用或非 v2");
+        const v2 = base.policy as QualityPolicyV2;
+        const updated: QualityPolicyV2 = {
+          ...v2,
+          requirements: {
+            ...v2.requirements,
+            ...(patch.requirements?.mode !== undefined ? { mode: patch.requirements.mode } : {}),
+            ...(patch.requirements?.maxQuestions !== undefined ? { maxQuestions: patch.requirements.maxQuestions } : {}),
+          },
+          verification: {
+            ...v2.verification,
+            ...(patch.verification?.mode !== undefined ? { mode: patch.verification.mode } : {}),
+          },
+        };
+        await getOrCall("quality.policy.update", { projectId, policy: updated });
+        await get().loadQualityPolicy(projectId);
+        set({ sessionPolicy: get().qualityPolicy });
+      } catch (e) {
+        set({ qualityError: `保存需求/验证策略失败：${fmtErr(e)}` });
+      }
+    },
+
+    loadSessionProjectPolicy: async () => {
+      const projectId = get().sessionProjectId;
+      if (!projectId) return;
+      try {
+        const resp = await getOrCall<QualityPolicyInfo>("quality.policy.get", { projectId });
+        set({ sessionPolicy: resp });
+      } catch {
+        set({ sessionPolicy: null });
+      }
+    },
   };
 
   // derived slashCommands after store is created

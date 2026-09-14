@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Store } from "../store.js";
 import { QualityService } from "./service.js";
-import { validatePolicyV2, migrateV1ToV2, loadPolicyV2 } from "./policy.js";
+import { validatePolicyV2, migrateV1ToV2, loadPolicyV2, defaultReviewConfig } from "./policy.js";
 import { projectId, registerProject as registerProjectScope } from "./project.js";
 import { transition, createRun, isTerminal } from "./run.js";
 import type {
@@ -63,7 +63,7 @@ function makeV2Policy(): QualityPolicyV2 {
     enforcement: { mode: "report", approvalRisk: "high" },
     remediation: { mode: "off", maxFixRounds: 0 },
     requirements: { mode: "off", maxQuestions: 3 },
-    review: { mode: "off", blockSeverity: "major", minBlockingConfidence: 0.8 },
+    review: { ...defaultReviewConfig(), mode: "off", blockSeverity: "major", minBlockingConfidence: 0.8 },
     verification: { mode: "off" },
     evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10485760 },
   };

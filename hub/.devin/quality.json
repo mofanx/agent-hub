@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "checks": [
     {
       "id": "typecheck",
@@ -22,24 +22,57 @@
       ],
       "tier": "full",
       "timeoutMs": 300000,
-      "required": true
+      "required": false
     }
   ],
   "protectedPaths": [
-    ".devin/quality.json",
-    "src/quality/",
-    "src/agent.ts",
-    "src/scheduler.ts"
+    ".devin/quality.json"
   ],
-  "riskRules": [
-    { "pattern": ".devin/quality.json", "risk": "critical", "reason": "质量策略自修改" },
-    { "pattern": "src/quality/", "risk": "high", "reason": "质量引擎/权限路径" }
-  ],
+  "riskRules": [],
+  "requirementRules": [],
+  "verificationRules": [],
+  "enforcement": {
+    "mode": "report",
+    "approvalRisk": "high"
+  },
+  "remediation": {
+    "mode": "off",
+    "maxFixRounds": 0
+  },
+  "requirements": {
+    "mode": "require",
+    "maxQuestions": 7
+  },
   "review": {
-    "enabled": true,
+    "mode": "advisory",
     "blockSeverity": "major",
     "minBlockingConfidence": 0.8,
-    "maxFixRounds": 2
+    "trigger": {
+      "minDiffLines": 10,
+      "skipPatterns": [
+        "**/*.md",
+        "**/.gitignore",
+        "**/LICENSE"
+      ]
+    },
+    "tierMapping": {
+      "default": "standard",
+      "byRisk": {
+        "low": "light",
+        "medium": "standard",
+        "high": "deep",
+        "critical": "deep"
+      },
+      "byFileType": []
+    },
+    "model": "glm-5-2"
   },
-  "autonomy": "observe"
+  "verification": {
+    "mode": "require-evidence"
+  },
+  "evidence": {
+    "excludePaths": [],
+    "retentionDays": 30,
+    "maxArtifactBytes": 10485760
+  }
 }

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import type {
+  ChangeSet,
   CheckDefinition,
   CheckTier,
   ProjectScope,
@@ -18,6 +19,10 @@ import type {
   RequirementsMode,
   ReviewMode,
   VerificationMode,
+  ReviewTier,
+  ReviewTriggerConfig,
+  ReviewTierMapping,
+  ReviewConfigV2,
 } from "./types.js";
 import { canonicalize, validateCwd } from "./project.js";
 
@@ -352,6 +357,15 @@ export function writePolicy(scope: ProjectScope, policy: QualityPolicy): string 
   return file;
 }
 
+export function writePolicyV2(scope: ProjectScope, policy: QualityPolicyV2): string {
+  const file = path.join(scope.root, POLICY_FILE);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(policy, null, 2) + "\n", "utf8");
+  fs.renameSync(tmp, file);
+  return file;
+}
+
 /** 校验某路径是否受保护（用于风险分类前置检查）。支持 `**` 递归通配。 */
 export function isProtectedPath(policy: QualityPolicy, filePath: string): boolean {
   const rel = path.isAbsolute(filePath)
@@ -384,9 +398,28 @@ export const POLICY_VERSION_V2 = 2;
 
 const ENFORCEMENT_MODES: readonly EnforcementMode[] = ["report", "require-pass", "require-approval"];
 const REMEDIATION_MODES: readonly RemediationMode[] = ["off", "propose", "isolated-fix", "apply-low-risk"];
-const REQUIREMENTS_MODES: readonly RequirementsMode[] = ["off", "suggest", "require-high-risk"];
+const REQUIREMENTS_MODES: readonly RequirementsMode[] = ["off", "suggest", "require", "require-high-risk"];
 const REVIEW_MODES: readonly ReviewMode[] = ["off", "advisory", "blocking"];
 const VERIFICATION_MODES: readonly VerificationMode[] = ["off", "suggest", "require-evidence"];
+const REVIEW_TIERS: readonly ReviewTier[] = ["light", "standard", "deep"];
+
+export function defaultReviewConfig(): ReviewConfigV2 {
+  return {
+    mode: "off",
+    blockSeverity: "major",
+    minBlockingConfidence: 0.8,
+    trigger: {
+      minDiffLines: 10,
+      skipPatterns: ["**/*.md", "**/.gitignore", "**/LICENSE"],
+    },
+    tierMapping: {
+      default: "standard",
+      byRisk: { low: "light", medium: "standard", high: "deep", critical: "deep" },
+      byFileType: [],
+    },
+    model: "",
+  };
+}
 
 /** 校验 RequirementRule，返回错误列表。 */
 function validateRequirementRule(r: unknown, idx: number, errors: string[]): void {
@@ -485,6 +518,67 @@ function validateReviewV2(r: unknown, errors: string[]): void {
   if (typeof rr.minBlockingConfidence !== "number" || rr.minBlockingConfidence < 0 || rr.minBlockingConfidence > 1) {
     errors.push("review.minBlockingConfidence must be in [0,1]");
   }
+  if (rr.trigger !== undefined) {
+    validateReviewTrigger(rr.trigger, errors);
+  }
+  if (rr.tierMapping !== undefined) {
+    validateReviewTierMapping(rr.tierMapping, errors);
+  }
+  if (rr.model !== undefined && typeof rr.model !== "string") {
+    errors.push("review.model must be a string");
+  }
+  if (rr.reviewerAgent !== undefined && typeof rr.reviewerAgent !== "string") {
+    errors.push("review.reviewerAgent must be string if present");
+  }
+  if (rr.reviewerModel !== undefined && typeof rr.reviewerModel !== "string") {
+    errors.push("review.reviewerModel must be string if present");
+  }
+}
+
+function validateReviewTrigger(t: unknown, errors: string[]): void {
+  if (typeof t !== "object" || t === null) { errors.push("review.trigger must be an object"); return; }
+  const tt = t as Record<string, unknown>;
+  if (typeof tt.minDiffLines !== "number" || tt.minDiffLines < 0 || !Number.isFinite(tt.minDiffLines)) {
+    errors.push("review.trigger.minDiffLines must be a non-negative finite number");
+  }
+  if (!Array.isArray(tt.skipPatterns) || tt.skipPatterns.some((s) => typeof s !== "string")) {
+    errors.push("review.trigger.skipPatterns must be string array");
+  }
+}
+
+function validateReviewTierMapping(m: unknown, errors: string[]): void {
+  if (typeof m !== "object" || m === null) { errors.push("review.tierMapping must be an object"); return; }
+  const mm = m as Record<string, unknown>;
+  if (typeof mm.default !== "string" || !REVIEW_TIERS.includes(mm.default as ReviewTier)) {
+    errors.push(`review.tierMapping.default must be one of ${REVIEW_TIERS.join("|")}`);
+  }
+  if (mm.byRisk !== undefined) {
+    if (typeof mm.byRisk !== "object" || mm.byRisk === null) {
+      errors.push("review.tierMapping.byRisk must be an object");
+    } else {
+      const br = mm.byRisk as Record<string, unknown>;
+      for (const k of Object.keys(br)) {
+        if (!RISKS.includes(k as QualityRisk)) { errors.push(`review.tierMapping.byRisk: unknown risk "${k}"`); continue; }
+        if (typeof br[k] !== "string" || !REVIEW_TIERS.includes(br[k] as ReviewTier)) {
+          errors.push(`review.tierMapping.byRisk.${k} must be one of ${REVIEW_TIERS.join("|")}`);
+        }
+      }
+    }
+  }
+  if (mm.byFileType !== undefined) {
+    if (!Array.isArray(mm.byFileType)) {
+      errors.push("review.tierMapping.byFileType must be an array");
+    } else {
+      mm.byFileType.forEach((entry, i) => {
+        if (typeof entry !== "object" || entry === null) { errors.push(`review.tierMapping.byFileType[${i}]: not an object`); return; }
+        const e = entry as Record<string, unknown>;
+        if (typeof e.pattern !== "string" || e.pattern.length === 0) errors.push(`review.tierMapping.byFileType[${i}].pattern required`);
+        if (typeof e.tier !== "string" || !REVIEW_TIERS.includes(e.tier as ReviewTier)) {
+          errors.push(`review.tierMapping.byFileType[${i}].tier must be one of ${REVIEW_TIERS.join("|")}`);
+        }
+      });
+    }
+  }
 }
 
 function validateVerification(v: unknown, errors: string[]): void {
@@ -582,6 +676,41 @@ export function isPolicyReviewEnabled(policy: QualityPolicy | QualityPolicyV2): 
   return policy.version === 2 ? policy.review.mode !== "off" : policy.review.enabled;
 }
 
+function matchesSkipPattern(filePath: string, pattern: string): boolean {
+  if (pattern === filePath) return true;
+  if (pattern.startsWith("**/")) {
+    if (matchesSkipPattern(filePath, pattern.slice(3))) return true;
+  }
+  if (pattern.endsWith("/**")) {
+    const base = pattern.slice(0, -3);
+    return filePath === base || filePath.startsWith(base.endsWith("/") ? base : base + "/");
+  }
+  if (pattern.endsWith("/*")) {
+    const base = pattern.slice(0, -2);
+    return filePath.startsWith(base.endsWith("/") ? base : base + "/") && !filePath.slice(base.length + 1).includes("/");
+  }
+  if (pattern.includes("*")) {
+    const re = pattern
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*\*/g, ".+")
+      .replace(/\*/g, "[^/]*");
+    return new RegExp(`^${re}$`).test(filePath);
+  }
+  return filePath.startsWith(pattern.endsWith("/") ? pattern : pattern + "/");
+}
+
+export function shouldTriggerReview(changeSet: ChangeSet, review: ReviewConfigV2): boolean {
+  if (review.mode === "off") return false;
+  if (changeSet.files.length === 0) return false;
+  const { minDiffLines, skipPatterns } = review.trigger;
+  if (skipPatterns.length > 0 && changeSet.files.every((f) => skipPatterns.some((p) => matchesSkipPattern(f.path, p)))) {
+    return false;
+  }
+  const totalDiffLines = changeSet.files.reduce((sum, f) => sum + (f.additions ?? 0) + (f.deletions ?? 0), 0);
+  if (totalDiffLines < minDiffLines) return false;
+  return true;
+}
+
 export function getPolicyMaxFixRounds(policy: QualityPolicy | QualityPolicyV2): number {
   return policy.version === 2 ? policy.remediation.maxFixRounds : policy.review.maxFixRounds;
 }
@@ -598,9 +727,16 @@ export function migrateV1ToV2(v1: QualityPolicy): PolicyMigrationPreview {
   changes.push(`review.maxFixRounds=${v1.review.maxFixRounds} → remediation.maxFixRounds=${v1.review.maxFixRounds}`);
   changes.push("新增 requirementRules=[]（Phase 3 启用）");
   changes.push("新增 verificationRules=[]（Phase 4 启用）");
-  changes.push("新增 requirements.mode=off（Phase 3 启用）");
-  changes.push("新增 verification.mode=off（Phase 4 启用）");
+  changes.push("新增 requirements.mode=suggest（Phase 3 灰度）");
+  changes.push("新增 verification.mode=suggest（Phase 4 灰度）");
   changes.push("新增 evidence={excludePaths:[],retentionDays:30,maxArtifactBytes:10485760}");
+  changes.push("新增 review.trigger/tiers/tierMapping（review tier 配置）");
+
+  const reviewConfig = defaultReviewConfig();
+  reviewConfig.mode = v1.review.enabled ? "advisory" : "off";
+  reviewConfig.blockSeverity = v1.review.blockSeverity;
+  reviewConfig.minBlockingConfidence = v1.review.minBlockingConfidence;
+  if (v1.review.reviewerSessionId) reviewConfig.reviewerAgent = v1.review.reviewerSessionId;
 
   const v2: QualityPolicyV2 = {
     version: 2,
@@ -611,13 +747,9 @@ export function migrateV1ToV2(v1: QualityPolicy): PolicyMigrationPreview {
     verificationRules: [] as VerificationRule[],
     enforcement: { mode: mapped.enforcement, approvalRisk: "high" },
     remediation: { mode: mapped.remediation, maxFixRounds: v1.review.maxFixRounds },
-    requirements: { mode: "off", maxQuestions: 3 },
-    review: {
-      mode: v1.review.enabled ? "advisory" : "off",
-      blockSeverity: v1.review.blockSeverity,
-      minBlockingConfidence: v1.review.minBlockingConfidence,
-    },
-    verification: { mode: "off" },
+    requirements: { mode: "suggest", maxQuestions: 3 },
+    review: reviewConfig,
+    verification: { mode: "suggest" },
     evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10_485_760 },
   };
   return { v1, v2, changes };

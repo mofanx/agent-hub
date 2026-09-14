@@ -102,6 +102,7 @@ export function recoverInterruptedRuns(store: Store, projects: ProjectScope[] = 
     "collecting",
     "quick-verifying",
     "reviewing",
+    "reviewed",
     "fixing",
     "full-verifying",
     "requirement-verifying",

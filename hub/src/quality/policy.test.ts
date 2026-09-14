@@ -9,6 +9,7 @@ import {
   PolicyValidationError,
   assertPolicy,
   defaultObservePolicy,
+  defaultReviewConfig,
   detectDefaultChecks,
   generateDefaultPolicy,
   getPolicyEnforcement,
@@ -17,11 +18,12 @@ import {
   loadPolicy,
   loadPolicyV2,
   migrateV1ToV2Write,
+  shouldTriggerReview,
   suggestChecksFromAgentsMd,
   validatePolicy,
   writePolicy,
 } from "./policy.js";
-import type { ProjectScope, QualityPolicy } from "./types.js";
+import type { ChangeSet, ProjectScope, QualityPolicy } from "./types.js";
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "quality-policy-"));
@@ -391,5 +393,69 @@ describe("migrateV1ToV2Write", () => {
     assert.ok(!second.ok);
     if (second.ok) return;
     assert.equal(second.reason, "invalid-v1");
+  });
+});
+
+function makeChangeSet(files: { path: string; additions?: number; deletions?: number }[]): ChangeSet {
+  return {
+    runId: "r-test",
+    baseRevision: undefined,
+    patchArtifact: "",
+    patchHash: "h-test",
+    files: files.map((f) => ({ path: f.path, status: "modify" as const, additions: f.additions, deletions: f.deletions })),
+    preexistingDirty: false,
+    contaminated: false,
+    riskReasons: [],
+  };
+}
+
+describe("shouldTriggerReview", () => {
+  const review = defaultReviewConfig();
+  review.mode = "advisory";
+
+  it("mode=off 时不触发", () => {
+    const off = { ...review, mode: "off" as const };
+    assert.equal(shouldTriggerReview(makeChangeSet([{ path: "src/foo.ts", additions: 50, deletions: 10 }]), off), false);
+  });
+
+  it("无文件时不触发", () => {
+    assert.equal(shouldTriggerReview(makeChangeSet([]), review), false);
+  });
+
+  it("所有文件匹配 skipPatterns 时不触发", () => {
+    const cs = makeChangeSet([
+      { path: "README.md", additions: 5, deletions: 0 },
+      { path: "docs/guide.md", additions: 10, deletions: 2 },
+    ]);
+    assert.equal(shouldTriggerReview(cs, review), false);
+  });
+
+  it("部分文件匹配 skipPatterns 时仍触发", () => {
+    const cs = makeChangeSet([
+      { path: "README.md", additions: 5, deletions: 0 },
+      { path: "src/foo.ts", additions: 50, deletions: 10 },
+    ]);
+    assert.equal(shouldTriggerReview(cs, review), true);
+  });
+
+  it("diff 行数 < minDiffLines 时不触发", () => {
+    const cs = makeChangeSet([{ path: "src/foo.ts", additions: 3, deletions: 2 }]);
+    assert.equal(shouldTriggerReview(cs, review), false);
+  });
+
+  it("diff 行数 >= minDiffLines 时触发", () => {
+    const cs = makeChangeSet([{ path: "src/foo.ts", additions: 8, deletions: 5 }]);
+    assert.equal(shouldTriggerReview(cs, review), true);
+  });
+
+  it("additions/deletions 为 undefined 时按 0 计", () => {
+    const cs = makeChangeSet([{ path: "src/foo.ts" }]);
+    assert.equal(shouldTriggerReview(cs, review), false);
+  });
+
+  it("minDiffLines=0 时只要有文件就触发（非全 skip）", () => {
+    const r = { ...review, trigger: { ...review.trigger, minDiffLines: 0 } };
+    const cs = makeChangeSet([{ path: "src/foo.ts" }]);
+    assert.equal(shouldTriggerReview(cs, r), true);
   });
 });

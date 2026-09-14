@@ -20,6 +20,7 @@ import { QualityService } from "./service.js";
 import { RunPermissionManager } from "./permissions.js";
 import { Store } from "../store.js";
 import { recoverInterruptedRuns } from "./recovery.js";
+import { defaultReviewConfig } from "./policy.js";
 import type {
   ChangeSet,
   CheckRun,
@@ -87,7 +88,7 @@ function makePolicy(overrides?: Partial<QualityPolicyV2>): QualityPolicy {
     enforcement: { mode: "report", approvalRisk: "high" },
     remediation: { mode: "isolated-fix", maxFixRounds: 2 },
     requirements: { mode: "off", maxQuestions: 3 },
-    review: { mode: "advisory", blockSeverity: "major", minBlockingConfidence: 0.7 },
+    review: { ...defaultReviewConfig(), mode: "advisory", blockSeverity: "major", minBlockingConfidence: 0.7 },
     verification: { mode: "off" },
     evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10_000_000 },
   };
@@ -107,7 +108,7 @@ function makePolicyV2(overrides?: Partial<QualityPolicyV2>): QualityPolicyV2 {
     enforcement: { mode: "report", approvalRisk: "high" },
     remediation: { mode: "isolated-fix", maxFixRounds: 2 },
     requirements: { mode: "off", maxQuestions: 3 },
-    review: { mode: "advisory", blockSeverity: "major", minBlockingConfidence: 0.7 },
+    review: { ...defaultReviewConfig(), mode: "advisory", blockSeverity: "major", minBlockingConfidence: 0.7 },
     verification: { mode: "off" },
     evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10_000_000 },
     ...overrides,

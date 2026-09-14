@@ -902,7 +902,32 @@ export class Store {
   }
 
   deleteQualityProject(id: string): boolean {
-    return this.db.prepare("DELETE FROM quality_projects WHERE id = ?").run(id).changes > 0;
+    const existing = this.db.prepare("SELECT 1 FROM quality_projects WHERE id = ?").get(id);
+    if (!existing) return false;
+    const tx = this.db.transaction(() => {
+      // 级联删除 run 及其子数据
+      const runIds = this.db.prepare("SELECT id FROM quality_runs WHERE project_id = ?").all(id) as { id: string }[];
+      for (const r of runIds) {
+        this.db.prepare("DELETE FROM quality_checks WHERE run_id = ?").run(r.id);
+        this.db.prepare("DELETE FROM quality_findings WHERE run_id = ?").run(r.id);
+        this.db.prepare("DELETE FROM quality_review_decisions WHERE run_id = ?").run(r.id);
+        this.db.prepare("DELETE FROM quality_requirement_verifications WHERE run_id = ?").run(r.id);
+        this.db.prepare("DELETE FROM quality_observations WHERE run_id = ?").run(r.id);
+        this.db.prepare("DELETE FROM quality_metrics WHERE run_id = ?").run(r.id);
+      }
+      this.db.prepare("DELETE FROM quality_runs WHERE project_id = ?").run(id);
+      // 项目级数据
+      this.db.prepare("DELETE FROM quality_incidents WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_rules WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_work_items WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_active_controls WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_review_decisions WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_observations WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_metrics WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_projects WHERE id = ?").run(id);
+    });
+    try { tx(); } catch { return false; }
+    return true;
   }
 
   // ── quality: runs ──────────────────────────────────────────────────
@@ -988,7 +1013,16 @@ export class Store {
   }
 
   deleteQualityRun(id: string): boolean {
-    return this.db.prepare("DELETE FROM quality_runs WHERE id = ?").run(id).changes > 0;
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM quality_checks WHERE run_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_findings WHERE run_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_review_decisions WHERE run_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_requirement_verifications WHERE run_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_observations WHERE run_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_metrics WHERE run_id = ?").run(id);
+      this.db.prepare("DELETE FROM quality_runs WHERE id = ?").run(id);
+    });
+    try { tx(); return true; } catch { return false; }
   }
 
   /** 清除 run 的所有旧 check 结果（修复后复验前调用）。 */
@@ -1390,6 +1424,13 @@ export class Store {
     const rows = (roomId
       ? this.db.prepare(sql).all(roomId, limit)
       : this.db.prepare(sql).all(limit)) as QualityWorkRequestRow[];
+    return rows.map(rowToWorkRequest);
+  }
+
+  listWorkRequestsBySession(sessionId: string, limit = 100): WorkRequest[] {
+    const rows = this.db
+      .prepare("SELECT * FROM quality_work_requests WHERE session_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(sessionId, limit) as QualityWorkRequestRow[];
     return rows.map(rowToWorkRequest);
   }
 

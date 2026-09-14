@@ -48,6 +48,7 @@ function makeRun(projectId: string, id: string, stage: QualityRun["stage"]): Qua
     collecting: ["preflight", "implementing", "collecting"],
     "quick-verifying": ["preflight", "implementing", "collecting", "quick-verifying"],
     reviewing: ["preflight", "implementing", "collecting", "quick-verifying", "reviewing"],
+    reviewed: ["preflight", "implementing", "collecting", "quick-verifying", "reviewing", "reviewed"],
     fixing: ["preflight", "implementing", "collecting", "quick-verifying", "fixing"],
     "full-verifying": ["preflight", "implementing", "collecting", "quick-verifying", "reviewing", "full-verifying"],
     "awaiting-approval": ["preflight", "implementing", "collecting", "quick-verifying", "reviewing", "full-verifying", "awaiting-approval"],
@@ -109,6 +110,14 @@ describe("CheckRun recovery", () => {
       assert.equal(nextRun.outcome, "inconclusive");
       assert.equal(nextChecks.length, 2);
       assert.ok(nextChecks.every((c) => c.status === "infra-failed"));
+    });
+
+    it("reviewed run → inconclusive + failureCode=hub-restart", () => {
+      const run = makeRun("p1", "r1", "reviewed");
+      const { run: nextRun } = recoverRun(run, [], 9000);
+      assert.equal(nextRun.stage, "inconclusive");
+      assert.equal(nextRun.failureCode, FAILURE_HUB_RESTART);
+      assert.equal(nextRun.outcome, "inconclusive");
     });
 
     it("queued run → cancelled（不记为 failed）", () => {

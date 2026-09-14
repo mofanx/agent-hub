@@ -5,6 +5,7 @@ export type QualityStage =
   | "collecting"
   | "quick-verifying"
   | "reviewing"
+  | "reviewed"
   | "fixing"
   | "full-verifying"
   | "requirement-verifying"
@@ -51,6 +52,12 @@ export type QualityRun = {
   policySnapshotRef?: string | undefined;
   changeSetId?: string | undefined;
   outcome?: "verified" | "failed" | "inconclusive" | "waived" | undefined;
+  /** 是否已向用户弹出 review 协作模式确认提示 */
+  reviewPromptedAt?: number | undefined;
+  /** 用户对 review 提示的决策：pending / create-room / add-reviewer / use-session / no-reviewer / skip / proceed */
+  reviewPromptAction?: string | undefined;
+  /** 本次 review 实际使用的 room（可能与原 roomId 不同，表示自动创建的 review 群聊） */
+  reviewRoomId?: string | undefined;
 };
 
 export type CheckTier = "quick" | "full";
@@ -515,9 +522,36 @@ export type ActiveControl = {
 
 export type EnforcementMode = "report" | "require-pass" | "require-approval";
 export type RemediationMode = "off" | "propose" | "isolated-fix" | "apply-low-risk";
-export type RequirementsMode = "off" | "suggest" | "require-high-risk";
+export type RequirementsMode = "off" | "suggest" | "require" | "require-high-risk";
 export type ReviewMode = "off" | "advisory" | "blocking";
 export type VerificationMode = "off" | "suggest" | "require-evidence";
+
+// ── Review Tier 配置（风险分级触发）──────────────────────────
+
+export type ReviewTier = "light" | "standard" | "deep";
+
+export type ReviewTriggerConfig = {
+  minDiffLines: number;
+  skipPatterns: string[];
+};
+
+export type ReviewTierMapping = {
+  default: ReviewTier;
+  byRisk: Partial<Record<QualityRisk, ReviewTier>>;
+  byFileType: { pattern: string; tier: ReviewTier }[];
+};
+
+export type ReviewConfigV2 = {
+  mode: ReviewMode;
+  blockSeverity: "critical" | "major";
+  minBlockingConfidence: number;
+  trigger: ReviewTriggerConfig;
+  tierMapping: ReviewTierMapping;
+  /** reviewer 使用的模型 uid/slug/alias，空字符串表示用 agent 默认模型。 */
+  model: string;
+  reviewerAgent?: string | undefined;
+  reviewerModel?: string | undefined;
+};
 
 export type QualityPolicyV2 = {
   version: 2;
@@ -529,7 +563,7 @@ export type QualityPolicyV2 = {
   enforcement: { mode: EnforcementMode; approvalRisk: "high" | "critical" };
   remediation: { mode: RemediationMode; maxFixRounds: number };
   requirements: { mode: RequirementsMode; maxQuestions: number };
-  review: { mode: ReviewMode; blockSeverity: "critical" | "major"; minBlockingConfidence: number };
+  review: ReviewConfigV2;
   verification: { mode: VerificationMode };
   evidence: { excludePaths: string[]; retentionDays: number; maxArtifactBytes: number };
 };

@@ -113,6 +113,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -131,6 +132,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -159,7 +161,16 @@ import com.agenthub.FlowArtifact
 import com.agenthub.FlowInfo
 import com.agenthub.FlowTask
 import com.agenthub.QualitySummary
+import com.agenthub.QualityCheck
+import com.agenthub.QualityFinding
+import com.agenthub.RequirementVerification
 import com.agenthub.TokenUsage
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 private fun formatNumber(n: Long): String = when {
     n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
@@ -1640,41 +1651,207 @@ private fun RawChatBubble(
                 }
             }
         }
+
+        is ChatItem.Clarification -> Column(Modifier.padding(vertical = 4.dp)) {
+            if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+            val answeredColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            MessageBubbleBox(
+                copyText = item.text,
+                quote = null,
+                vm = vm,
+                itemId = item.id.toString(),
+                canSelect = false,
+                modifier = bubbleModifier.fillMaxWidth(),
+            ) {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = bgColor),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        val statusText = when (item.status) {
+                            "answered" -> "已回答"
+                            "skipped" -> "已跳过"
+                            "cancelled" -> "已取消"
+                            else -> "待澄清"
+                        }
+                        Text(
+                            "需求澄清 · $statusText",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = textColor,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        if (item.status == "answered" || item.status == "skipped" || item.status == "cancelled") {
+                            Text(
+                                if (item.status == "answered") "已提交澄清回答" else if (item.status == "skipped") "已跳过澄清" else "已取消澄清",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = answeredColor,
+                            )
+                        } else {
+                            val answerTexts = remember { mutableStateMapOf<String, String>() }
+                            item.questions.forEach { q ->
+                                Spacer(Modifier.height(8.dp))
+                                Text(q.text, style = MaterialTheme.typography.bodySmall, color = textColor)
+                                OutlinedTextField(
+                                    value = answerTexts[q.id] ?: "",
+                                    onValueChange = { answerTexts[q.id] = it },
+                                    placeholder = { Text("请输入回答") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = false,
+                                    minLines = 2,
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { vm.answerClarification(item.clarificationRequestId, answerTexts.toMap()) },
+                                ) { Text("提交") }
+                                if (item.canSkip) {
+                                    OutlinedButton(
+                                        onClick = { vm.skipClarification(item.clarificationRequestId) },
+                                    ) { Text("跳过") }
+                                }
+                                OutlinedButton(
+                                    onClick = { vm.cancelClarification(item.clarificationRequestId) },
+                                ) { Text("取消") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        is ChatItem.ReviewPrompt -> Column(Modifier.padding(vertical = 4.dp)) {
+            if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+            val answeredColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            MessageBubbleBox(
+                copyText = item.text,
+                quote = null,
+                vm = vm,
+                itemId = item.id.toString(),
+                canSelect = false,
+                modifier = bubbleModifier.fillMaxWidth(),
+            ) {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = bgColor),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            item.text,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = textColor,
+                        )
+                        if (item.answered != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                when (item.answered) {
+                                    "create-review-room" -> "已创建审查群聊"
+                                    "add-reviewer" -> "已拉入审查 AI"
+                                    "use-session", "no-reviewer" -> "已选择当前上下文审查"
+                                    "skip" -> "已跳过审查"
+                                    else -> "已选择：${item.answered}"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = answeredColor,
+                            )
+                        } else {
+                            Spacer(Modifier.height(8.dp))
+                            val isRoom = item.roomId != null
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = {
+                                    vm.respondReviewPrompt(item.runId, if (isRoom) "add-reviewer" else "create-review-room")
+                                }) {
+                                    Text(if (isRoom) "拉入审查 AI" else "创建审查群聊")
+                                }
+                                OutlinedButton(onClick = {
+                                    vm.respondReviewPrompt(item.runId, if (isRoom) "no-reviewer" else "use-session")
+                                }) {
+                                    Text(if (isRoom) "不拉入" else "当前会话审查")
+                                }
+                                OutlinedButton(onClick = { vm.respondReviewPrompt(item.runId, "skip") }) {
+                                    Text("跳过")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        is ChatItem.Review -> Column(Modifier.padding(vertical = 4.dp)) {
+            if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer
+            MessageBubbleBox(
+                copyText = item.text,
+                quote = null,
+                vm = vm,
+                itemId = item.id.toString(),
+                canSelect = false,
+                modifier = bubbleModifier.fillMaxWidth(),
+            ) {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = bgColor),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            "Review 完成 · 结论：${item.verdict} · 共 ${item.findings.size} 条发现",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = textColor,
+                        )
+                        if (item.findings.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            item.findings.forEach { f ->
+                                val file = f.file.orEmpty()
+                                val line = f.line
+                                val loc = if (file.isNotBlank()) "$file${if ((line ?: 0) > 0) ":$line" else ""}" else "未知位置"
+                                Text(
+                                    "[${f.severity}]${if (f.blocking) " ⛔阻断" else ""} $loc — ${f.claim}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = textColor,
+                                )
+                                val evidence = f.evidence
+                                if (!evidence.isNullOrBlank()) {
+                                    Text(
+                                        "  证据：$evidence",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = textColor.copy(alpha = 0.8f),
+                                    )
+                                }
+                                val suggestion = f.suggestion
+                                if (!suggestion.isNullOrBlank()) {
+                                    Text(
+                                        "  建议：$suggestion",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = textColor.copy(alpha = 0.8f),
+                                    )
+                                }
+                            }
+                        } else {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "未发现质量问题",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = textColor,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-private val STAGE_LABELS = mapOf(
-    "queued" to "排队中", "preflight" to "预检中", "implementing" to "实现中", "collecting" to "收集变更",
-    "quick-verifying" to "L1 快速检查", "full-verifying" to "L1 完整检查", "fixing" to "自动修复中",
-    "reviewing" to "AI 审查中", "requirement-verifying" to "L3 需求验证", "awaiting-approval" to "等待审批",
-    "accepted" to "验证通过", "failed" to "验证未通过", "inconclusive" to "无法判定",
-    "waived" to "已豁免", "cancelled" to "已取消", "quarantined" to "已隔离", "stale" to "已过期",
-)
-
-private val FAILURE_CODE_LABELS = mapOf(
-    "l1-check-failed" to "L1 确定性检查未通过",
-    "l1-infra-failed" to "检查基础设施失败",
-    "l1-inconclusive" to "L1 检查无法判定",
-    "l1-no-passed-checks" to "无通过的检查",
-    "l3-verification-failed" to "L3 需求验证未通过",
-    "l3-inconclusive" to "L3 需求证据不足",
-    "fixer-budget-exhausted" to "自动修复预算耗尽",
-    "fixer-session-error" to "修复会话创建失败",
-    "fixer-prompt-error" to "修复执行失败",
-    "fixer-quick-gate-error" to "修复后检查失败",
-    "fixer-infra-failed" to "修复基础设施失败",
-    "fixer-no-fixable" to "无可修复的问题",
-    "fixer-error" to "修复流程异常",
-    "review-error" to "AI 审查异常",
-    "hub-restart" to "Hub 重启导致中断",
-    "infra-no-project" to "未找到质量项目",
-    "infra-no-policy" to "未找到质量策略",
-    "no-patch" to "无代码变更",
-    "lease-failed" to "写锁获取失败",
-)
-
-private fun qualityStageLabel(stage: String) = STAGE_LABELS[stage] ?: stage
-private fun qualityFailureLabel(code: String?) = code?.let { FAILURE_CODE_LABELS[it] ?: it }
+private fun qualityStageLabel(stage: String) = ChatViewModel.stageLabel(stage)
+private fun qualityFailureLabel(code: String?) = ChatViewModel.failureLabel(code)
 
 @Composable
 private fun QualityStatusBar(q: QualitySummary, vm: ChatViewModel) {
@@ -1683,7 +1860,8 @@ private fun QualityStatusBar(q: QualitySummary, vm: ChatViewModel) {
     val fixInfo = if (q.stage == "fixing") " (${q.fixRound}/${q.maxFixRounds})" else ""
     val checkInfo = if (q.passedChecks + q.failedChecks > 0) " · L1 ${q.passedChecks}/${q.passedChecks + q.failedChecks}" else ""
     val failLabel = qualityFailureLabel(q.failureCode)
-    val isTerminal = q.stage in listOf("accepted", "failed", "inconclusive", "waived", "cancelled")
+    val guide = ChatViewModel.actionGuide(q.stage, q.failureCode)
+    val isTerminal = ChatViewModel.TERMINAL_STAGES.contains(q.stage)
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
@@ -1716,6 +1894,18 @@ private fun QualityStatusBar(q: QualitySummary, vm: ChatViewModel) {
             if (expanded) {
                 Spacer(Modifier.height(4.dp))
                 QualitySummaryCard(q, q.runId, vm)
+                QualityRunDetail(q.runId, vm)
+                guide?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text("💡 $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                }
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = {
+                    vm.qualityRunId = q.runId
+                    vm.screen = Screen.Quality
+                }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) {
+                    Text("查看完整证据 →", style = MaterialTheme.typography.labelSmall)
+                }
                 Text("run: ${q.runId}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 2.dp))
             }
         }
@@ -1723,12 +1913,76 @@ private fun QualityStatusBar(q: QualitySummary, vm: ChatViewModel) {
 }
 
 @Composable
-private fun QualitySummaryCard(q: QualitySummary, runId: String?, vm: ChatViewModel) {
+private fun QualityRunDetail(runId: String, vm: ChatViewModel) {
+    var data by remember(runId) { mutableStateOf<Triple<List<QualityCheck>, List<QualityFinding>, List<RequirementVerification>>?>(null) }
+    var loading by remember(runId) { mutableStateOf(false) }
+    LaunchedEffect(runId) {
+        loading = true
+        try {
+            val result = vm.hubCall("quality.run.get", buildJsonObject { put("id", runId) })
+            val checks = result["checks"]?.jsonArray?.map { vm.parseQualityCheckPublic(it.jsonObject) } ?: emptyList()
+            val findings = result["findings"]?.jsonArray?.map { vm.parseQualityFindingPublic(it.jsonObject) } ?: emptyList()
+            val verifs = result["verifications"]?.jsonArray?.map { vm.parseRequirementVerificationPublic(it.jsonObject) } ?: emptyList()
+            data = Triple(checks, findings, verifs)
+        } catch (_: Exception) {} finally { loading = false }
+    }
+    if (loading) {
+        Text("加载中…", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        return
+    }
+    data?.let { (checks, findings, verifs) ->
+        val failedChecks = checks.filter { it.status != "passed" }
+        val blockingFindings = findings.filter { it.blocking }
+        if (failedChecks.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text("失败检查（${failedChecks.size}）", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+            failedChecks.forEach { c ->
+                Row(Modifier.padding(start = 8.dp, top = 2.dp)) {
+                    Text("✗", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                    Spacer(Modifier.width(4.dp))
+                    Text(c.checkId, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                    c.summary?.let { Text(" ${it.take(200)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 2) }
+                }
+            }
+        }
+        if (blockingFindings.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text("阻断发现（${blockingFindings.size}）", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+            blockingFindings.forEach { f ->
+                Row(Modifier.padding(start = 8.dp, top = 2.dp)) {
+                    Text("[${f.severity}]", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(4.dp))
+                    Text(f.claim, style = MaterialTheme.typography.labelSmall)
+                    f.file?.let { Text(" ${it}${if (f.line != null) ":${f.line}" else ""}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, fontFamily = FontFamily.Monospace) }
+                }
+            }
+        }
+        if (verifs.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text("L3 需求验证（${verifs.size}）", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+            verifs.forEach { v ->
+                Row(Modifier.padding(start = 8.dp, top = 2.dp)) {
+                    val icon = when (v.status) { "passed" -> "✓"; "failed" -> "✗"; else -> "⚠" }
+                    val color = when (v.status) { "passed" -> MaterialTheme.colorScheme.primary; "failed" -> MaterialTheme.colorScheme.error; else -> MaterialTheme.colorScheme.tertiary }
+                    Text(icon, color = color, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(4.dp))
+                    Text(v.criterionId, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.width(4.dp))
+                    Text(v.method, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QualitySummaryCard(q: QualitySummary, runId: String?, vm: ChatViewModel, isRoom: Boolean = false) {
     val label = qualityStageLabel(q.stage)
     val fixInfo = if (q.stage == "fixing") " (${q.fixRound}/${q.maxFixRounds})" else ""
     val checkInfo = if (q.passedChecks + q.failedChecks > 0) " · L1 ${q.passedChecks}通过 ${q.failedChecks}失败" else ""
     val findingInfo = if (q.findings > 0) " · ${q.findings} findings${if (q.blockingFindings > 0) " (${q.blockingFindings} blocking)" else ""}" else ""
     val failLabel = qualityFailureLabel(q.failureCode)
+    val guide = ChatViewModel.actionGuide(q.stage, q.failureCode, isRoom)
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(4.dp),
@@ -1739,6 +1993,10 @@ private fun QualitySummaryCard(q: QualitySummary, runId: String?, vm: ChatViewMo
             failLabel?.let {
                 Spacer(Modifier.height(2.dp))
                 Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            }
+            guide?.let {
+                Spacer(Modifier.height(2.dp))
+                Text("💡 $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
             }
             if (q.awaitingApproval && runId != null) {
                 Spacer(Modifier.height(4.dp))
@@ -1772,6 +2030,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
         else -> ""
     }
     val showRetry = flow.phase == "awaiting-retry"
+    val canCancel = flow.phase != "done" && flow.phase != "summarizing"
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1811,7 +2070,16 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                         if (progress.verifying > 0) " · ${progress.verifying} 验证中" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
                 )
+                if (canCancel) {
+                    OutlinedButton(
+                        onClick = { vm.cancelFlow() },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text("中断", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
             if (!collapsed) {
                 Spacer(Modifier.height(6.dp))
@@ -1867,7 +2135,10 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                     color = MaterialTheme.colorScheme.surface,
                     shape = RoundedCornerShape(4.dp),
                 ) {
-                    Text("验证中", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                    val qText = task.quality?.let { q ->
+                        ChatViewModel.compactQualityProgress(q.stage, q.fixRound, q.maxFixRounds, q.passedChecks, q.failedChecks, q.awaitingApproval)
+                    } ?: "验证中"
+                    Text(qText, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
                 }
                 Spacer(Modifier.width(4.dp))
             }
@@ -1899,7 +2170,18 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                 }
                 task.quality?.let { q ->
                     Spacer(Modifier.height(4.dp))
-                    QualitySummaryCard(q, task.qualityRunId, vm)
+                    QualitySummaryCard(q, task.qualityRunId, vm, isRoom = true)
+                    task.qualityRunId?.let { rid ->
+                        TextButton(
+                            onClick = {
+                                vm.qualityRunId = rid
+                                vm.screen = Screen.Quality
+                            },
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                        ) {
+                            Text("查看完整证据 →", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
                 }
             }
         }
@@ -2857,3 +3139,5 @@ private fun BlackboardPanel(vm: ChatViewModel) {
         )
     }
 }
+// verified by agent-hub conductor dispatch
+// t2: 在 t1 确定的文件末尾追加此注释，标记子任务 t2 已完成

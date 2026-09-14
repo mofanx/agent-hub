@@ -12,6 +12,7 @@ import type {
   RuleCandidate,
   RuleCandidateStatus,
   ReviewFinding,
+  ReviewVerdict,
   FindingStatus,
   ReviewerDecision,
   ReviewerDecisionOutcome,
@@ -31,6 +32,9 @@ import type {
   RuleDefinition,
   RuleCandidateType,
   PolicyExportPatch,
+  AcceptanceCriterion,
+  VerificationRule,
+  RuleSelector,
 } from "./types.js";
 import { createRun, isTerminal, transition, IllegalTransitionError } from "./run.js";
 import { registerProject } from "./project.js";
@@ -105,7 +109,9 @@ import type { Store, QualityMetricRow } from "../store.js";
 
 export type QualityEvent =
   | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: QualityRun; checkStats?: { passed: number; failed: number; infraFailed: number }; findingStats?: { total: number; blocking: number } } }
-  | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: VerificationVerdict; records: RequirementVerification[] } };
+  | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: VerificationVerdict; records: RequirementVerification[] } }
+  | { method: "quality.reviewed"; params: { runId: string; projectId: string; roomId: string | null; implementerSessionId: string | null; findings: ReviewFinding[]; verdict: ReviewVerdict } }
+  | { method: "quality.review.prompt"; params: { runId: string; projectId: string; roomId: string | null; implementerSessionId: string | null; kind: string } };
 
 export type Emit = (event: QualityEvent) => void;
 
@@ -192,6 +198,10 @@ export class QualityService {
 
   deleteProject(id: string): boolean {
     return this.store.deleteQualityProject(id);
+  }
+
+  deleteRun(id: string): boolean {
+    return this.store.deleteQualityRun(id);
   }
 
   /** 注册/刷新项目（按 connectionId + root）。 */
@@ -922,6 +932,21 @@ export class QualityService {
     this.broadcast(run);
   }
 
+  /** 广播 quality.reviewed 事件（review 完成后调用，携带 findings 摘要）。 */
+  emitReviewResult(runId: string, projectId: string, roomId: string | undefined, implementerSessionId: string | undefined, findings: ReviewFinding[], verdict: ReviewVerdict): void {
+    this.emit({
+      method: "quality.reviewed",
+      params: { runId, projectId, roomId: roomId ?? null, implementerSessionId: implementerSessionId ?? null, findings, verdict },
+    });
+  }
+
+  emitReviewPrompt(runId: string, projectId: string, roomId: string | undefined, implementerSessionId: string | undefined, kind: string): void {
+    this.emit({
+      method: "quality.review.prompt",
+      params: { runId, projectId, roomId: roomId ?? null, implementerSessionId: implementerSessionId ?? null, kind },
+    });
+  }
+
   /** 持久化 check 并广播 runUpdate（check 变化也触发 UI 刷新）。 */
   saveCheck(check: CheckRun): void {
     this.store.saveQualityCheck(check);
@@ -1055,12 +1080,18 @@ export class QualityService {
     return this.store.listRequirementSpecs(requestId);
   }
 
-  updateRequirementSpec(id: string, patch: Partial<Pick<RequirementSpec, "goal" | "scope" | "acceptanceCriteria" | "constraints" | "risks" | "clarifications" | "status">>): RequirementSpec | undefined {
+  updateRequirementSpec(id: string, patch: Partial<Pick<RequirementSpec, "goal" | "scope" | "acceptanceCriteria" | "constraints" | "risks" | "clarifications" | "status">>, opts?: { projectId?: string; regenerateCriteria?: boolean }): RequirementSpec | undefined {
     const spec = this.store.getRequirementSpec(id);
     if (!spec) return undefined;
-    const updated = { ...spec, ...patch, updatedAt: Date.now() };
-    this.store.saveRequirementSpec(updated);
-    return updated;
+    let merged = { ...spec, ...patch, updatedAt: Date.now() };
+    if (opts?.regenerateCriteria && opts.projectId && patch.acceptanceCriteria === undefined) {
+      const policy = this.getProjectPolicy(opts.projectId);
+      const text = [merged.goal, ...merged.clarifications.filter((c) => c.status === "answered" && c.answer).map((c) => `${c.question} ${c.answer}`)].join("\n");
+      const criteria = this.generateAcceptanceCriteria(text, this.classifyRequestIntent(merged.goal), policy);
+      if (criteria.length > 0) merged = { ...merged, acceptanceCriteria: criteria };
+    }
+    this.store.saveRequirementSpec(merged);
+    return merged;
   }
 
   createWorkItem(params: {
@@ -1415,6 +1446,73 @@ export class QualityService {
     return classifyIntent(text);
   }
 
+  /** 按 roomId/sessionId 查找当前 WorkRequest 及其最新 RequirementSpec（替换内存缓存）。 */
+  findCurrentSpec(scope: { sessionId?: string; roomId?: string }): { request: WorkRequest; spec: RequirementSpec } | undefined {
+    const limit = 20;
+    const requests = scope.sessionId
+      ? this.store.listWorkRequestsBySession(scope.sessionId, limit)
+      : scope.roomId
+        ? this.store.listWorkRequests(scope.roomId, limit)
+        : [];
+    for (const request of requests) {
+      if (request.status === "cancelled" || request.status === "completed") continue;
+      const specs = this.store.listRequirementSpecs(request.id);
+      const spec = specs[specs.length - 1];
+      if (spec && spec.status !== "cancelled" && spec.status !== "superseded") {
+        return { request, spec };
+      }
+    }
+    return undefined;
+  }
+
+  /** 根据 goal + 澄清 + verificationRules 生成 acceptanceCriteria（用于 L3 验证）。 */
+  generateAcceptanceCriteria(
+    text: string,
+    intent: RequestIntent,
+    policy: QualityPolicyV2 | undefined,
+  ): AcceptanceCriterion[] {
+    if (!policy || policy.verificationRules.length === 0) return [];
+    const lower = text.toLowerCase();
+    const criteria: AcceptanceCriterion[] = [];
+    for (const rule of policy.verificationRules) {
+      if (!matchVerificationSelector(rule.selector, intent, lower)) continue;
+      criteria.push({
+        id: rule.id,
+        description: instantiateTemplate(rule.criterionTemplate, text, lower),
+        required: true,
+        evidenceMode: rule.evidenceMode,
+        expectedEvidence: rule.expectedEvidence,
+      });
+    }
+    return criteria;
+  }
+
+  /** 格式化 spec.goal + 已回答澄清为 implementer prompt 上下文。 */
+  buildSpecPromptContext(spec: RequirementSpec): string {
+    const lines: string[] = [`【需求目标】${spec.goal}`];
+    const answered = spec.clarifications.filter((c) => c.status === "answered" && c.answer);
+    if (answered.length > 0) {
+      lines.push("【澄清问答】");
+      for (const c of answered) {
+        lines.push(`- ${c.question} → ${c.answer}`);
+      }
+    }
+    if (spec.acceptanceCriteria.length > 0) {
+      lines.push("【验收标准】");
+      for (const ac of spec.acceptanceCriteria) {
+        lines.push(`- ${ac.description}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /** 获取项目当前 v2 policy（供外部 prompt 拼接使用）。 */
+  getProjectPolicy(projectId: string): QualityPolicyV2 | undefined {
+    const loaded = this.loadPolicyWithVersion(projectId);
+    if (loaded.version === 2 && loaded.policy) return loaded.policy as QualityPolicyV2;
+    return undefined;
+  }
+
   /**
    * L0 完整流程：分类 → 创建 WorkRequest → 创建 RequirementSpec → 评估 → 生成 ClarificationRequest。
    * 非 code-change 意图直接返回，不拦截。
@@ -1486,6 +1584,12 @@ export class QualityService {
       if (loaded.version === 2 && loaded.policy) {
         policy = loaded.policy as QualityPolicyV2;
       }
+    }
+
+    // 根据 verificationRules 自动生成 acceptanceCriteria（L3 验证用）
+    const generatedCriteria = this.generateAcceptanceCriteria(params.text, request.intent, policy);
+    if (generatedCriteria.length > 0) {
+      this.updateRequirementSpec(spec.id, { acceptanceCriteria: generatedCriteria });
     }
 
     // 执行 L0 评估
@@ -1809,3 +1913,13 @@ export type RunVerificationResult = {
 };
 
 export { buildCoverageMatrix, decideVerification, toVerificationRecords };
+
+function matchVerificationSelector(selector: RuleSelector, intent: RequestIntent, lowerText: string): boolean {
+  if (selector.intents && !selector.intents.includes(intent)) return false;
+  if (selector.keywords && !selector.keywords.some((kw) => lowerText.includes(kw.toLowerCase()))) return false;
+  return true;
+}
+
+function instantiateTemplate(template: string, text: string, _lower: string): string {
+  return template.includes("{goal}") ? template.replace(/\{goal\}/g, text) : template;
+}

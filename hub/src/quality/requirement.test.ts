@@ -32,6 +32,7 @@ import type {
   QualityPolicyV2,
   RequirementRule,
 } from "./types.js";
+import { defaultReviewConfig, writePolicyV2 } from "./policy.js";
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "quality-l0-"));
@@ -48,7 +49,7 @@ function makeV2Policy(rules: RequirementRule[] = []): QualityPolicyV2 {
     enforcement: { mode: "report", approvalRisk: "high" },
     remediation: { mode: "off", maxFixRounds: 0 },
     requirements: { mode: "suggest", maxQuestions: 3 },
-    review: { mode: "off", blockSeverity: "major", minBlockingConfidence: 0.8 },
+    review: { ...defaultReviewConfig(), mode: "off", blockSeverity: "major", minBlockingConfidence: 0.8 },
     verification: { mode: "off" },
     evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10485760 },
   };
@@ -763,5 +764,128 @@ describe("L0 advisory 升级阈值（§19）", () => {
     });
     assert.equal(r.upgrade, true);
     assert.equal(r.reason, "all thresholds met");
+  });
+});
+
+describe("L0 acceptanceCriteria 生成与 spec 绑定", () => {
+  let dir: string;
+  let store: Store;
+  let service: QualityService;
+
+  beforeEach(() => {
+    dir = tmpDir();
+    store = new Store(dir);
+    service = new QualityService(store, () => {});
+    const project = service.registerProject({ connectionId: "conn-1", root: dir });
+    const policy: QualityPolicyV2 = {
+      version: 2,
+      checks: [],
+      protectedPaths: [],
+      riskRules: [],
+      requirementRules: [],
+      verificationRules: [
+        {
+          id: "test-evidence",
+          selector: { intents: ["code-change"], keywords: ["测试", "test"] },
+          criterionTemplate: "需提供测试证据覆盖目标：{goal}",
+          evidenceMode: "any",
+          expectedEvidence: [{ id: "e1", kind: "test", description: "单元测试通过" }],
+        },
+        {
+          id: "no-match",
+          selector: { intents: ["code-change"], keywords: ["nonexistent-keyword"] },
+          criterionTemplate: "不应命中",
+          evidenceMode: "all",
+          expectedEvidence: [],
+        },
+      ],
+      enforcement: { mode: "report", approvalRisk: "high" },
+      remediation: { mode: "off", maxFixRounds: 0 },
+      requirements: { mode: "suggest", maxQuestions: 3 },
+      review: { ...defaultReviewConfig(), mode: "off" },
+      verification: { mode: "suggest" },
+      evidence: { excludePaths: [], retentionDays: 30, maxArtifactBytes: 10485760 },
+    };
+    writePolicyV2(project, policy);
+  });
+
+  afterEach(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("generateAcceptanceCriteria 按 selector 匹配 verificationRules", () => {
+    const policy = service.getProjectPolicy(service.listProjects()[0]!.id)!;
+    const criteria = service.generateAcceptanceCriteria("实现登录功能并写测试", "code-change", policy);
+    assert.equal(criteria.length, 1);
+    assert.equal(criteria[0]!.id, "test-evidence");
+    assert.match(criteria[0]!.description, /测试证据/);
+  });
+
+  it("handleL0Request 自动生成 acceptanceCriteria 并持久化", async () => {
+    const result = await service.handleL0Request({
+      text: "实现登录功能并写测试",
+      source: "session",
+      correlationId: "corr-criteria",
+      sessionId: "sess-1",
+      projectId: service.listProjects()[0]!.id,
+      l0Mode: "suggest",
+    });
+    assert.ok(result.spec);
+    const spec = service.getRequirementSpec(result.spec!.id)!;
+    assert.ok(spec.acceptanceCriteria.length >= 1);
+    assert.equal(spec.acceptanceCriteria[0]!.id, "test-evidence");
+  });
+
+  it("findCurrentSpec 按 sessionId 持久化查找 WorkRequest+Spec", async () => {
+    await service.handleL0Request({
+      text: "实现登录功能并写测试",
+      source: "session",
+      correlationId: "corr-find",
+      sessionId: "sess-find",
+      projectId: service.listProjects()[0]!.id,
+      l0Mode: "suggest",
+    });
+    const current = service.findCurrentSpec({ sessionId: "sess-find" });
+    assert.ok(current);
+    assert.equal(current!.request.sessionId, "sess-find");
+    assert.ok(current!.spec);
+  });
+
+  it("buildSpecPromptContext 包含 goal 和已回答澄清", async () => {
+    const result = await service.handleL0Request({
+      text: "实现登录",
+      source: "session",
+      correlationId: "corr-ctx",
+      sessionId: "sess-ctx",
+      projectId: service.listProjects()[0]!.id,
+      l0Mode: "suggest",
+    });
+    if (!result.clarificationRequest) return;
+    const answers = result.clarificationRequest.questions.map((q) => ({ questionId: q.id, answer: "邮箱登录" }));
+    const answered = service.answerClarification({ clarificationRequestId: result.clarificationRequest.id, answers });
+    assert.ok(answered);
+    const ctx = service.buildSpecPromptContext(answered!.spec);
+    assert.match(ctx, /需求目标/);
+    assert.match(ctx, /澄清问答/);
+  });
+
+  it("updateRequirementSpec goal 变更时重新生成 acceptanceCriteria", async () => {
+    const result = await service.handleL0Request({
+      text: "实现登录功能并写测试",
+      source: "session",
+      correlationId: "corr-regen",
+      sessionId: "sess-regen",
+      projectId: service.listProjects()[0]!.id,
+      l0Mode: "suggest",
+    });
+    const specId = result.spec!.id;
+    const updated = service.updateRequirementSpec(specId, { goal: "实现注册功能并写测试" }, {
+      regenerateCriteria: true,
+      projectId: service.listProjects()[0]!.id,
+    });
+    assert.ok(updated);
+    assert.ok(updated!.acceptanceCriteria.length >= 1);
+    assert.match(updated!.acceptanceCriteria[0]!.description, /注册功能/);
   });
 });

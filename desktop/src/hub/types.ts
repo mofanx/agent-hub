@@ -248,6 +248,19 @@ export type ChatItem =
       options: [string, string][];
       answered: string | null;
       author: string;
+    }
+  | {
+      kind: "clarification";
+      at?: number;
+      historyId?: number;
+      clarificationRequestId: string;
+      specId: string;
+      specVersion: number;
+      questions: Array<{ id: string; dimension: string; text: string }>;
+      canSkip: boolean;
+      expiresAt?: number;
+      answered: "answered" | "skipped" | "cancelled" | null;
+      author: string;
     };
 
 export type Screen = "connect" | "sessions" | "chat" | "room" | "settings" | "schedule" | "quality";
@@ -259,6 +272,7 @@ export type QualityStage =
   | "collecting"
   | "quick-verifying"
   | "reviewing"
+  | "reviewed"
   | "fixing"
   | "full-verifying"
   | "requirement-verifying"
@@ -347,6 +361,84 @@ export interface QualityFinding {
   resolutionNote?: string;
 }
 
+export interface RequirementVerification {
+  id: string;
+  runId: string;
+  specId: string;
+  specVersion: number;
+  criterionId: string;
+  expectationId: string;
+  status: "passed" | "failed" | "inconclusive" | "waived";
+  method: "check" | "test" | "runtime" | "manual" | "ai-inference";
+  evidenceRefs: string[];
+  verifier: string;
+  confidence?: number;
+  waiverReason?: string;
+}
+
+export type RequirementDimension =
+  | "goal"
+  | "scope"
+  | "constraints"
+  | "risks"
+  | "acceptance"
+  | "priority"
+  | "dependencies"
+  | "non-functional";
+
+export type EvidenceExpectation = { id: string } & (
+  | { kind: "check"; checkId: string }
+  | { kind: "test"; testId?: string; description: string }
+  | { kind: "runtime"; description: string }
+  | { kind: "manual"; instruction: string }
+  | { kind: "review"; rubric: string }
+);
+
+export interface AcceptanceCriterion {
+  id: string;
+  description: string;
+  required: boolean;
+  evidenceMode: "all" | "any";
+  expectedEvidence: EvidenceExpectation[];
+}
+
+export interface Clarification {
+  id: string;
+  dimension: string;
+  question: string;
+  answer?: string;
+  status: "pending" | "answered" | "skipped" | "expired";
+}
+
+export interface RequirementSpec {
+  id: string;
+  requestId: string;
+  version: number;
+  parentVersion?: number;
+  goal: string;
+  scope: { included: string[]; excluded: string[] };
+  acceptanceCriteria: AcceptanceCriterion[];
+  constraints: string[];
+  risks: string[];
+  clarifications: Clarification[];
+  status: "draft" | "clarifying" | "accepted" | "superseded" | "cancelled";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ClarificationRequest {
+  id: string;
+  requestId: string;
+  specId: string;
+  specVersion: number;
+  questions: Array<{ id: string; dimension: RequirementDimension; ruleId?: string; text: string }>;
+  canSkip: boolean;
+  expiresAt?: number;
+  status: "pending" | "answered" | "skipped" | "expired" | "cancelled";
+  createdAt: number;
+  answeredAt?: number;
+}
+
 export interface QualityProject {
   id: string;
   connectionId: string;
@@ -396,9 +488,33 @@ export interface QualityPolicyInfo {
 
 export type EnforcementMode = "report" | "require-pass" | "require-approval";
 export type RemediationMode = "off" | "propose" | "isolated-fix" | "apply-low-risk";
-export type RequirementsMode = "off" | "suggest" | "require-high-risk";
+export type RequirementsMode = "off" | "suggest" | "require" | "require-high-risk";
 export type ReviewMode = "off" | "advisory" | "blocking";
 export type VerificationMode = "off" | "suggest" | "require-evidence";
+
+export type ReviewTier = "light" | "standard" | "deep";
+
+export interface ReviewTriggerConfig {
+  minDiffLines: number;
+  skipPatterns: string[];
+}
+
+export interface ReviewTierMapping {
+  default: ReviewTier;
+  byRisk: Partial<Record<QualityRisk, ReviewTier>>;
+  byFileType: { pattern: string; tier: ReviewTier }[];
+}
+
+export interface ReviewConfigV2 {
+  mode: ReviewMode;
+  blockSeverity: "critical" | "major";
+  minBlockingConfidence: number;
+  trigger: ReviewTriggerConfig;
+  tierMapping: ReviewTierMapping;
+  model: string;
+  reviewerAgent?: string;
+  reviewerModel?: string;
+}
 
 export interface QualityPolicyV2 {
   version: 2;
@@ -410,7 +526,7 @@ export interface QualityPolicyV2 {
   enforcement: { mode: EnforcementMode; approvalRisk: "high" | "critical" };
   remediation: { mode: RemediationMode; maxFixRounds: number };
   requirements: { mode: RequirementsMode; maxQuestions: number };
-  review: { mode: ReviewMode; blockSeverity: "critical" | "major"; minBlockingConfidence: number };
+  review: ReviewConfigV2;
   verification: { mode: VerificationMode };
   evidence: { excludePaths: string[]; retentionDays: number; maxArtifactBytes: number };
 }

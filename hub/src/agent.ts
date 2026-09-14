@@ -56,6 +56,7 @@ export type HubEvent =
   | { method: "agent.status"; params: { status: string; detail?: string } }
   | { method: "task.update"; params: { tasks: unknown[] } }
   | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } }
+  | { method: "quality.reviewed"; params: { runId: string; projectId: string; roomId: string | null; findings: unknown[]; verdict: string } }
   | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: unknown; records: unknown[] } }
   | { method: "quality.awaitingApproval"; params: { runId: string; projectId: string; roomId: string | null } }
   | {
@@ -218,6 +219,26 @@ export class AcpAgent {
       clientInfo: { name: "agent-hub", version: "0.3.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
+
+    const authMethods = init.authMethods ?? [];
+    if (authMethods.length > 0) {
+      const method = authMethods[0]!;
+      const methodType = "type" in method ? method.type : "agent";
+      if (methodType === "terminal") {
+        throw new Error(`本地 Agent ${this.name} 需要终端认证，当前环境无法交互`);
+      }
+      if (methodType !== "env_var") {
+        const apiKey = process.env.DEVIN_API_KEY ?? process.env.ACP_API_KEY;
+        if (apiKey || process.env.DEVIN_ACP_BROWSER) {
+          const meta = apiKey ? { api_key: apiKey } : {};
+          await this.ctx.request(acp.methods.agent.authenticate, {
+            methodId: method.id,
+            _meta: meta,
+          });
+        }
+      }
+    }
+
     this.ready = true;
     this.emit({
       method: "agent.status",
@@ -616,16 +637,16 @@ export class AcpAgent {
     timeoutMs = 300_000,
   ): Promise<{ output: string; stopReason: string }> {
     return new Promise<{ output: string; stopReason: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = timeoutMs > 0 ? setTimeout(() => {
         this.promptOnceWaiters.delete(sessionId);
         reject(new Error(`promptOnce timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
+      }, timeoutMs) : null;
       this.promptOnceWaiters.set(sessionId, (output, stopReason) => {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         resolve({ output, stopReason });
       });
       this.promptContent(sessionId, [{ type: "text", text }]).catch((err) => {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         this.promptOnceWaiters.delete(sessionId);
         reject(err);
       });

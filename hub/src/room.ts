@@ -232,6 +232,15 @@ export class RoomManager {
     return this.rooms.get(roomId);
   }
 
+  addMember(roomId: string, sessionId: string, name: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room) return false;
+    if (room.members.some((m) => m.sessionId === sessionId)) return false;
+    room.members.push({ sessionId, name });
+    this.dedupMemberNames(roomId);
+    return true;
+  }
+
   /** 从持久化状态恢复：拆分旧 artifact、初始化黑板 */
   import(room: Room): void {
     const legacy: LegacyArtifact[] = (room.artifacts ?? []) as LegacyArtifact[];

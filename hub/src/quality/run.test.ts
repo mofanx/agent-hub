@@ -84,12 +84,22 @@ describe("quality state machine", () => {
       assert.ok(canTransition("quick-verifying", "cancelled"));
     });
 
-    it("reviewing → full-verifying / fixing / awaiting-approval / failed / cancelled", () => {
+    it("reviewing → reviewed / full-verifying / fixing / awaiting-approval / failed / cancelled", () => {
+      assert.ok(canTransition("reviewing", "reviewed"));
       assert.ok(canTransition("reviewing", "full-verifying"));
       assert.ok(canTransition("reviewing", "fixing"));
       assert.ok(canTransition("reviewing", "awaiting-approval"));
       assert.ok(canTransition("reviewing", "failed"));
       assert.ok(canTransition("reviewing", "cancelled"));
+    });
+
+    it("reviewed → full-verifying / fixing / failed / inconclusive / cancelled", () => {
+      assert.ok(canTransition("reviewed", "full-verifying"));
+      assert.ok(canTransition("reviewed", "fixing"));
+      assert.ok(canTransition("reviewed", "failed"));
+      assert.ok(canTransition("reviewed", "inconclusive"));
+      assert.ok(canTransition("reviewed", "cancelled"));
+      assert.equal(canTransition("reviewed", "reviewing"), false);
     });
 
     it("fixing → collecting / failed / cancelled", () => {

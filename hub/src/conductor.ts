@@ -87,6 +87,8 @@ export interface QualityIntegration {
   getRunEnforcement?(runId: string): "report" | "require-pass" | "require-approval" | undefined;
   /** 查询 run 的质量摘要（用于 getFlow 关联展示） */
   getRunSummary?(runId: string): QualitySummary | undefined;
+  /** 查询 room 当前需求 spec 的 prompt 上下文（goal + 澄清答案 + 验收标准），供子任务 prompt 拼接 */
+  getSpecPromptContext?(roomId: string): string | undefined;
 }
 
 const PLAN_RESULT_LEN = 4000;
@@ -438,7 +440,7 @@ export class ConductorOrchestrator {
               })
             : undefined);
           if (runId) {
-            if (preparedRunId) this.quality?.completeRunForTask?.(runId, output, result.artifacts);
+            this.quality?.completeRunForTask?.(runId, output, result.artifacts);
             running.status = "verifying";
             running.qualityRunId = runId;
             running.verifyingSince = Date.now();
@@ -766,18 +768,20 @@ export class ConductorOrchestrator {
       const artifactContext = refs && refs.length > 0
         ? { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}), refs }
         : { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}) };
+      const specContext = this.quality?.getSpecPromptContext?.(flow.roomId);
+      const taskBody = [
+        `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
+        "",
+        "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试等）：",
+        '```json',
+        '{"text":"你的总结","artifacts":[{"type":"file","path":"/path/to/file","summary":"改动摘要"},{"type":"command","summary":"运行的命令和结果"},{"type":"test","summary":"测试结果"}]}',
+        '```',
+        "",
+        "如果没有 artifact，可以只输出文本，不必输出 JSON。",
+      ].join("\n");
       const prompt = this.rooms.buildPrompt(
         room.roomId,
-        [
-          `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
-          "",
-          "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试等）：",
-          '```json',
-          '{"text":"你的总结","artifacts":[{"type":"file","path":"/path/to/file","summary":"改动摘要"},{"type":"command","summary":"运行的命令和结果"},{"type":"test","summary":"测试结果"}]}',
-          '```',
-          "",
-          "如果没有 artifact，可以只输出文本，不必输出 JSON。",
-        ].join("\n"),
+        specContext ? `${specContext}\n\n${taskBody}` : taskBody,
         t.sessionId,
         undefined,
         undefined,
@@ -1269,3 +1273,5 @@ export function resolveMemberByString(
 
 export { parseTasks, extractTaskResult };
 export type { TaskArtifact, TaskResult };
+// conductor-dispatch: verified by agent-hub
+// t2: 在 t1 确定的文件末尾追加此注释，标记子任务 t2 已完成

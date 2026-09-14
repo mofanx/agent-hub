@@ -41,7 +41,7 @@ import type { ExecutionProvider } from "./quality/execution.js";
 import { LocalExecutionProvider } from "./quality/execution-local.js";
 import { RoutingExecutionProvider } from "./quality/execution.js";
 import { collectChangeSet, collectBaseline, type Baseline } from "./quality/change-set.js";
-import { defaultObservePolicy, getPolicyEnforcement, getPolicyMaxFixRounds, hashPolicy, isPolicyReviewEnabled, readPolicySnapshot, writePolicySnapshot } from "./quality/policy.js";
+import { defaultObservePolicy, getPolicyEnforcement, getPolicyMaxFixRounds, hashPolicy, isPolicyReviewEnabled, readPolicySnapshot, shouldTriggerReview, writePolicySnapshot, writePolicyV2, validatePolicyV2 } from "./quality/policy.js";
 import { classifyChangeSet } from "./quality/risk.js";
 import type { ChangeSet, CheckTier, ProjectScope, QualityPolicy, QualityPolicyV2, QualityRisk, QualityRun, QualityTrigger, WorkItem } from "./quality/types.js";
 import type { QualityIntegration } from "./conductor.js";
@@ -73,10 +73,48 @@ const runPermissionManager = new RunPermissionManager();
 const writerLeaseManager = new WriterLeaseManager();
 const runContextRegistry = new RunContextRegistry();
 const dirtyTracker = new DirtyTracker();
-// L0 创建的 WorkRequest/RequirementSpec 缓存，供后续 triggerGateForSession 复用
-const l0PendingSpecs = new Map<string, { requestId: string; specId: string; specVersion: number }>();
+// require 模式下被挂起的原始消息，澄清完成后恢复派发。键为 requestId。
+const suspendedPrompts = new Map<string, {
+  source: "room" | "session";
+  roomId?: string;
+  sessionId?: string;
+  mode?: string;
+  text: string;
+  content?: Array<Record<string, unknown>>;
+  quote?: { author: string; text: string };
+}>();
 const qualityEmit: Emit = (event: QualityEvent) => {
   broadcast(event as HubEvent);
+  if (event.method === "quality.review.prompt") {
+    const { roomId, kind } = event.params;
+    const message = kind === "add-reviewer"
+      ? "当前群聊即将进入 AI 审查阶段，是否拉入一名审查 AI？"
+      : "当前代码改动即将进入 AI 审查，是否创建审查群聊并在群内协作？";
+    if (roomId) {
+      roomModeManager.broadcastRoomNotice(roomId, message);
+    }
+    return;
+  }
+  if (event.method === "quality.reviewed") {
+    const { runId, roomId, findings, verdict } = event.params;
+    if (roomId) {
+      const lines: string[] = [`📋 Review 完成 · run ${runId} · 结论: ${verdict}`];
+      if (findings.length === 0) {
+        lines.push("（无问题发现）");
+      } else {
+        for (const f of findings) {
+          const loc = f.file ? `${f.file}${f.line !== undefined ? `:${f.line}` : ""}` : "未知位置";
+          const sev = `[${f.severity}]`;
+          const blk = f.blocking ? " ⛔阻断" : "";
+          lines.push(`${sev}${blk} ${loc} — ${f.claim}`);
+          if (f.evidence) lines.push(`  证据: ${f.evidence}`);
+          if (f.suggestion) lines.push(`  建议: ${f.suggestion}`);
+        }
+      }
+      roomModeManager.broadcastRoomNotice(roomId, lines.join("\n"));
+    }
+    return;
+  }
   if (event.method !== "quality.runUpdate") return;
   const { runId, run } = event.params;
   if (isTerminal(run.stage)) {
@@ -140,25 +178,65 @@ const reviewerSessionRunner: ReviewerSessionRunner = {
   async ensureSession(opts) {
     // 复用已有 reviewerSessionId
     if (opts.existingSessionId) return opts.existingSessionId;
-    // 找一个可用的 agent 创建新 session
+
+    const targetModel = (opts.model ?? "").trim();
+    if (targetModel) {
+      try {
+        await modelManager.list();
+        const modelInfo = modelManager.find(targetModel);
+        if (modelInfo) {
+          // 找到匹配后端且在线的 agent
+          const connections = store.listConnections().filter((c) => c.agent === modelInfo.backend);
+          for (const conn of connections) {
+            const agent = agents.get(conn.id);
+            if (agent?.isReady) {
+              const { sessionId } = await agent.createSession(opts.project.root, "reviewer");
+              owners.set(sessionId, conn.id);
+              // 保持 session 级模型偏好与 agent 配置一致
+              await modelManager.setForSession(modelInfo.uid, sessionId).catch((err) =>
+                logWarn("review", `set session model preference failed: ${String(err)}`)
+              );
+              await agent.setConfigOption(sessionId, "model", modelInfo.uid).catch((err) =>
+                logWarn("review", `set agent model failed: ${String(err)}`)
+              );
+              sessionMetas.set(sessionId, {
+                sessionId,
+                cwd: opts.project.root,
+                name: "reviewer",
+                agent: conn.agent,
+                connectionId: conn.id,
+              });
+              persistState();
+              return sessionId;
+            }
+          }
+          logWarn("review", `no ready agent for model ${targetModel} (backend ${modelInfo.backend}), falling back`);
+        } else {
+          logWarn("review", `model ${targetModel} not found, falling back`);
+        }
+      } catch (err) {
+        logWarn("review", `model resolution failed for ${targetModel}: ${String(err)}`);
+      }
+    }
+
+    // 回退：找一个可用的 agent 创建新 session
     const agent = [...agents.values()].find((a) => a.isReady);
     if (!agent) throw new Error("no agent available for reviewer session");
     const { sessionId } = await agent.createSession(opts.project.root, "reviewer");
     owners.set(sessionId, [...agents.entries()].find(([, a]) => a === agent)![0]);
     return sessionId;
   },
-  async promptOnce(sessionId, text, timeoutMs) {
+  async promptOnce(sessionId, text) {
     const agent = agentForSession(sessionId);
     if (!agent) throw new Error(`agent not found for reviewer session ${sessionId}`);
-    return agent.promptOnce(sessionId, text, timeoutMs);
+    return agent.promptOnce(sessionId, text, 0);
   },
 };
 
 let reviewOrchestrator: ReviewOrchestrator | undefined;
+const reviewPromptFallbacks = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** reviewRunner 回调：当 run 进入 reviewing 阶段时触发 ReviewOrchestrator。 */
-const reviewRunner = (run: { id: string; stage: string }) => {
-  if (run.stage !== "reviewing") return;
+function ensureReviewOrchestrator(): ReviewOrchestrator {
   if (!reviewOrchestrator) {
     reviewOrchestrator = new ReviewOrchestrator(
       qualityService,
@@ -167,7 +245,39 @@ const reviewRunner = (run: { id: string; stage: string }) => {
       { artifactDir: qualityArtifactDir },
     );
   }
-  reviewOrchestrator.runReview(run.id).catch((err) => {
+  return reviewOrchestrator;
+}
+
+/** reviewRunner 回调：当 run 进入 reviewing 阶段时触发 ReviewOrchestrator。 */
+const reviewRunner = (run: QualityRun) => {
+  if (run.stage !== "reviewing") return;
+
+  // 首次进入 reviewing 时先向用户弹出协作方式确认
+  if (!run.reviewPromptedAt) {
+    const kind = run.roomId ? "add-reviewer" : "create-review-room";
+    qualityService.emitReviewPrompt(run.id, run.projectId, run.roomId, run.implementerSessionId, kind);
+    const now = Date.now();
+    qualityService.saveRun({ ...run, reviewPromptedAt: now, reviewPromptAction: "pending" });
+    // 60 秒内用户未响应，则默认沿用旧行为继续 review（兼容旧客户端）
+    const timer = setTimeout(() => {
+      reviewPromptFallbacks.delete(run.id);
+      const current = qualityService.getRun(run.id);
+      if (!current || current.stage !== "reviewing" || current.reviewPromptAction !== "pending") return;
+      qualityService.saveRun({ ...current, reviewPromptAction: "proceed" });
+      ensureReviewOrchestrator().runReview(run.id).catch((err) => {
+        logError("review-orchestrator", err);
+        try { qualityService.advance(run.id, "failed", "review-error"); } catch { /* */ }
+      });
+    }, 60000);
+    reviewPromptFallbacks.set(run.id, timer);
+    return;
+  }
+
+  // 用户尚未决策时保持等待
+  if (run.reviewPromptAction === "pending") return;
+
+  // 用户已决策或默认继续时执行 review
+  ensureReviewOrchestrator().runReview(run.id).catch((err) => {
     logError("review-orchestrator", err);
     // 安全失败：推进到 failed
     try {
@@ -294,7 +404,7 @@ function makeGateRunner(tier: CheckTier): (run: { id: string; stage: string }) =
     });
     const attempt = current.fixRound + 1;
     gate.runGate(project, policy, tier, runId, changeSet, attempt).then((result) => {
-      advanceAfterGate(runId, result, qualityService.getRun(runId) ?? runForAdvance, policy, tier);
+      advanceAfterGate(runId, result, qualityService.getRun(runId) ?? runForAdvance, policy, tier, changeSet);
     }).catch((err) => {
       logError("gate-runner", err);
       try { qualityService.advance(runId, "inconclusive", "l1-infra-failed"); } catch { /* */ }
@@ -315,11 +425,16 @@ function advanceAfterGate(
   run: QualityRun,
   policy: QualityPolicy | QualityPolicyV2,
   tier: CheckTier,
+  changeSet?: ChangeSet | undefined,
 ): void {
   if (gate.passed) {
     if (tier === "quick") {
       console.log(`[hub] gate-runner: quick gate passed, advancing to full-verifying for run ${runId}`);
-      qualityService.advance(runId, isPolicyReviewEnabled(policy) ? "reviewing" : "full-verifying");
+      const reviewEnabled = isPolicyReviewEnabled(policy);
+      const shouldReview = reviewEnabled && policy.version === 2 && changeSet
+        ? shouldTriggerReview(changeSet, policy.review)
+        : reviewEnabled;
+      qualityService.advance(runId, shouldReview ? "reviewing" : "full-verifying");
       return;
     }
     const checks = qualityService.listChecks(runId);
@@ -481,9 +596,28 @@ type PreparedQualityRun = { run: QualityRun; workItem: WorkItem; project: Projec
 
 /**
  * L0 横切评估：在消息派发给 agent 之前运行意图分类 + 需求评估。
- * shadow 模式不阻断：无论 L0 结果如何，都继续执行原流程。
+ * 读取 policy.requirements.mode：off 跳过；suggest 仅广播；require 挂起等待澄清。
  * 仅 code-change 意图触发完整评估；有 clarification 时广播 clarificationRequired 事件。
+ * 返回 { proceed }：require 模式下需要澄清时 proceed=false，调用方应停止派发。
  */
+function resolveProjectForL0(params: { source: "room" | "session"; roomId?: string; sessionId?: string }): ProjectScope | undefined {
+  if (params.sessionId) {
+    const project = findProjectForSession(params.sessionId);
+    if (project) return project;
+  }
+  if (params.roomId) {
+    const room = rooms.get(params.roomId);
+    if (room) {
+      const candidates = [room.conductorId, ...room.members.map((m) => m.sessionId)].filter((s): s is string => !!s);
+      for (const sid of candidates) {
+        const project = findProjectForSession(sid);
+        if (project) return project;
+      }
+    }
+  }
+  return undefined;
+}
+
 async function runL0Intercept(params: {
   text: string;
   source: "room" | "session";
@@ -491,18 +625,23 @@ async function runL0Intercept(params: {
   mode?: string;
   roomId?: string;
   sessionId?: string;
-}): Promise<void> {
+  content?: Array<Record<string, unknown>>;
+  quote?: { author: string; text: string };
+}): Promise<{ proceed: boolean }> {
   try {
     const intent = qualityService.classifyRequestIntent(params.text);
-    if (intent !== "code-change") return;
+    if (intent !== "code-change") return { proceed: true };
 
-    // 尝试解析项目（room 入口可能无法确定项目，此时只运行通用评估）
-    let projectId: string | undefined;
-    if (params.sessionId) {
-      const project = findProjectForSession(params.sessionId);
-      projectId = project?.id;
+    const project = resolveProjectForL0(params);
+    const projectId = project?.id;
+    let mode: QualityPolicyV2["requirements"]["mode"] = "off";
+    if (projectId) {
+      const policy = qualityService.getProjectPolicy(projectId);
+      if (policy) mode = policy.requirements.mode;
     }
+    if (mode === "off") return { proceed: true };
 
+    const l0Mode = mode === "require" || mode === "require-high-risk" ? "require" : "suggest";
     const result = await qualityService.handleL0Request({
       text: params.text,
       source: params.source,
@@ -511,7 +650,7 @@ async function runL0Intercept(params: {
       ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
       ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
       ...(projectId !== undefined ? { projectId } : {}),
-      l0Mode: "shadow",
+      l0Mode,
     });
 
     if (result.clarificationRequest) {
@@ -528,17 +667,54 @@ async function runL0Intercept(params: {
         },
       } as HubEvent);
     }
-    // 缓存 L0 创建的 request/spec，供后续 triggerGateForSession 复用
-    if (result.spec && params.sessionId) {
-      l0PendingSpecs.set(params.sessionId, {
-        requestId: result.request.id,
-        specId: result.spec.id,
-        specVersion: result.spec.version,
+
+    // require 模式下有澄清问题 → 挂起原消息，等待澄清完成后恢复
+    if (l0Mode === "require" && result.clarificationRequest) {
+      suspendedPrompts.set(result.request.id, {
+        source: params.source,
+        ...(params.roomId !== undefined ? { roomId: params.roomId } : {}),
+        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+        ...(params.mode !== undefined ? { mode: params.mode } : {}),
+        text: params.text,
+        ...(params.content !== undefined ? { content: params.content } : {}),
+        ...(params.quote !== undefined ? { quote: params.quote } : {}),
       });
+      return { proceed: false };
     }
+    return { proceed: true };
   } catch (err) {
     // L0 评估失败 → 安全降级，不阻断消息
     logError("L0 intercept", String(err));
+    return { proceed: true };
+  }
+}
+
+/** require 模式澄清完成后恢复被挂起的原始消息派发。 */
+function resumeSuspendedPrompt(requestId: string): void {
+  const suspended = suspendedPrompts.get(requestId);
+  if (!suspended) return;
+  suspendedPrompts.delete(requestId);
+  const spec = qualityService.findCurrentSpec({
+    ...(suspended.roomId !== undefined ? { roomId: suspended.roomId } : {}),
+    ...(suspended.sessionId !== undefined ? { sessionId: suspended.sessionId } : {}),
+  })?.spec;
+  const ctx = spec ? qualityService.buildSpecPromptContext(spec) : undefined;
+  const prefix = ctx ? `${ctx}\n\n` : "";
+  if (suspended.source === "session" && suspended.sessionId) {
+    const content = suspended.content ?? [{ type: "text", text: suspended.text }];
+    const enriched = content.map((b) => b.type === "text" ? { ...b, text: `${prefix}${String(b.text ?? "")}` } : b);
+    agentOps.prompt(suspended.sessionId, enriched).catch((err: unknown) => logError("resume suspended prompt", String(err)));
+  } else if (suspended.source === "room" && suspended.roomId) {
+    const room = rooms.get(suspended.roomId);
+    if (room) {
+      const text = `${prefix}${suspended.text}`;
+      void roomModeManager.handle(room, text, {
+        ...(suspended.quote !== undefined ? { quote: suspended.quote } : {}),
+        content: suspended.content ?? [{ type: "text", text }],
+        params: {},
+        sessionNote: (sid: string) => sessionLostReplyNote(sid),
+      }).catch((err: unknown) => logError("resume suspended room prompt", String(err)));
+    }
   }
 }
 
@@ -572,6 +748,19 @@ function prepareQualityRun(opts: {
       });
   if (!request) return undefined;
   qualityService.updateWorkRequestStatus(request.id, "dispatched");
+  // 自动绑定 specId/specVersion：优先用调用方传入，否则按 roomId/sessionId 持久化查找
+  let specId = opts.specId;
+  let specVersion = opts.specVersion;
+  if (specId === undefined) {
+    const current = qualityService.findCurrentSpec({
+      ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
+      sessionId: opts.sessionId,
+    });
+    if (current) {
+      specId = current.spec.id;
+      specVersion = current.spec.version;
+    }
+  }
   const workItem = qualityService.createWorkItem({
     requestId: request.id,
     projectId: project.id,
@@ -579,8 +768,8 @@ function prepareQualityRun(opts: {
     sessionId: opts.sessionId,
     ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
     ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
-    ...(opts.specId !== undefined ? { specId: opts.specId } : {}),
-    ...(opts.specVersion !== undefined ? { specVersion: opts.specVersion } : {}),
+    ...(specId !== undefined ? { specId } : {}),
+    ...(specVersion !== undefined ? { specVersion } : {}),
   });
   const baseline = collectBaseline(project);
   const policyHash = hashPolicy(policy);
@@ -619,6 +808,14 @@ function prepareQualityRun(opts: {
     ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
     role: "implementer",
   }, opts.roomId);
+  // 进入 implementing 前把 spec.goal + 澄清答案拼入 implementer 上下文（广播到 room 使编程端可见）
+  if (workItem.specId) {
+    const spec = qualityService.getRequirementSpec(workItem.specId);
+    if (spec && opts.roomId) {
+      const ctx = qualityService.buildSpecPromptContext(spec);
+      if (ctx) roomModeManager.broadcastRoomNotice(opts.roomId, `【需求上下文】\n${ctx}`);
+    }
+  }
   qualityService.advance(run.id, "implementing");
   return { run: qualityService.getRun(run.id)!, workItem, project };
 }
@@ -717,6 +914,11 @@ const qualityIntegration: QualityIntegration = {
       ...(run.failureCode !== undefined ? { failureCode: run.failureCode } : {}),
       awaitingApproval: run.stage === "awaiting-approval",
     };
+  },
+  getSpecPromptContext(roomId) {
+    const current = qualityService.findCurrentSpec({ roomId });
+    if (!current) return undefined;
+    return qualityService.buildSpecPromptContext(current.spec);
   },
 };
 
@@ -971,10 +1173,12 @@ function cleanupLocalAgent(connectionId: string): void {
 }
 
 function spawnAgent(def: AgentDef): ChildProcess {
+  const env = { ...process.env, ...def.env };
+  if (!def.env?.ACP_BACKEND) delete env.ACP_BACKEND;
   return spawn(def.bin, def.args, {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: def.cwd,
-    env: { ...process.env, ...def.env },
+    env,
     windowsHide: true,
   });
 }
@@ -1372,9 +1576,8 @@ function triggerGateForSession(sessionId: string, output: string): void {
   if (!project) return;
   const { policy } = qualityService.getPolicy(project.id);
   const reviewerSessionId = policy.review.reviewerSessionId;
-  // 复用 L0 创建的 WorkRequest/RequirementSpec，打通 L0-L3 链路
-  const l0Spec = l0PendingSpecs.get(sessionId);
-  if (l0Spec) l0PendingSpecs.delete(sessionId);
+  // 通过持久化查找复用 L0 创建的 WorkRequest/RequirementSpec，打通 L0-L3 链路
+  const current = qualityService.findCurrentSpec({ sessionId });
   const prepared = prepareQualityRun({
     sessionId,
     trigger: "interactive",
@@ -1382,7 +1585,7 @@ function triggerGateForSession(sessionId: string, output: string): void {
     mode: "session",
     filePaths: allPaths,
     ...(reviewerSessionId !== undefined ? { reviewerSessionId } : {}),
-    ...(l0Spec ? { requestId: l0Spec.requestId, specId: l0Spec.specId, specVersion: l0Spec.specVersion } : {}),
+    ...(current ? { requestId: current.request.id, specId: current.spec.id, specVersion: current.spec.version } : {}),
   });
   if (!prepared) return;
   // agent 已完成实现，直接推进到 quick-verifying
@@ -2067,6 +2270,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!room) throw new Error("unknown room");
       return { flow: roomModeManager.getFlow(roomId) };
     }
+    case "room.flow.cancel": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      await roomModeManager.cancelActive(roomId, "用户取消编排");
+      persistState();
+      return { cancelled: true };
+    }
     case "room.retryTasks": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
@@ -2385,14 +2596,17 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
           : historyText,
       });
-      // L0 横切：shadow 模式不阻断，仅广播 clarificationRequired
-      await runL0Intercept({
+      // L0 横切：按 policy.requirements.mode 决定是否阻断
+      const l0 = await runL0Intercept({
         text: historyText,
         source: "room",
         correlationId: `room-${roomId}-${Date.now()}`,
         mode: room.mode,
         roomId,
+        content,
+        ...(quote !== undefined ? { quote } : {}),
       });
+      if (!l0.proceed) return { sent: [], skipped: [] };
       // 重试指令拦截：awaiting-retry 的 flow 优先处理，不进入 cancelActive
       const retryMatch = parseRetryCommand(historyText);
       if (retryMatch && roomModeManager.hasAwaitingRetry(roomId)) {
@@ -2454,13 +2668,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         text: historyText,
       });
 
-      // L0 横切：shadow 模式不阻断，仅广播 clarificationRequired
-      await runL0Intercept({
+      // L0 横切：按 policy.requirements.mode 决定是否阻断
+      const l0 = await runL0Intercept({
         text: historyText,
         source: "session",
         correlationId: `session-${sessionId}-${Date.now()}`,
         sessionId,
+        content: promptContent,
       });
+      if (!l0.proceed) return { accepted: true };
 
       if (note) {
         const first = promptContent[0];
@@ -2695,6 +2911,17 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const id = String(req.params?.projectId ?? "");
       return qualityService.ensurePolicy(id);
     }
+    case "quality.policy.update": {
+      const id = String(req.params?.projectId ?? "");
+      const project = qualityService.getProject(id);
+      if (!project) throw new Error(`unknown project: ${id}`);
+      const policy = req.params?.policy as QualityPolicyV2;
+      if (!policy || policy.version !== 2) throw new Error("policy must be a v2 object");
+      const errors = validatePolicyV2(policy, project);
+      if (errors.length > 0) throw new Error(`policy validation failed:\n  - ${errors.join("\n  - ")}`);
+      const filePath = writePolicyV2(project, policy);
+      return { path: filePath, policy };
+    }
     // ── quality: runs ──────────────────────────────────────────────────
     case "quality.run.start": {
       const p = req.params ?? {};
@@ -2766,6 +2993,11 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const id = String(req.params?.id ?? "");
       const to = String(req.params?.to ?? "");
       return { run: qualityService.advance(id, to as never) };
+    }
+    case "quality.run.delete": {
+      const id = String(req.params?.id ?? "");
+      const deleted = qualityService.deleteRun(id);
+      return { deleted };
     }
     case "quality.check.list": {
       const runId = String(req.params?.runId ?? "");
@@ -2979,6 +3211,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         method: "requirement.specUpdate",
         params: { requestId: result.request.id, specId: result.spec.id, specVersion: result.spec.version, status: result.spec.status },
       } as HubEvent);
+      resumeSuspendedPrompt(result.request.id);
       return { spec: result.spec, request: result.request };
     }
     case "requirement.clarificationSkip": {
@@ -2993,6 +3226,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         method: "requirement.specUpdate",
         params: { requestId: result.request.id, specId: result.spec.id, specVersion: result.spec.version, status: result.spec.status },
       } as HubEvent);
+      resumeSuspendedPrompt(result.request.id);
       return { spec: result.spec, request: result.request };
     }
     case "requirement.clarificationCancel": {
@@ -3023,12 +3257,28 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     case "requirement.specUpdate": {
       const id = String(req.params?.id ?? "");
       const patch = req.params ?? {};
+      const goalChanged = patch.goal !== undefined;
+      const criteriaSupplied = patch.acceptanceCriteria !== undefined;
+      // 解析 spec 所属项目，用于 goal 变更时自动重新生成 acceptanceCriteria
+      let projectId: string | undefined;
+      if (goalChanged && !criteriaSupplied) {
+        const spec = qualityService.getRequirementSpec(id);
+        if (spec) {
+          const request = qualityService.getWorkRequest(spec.requestId);
+          const scope = request ? resolveProjectForL0({
+            source: "room",
+            ...(request.roomId !== undefined ? { roomId: request.roomId } : {}),
+            ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
+          }) : undefined;
+          projectId = scope?.id;
+        }
+      }
       const updated = qualityService.updateRequirementSpec(id, {
         ...(patch.goal !== undefined ? { goal: String(patch.goal) } : {}),
         ...(patch.acceptanceCriteria !== undefined ? { acceptanceCriteria: patch.acceptanceCriteria as any } : {}),
         ...(patch.constraints !== undefined ? { constraints: patch.constraints as string[] } : {}),
         ...(patch.status !== undefined ? { status: String(patch.status) as any } : {}),
-      });
+      }, { regenerateCriteria: goalChanged && !criteriaSupplied, ...(projectId !== undefined ? { projectId } : {}) });
       if (!updated) throw new Error(`unknown spec: ${id}`);
       broadcast({ method: "requirement.specUpdate", params: { specId: updated.id, specVersion: updated.version, status: updated.status } } as HubEvent);
       return { spec: updated };
@@ -3240,6 +3490,97 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const result = qualityService.migratePolicyToV2(projectId, expectedOldHash);
       if (!result.ok) throw new Error(`migration failed: ${result.errors.join(", ")}`);
       return result;
+    }
+    // ── Phase 6：review 协作提示 RPC ─────────────────────────────────
+    case "quality.review.promptResponse": {
+      const runId = String(req.params?.runId ?? "");
+      const action = String(req.params?.action ?? "");
+      const timer = reviewPromptFallbacks.get(runId);
+      if (timer) {
+        clearTimeout(timer);
+        reviewPromptFallbacks.delete(runId);
+      }
+      const run = qualityService.getRun(runId);
+      if (!run) throw new Error(`unknown run: ${runId}`);
+      if (run.stage !== "reviewing") throw new Error(`run ${runId} not in reviewing stage`);
+      if (!run.reviewPromptedAt || run.reviewPromptAction !== "pending") {
+        throw new Error(`run ${runId} has no pending review prompt`);
+      }
+
+      if (action === "skip") {
+        const next = qualityService.advance(runId, "full-verifying");
+        return { run: next };
+      }
+
+      if (action === "create-review-room") {
+        if (!run.implementerSessionId) throw new Error(`run ${runId} has no implementerSessionId`);
+        const project = qualityService.getProject(run.projectId);
+        if (!project) throw new Error(`unknown project: ${run.projectId}`);
+
+        // 创建 reviewer session
+        const reviewerSessionId = await reviewerSessionRunner.ensureSession({ project, run });
+
+        // 构建 room 成员
+        const implementerMeta = sessionMetas.get(run.implementerSessionId);
+        const members: { sessionId: string; name: string }[] = [
+          { sessionId: run.implementerSessionId, name: implementerMeta?.name ?? "implementer" },
+          { sessionId: reviewerSessionId, name: "reviewer" },
+        ];
+
+        // 可选：把用户的 client session 也加入
+        const userSessionId = typeof req.params?.userSessionId === "string" ? req.params.userSessionId : undefined;
+        if (userSessionId && userSessionId !== run.implementerSessionId) {
+          const userMeta = sessionMetas.get(userSessionId);
+          members.push({ sessionId: userSessionId, name: userMeta?.name ?? "我" });
+        }
+
+        const roomName = `🔍 审查: ${path.basename(project.root)} #${run.id.slice(0, 6)}`;
+        const room = rooms.create(roomName, members, "roundrobin");
+        persistState();
+
+        const updated: QualityRun = {
+          ...run,
+          roomId: room.roomId,
+          reviewRoomId: room.roomId,
+          reviewerSessionId,
+          reviewPromptAction: "proceed",
+        };
+        qualityService.saveRun(updated);
+
+        await ensureReviewOrchestrator().runReview(runId);
+        return { run: qualityService.getRun(runId), room: enrichRoom(room) };
+      }
+
+      if (action === "add-reviewer") {
+        if (!run.roomId) throw new Error(`run ${runId} has no roomId`);
+        if (!run.implementerSessionId) throw new Error(`run ${runId} has no implementerSessionId`);
+        const project = qualityService.getProject(run.projectId);
+        if (!project) throw new Error(`unknown project: ${run.projectId}`);
+
+        const reviewerSessionId = await reviewerSessionRunner.ensureSession({ project, run });
+        rooms.addMember(run.roomId, reviewerSessionId, "reviewer");
+        persistState();
+
+        const updated: QualityRun = {
+          ...run,
+          reviewerSessionId,
+          reviewPromptAction: "proceed",
+        };
+        qualityService.saveRun(updated);
+
+        await ensureReviewOrchestrator().runReview(runId);
+        return { run: qualityService.getRun(runId) };
+      }
+
+      // use-session / no-reviewer / proceed：直接在当前上下文继续 review
+      if (["use-session", "no-reviewer", "proceed"].includes(action)) {
+        const updated: QualityRun = { ...run, reviewPromptAction: "proceed" };
+        qualityService.saveRun(updated);
+        await ensureReviewOrchestrator().runReview(runId);
+        return { run: qualityService.getRun(runId) };
+      }
+
+      throw new Error(`unknown review prompt action: ${action}`);
     }
     default:
       throw new Error(`unknown method: ${req.method}`);

@@ -6,6 +6,7 @@ import type {
   FindingSeverity,
   FindingStatus,
   QualityPolicy,
+  QualityPolicyV2,
   QualityRun,
   ReviewFinding,
   ReviewVerdict,
@@ -313,7 +314,7 @@ function validateRawFinding(raw: unknown, idx: number): FindingValidation {
  */
 export function isBlocking(
   finding: RawFinding | ReviewFinding,
-  policy: QualityPolicy,
+  policy: QualityPolicy | QualityPolicyV2,
 ): boolean {
   const sev = finding.severity;
   const blockSev = policy.review.blockSeverity;
@@ -354,7 +355,7 @@ export function newFindingId(): string {
 export function toReviewFinding(
   raw: RawFinding,
   runId: string,
-  policy: QualityPolicy,
+  policy: QualityPolicy | QualityPolicyV2,
 ): ReviewFinding {
   return {
     id: newFindingId(),
@@ -402,7 +403,7 @@ export function isValidFindingStatus(s: string): s is FindingStatus {
 export function findingsFromOutput(
   output: ReviewerOutput,
   runId: string,
-  policy: QualityPolicy,
+  policy: QualityPolicy | QualityPolicyV2,
 ): ReviewFinding[] {
   return output.findings.map((raw) => toReviewFinding(raw, runId, policy));
 }

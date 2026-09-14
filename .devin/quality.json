@@ -1,11 +1,14 @@
 {
-  "version": 1,
-  "autonomy": "observe",
+  "version": 2,
   "checks": [
     {
       "id": "hub-typecheck",
       "cwd": "hub",
-      "argv": ["npx", "tsc", "--noEmit"],
+      "argv": [
+        "npx",
+        "tsc",
+        "--noEmit"
+      ],
       "tier": "quick",
       "timeoutMs": 120000,
       "required": true
@@ -13,7 +16,10 @@
     {
       "id": "hub-test",
       "cwd": "hub",
-      "argv": ["npm", "test"],
+      "argv": [
+        "npm",
+        "test"
+      ],
       "tier": "full",
       "timeoutMs": 300000,
       "required": true
@@ -21,7 +27,11 @@
     {
       "id": "desktop-typecheck",
       "cwd": "desktop",
-      "argv": ["npx", "tsc", "--noEmit"],
+      "argv": [
+        "npx",
+        "tsc",
+        "--noEmit"
+      ],
       "tier": "quick",
       "timeoutMs": 120000,
       "required": true
@@ -29,7 +39,10 @@
     {
       "id": "android-compile",
       "cwd": "android",
-      "argv": ["./gradlew", ":app:compileDebugKotlin"],
+      "argv": [
+        "./gradlew",
+        ":app:compileDebugKotlin"
+      ],
       "tier": "full",
       "timeoutMs": 600000,
       "required": false,
@@ -44,14 +57,66 @@
     "deploy/"
   ],
   "riskRules": [
-    { "pattern": ".devin/quality.json", "risk": "critical", "reason": "质量策略自修改" },
-    { "pattern": "hub/src/quality/", "risk": "high", "reason": "质量引擎/权限路径" },
-    { "pattern": "deploy/", "risk": "high", "reason": "部署脚本" }
+    {
+      "pattern": ".devin/quality.json",
+      "risk": "critical",
+      "reason": "质量策略自修改"
+    },
+    {
+      "pattern": "hub/src/quality/",
+      "risk": "high",
+      "reason": "质量引擎/权限路径"
+    },
+    {
+      "pattern": "deploy/",
+      "risk": "high",
+      "reason": "部署脚本"
+    }
   ],
+  "requirementRules": [],
+  "verificationRules": [],
+  "enforcement": {
+    "mode": "report",
+    "approvalRisk": "high"
+  },
+  "remediation": {
+    "mode": "off",
+    "maxFixRounds": 0
+  },
+  "requirements": {
+    "mode": "suggest",
+    "maxQuestions": 3
+  },
   "review": {
-    "enabled": false,
+    "mode": "off",
     "blockSeverity": "major",
     "minBlockingConfidence": 0.8,
-    "maxFixRounds": 0
+    "trigger": {
+      "minDiffLines": 10,
+      "skipPatterns": [
+        "**/*.md",
+        "**/.gitignore",
+        "**/LICENSE"
+      ]
+    },
+    "tierMapping": {
+      "default": "standard",
+      "byRisk": {
+        "low": "light",
+        "medium": "standard",
+        "high": "deep",
+        "critical": "deep"
+      },
+      "byFileType": []
+    },
+    "model": ""
+  },
+  "verification": {
+    "mode": "suggest"
+  },
+  "evidence": {
+    "excludePaths": [],
+    "retentionDays": 30,
+    "maxArtifactBytes": 10485760
   }
 }

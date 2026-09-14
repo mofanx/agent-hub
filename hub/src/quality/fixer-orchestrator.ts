@@ -156,8 +156,8 @@ export class FixerOrchestrator {
 
     const { policy } = this.service.getPolicy(project.id);
 
-    // 0. 检查 fix 预算
-    if (run.fixRound > run.budget.maxFixRounds) {
+    // 0. 检查 fix 预算（maxFixRounds=0 表示无上限）
+    if (run.budget.maxFixRounds > 0 && run.fixRound > run.budget.maxFixRounds) {
       logWarn("fixer", `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing`);
       const failed = this.service.advance(runId, "failed", "fixer-budget-exhausted");
       return {
@@ -406,9 +406,9 @@ export class FixerOrchestrator {
       return next.stage;
     }
 
-    // codeFailed：检查是否还有 fix 预算
+    // codeFailed：检查是否还有 fix 预算（maxFixRounds=0 表示无上限）
     // fixRound 已在进入 fixing 时递增，当前 run.fixRound 是本轮修复的轮次
-    if (run.fixRound >= run.budget.maxFixRounds) {
+    if (run.budget.maxFixRounds > 0 && run.fixRound >= run.budget.maxFixRounds) {
       logWarn(
         "fixer",
         `run ${runId} exceeded maxFixRounds (${run.fixRound}/${run.budget.maxFixRounds}), failing after quick gate`,
