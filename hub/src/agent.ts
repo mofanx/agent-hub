@@ -5,7 +5,6 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { logWarn } from "./logger.js";
-import type { RunPermissionManager } from "./quality/permissions.js";
 
 export type TokenUsage = {
   totalTokens?: number;
@@ -75,27 +74,7 @@ export type HubEvent =
   | { method: "room.blackboardUpdate"; params: { roomId: string; blackboard: { id: string; from: string; text: string; detail: string; at: number }[] } }
   | { method: "file.update"; params: { roomId?: string; sessionId?: string; path: string; op: "delete" | "rename"; from?: string; to?: string } }
   | { method: "agent.status"; params: { status: string; detail?: string } }
-  | { method: "task.update"; params: { tasks: unknown[] } }
-  | { method: "quality.runUpdate"; params: { runId: string; projectId: string; run: unknown } }
-  | { method: "quality.reviewed"; params: { runId: string; projectId: string; roomId: string | null; findings: unknown[]; verdict: string } }
-  | { method: "quality.verification.auto"; params: { runId: string; projectId: string; verdict: unknown; records: unknown[] } }
-  | { method: "quality.awaitingApproval"; params: { runId: string; projectId: string; roomId: string | null } }
-  | {
-      method: "quality.approvalRequest";
-      params: {
-        requestId: string;
-        runId: string;
-        projectId: string;
-        roomId: string | null;
-        title: string;
-        options: { optionId: string; name: string }[];
-      };
-    }
-  | { method: "quality.approvalResolved"; params: { requestId: string; outcome: string } }
-  | { method: "requirement.clarificationRequired"; params: { requestId: string; clarificationRequestId: string; specId: string; specVersion: number; questions: unknown[]; canSkip: boolean; expiresAt: number | null } }
-  | { method: "requirement.clarificationAnswer"; params: { clarificationRequestId: string; specId: string; specVersion: number } }
-  | { method: "requirement.clarificationSkip"; params: { clarificationRequestId: string; specId: string; specVersion: number } }
-  | { method: "requirement.specUpdate"; params: { requestId: string; specId: string; specVersion: number; status: string } };
+  | { method: "task.update"; params: { tasks: unknown[] } };
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 
@@ -263,7 +242,6 @@ export class AcpAgent {
     private readonly onTurnEnd?: (sessionId: string, text: string) => void,
     private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
     private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
-    private readonly permissionManager?: RunPermissionManager,
   ) {}
 
   get isReady(): boolean {
@@ -458,7 +436,7 @@ export class AcpAgent {
       method: "prompt.done",
       params: createPromptDoneParams(sessionId, stopReason, fullText, usage),
     });
-    // 解析 promptOnce 等待者（reviewer 等需要同步获取完整输出的场景）
+    // 解析 promptOnce 等待者
     const waiter = this.promptOnceWaiters.get(sessionId);
     if (waiter) {
       this.promptOnceWaiters.delete(sessionId);
@@ -473,40 +451,6 @@ export class AcpAgent {
     options: PermissionOption[];
   }): Promise<{ outcome: { outcome: "selected"; optionId: string } }> {
     const requestId = randomUUID();
-
-    // 质量角色只读硬限制（Q2-02 / §11.1）：
-    // reviewer/planner 即使全局 bypass 开启，也不能写/delete/move。
-    if (this.permissionManager) {
-      const binding = this.permissionManager.getBinding(params.sessionId);
-      if (binding && this.permissionManager.isReadOnlyEnforced(params.sessionId)) {
-        const toolName =
-          typeof params.toolCall === "object" &&
-          params.toolCall != null &&
-          "name" in params.toolCall
-            ? String(params.toolCall.name)
-            : "?";
-        // 从 toolCall 中提取 kind 用于权限判断
-        const kind =
-          typeof params.toolCall === "object" &&
-          params.toolCall != null &&
-          "kind" in params.toolCall
-            ? String((params.toolCall as { kind: string }).kind)
-            : "";
-        const decision = this.permissionManager.checkSession(params.sessionId, kind, permissionBypass);
-        if (!decision.allowed) {
-          // 自动选择 reject/deny 选项
-          const reject =
-            params.options.find((o) => /reject|deny|denied|block/i.test(o.kind) || /reject|deny|denied|block/i.test(o.name)) ??
-            params.options[params.options.length - 1];
-          const optionId = reject?.optionId ?? "";
-          logWarn(
-            "permission",
-            `read-only ${binding.role} denied ${toolName} (${kind}) in session ${params.sessionId}: ${decision.reason}`,
-          );
-          return Promise.resolve({ outcome: { outcome: "selected", optionId } });
-        }
-      }
-    }
 
     if (permissionBypass) {
       const chosen =
@@ -687,13 +631,6 @@ export class AcpAgent {
     path: string;
     content: string;
   }): Record<string, never> {
-    // 质量角色只读硬限制（Q2-02）：reviewer/planner 不能写任何文件
-    if (this.permissionManager?.isReadOnlyEnforced(params.sessionId)) {
-      const binding = this.permissionManager.getBinding(params.sessionId);
-      throw new Error(
-        `permission denied: ${binding?.role ?? "read-only"} is read-only, cannot write ${params.path}`,
-      );
-    }
     const target = this.resolveSessionPath(params.sessionId, params.path);
     const dir = path.dirname(target);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -832,7 +769,6 @@ export class AcpAgent {
 
   /**
    * 发送 prompt 并等待完整 internalOutput（不截断）。
-   * 用于 reviewer 等需要同步获取完整输出的场景。
    * 返回 { output, stopReason }，output 为完整 turnText。
    */
   async promptOnce(

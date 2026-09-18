@@ -38,11 +38,8 @@ import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shield
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -279,18 +276,6 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         vm.scheduleReturnScreen = Screen.Sessions
                         vm.screen = Screen.Schedule
                     }) { Icon(Icons.Filled.CalendarMonth, contentDescription = S.scheduledTasks) }
-                    IconButton(onClick = {
-                        vm.qualityReturnScreen = Screen.Sessions
-                        vm.openQuality()
-                    }) {
-                        BadgedBox(badge = {
-                            if (vm.qualityAwaitingCount > 0) {
-                                Badge { Text("${vm.qualityAwaitingCount}") }
-                            }
-                        }) {
-                            Icon(Icons.Filled.Shield, contentDescription = "质量")
-                        }
-                    }
                 },
             )
         },

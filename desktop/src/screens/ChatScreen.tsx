@@ -21,20 +21,17 @@ import {
   Plus,
   RotateCcw,
   Search,
-  Shield,
   ShieldAlert,
   SlashSquare,
   Square,
   Trash2,
   Wrench,
   X,
-  HelpCircle,
   Zap,
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor, type Strings } from "../hub/strings";
-import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, QualitySummary, QualityCheck, QualityFinding, QualityPolicyInfo, QualityPolicyV2, RequirementSpec, RequirementVerification, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
-import { qualityStageLabel, qualityFailureLabel, actionGuide, compactQualityProgress, TERMINAL_STAGES } from "../hub/quality-labels";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
@@ -762,19 +759,6 @@ export function ChatScreen() {
         )}
       </div>
 
-      {store.sessionQuality && !isRoom && (
-        <QualityStatusBar quality={store.sessionQuality} store={store} />
-      )}
-
-      {store.currentSpec && store.sessionQuality && store.shownSpecRunIds.has(store.sessionQuality.runId) && !isRoom && (
-        <SpecSummaryCard spec={store.currentSpec} runId={store.sessionQuality.runId} stage={store.sessionQuality.stage} />
-      )}
-
-      {store.currentSpec && isRoom && store.flow && (() => {
-        const task = store.flow!.tasks.find((t) => t.qualityRunId && store.shownSpecRunIds.has(t.qualityRunId));
-        return task ? <SpecSummaryCard spec={store.currentSpec!} runId={task.qualityRunId!} stage={task.quality?.stage ?? ""} /> : null;
-      })()}
-
       <div className="chat-body">
         <div className="chat-main">
           <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
@@ -1220,7 +1204,6 @@ function getItemText(item: ChatItem, S: Strings): string {
   if (item.kind === "tool") return `[${item.title}] ${item.status}`;
   if (item.kind === "permission") return `${S.permissionRequestLabel}: ${item.title}`;
   if (item.kind === "elicitation") return `${S.elicitationRequestLabel}: ${item.message}`;
-  if (item.kind === "clarification") return S.clarificationSummary.replace("%s", String(item.questions.length));
   return "";
 }
 
@@ -1500,121 +1483,9 @@ function ChatMessage({
         />
       );
 
-    case "clarification":
-      return (
-        <ClarificationCard
-          item={item}
-          showAuthor={showAuthor}
-          onContextMenu={onContextMenu}
-          menuEl={menuEl}
-          selectModal={selectModal}
-          currentMatchClass={currentMatchClass}
-        />
-      );
-
     default:
       return null;
   }
-}
-
-function ClarificationCard({
-  item,
-  showAuthor,
-  onContextMenu,
-  menuEl,
-  selectModal,
-  currentMatchClass,
-}: {
-  item: Extract<ChatItem, { kind: "clarification" }>;
-  showAuthor: boolean;
-  onContextMenu: (e: React.MouseEvent) => void;
-  menuEl: ReactNode;
-  selectModal: ReactNode;
-  currentMatchClass: string;
-}) {
-  const store = useHubStore();
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [submitting, setSubmitting] = useState(false);
-  const resolved = item.answered !== null;
-  const expired = item.expiresAt !== undefined && item.expiresAt < Date.now();
-  const spec = store.requirementSpecs.find((s) => s.id === item.specId) ?? store.currentSpec;
-  const specStatus = spec && spec.id === item.specId ? spec.status : undefined;
-  const STATUS_LABEL: Record<string, string> = { draft: "草稿", clarifying: "澄清中", accepted: "已接受", superseded: "已废弃", cancelled: "已取消" };
-
-  const submit = async () => {
-    const payload = item.questions
-      .map((q) => ({ questionId: q.id, answer: answers[q.id] ?? "" }))
-      .filter((a) => a.answer.trim().length > 0);
-    if (payload.length === 0) return;
-    setSubmitting(true);
-    try { await store.answerClarification(item.clarificationRequestId, payload); } finally { setSubmitting(false); }
-  };
-
-  return (
-    <div className={`message permission ${currentMatchClass}`} onContextMenu={onContextMenu}>
-      <div className="msg-body">
-        <div className="permission-head">
-          <HelpCircle size={14} />
-          {showAuthor && item.author ? `${item.author} · ` : ""}需求澄清
-          <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-dim)" }}>
-            spec v{item.specVersion}
-          </span>
-          {specStatus && (
-            <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-dim)" }}>
-              · {STATUS_LABEL[specStatus] ?? specStatus}
-            </span>
-          )}
-        </div>
-        {resolved ? (
-          <div className="subtitle">已处理：{item.answered === "answered" ? "已回答" : item.answered === "skipped" ? "已跳过" : "已取消"}</div>
-        ) : expired ? (
-          <div className="subtitle">已过期</div>
-        ) : (
-          <>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-              {item.questions.map((q, i) => (
-                <div key={q.id} style={{ borderTop: i > 0 ? "1px solid var(--border)" : undefined, paddingTop: i > 0 ? 6 : 0 }}>
-                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>
-                    [{q.dimension}] 问题 {i + 1}
-                  </div>
-                  <div className="text" style={{ marginBottom: 4 }}>{q.text}</div>
-                  <textarea
-                    style={{ width: "100%", minHeight: 48, padding: "4px 6px", fontSize: 12, borderRadius: 4, border: "1px solid var(--border)", background: "var(--bg, #1e1e1e)", color: "var(--text)", resize: "vertical" }}
-                    placeholder="输入回答…"
-                    value={answers[q.id] ?? ""}
-                    onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                  />
-                </div>
-              ))}
-            </div>
-            <div className="permission-actions" style={{ marginTop: 8 }}>
-              <button disabled={submitting} onClick={() => void submit()}>
-                {submitting ? "提交中…" : "提交回答"}
-              </button>
-              {item.canSkip && (
-                <button
-                  className="secondary"
-                  disabled={submitting}
-                  onClick={async () => { setSubmitting(true); try { await store.skipClarification(item.clarificationRequestId); } finally { setSubmitting(false); } }}
-                >
-                  跳过
-                </button>
-              )}
-              <button
-                className="secondary"
-                disabled={submitting}
-                onClick={async () => { setSubmitting(true); try { await store.cancelClarification(item.clarificationRequestId); } finally { setSubmitting(false); } }}
-              >
-                取消
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-      {menuEl}
-      {selectModal}
-    </div>
-  );
 }
 
 function ElicitationCard({
@@ -1946,7 +1817,6 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
         <span className="flow-progress">
           {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
           {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
-          {progress.verifying ? ` · ${progress.verifying} 验证中` : ""}
         </span>
         {phase !== "done" && phase !== "summarizing" && (
           <button
@@ -2460,267 +2330,6 @@ function renderMarkdown(text: string): string {
   }
 }
 
-function QualitySummaryView({ q, onApprove, onReject, isRoom }: { q: QualitySummary; onApprove?: () => void; onReject?: () => void; isRoom?: boolean }) {
-  const label = qualityStageLabel(q.stage);
-  const fixInfo = q.stage === "fixing" ? ` (${q.fixRound}/${q.maxFixRounds})` : "";
-  const checkInfo = q.passedChecks + q.failedChecks > 0 ? ` · L1 ${q.passedChecks}通过 ${q.failedChecks}失败` : "";
-  const findingInfo = q.findings > 0 ? ` · ${q.findings} findings${q.blockingFindings > 0 ? ` (${q.blockingFindings} blocking)` : ""}` : "";
-  const failLabel = qualityFailureLabel(q.failureCode);
-  const guide = actionGuide(q.stage, q.failureCode, isRoom);
-  return (
-    <div className="quality-summary">
-      <div className="quality-summary-line">
-        <Shield size={11} /> {label}{fixInfo}{checkInfo}{findingInfo}
-        {q.enforcement !== "require-pass" && <span className="quality-enforcement-tag">{q.enforcement}</span>}
-      </div>
-      {failLabel && <div className="quality-summary-fail">{failLabel}</div>}
-      {guide && <div className="quality-summary-guide">💡 {guide}</div>}
-      {q.awaitingApproval && onApprove && onReject && (
-        <div className="quality-approval-buttons">
-          <button onClick={onApprove}><Check size={11} /> 批准</button>
-          <button className="secondary" onClick={onReject}><X size={11} /> 拒绝</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QualityRunDetail({ runId, onApprove, onReject }: { runId: string; onApprove: () => void; onReject: () => void }) {
-  const [data, setData] = useState<{ checks: QualityCheck[]; findings: QualityFinding[]; verifications: RequirementVerification[] } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const client = useHubStore((s) => s.client);
-  useEffect(() => {
-    if (!runId || !client) return;
-    setLoading(true);
-    (async () => {
-      try {
-        const resp = await client.call("quality.run.get", { id: runId }) as Record<string, unknown>;
-        setData({
-          checks: ((resp.checks as unknown[] | undefined) ?? []) as QualityCheck[],
-          findings: ((resp.findings as unknown[] | undefined) ?? []) as QualityFinding[],
-          verifications: ((resp.verifications as unknown[] | undefined) ?? []) as RequirementVerification[],
-        });
-      } catch { /* ignore */ } finally { setLoading(false); }
-    })();
-  }, [runId, client]);
-  void onApprove; void onReject;
-  if (loading) return <div className="quality-detail-loading">加载中…</div>;
-  if (!data) return null;
-  const failedChecks = data.checks.filter((c) => c.status !== "passed");
-  const blockingFindings = data.findings.filter((f) => f.blocking);
-  return (
-    <div className="quality-run-detail">
-      {failedChecks.length > 0 && (
-        <div className="quality-detail-section">
-          <div className="quality-detail-section-title">失败检查（{failedChecks.length}）</div>
-          {failedChecks.map((c) => (
-            <div key={c.id} className="quality-detail-check">
-              <span className="quality-detail-check-status">✗</span>
-              <code className="quality-detail-check-id">{c.checkId}</code>
-              {c.summary && <div className="quality-detail-check-summary">{c.summary.slice(0, 200)}</div>}
-            </div>
-          ))}
-        </div>
-      )}
-      {blockingFindings.length > 0 && (
-        <div className="quality-detail-section">
-          <div className="quality-detail-section-title">阻断发现（{blockingFindings.length}）</div>
-          {blockingFindings.map((f) => (
-            <div key={f.id} className="quality-detail-finding">
-              <span className="quality-detail-finding-sev">[{f.severity}]</span>
-              <span className="quality-detail-finding-claim">{f.claim}</span>
-              {f.file && <code className="quality-detail-finding-loc">{f.file}{f.line ? `:${f.line}` : ""}</code>}
-            </div>
-          ))}
-        </div>
-      )}
-      {data.verifications.length > 0 && (
-        <div className="quality-detail-section">
-          <div className="quality-detail-section-title">L3 需求验证（{data.verifications.length}）</div>
-          {data.verifications.map((v) => (
-            <div key={v.id} className="quality-detail-verif">
-              <span className={`quality-detail-verif-status quality-detail-verif-${v.status}`}>{v.status === "passed" ? "✓" : v.status === "failed" ? "✗" : "⚠"}</span>
-              <code className="quality-detail-verif-id">{v.criterionId}</code>
-              <span className="quality-detail-verif-method">{v.method}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QualityStatusBar({ quality, store }: { quality: QualitySummary; store: { qualityRunAction: (id: string, action: "cancel" | "approve" | "reject" | "retry") => Promise<void>; saveRequirementVerificationPolicy: (projectId: string, patch: { requirements?: { mode?: "off" | "suggest" | "require" | "require-high-risk"; maxQuestions?: number }; verification?: { mode?: "off" | "suggest" | "require-evidence" } }) => Promise<void>; sessionProjectId: string | null; sessionPolicy: QualityPolicyInfo | null; loadSessionProjectPolicy: () => Promise<void> } }) {
-  const [expanded, setExpanded] = useState(false);
-  const isTerminal = TERMINAL_STAGES.has(quality.stage);
-  const label = qualityStageLabel(quality.stage);
-  const fixInfo = quality.stage === "fixing" ? ` (${quality.fixRound}/${quality.maxFixRounds})` : "";
-  const checkInfo = quality.passedChecks + quality.failedChecks > 0
-    ? ` · L1 ${quality.passedChecks}/${quality.passedChecks + quality.failedChecks}`
-    : "";
-  const failLabel = qualityFailureLabel(quality.failureCode);
-  const guide = actionGuide(quality.stage, quality.failureCode);
-  const icon = quality.stage === "accepted" ? <Check size={13} />
-    : quality.stage === "failed" ? <ShieldAlert size={13} />
-    : quality.stage === "inconclusive" ? <ShieldAlert size={13} />
-    : quality.awaitingApproval ? <ShieldAlert size={13} />
-    : <Shield size={13} />;
-  const handleApprove = async () => { try { await store.qualityRunAction(quality.runId, "approve"); } catch { /* ignore */ } };
-  const handleReject = async () => { try { await store.qualityRunAction(quality.runId, "reject"); } catch { /* ignore */ } };
-  const handleViewEvidence = () => {
-    useHubStore.setState({ qualityRunId: quality.runId, screen: "quality" });
-  };
-  return (
-    <div className="quality-status-bar" onClick={() => setExpanded(!expanded)} style={{ cursor: "pointer" }}>
-      <div className="quality-status-bar-main">
-        {icon}
-        <span>{label}{fixInfo}{checkInfo}</span>
-        {failLabel && <span className="quality-status-fail">{failLabel}</span>}
-        {quality.awaitingApproval && (
-          <span className="quality-approval-inline" onClick={(e) => e.stopPropagation()}>
-            <button onClick={handleApprove}><Check size={11} /> 批准</button>
-            <button className="secondary" onClick={handleReject}><X size={11} /> 拒绝</button>
-          </span>
-        )}
-        {!isTerminal && !quality.awaitingApproval && <span className="quality-status-hint">点击查看详情</span>}
-      </div>
-      {expanded && (
-        <div className="quality-status-detail" onClick={(e) => e.stopPropagation()}>
-          <QualitySummaryView q={quality} onApprove={handleApprove} onReject={handleReject} />
-          <QualityRunDetail runId={quality.runId} onApprove={handleApprove} onReject={handleReject} />
-          <RequirementQuickToggle store={store} />
-          {guide && <div className="quality-status-guide">💡 {guide}</div>}
-          <button className="quality-status-evidence-link" onClick={handleViewEvidence}>查看完整证据 →</button>
-          <div className="quality-status-runid">run: {quality.runId}</div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RequirementQuickToggle({ store }: { store: { saveRequirementVerificationPolicy: (projectId: string, patch: { requirements?: { mode?: "off" | "suggest" | "require" | "require-high-risk"; maxQuestions?: number }; verification?: { mode?: "off" | "suggest" | "require-evidence" } }) => Promise<void>; sessionProjectId: string | null; sessionPolicy: QualityPolicyInfo | null; loadSessionProjectPolicy: () => Promise<void> } }) {
-  const projectId = store.sessionProjectId;
-  const policy = store.sessionPolicy;
-  const [reqMode, setReqMode] = useState(policy?.version === 2 ? (policy.policy as QualityPolicyV2).requirements.mode : "off");
-  const [verMode, setVerMode] = useState(policy?.version === 2 ? (policy.policy as QualityPolicyV2).verification.mode : "off");
-  const [maxQ, setMaxQ] = useState(policy?.version === 2 ? (policy.policy as QualityPolicyV2).requirements.maxQuestions : 3);
-  const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    if (projectId && !policy) void store.loadSessionProjectPolicy();
-  }, [projectId, policy]);
-  useEffect(() => {
-    if (policy?.version === 2) {
-      const v2 = policy.policy as QualityPolicyV2;
-      setReqMode(v2.requirements.mode);
-      setVerMode(v2.verification.mode);
-      setMaxQ(v2.requirements.maxQuestions);
-    }
-  }, [policy]);
-  if (!projectId || !policy || policy.version !== 2) return null;
-  const v2 = policy.policy as QualityPolicyV2;
-  const inputStyle: React.CSSProperties = { padding: "2px 4px", fontSize: 11, borderRadius: 4, border: "1px solid var(--border)", background: "var(--bg, #1e1e1e)", color: "var(--text)" };
-  const labelStyle: React.CSSProperties = { fontSize: 10, color: "var(--text-dim)", marginBottom: 2 };
-  const dirty = reqMode !== v2.requirements.mode || verMode !== v2.verification.mode || maxQ !== v2.requirements.maxQuestions;
-  const save = async () => {
-    setSaving(true);
-    try {
-      await store.saveRequirementVerificationPolicy(projectId, {
-        requirements: { mode: reqMode, maxQuestions: maxQ },
-        verification: { mode: verMode },
-      });
-    } finally { setSaving(false); }
-  };
-  return (
-    <div style={{ borderTop: "1px solid var(--border)", paddingTop: 6, marginTop: 6, fontSize: 11 }}>
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>需求/验证快捷配置</div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <div>
-          <div style={labelStyle}>需求模式</div>
-          <select style={inputStyle} value={reqMode} onChange={(e) => setReqMode(e.target.value as "off" | "suggest" | "require" | "require-high-risk")}>
-            <option value="off">关闭</option>
-            <option value="suggest">建议</option>
-            <option value="require">强制</option>
-            <option value="require-high-risk">仅高风险</option>
-          </select>
-        </div>
-        <div>
-          <div style={labelStyle}>验证模式</div>
-          <select style={inputStyle} value={verMode} onChange={(e) => setVerMode(e.target.value as "off" | "suggest" | "require-evidence")}>
-            <option value="off">关闭</option>
-            <option value="suggest">建议</option>
-            <option value="require-evidence">要求证据</option>
-          </select>
-        </div>
-        <div>
-          <div style={labelStyle}>最大提问数</div>
-          <input type="number" min={0} style={inputStyle} value={maxQ} onChange={(e) => setMaxQ(Number(e.target.value))} />
-        </div>
-      </div>
-      {dirty && (
-        <button style={{ marginTop: 4, fontSize: 11 }} disabled={saving} onClick={() => void save()}>
-          {saving ? "保存中…" : "保存"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function SpecSummaryCard({ spec, runId, stage }: { spec: RequirementSpec; runId: string; stage: string }) {
-  const [expanded, setExpanded] = useState(true);
-  const STATUS_LABEL: Record<string, string> = { draft: "草稿", clarifying: "澄清中", accepted: "已接受", superseded: "已废弃", cancelled: "已取消" };
-  const isTerminal = TERMINAL_STAGES.has(stage as QualitySummary["stage"]);
-  const stageLabel = stage ? qualityStageLabel(stage as QualitySummary["stage"]) : "";
-  return (
-    <div className="quality-status-bar" style={{ cursor: "pointer", background: "var(--bg-elevated, #1a1a2e)" }} onClick={() => setExpanded(!expanded)}>
-      <div className="quality-status-bar-main">
-        <NotebookText size={13} />
-        <span>需求规格 · spec {spec.id.slice(0, 8)} v{spec.version}</span>
-        <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{STATUS_LABEL[spec.status] ?? spec.status}</span>
-        {stageLabel && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>· {stageLabel}{isTerminal ? "（终态）" : ""}</span>}
-        <span className="quality-status-hint">{expanded ? "收起" : "展开"}</span>
-      </div>
-      {expanded && (
-        <div className="quality-status-detail" onClick={(e) => e.stopPropagation()}>
-          <div style={{ fontSize: 12 }}>
-            <div style={{ color: "var(--text-dim)", fontSize: 11, marginBottom: 2 }}>目标</div>
-            <div>{spec.goal || "（未设置）"}</div>
-          </div>
-          {spec.acceptanceCriteria.length > 0 && (
-            <div style={{ marginTop: 8, fontSize: 12 }}>
-              <div style={{ color: "var(--text-dim)", fontSize: 11, marginBottom: 2 }}>验收标准（{spec.acceptanceCriteria.length} 条）</div>
-              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                {spec.acceptanceCriteria.map((c) => (
-                  <li key={c.id}>
-                    {c.required ? "★ " : "○ "}{c.description}
-                    <span style={{ color: "var(--text-dim)" }}> · {c.evidenceMode} · {c.expectedEvidence.length} 证据</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {spec.constraints.length > 0 && (
-            <div style={{ marginTop: 8, fontSize: 12 }}>
-              <div style={{ color: "var(--text-dim)", fontSize: 11, marginBottom: 2 }}>约束</div>
-              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                {spec.constraints.map((c, i) => <li key={i}>{c}</li>)}
-              </ul>
-            </div>
-          )}
-          {spec.risks.length > 0 && (
-            <div style={{ marginTop: 8, fontSize: 12 }}>
-              <div style={{ color: "var(--text-dim)", fontSize: 11, marginBottom: 2 }}>风险</div>
-              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                {spec.risks.map((r, i) => <li key={i}>{r}</li>)}
-              </ul>
-            </div>
-          )}
-          {runId && <div className="quality-status-runid" style={{ marginTop: 6 }}>run: {runId}</div>}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const store = useHubStore();
@@ -2729,14 +2338,12 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
       <Check size={12} />
     ) : task.status === "running" ? (
       <Loader2 size={12} className="spin" />
-    ) : task.status === "verifying" ? (
-      <Shield size={12} />
     ) : task.status === "failed" ? (
       <X size={12} />
     ) : (
       <Circle size={11} />
     );
-  const hasDetail = task.output || task.failureMessage || task.dependsOn.length > 0 || task.retries || task.quality;
+  const hasDetail = task.output || task.failureMessage || task.dependsOn.length > 0 || task.retries;
   const handleRetry = async () => {
     const client = store.client;
     const roomId = store.currentRoom?.roomId;
@@ -2745,16 +2352,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
       await client.call("room.retryTasks", { roomId, taskIds: [task.id] });
     } catch { /* ignore */ }
   };
-  const handleApprove = async () => {
-    if (!task.qualityRunId) return;
-    try { await store.qualityRunAction(task.qualityRunId, "approve"); } catch { /* ignore */ }
-  };
-  const handleReject = async () => {
-    if (!task.qualityRunId) return;
-    try { await store.qualityRunAction(task.qualityRunId, "reject"); } catch { /* ignore */ }
-  };
-  const isFixing = task.quality?.stage === "fixing";
-  const showRetryBtn = showRetry && task.status === "failed" && !isFixing;
+  const showRetryBtn = showRetry && task.status === "failed";
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
@@ -2762,13 +2360,6 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
         <div className="flow-task-line" onClick={() => hasDetail && setExpanded(!expanded)} style={hasDetail ? { cursor: "pointer" } : undefined}>
           <span className="flow-task-name">@{task.name}</span>
           <span className="flow-task-desc" title={task.task}>{task.task}</span>
-          {task.status === "verifying" && task.qualityRunId && (
-            <span className="flow-task-badge">
-              {task.quality
-                ? compactQualityProgress(task.quality.stage, task.quality.fixRound, task.quality.maxFixRounds, task.quality.passedChecks, task.quality.failedChecks, task.quality.awaitingApproval) ?? "验证中"
-                : "验证中"}
-            </span>
-          )}
           {task.retries && task.retries > 0 && (
             <span className="flow-task-badge">重试 {task.retries}</span>
           )}
@@ -2786,19 +2377,6 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
             )}
             {task.failureMessage && (
               <div className="flow-task-error">{task.failureMessage}</div>
-            )}
-            {task.quality && (
-              <div className="flow-task-quality">
-                <QualitySummaryView q={task.quality} onApprove={handleApprove} onReject={handleReject} isRoom />
-                {task.qualityRunId && (
-                  <button
-                    className="quality-status-evidence-link"
-                    onClick={() => useHubStore.setState({ qualityRunId: task.qualityRunId, screen: "quality" })}
-                  >
-                    查看完整证据 →
-                  </button>
-                )}
-              </div>
             )}
           </div>
         )}

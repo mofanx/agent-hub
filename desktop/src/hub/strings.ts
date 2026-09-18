@@ -40,7 +40,6 @@ export interface Strings {
   close: string;
   permissionRequestLabel: string;
   elicitationRequestLabel: string;
-  clarificationSummary: string;
   errorLabel: string;
   thoughtProcess: string;
   plan: string;
@@ -88,7 +87,6 @@ const zh: Strings = {
   close: "关闭",
   permissionRequestLabel: "审批请求",
   elicitationRequestLabel: "输入请求",
-  clarificationSummary: "需求澄清: %s 个问题",
   errorLabel: "错误",
   thoughtProcess: "思考过程",
   plan: "计划",
@@ -136,7 +134,6 @@ const en: Strings = {
   close: "Close",
   permissionRequestLabel: "Permission request",
   elicitationRequestLabel: "Input request",
-  clarificationSummary: "Clarification: %s questions",
   errorLabel: "Error",
   thoughtProcess: "Thinking",
   plan: "Plan",

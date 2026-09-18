@@ -25,7 +25,6 @@ import com.agenthub.ui.HubDrawer
 import com.agenthub.ui.LocalStrings
 import com.agenthub.ui.SessionListScreen
 import com.agenthub.ui.SettingsScreen
-import com.agenthub.ui.QualityScreen
 import com.agenthub.ui.ScheduleScreen
 import com.agenthub.ui.stringsFor
 import kotlinx.coroutines.launch
@@ -93,6 +92,5 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         }
         Screen.Settings -> SettingsScreen(vm, onMenuClick)
         Screen.Schedule -> ScheduleScreen(vm, onMenuClick)
-        Screen.Quality -> QualityScreen(vm, onMenuClick)
     }
 }

@@ -62,7 +62,7 @@ export type MultiplexFrame = {
   payload: AnyMessage;
 };
 
-/** 控制帧：channel=__control__，method 为 announce 或 quality.* 等 */
+/** 控制帧：channel=__control__，method 为 announce 等控制方法 */
 export type ControlFrame = {
   channel: "__control__";
   method: string;

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
-import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString, type QualityIntegration } from "./conductor.js";
+import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
@@ -151,10 +151,9 @@ export class RoomModeManager {
     private readonly agent: AgentOps,
     private readonly rooms: RoomManager,
     private readonly broadcast: (method: string, params: Record<string, unknown>) => void,
-    quality?: QualityIntegration,
     promptRetryMs?: number,
   ) {
-    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), quality, (roomId) => this.emitFlowUpdate(roomId), promptRetryMs);
+    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs);
   }
 
   exportRuntime(): Record<string, unknown> {
@@ -183,11 +182,6 @@ export class RoomModeManager {
   /** agent 连接后恢复所有活跃 flow 的调度（Fix C）。 */
   resumeFlows(): void {
     this.conductor.resumeFlows();
-  }
-
-  /** run 进入 awaiting-approval 时暂停对应 task 的超时计数 */
-  notifyAwaitingApproval(runId: string): void {
-    this.conductor.notifyAwaitingApproval(runId);
   }
 
   /** 检查房间是否有等待重试的 flow */

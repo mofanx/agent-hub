@@ -28,13 +28,9 @@ type FlowTask = {
   sessionId: string;
   task: string;
   dependsOn: string[];
-  status: "pending" | "running" | "done" | "failed" | "verifying";
+  status: "pending" | "running" | "done" | "failed";
   failureMessage?: string;
   retries?: number;
-  qualityRunId?: string;
-  verifyingSince?: number;
-  awaitingApproval?: boolean;
-  quality?: QualitySummary;
 };
 
 type Flow = {
@@ -49,95 +45,24 @@ type Flow = {
 
 export type ConductorNotice = { roomId: string; message: string };
 
-export type QualitySummary = {
-  runId: string;
-  stage: string;
-  enforcement: "require-pass" | "require-approval" | "report";
-  fixRound: number;
-  maxFixRounds: number;
-  passedChecks: number;
-  failedChecks: number;
-  findings: number;
-  blockingFindings: number;
-  verdict?: string;
-  failureCode?: string;
-  awaitingApproval: boolean;
-};
-
-export interface QualityIntegration {
-  prepareRunForTask?(opts: {
-    roomId: string;
-    taskId: string;
-    sessionId: string;
-    task: string;
-  }): { runId?: string; ready: boolean };
-  completeRunForTask?(runId: string, output: string, artifacts: TaskArtifact[]): void;
-  cancelRunForTask?(runId: string): void;
-  startRunForTask(opts: {
-    roomId: string;
-    taskId: string;
-    sessionId: string;
-    output: string;
-    artifacts: TaskArtifact[];
-  }): string | undefined;
-  onRunTerminal(runId: string, cb: (accepted: boolean) => void): void;
-  /** 恢复重启前注册的 run terminal 回调：若 run 已终态立即回调，否则重新注册 */
-  recoverRun(runId: string, cb: (accepted: boolean) => void): void;
-  /** 查询 run 的 enforcement 模式（用于依赖解锁控制） */
-  getRunEnforcement?(runId: string): "report" | "require-pass" | "require-approval" | undefined;
-  /** 查询 run 的质量摘要（用于 getFlow 关联展示） */
-  getRunSummary?(runId: string): QualitySummary | undefined;
-  /** 查询 room 当前需求 spec 的 prompt 上下文（goal + 澄清答案 + 验收标准），供子任务 prompt 拼接 */
-  getSpecPromptContext?(roomId: string): string | undefined;
-}
-
 const PLAN_RESULT_LEN = 4000;
-const VERIFYING_TIMEOUT_MS = 5 * 60 * 1000;
 const BUSY_RETRY_MS = 5000;
 
-const FAILURE_CODE_LABELS: Record<string, string> = {
-  "l1-check-failed": "L1 确定性检查未通过",
-  "l1-infra-failed": "检查基础设施失败",
-  "l1-inconclusive": "L1 检查无法判定",
-  "l1-no-passed-checks": "无通过的检查",
-  "l3-verification-failed": "L3 需求验证未通过",
-  "l3-inconclusive": "L3 需求证据不足",
-  "fixer-budget-exhausted": "自动修复预算耗尽",
-  "fixer-session-error": "修复会话创建失败",
-  "fixer-prompt-error": "修复执行失败",
-  "fixer-quick-gate-error": "修复后检查失败",
-  "fixer-infra-failed": "修复基础设施失败",
-  "fixer-no-fixable": "无可修复的问题",
-  "fixer-error": "修复流程异常",
-  "review-error": "AI 审查异常",
-  "hub-restart": "Hub 重启导致中断",
-  "infra-no-project": "未找到质量项目",
-  "infra-no-policy": "未找到质量策略",
-  "no-patch": "无代码变更",
-  "lease-failed": "写锁获取失败",
-};
-
-function failureCodeLabel(code: string): string {
-  return FAILURE_CODE_LABELS[code] ?? code;
-}
 const PROMPT_RETRY_MS = 5000;
 const SUMMARIZE_RETRY_MS = 5000;
 
 export class ConductorOrchestrator {
   private flows = new Map<string, Flow>();
   private readonly promptRetryMs: number;
-  private readonly quality: QualityIntegration | undefined;
   private readonly emitFlow: ((roomId: string) => void) | undefined;
 
   constructor(
     private readonly agent: AgentOps,
     private readonly rooms: RoomManager,
     private readonly notice: (n: ConductorNotice) => void,
-    quality?: QualityIntegration,
     emitFlow?: (roomId: string) => void,
     promptRetryMs?: number,
   ) {
-    this.quality = quality;
     this.emitFlow = emitFlow;
     this.promptRetryMs = promptRetryMs ?? PROMPT_RETRY_MS;
   }
@@ -146,30 +71,15 @@ export class ConductorOrchestrator {
     return this.flows.has(roomId);
   }
 
-  /** run 进入 awaiting-approval 时由 Hub 调用：暂停对应 task 的超时计数 */
-  notifyAwaitingApproval(runId: string): void {
-    for (const flow of this.flows.values()) {
-      for (const t of flow.tasks.values()) {
-        if (t.qualityRunId === runId && t.status === "verifying") {
-          t.awaitingApproval = true;
-          t.verifyingSince = Date.now();
-          this.emitFlow?.(flow.roomId);
-          return;
-        }
-      }
-    }
-  }
-
   /** 强制中断某个房间的指挥编排 */
   cancel(roomId: string, reason?: string): string[] {
     const flow = this.flows.get(roomId);
     if (!flow) return [];
     const touched = new Set<string>();
     for (const t of flow.tasks.values()) {
-      if (t.status === "pending" || t.status === "running" || t.status === "verifying") {
+      if (t.status === "pending" || t.status === "running") {
         touched.add(t.sessionId);
       }
-      if (t.qualityRunId) this.quality?.cancelRunForTask?.(t.qualityRunId);
     }
     this.flows.delete(roomId);
     this.emitFlow?.(roomId);
@@ -192,23 +102,19 @@ export class ConductorOrchestrator {
         task: t.task,
         dependsOn: t.dependsOn,
         artifacts: result?.artifacts ?? [],
-        ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
         ...(t.retries !== undefined && t.retries > 0 ? { retries: t.retries } : {}),
-        ...(t.awaitingApproval ? { awaitingApproval: true } : {}),
-        ...(t.qualityRunId !== undefined && this.quality?.getRunSummary ? { quality: this.quality.getRunSummary(t.qualityRunId) } : {}),
       };
     });
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
     const pending = tasks.filter((t) => t.status === "pending").length;
     const failed = tasks.filter((t) => t.status === "failed").length;
-    const verifying = tasks.filter((t) => t.status === "verifying").length;
     return {
       roomId: flow.roomId,
       phase: flow.phase,
-      progress: { done, running, pending, failed, verifying, total: tasks.length },
+      progress: { done, running, pending, failed, total: tasks.length },
       tasks,
     };
   }
@@ -264,10 +170,6 @@ export class ConductorOrchestrator {
           (t) => t.sessionId === sessionId && t.status === "running",
         );
         if (running) {
-          if (running.qualityRunId) {
-            this.quality?.cancelRunForTask?.(running.qualityRunId);
-            delete running.qualityRunId;
-          }
           running.status = "pending";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
           this.notice({
@@ -429,66 +331,11 @@ export class ConductorOrchestrator {
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
 
-          const preparedRunId = running.qualityRunId;
-          const hasFileChanges = result.artifacts.some((a) => a.type === "file");
-          const runId = preparedRunId ?? (hasFileChanges
-            ? this.quality?.startRunForTask({
-                roomId: flow.roomId,
-                taskId: running.id,
-                sessionId,
-                output,
-                artifacts: result.artifacts,
-              })
-            : undefined);
-          if (runId) {
-            this.quality?.completeRunForTask?.(runId, output, result.artifacts);
-            running.status = "verifying";
-            running.qualityRunId = runId;
-            running.verifyingSince = Date.now();
-            this.notice({
-              roomId: flow.roomId,
-              message: `@${name} 子任务 ${running.id} 已提交质量验证（run ${runId}）`,
-            });
-            this.quality!.onRunTerminal(runId, (accepted) => {
-              if (!this.flows.has(flow.roomId)) return;
-              const task = flow.tasks.get(running.id);
-              if (!task || task.status !== "verifying") return;
-              task.awaitingApproval = false;
-              const enforcement = this.quality?.getRunEnforcement?.(runId) ?? "require-pass";
-              const summary = this.quality?.getRunSummary?.(runId);
-              const fc = summary?.failureCode;
-              const shouldUnlock = enforcement === "report" ? true : accepted;
-              if (shouldUnlock) {
-                task.status = "done";
-                this.notice({
-                  roomId: flow.roomId,
-                  message: accepted
-                    ? `@${name} 子任务 ${running.id} 质量验证通过`
-                    : `@${name} 子任务 ${running.id} 质量验证未通过（report 仅报告，不阻断后续任务）`,
-                });
-              } else {
-                task.status = "failed";
-                task.failureMessage = fc ? failureCodeLabel(fc) : "质量验证未通过";
-                this.notice({
-                  roomId: flow.roomId,
-                  message: `@${name} 子任务 ${running.id} 质量验证未通过`,
-                });
-              }
-              this.emitFlow?.(flow.roomId);
-              const r = this.rooms.get(flow.roomId);
-              if (r) {
-                this.scheduleTasks(flow, r).catch((e) =>
-                  logError("conductor quality terminal schedule", e),
-                );
-              }
-            });
-          } else {
-            running.status = "done";
-            this.notice({
-              roomId: flow.roomId,
-              message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
-            });
-          }
+          running.status = "done";
+          this.notice({
+            roomId: flow.roomId,
+            message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
+          });
           await this.scheduleTasks(flow, room);
           return flow.roomId;
         }
@@ -665,33 +512,6 @@ export class ConductorOrchestrator {
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
     if (!this.flows.has(flow.roomId)) return;
 
-    // Bug 2: 检查 verifying task 超时（awaitingApproval 期间暂停超时计数）
-    const now = Date.now();
-    let verifyingTimedOut = false;
-    for (const t of flow.tasks.values()) {
-      if (t.status === "verifying" && t.verifyingSince && !t.awaitingApproval) {
-        const elapsed = now - t.verifyingSince;
-        if (elapsed > VERIFYING_TIMEOUT_MS) {
-          t.status = "failed";
-          t.failureMessage = "质量验证超时";
-          verifyingTimedOut = true;
-          this.notice({
-            roomId: flow.roomId,
-            message: `子任务 ${t.id} 质量验证超时（${Math.round(elapsed / 1000)}s），已标记失败`,
-          });
-        }
-      }
-    }
-    if (verifyingTimedOut) {
-      const r = this.rooms.get(flow.roomId);
-      if (r) {
-        this.scheduleTasks(flow, r).catch((e) =>
-          logError("conductor verifying timeout reschedule", e),
-        );
-      }
-      return;
-    }
-
     // 依赖失败传播：任何 failed task 的下游 pending task 标记为 failed
     const failedIds = new Set<string>();
     for (const [id, t] of flow.tasks) {
@@ -719,7 +539,7 @@ export class ConductorOrchestrator {
     const tasks = this.runnableTasks(flow);
     if (tasks.length === 0) {
       const values = [...flow.tasks.values()];
-      const hasActive = values.some((t) => t.status === "running" || t.status === "verifying");
+      const hasActive = values.some((t) => t.status === "running");
       if (hasActive) return;
       const doneCount = values.filter((t) => t.status === "done").length;
       if (doneCount > 0) {
@@ -745,19 +565,6 @@ export class ConductorOrchestrator {
         skippedBusy = true;
         continue;
       }
-      if (!t.qualityRunId && this.quality?.prepareRunForTask) {
-        const prepared = this.quality.prepareRunForTask({
-          roomId: flow.roomId,
-          taskId: t.id,
-          sessionId: t.sessionId,
-          task: t.task,
-        });
-        if (!prepared.ready) {
-          skippedBusy = true;
-          continue;
-        }
-        if (prepared.runId) t.qualityRunId = prepared.runId;
-      }
       t.status = "running";
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       assignments.push(`@${name}：${t.task}`);
@@ -769,7 +576,6 @@ export class ConductorOrchestrator {
       const artifactContext = refs && refs.length > 0
         ? { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}), refs }
         : { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}) };
-      const specContext = this.quality?.getSpecPromptContext?.(flow.roomId);
       const taskBody = [
         `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
         "",
@@ -784,17 +590,13 @@ export class ConductorOrchestrator {
       ].join("\n");
       const prompt = this.rooms.buildPrompt(
         room.roomId,
-        specContext ? `${specContext}\n\n${taskBody}` : taskBody,
+        taskBody,
         t.sessionId,
         undefined,
         undefined,
         artifactContext,
       );
       this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
-        if (t.qualityRunId) {
-          this.quality?.cancelRunForTask?.(t.qualityRunId);
-          delete t.qualityRunId;
-        }
         t.retries = (t.retries ?? 0) + 1;
         const msg = String(err);
         if (t.retries >= 3) {
@@ -957,11 +759,8 @@ export class ConductorOrchestrator {
           task: t.task,
           dependsOn: t.dependsOn,
           status: t.status,
-          ...(t.qualityRunId !== undefined ? { qualityRunId: t.qualityRunId } : {}),
-          ...(t.awaitingApproval ? { awaitingApproval: true } : {}),
           ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
           ...(t.retries !== undefined ? { retries: t.retries } : {}),
-          ...(t.verifyingSince !== undefined ? { verifyingSince: t.verifyingSince } : {}),
         })),
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
@@ -998,11 +797,9 @@ export class ConductorOrchestrator {
         if (!taskId) continue;
         const sessionId = String(o.sessionId ?? "");
         if (!room.members.some((m) => m.sessionId === sessionId)) continue;
-        const rawStatus = (o.status as FlowTask["status"]) ?? "pending";
-        const qualityRunId = typeof o.qualityRunId === "string" && o.qualityRunId ? o.qualityRunId : undefined;
-        const awaitingApproval = Boolean(o.awaitingApproval);
-        // running → pending（重启后需要重新派发）；verifying 保留（通过 recoverRun 恢复回调）
-        const status: FlowTask["status"] = rawStatus === "running" ? "pending" : rawStatus;
+        const rawStatus = String(o.status ?? "pending");
+        const status: FlowTask["status"] =
+          rawStatus === "done" || rawStatus === "failed" ? rawStatus : "pending";
         flow.tasks.set(taskId, {
           id: taskId,
           sessionId,
@@ -1011,8 +808,6 @@ export class ConductorOrchestrator {
             ? o.dependsOn.map((s) => String(s)).filter(Boolean)
             : [],
           status,
-          ...(qualityRunId ? { qualityRunId } : {}),
-          ...(awaitingApproval && status === "verifying" ? { awaitingApproval: true, verifyingSince: Date.now() } : {}),
           ...(typeof o.failureMessage === "string" ? { failureMessage: o.failureMessage } : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
         });
@@ -1041,36 +836,6 @@ export class ConductorOrchestrator {
         }
       }
       this.flows.set(roomId, flow);
-      // 为 verifying task 恢复 onRunTerminal 回调
-      for (const t of flow.tasks.values()) {
-        if (t.status === "verifying" && t.qualityRunId && this.quality) {
-          const taskRef = t;
-          const flowRef = flow;
-          const memberName = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
-          this.quality.recoverRun(t.qualityRunId, (accepted) => {
-            if (!this.flows.has(flowRef.roomId)) return;
-            const task = flowRef.tasks.get(taskRef.id);
-            if (!task || task.status !== "verifying") return;
-            task.awaitingApproval = false;
-            if (accepted) {
-              task.status = "done";
-              this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证通过` });
-            } else {
-              task.status = "failed";
-              const fc = this.quality?.getRunSummary?.(taskRef.qualityRunId ?? "")?.failureCode;
-              task.failureMessage = fc ? failureCodeLabel(fc) : "质量验证未通过";
-              this.notice({ roomId: flowRef.roomId, message: `@${memberName} 子任务 ${taskRef.id} 质量验证未通过` });
-            }
-            this.emitFlow?.(flowRef.roomId);
-            const r = this.rooms.get(flowRef.roomId);
-            if (r) {
-              this.scheduleTasks(flowRef, r).catch((e) =>
-                logError("conductor recover run terminal", e),
-              );
-            }
-          });
-        }
-      }
       this.notice({ roomId, message: "🔄 已恢复指挥编排，继续执行待派发任务" });
       await this.scheduleTasks(flow, room).catch((err) => {
         logError("conductor import schedule", err);

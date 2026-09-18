@@ -36,15 +36,6 @@ import { WebSocket } from "ws";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Stream, AnyMessage } from "@agentclientprotocol/sdk";
 import { getAgentDef } from "./agent-defs.js";
-import {
-  defaultExecRunner,
-  isQualityControlFrame,
-  parseAllowedRoots,
-  runWorkerExec,
-  type ExecRequestFrame,
-  type QualityControlFrame,
-} from "./quality/execution-worker.js";
-
 const HUB_URL = process.env.HUB_URL;
 const TOKEN = process.env.CONNECTION_TOKEN;
 const AGENTS_ENV = process.env.AGENTS;
@@ -262,26 +253,7 @@ async function runOnce(channels: Channel[]): Promise<{ code: number; permanent: 
         const frame = msg as Record<string, unknown>;
         const chId = frame.channel;
         const payload = frame.payload;
-        // quality.* 控制帧：在 worker 本机执行命令并回传
-        if (chId === "__control__" && isQualityControlFrame(frame)) {
-          const qframe = frame as QualityControlFrame;
-          if (qframe.method === "quality.exec.request") {
-            const allowedRoots = parseAllowedRoots();
-            if (allowedRoots.length === 0) {
-              // 默认允许 worker 进程的 cwd
-              allowedRoots.push(process.cwd());
-            }
-            void runWorkerExec(
-              qframe as ExecRequestFrame,
-              allowedRoots,
-              (f) => {
-                if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(f));
-              },
-              defaultExecRunner,
-            );
-          }
-          return;
-        }
+        if (chId === "__control__") return;
         if (typeof chId !== "string" || chId === "__control__") return;
         if (typeof payload !== "object" || payload === null) return;
 
