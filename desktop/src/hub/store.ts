@@ -71,9 +71,6 @@ interface State {
   fileRefToInsert: string | null;
   /** 各类新增内容计数（打开对应面板时清零） */
   newCounts: { artifact: number; event: number; blackboard: number };
-  lastArtifactAt: number;
-  lastEventAt: number;
-  lastBlackboardAt: number;
   searchQuery: string;
   searchResults: SearchHit[];
   searchGroups: SearchGroup[];
@@ -225,7 +222,7 @@ interface Actions {
   refreshFlow(roomId: string): Promise<void>;
   setFlow(flow: FlowInfo | null): void;
   refreshArtifacts(scope: { roomId: string } | { sessionId: string }): Promise<void>;
-  refreshBlackboard(roomId: string): Promise<void>;
+  refreshSessionUsage(sessionId: string): Promise<void>;
   removeBlackboard(roomId: string, id: string): Promise<void>;
   clearBlackboard(roomId: string): Promise<void>;
   removeArtifact(roomId: string, artifactId: string): Promise<void>;
@@ -268,6 +265,12 @@ interface Actions {
   clearTaskLogs(): Promise<void>;
 
 }
+
+const countAdded = <T extends { id: string }>(previous: T[] | null, next: T[]) =>
+  previous === null ? 0 : next.filter((item) => !previous.some((old) => old.id === item.id)).length;
+
+let artifactRefreshGeneration = 0;
+let usageRefreshGeneration = 0;
 
 const defaultConfig: AppConfig = {
   profiles: [],
@@ -522,15 +525,27 @@ export const useHubStore = create<State & Actions>((set, get) => {
               at: typeof e.at === "number" ? e.at : 0,
             } as BlackboardInfo;
           });
-          const maxAt = blackboard.length ? Math.max(...blackboard.map((b) => b.at)) : 0;
-          const last = get().lastBlackboardAt;
-          const prev = get().newCounts;
-          const added = last === 0 ? 0 : blackboard.filter((b) => b.at > last).length;
+          const added = countAdded(get().blackboard, blackboard);
           set({
             blackboard,
-            lastBlackboardAt: last === 0 ? maxAt : Math.max(last, maxAt),
-            newCounts: { ...prev, blackboard: prev.blackboard + added },
+            newCounts: { ...get().newCounts, blackboard: get().newCounts.blackboard + added },
           });
+        }
+        break;
+      }
+      case "room.modeSelected": {
+        const roomId = String(params.roomId ?? "");
+        const room = get().currentRoom;
+        if (room && room.roomId === roomId) {
+          const activeSpeaker = typeof params.activeSpeaker === "string" ? params.activeSpeaker : null;
+          const subMode = typeof params.mode === "string" ? params.mode : undefined;
+          const reason = typeof params.reason === "string" ? params.reason : undefined;
+          const updated = { ...room, activeSpeaker, subMode, reason };
+          set({
+            currentRoom: updated,
+            rooms: get().rooms.map((r) => (r.roomId === roomId ? { ...r, activeSpeaker, subMode, reason } : r)),
+          });
+          if (activeSpeaker) void get().refreshSessionUsage(activeSpeaker);
         }
         break;
       }
@@ -678,6 +693,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       name: String(o.name ?? ""),
       mode: String(o.mode ?? "mention"),
       activeSpeaker: stringOrNull(o.activeSpeaker),
+      subMode: stringOrNull(o.subMode),
+      reason: stringOrNull(o.reason),
       conductorId: stringOrNull(o.conductorId),
       members,
       archived: o.archived === true,
@@ -775,9 +792,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
     quote: null,
     fileRefToInsert: null,
     newCounts: { artifact: 0, event: 0, blackboard: 0 },
-    lastArtifactAt: 0,
-    lastEventAt: 0,
-    lastBlackboardAt: 0,
     searchQuery: "",
     searchResults: [],
     searchGroups: [],
@@ -953,9 +967,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quote: null,
     fileRefToInsert: null,
     newCounts: { artifact: 0, event: 0, blackboard: 0 },
-    lastArtifactAt: 0,
-    lastEventAt: 0,
-    lastBlackboardAt: 0,
         searchQuery: "",
         searchResults: [],
         searchGroups: [],
@@ -1190,9 +1201,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quote: null,
         fileRefToInsert: null,
         newCounts: { artifact: 0, event: 0, blackboard: 0 },
-        lastArtifactAt: 0,
-        lastEventAt: 0,
-        lastBlackboardAt: 0,
         screen: "chat",
         historyHasMore: false,
         historyLoading: false,
@@ -1200,6 +1208,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
       get().refreshArtifacts({ sessionId: session.sessionId });
+      void get().refreshSessionUsage(session.sessionId);
       if (session.agent === "devin") void get().refreshBackendQuota();
     },
 
@@ -1228,9 +1237,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quote: null,
         fileRefToInsert: null,
         newCounts: { artifact: 0, event: 0, blackboard: 0 },
-        lastArtifactAt: 0,
-        lastEventAt: 0,
-        lastBlackboardAt: 0,
         screen: "room",
         ...(isSameRoom ? {} : { flow: null }),
         historyHasMore: false,
@@ -1241,7 +1247,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().syncBusyIdsFromList(get().sessions);
       get().refreshFlow(updatedRoom.roomId);
       get().refreshArtifacts({ roomId: updatedRoom.roomId });
-      get().refreshBlackboard(updatedRoom.roomId);
+      if (updatedRoom.activeSpeaker) void get().refreshSessionUsage(updatedRoom.activeSpeaker);
     },
 
     clearJumpToAt: () => {
@@ -2010,6 +2016,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     refreshArtifacts: async (scope: { roomId: string } | { sessionId: string }) => {
       const client = get().client;
       if (!client) return;
+      const generation = ++artifactRefreshGeneration;
       const isRoom = "roomId" in scope;
       if (isRoom && get().currentRoom?.roomId !== scope.roomId) return;
       if (!isRoom && get().currentSession?.sessionId !== scope.sessionId) return;
@@ -2046,6 +2053,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
             taskId: typeof e.taskId === "string" ? e.taskId : undefined,
           } as EventInfo;
         });
+        if (generation !== artifactRefreshGeneration) return;
+        if (isRoom && get().currentRoom?.roomId !== scope.roomId) return;
+        if (!isRoom && get().currentSession?.sessionId !== scope.sessionId) return;
         const blackboard = isRoom
           ? ((result.blackboard as unknown[]) ?? []).map((it) => {
               const e = it as Record<string, unknown>;
@@ -2058,31 +2068,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
               } as BlackboardInfo;
             })
           : get().blackboard;
-        const maxAt = artifacts.length ? Math.max(...artifacts.map((a) => a.at)) : 0;
-        const maxEventAt = events.length ? Math.max(...events.map((e) => e.at)) : 0;
         const board = isRoom ? (blackboard ?? []) : [];
-        const maxBoardAt = board.length ? Math.max(...board.map((b) => b.at)) : 0;
-        const last = get().lastArtifactAt;
-        const lastEvent = get().lastEventAt;
-        const lastBoard = get().lastBlackboardAt;
-        const prev = get().newCounts;
-        const newArtifacts = last === 0 ? 0 : artifacts.filter((a) => a.at > last).length;
-        const newEvents = lastEvent === 0 ? 0 : events.filter((e) => e.at > lastEvent).length;
-        const newBoard = isRoom && lastBoard !== 0 ? board.filter((b) => b.at > lastBoard).length : 0;
+        const prev = get();
+        const newArtifacts = countAdded(prev.currentArtifacts, artifacts);
+        const newEvents = countAdded(prev.currentEvents, events);
+        const newBoard = countAdded(prev.blackboard, board);
         set({
           currentArtifacts: artifacts,
           currentEvents: events,
           ...(isRoom ? { blackboard } : {}),
-          lastArtifactAt: last === 0 ? maxAt : Math.max(last, maxAt),
-          lastEventAt: lastEvent === 0 ? maxEventAt : Math.max(lastEvent, maxEventAt),
-          ...(isRoom
-            ? { lastBlackboardAt: lastBoard === 0 ? maxBoardAt : Math.max(lastBoard, maxBoardAt) }
-            : {}),
           newCounts: {
-            ...prev,
-            artifact: prev.artifact + newArtifacts,
-            event: prev.event + newEvents,
-            blackboard: prev.blackboard + newBoard,
+            ...prev.newCounts,
+            artifact: prev.newCounts.artifact + newArtifacts,
+            event: prev.newCounts.event + newEvents,
+            blackboard: prev.newCounts.blackboard + newBoard,
           },
         });
       } catch {
@@ -2090,27 +2089,23 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    refreshBlackboard: async (roomId: string) => {
+    refreshSessionUsage: async (sessionId: string) => {
       const client = get().client;
       if (!client) return;
+      const generation = ++usageRefreshGeneration;
       try {
-        const result = (await client.call("room.blackboard", { roomId })) as Record<string, unknown>;
-        const blackboard = ((result.blackboard as unknown[]) ?? []).map((it) => {
-          const e = it as Record<string, unknown>;
-          return {
-            id: String(e.id ?? ""),
-            from: String(e.from ?? ""),
-            text: String(e.text ?? ""),
-            detail: String(e.detail ?? ""),
-            at: typeof e.at === "number" ? e.at : 0,
-          } as BlackboardInfo;
-        });
-        const maxAt = blackboard.length ? Math.max(...blackboard.map((b) => b.at)) : 0;
-        const last = get().lastBlackboardAt;
-        set({
-          blackboard,
-          lastBlackboardAt: last === 0 ? maxAt : Math.max(last, maxAt),
-        });
+        const result = (await client.call("session.contextUsage", { sessionId })) as {
+          usage?: Record<string, unknown> | null;
+        };
+        if (generation !== usageRefreshGeneration) return;
+        const stillCurrent =
+          get().currentSession?.sessionId === sessionId ||
+          get().currentRoom?.activeSpeaker === sessionId;
+        if (!stillCurrent) return;
+        const next = { ...get().sessionUsage };
+        if (result.usage) next[sessionId] = parseContextUsage(result.usage);
+        else delete next[sessionId];
+        set({ sessionUsage: next });
       } catch {
         /* ignore */
       }

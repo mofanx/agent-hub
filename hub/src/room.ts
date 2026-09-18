@@ -1275,19 +1275,15 @@ export class RoomManager {
   }
 
   /** 某个 session 一轮结束后，把输出摘要写上黑板（供其他成员参考） */
-  recordOutput(sessionId: string, sessionName: string, output: string): string[] {
-    const touched: string[] = [];
+  recordOutput(roomId: string, sessionId: string, sessionName: string, output: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.members.some((m) => m.sessionId === sessionId)) return false;
     const detail = output.trim();
     const text = detail.replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN);
-    if (!text) return touched;
-    const id = randomUUID();
-    for (const room of this.rooms.values()) {
-      if (!room.members.some((m) => m.sessionId === sessionId)) continue;
-      const board = (room.blackboard ??= []);
-      board.push({ id, from: sessionName, text, detail, at: Date.now() });
-      if (board.length > BLACKBOARD_LIMIT) board.shift();
-      touched.push(room.roomId);
-    }
-    return touched;
+    if (!text) return false;
+    const board = (room.blackboard ??= []);
+    board.push({ id: randomUUID(), from: sessionName, text, detail, at: Date.now() });
+    if (board.length > BLACKBOARD_LIMIT) board.shift();
+    return true;
   }
 }

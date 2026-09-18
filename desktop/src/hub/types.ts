@@ -128,6 +128,8 @@ export interface RoomInfo {
   archived: boolean;
   /** 当前房间中正在发言的 sessionId */
   activeSpeaker?: string | null;
+  subMode?: string | null;
+  reason?: string | null;
   /** 成员角色卡：sessionId -> persona */
   memberRoles?: Record<string, string> | null;
   /** 并行/集思广益：汇总者 sessionId */

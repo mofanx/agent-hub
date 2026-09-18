@@ -549,9 +549,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var newArtifactCount by mutableStateOf(0)
     var newEventCount by mutableStateOf(0)
     var newBlackboardCount by mutableStateOf(0)
-    private var lastArtifactAt = 0L
-    private var lastEventAt = 0L
-    private var lastBlackboardAt = 0L
+    private var artifactsInitialized = false
+    private var eventsInitialized = false
+    private var blackboardInitialized = false
+    private var artifactRefreshGeneration = 0L
+    private var usageRefreshGeneration = 0L
     var fileTreeRoots by mutableStateOf<List<FileTreeRoot>>(emptyList())
     var fileTreePath by mutableStateOf<String?>(null)
     var fileTreeRootPath by mutableStateOf<String?>(null)
@@ -714,6 +716,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sessions.find { it.sessionId == sessionId }?.let { return displayName(it) }
         currentRoom?.members?.find { it.second == sessionId }?.second?.let { return it }
         return sessionId
+    }
+
+    private fun parseContextUsage(u: JsonObject) = ContextUsage(
+        used = u["used"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+        size = u["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+        costAmount = (u["cost"] as? JsonObject)?.get("amount")?.jsonPrimitive?.content?.toDoubleOrNull(),
+        costCurrency = (u["cost"] as? JsonObject)?.get("currency")?.jsonPrimitive?.content,
+    )
+
+    private fun refreshSessionUsage(sessionId: String) {
+        val generation = ++usageRefreshGeneration
+        viewModelScope.launch {
+            try {
+                val result = hub.call("session.contextUsage", buildJsonObject { put("sessionId", sessionId) })
+                if (generation != usageRefreshGeneration) return@launch
+                val stillCurrent = currentSession?.sessionId == sessionId || currentRoom?.activeSpeaker == sessionId
+                if (!stillCurrent) return@launch
+                val u = result["usage"] as? JsonObject
+                if (u != null) sessionUsage[sessionId] = parseContextUsage(u)
+                else sessionUsage.remove(sessionId)
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
     }
 
     private fun parseTokenUsage(u: JsonObject?): TokenUsage? {
@@ -1876,6 +1902,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
         viewModelScope.launch { refreshSessionArtifacts(session.sessionId) }
         refreshCurrentModel()
+        refreshSessionUsage(session.sessionId)
     }
 
     fun openRoom(room: RoomInfo, anchorAt: Long? = null) {
@@ -1919,8 +1946,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 syncBusyIdsFromList(sessions)
                 refreshFlow(updatedRoom.roomId)
                 refreshArtifacts(updatedRoom.roomId)
-                refreshBlackboard(updatedRoom.roomId)
                 refreshCurrentModel()
+                updatedRoom.activeSpeaker?.let { refreshSessionUsage(it) }
             } catch (e: Exception) {
                 connectError = e.message
             }
@@ -1938,10 +1965,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun refreshArtifacts(roomId: String) {
+        val generation = ++artifactRefreshGeneration
         try {
             val result = hub.call("room.artifacts", buildJsonObject { put("roomId", roomId) })
             val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
             val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
+            if (generation != artifactRefreshGeneration) return
+            if (currentRoom?.roomId != roomId) return
             val board = result["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
             trackNewArtifacts(artifacts, events, board)
             currentArtifacts.clear()
@@ -1956,10 +1986,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun refreshSessionArtifacts(sessionId: String) {
+        val generation = ++artifactRefreshGeneration
         try {
             val result = hub.call("session.artifacts", buildJsonObject { put("sessionId", sessionId) })
             val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
             val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
+            if (generation != artifactRefreshGeneration) return
+            if (currentRoom != null || currentSession?.sessionId != sessionId) return
             trackNewArtifacts(artifacts, events, null)
             currentArtifacts.clear()
             currentArtifacts.addAll(artifacts)
@@ -1970,19 +2003,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 基于 at 时间戳累计新增计数；首次加载（基准为 0）只设置基准不计数 */
     private fun trackNewArtifacts(
         artifacts: List<ArtifactInfo>,
         events: List<EventInfo>,
         board: List<BlackboardEntry>?,
     ) {
-        if (lastArtifactAt > 0L) newArtifactCount += artifacts.count { it.at > lastArtifactAt }
-        artifacts.maxOfOrNull { it.at }?.let { lastArtifactAt = maxOf(lastArtifactAt, it) }
-        if (lastEventAt > 0L) newEventCount += events.count { it.at > lastEventAt }
-        events.maxOfOrNull { it.at }?.let { lastEventAt = maxOf(lastEventAt, it) }
+        if (artifactsInitialized) {
+            val oldIds = currentArtifacts.map { it.id }.toSet()
+            newArtifactCount += artifacts.count { it.id !in oldIds }
+        } else {
+            artifactsInitialized = true
+        }
+        if (eventsInitialized) {
+            val oldIds = currentEvents.map { it.id }.toSet()
+            newEventCount += events.count { it.id !in oldIds }
+        } else {
+            eventsInitialized = true
+        }
         if (board != null) {
-            if (lastBlackboardAt > 0L) newBlackboardCount += board.count { it.at > lastBlackboardAt }
-            board.maxOfOrNull { it.at }?.let { lastBlackboardAt = maxOf(lastBlackboardAt, it) }
+            if (blackboardInitialized) {
+                val oldIds = blackboard.map { it.id }.toSet()
+                newBlackboardCount += board.count { it.id !in oldIds }
+            } else {
+                blackboardInitialized = true
+            }
         }
     }
 
@@ -1998,22 +2042,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         newArtifactCount = 0
         newEventCount = 0
         newBlackboardCount = 0
-        lastArtifactAt = 0L
-        lastEventAt = 0L
-        lastBlackboardAt = 0L
-    }
-
-    private suspend fun refreshBlackboard(roomId: String) {
-        try {
-            val result = hub.call("room.blackboard", buildJsonObject { put("roomId", roomId) })
-            val list = result["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
-            // 初次加载只设置基准，不计数
-            list.maxOfOrNull { it.at }?.let { lastBlackboardAt = maxOf(lastBlackboardAt, it) }
-            blackboard.clear()
-            blackboard.addAll(list)
-        } catch (e: Exception) {
-            // ignore
-        }
+        artifactsInitialized = false
+        eventsInitialized = false
+        blackboardInitialized = false
+        ++artifactRefreshGeneration
+        ++usageRefreshGeneration
     }
 
     private fun parseBlackboardEntry(obj: JsonObject): BlackboardEntry {
@@ -3351,13 +3384,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 val u = p["usage"] as? JsonObject ?: return
-                val cost = u["cost"] as? JsonObject
-                sessionUsage[sid] = ContextUsage(
-                    used = u["used"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
-                    size = u["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
-                    costAmount = cost?.get("amount")?.jsonPrimitive?.content?.toDoubleOrNull(),
-                    costCurrency = cost?.get("currency")?.jsonPrimitive?.content,
-                )
+                sessionUsage[sid] = parseContextUsage(u)
             }
             "prompt.done" -> {
                 val p = obj["params"]!!.jsonObject
@@ -3404,6 +3431,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     val idx = rooms.indexOfFirst { it.roomId == roomId }
                     if (idx >= 0) rooms[idx] = currentRoom!!
+                    currentRoom?.activeSpeaker?.let { refreshSessionUsage(it) }
                 }
             }
             "room.flowUpdate" -> {
@@ -3419,8 +3447,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val roomId = p["roomId"]!!.jsonPrimitive.content
                 if (currentRoom?.roomId == roomId) {
                     val list = p["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
-                    if (lastBlackboardAt > 0L) newBlackboardCount += list.count { it.at > lastBlackboardAt }
-                    list.maxOfOrNull { it.at }?.let { lastBlackboardAt = maxOf(lastBlackboardAt, it) }
+                    if (blackboardInitialized) {
+                        val oldIds = blackboard.map { it.id }.toSet()
+                        newBlackboardCount += list.count { it.id !in oldIds }
+                    } else {
+                        blackboardInitialized = true
+                    }
                     blackboard.clear()
                     blackboard.addAll(list)
                 }

@@ -343,6 +343,50 @@ describe("AcpAgent integration (in-memory stream)", () => {
     agentConn.close();
   });
 
+  it("usage_update 合法值写入缓存并发 session.usage，非法值不覆盖", async () => {
+    const { agentConn, hub, events } = setup();
+    await hub.createSession("/tmp", "s");
+
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: {
+        sessionUpdate: "usage_update",
+        used: 100,
+        size: 200,
+        cost: { amount: 0.5, currency: "USD" },
+      },
+    });
+    await waitFor(() => events.find((e) => e.method === "session.usage"));
+    const usage = hub.getContextUsage("s1");
+    assert.deepEqual(usage, {
+      used: 100,
+      size: 200,
+      cost: { amount: 0.5, currency: "USD" },
+    });
+    usage!.cost!.amount = 999;
+    assert.equal(hub.getContextUsage("s1")!.cost!.amount, 0.5);
+
+    const usageEvents = () => events.filter((e) => e.method === "session.usage").length;
+    assert.equal(usageEvents(), 1);
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "usage_update", used: 150 },
+    });
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "usage_update", used: -1, size: 300 },
+    });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(usageEvents(), 1);
+    assert.deepEqual(hub.getContextUsage("s1"), {
+      used: 100,
+      size: 200,
+      cost: { amount: 0.5, currency: "USD" },
+    });
+    hub.close();
+    agentConn.close();
+  });
+
   it("initialize 声明 session.configOptions boolean 能力", async () => {
     const { hub, agentConn, seenClientCapabilities } = setup();
     await hub.createSession("/tmp", "s");

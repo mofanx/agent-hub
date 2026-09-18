@@ -82,9 +82,12 @@ describe("room-modes", () => {
     await manager.handle(room, "@coder 改一下 room.ts", {});
     assert.equal(manager.isRoomTurn("s1"), true);
     assert.equal(manager.isRoomTurn("s2"), false);
+    assert.equal(manager.roomIdForTurn("s1"), room.roomId);
+    assert.equal(manager.subModeFor(room.roomId)?.activeSpeaker, "s1");
     const output = `已修改 hub/src/room.ts\n\`\`\`bash\nnpx tsc --noEmit\n\`\`\``;
     await manager.onPromptDone("s1", output);
     assert.equal(manager.isRoomTurn("s1"), false);
+    assert.equal(manager.roomIdForTurn("s1"), undefined);
     const events = rooms.getEvents(room.roomId, 10);
     assert.equal(events.length, 1);
     const event = events.find((e) => e.action === "command");

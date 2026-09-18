@@ -577,14 +577,18 @@ export class RoomModeManager {
     return false;
   }
 
+  roomIdForTurn(sessionId: string): string | undefined {
+    return this.promptRooms.get(sessionId)
+      ?? this.autoDecisions.get(sessionId)?.roomId
+      ?? this.conductor.getFlowForSession(sessionId)?.roomId
+      ?? [...this.parallelFlows.entries()].find(([, flow]) => flow.pending.has(sessionId))?.[0]
+      ?? [...this.pipelineFlows.entries()].find(([, flow]) => flow.order[flow.stage] === sessionId)?.[0]
+      ?? [...this.debateFlows.entries()].find(([, flow]) => flow.sides.includes(sessionId) || flow.judge === sessionId)?.[0];
+  }
+
   /** 这次输出是否属于某个房间回合（含隐藏编排） */
   isRoomTurn(sessionId: string): boolean {
-    return this.promptRooms.has(sessionId)
-      || this.autoDecisions.has(sessionId)
-      || this.conductor.getFlowForSession(sessionId) != null
-      || [...this.parallelFlows.values()].some((f) => f.pending.has(sessionId))
-      || [...this.pipelineFlows.values()].some((f) => f.order[f.stage] === sessionId)
-      || [...this.debateFlows.values()].some((f) => f.sides.includes(sessionId) || f.judge === sessionId);
+    return this.roomIdForTurn(sessionId) !== undefined;
   }
 
   /** 用于 prompt.done 跳过广播：是否是内部工作输出 */
@@ -712,6 +716,11 @@ export class RoomModeManager {
         logError("room-modes mention prompt", err);
       });
       sent.push(sid);
+    }
+    if (sent.length === 1) {
+      this.setSubMode(room.roomId, "mention", sent[0], undefined);
+    } else {
+      this.setSubMode(room.roomId, "mention", undefined, undefined);
     }
     return { sent, mentioned, skipped };
   }

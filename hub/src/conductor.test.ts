@@ -544,7 +544,12 @@ describe("conductor", () => {
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1));
       const flow = orchestrator.getFlow(qRoom.roomId);
-      if (flow && (flow as { phase: string }).phase === "summarizing") break;
+      if (!flow) break;
+      const tasks = flow.tasks as { id: string; status: string }[];
+      const allTerminal = ["t2", "t3"].every(
+        (id) => tasks.find((t) => t.id === id)?.status === "failed",
+      );
+      if (allTerminal && (flow as { phase: string }).phase === "summarizing") break;
     }
 
     await orchestrator.onPromptDone("conductor", "汇总");

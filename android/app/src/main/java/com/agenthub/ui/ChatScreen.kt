@@ -217,7 +217,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val sessionKey = vm.currentRoom?.roomId ?: vm.currentSession?.sessionId ?: ""
     val listState = remember(sessionKey) { LazyListState(0, 0) }
     val activeSessionId = vm.currentRoom?.activeSpeaker ?: vm.currentSession?.sessionId
-    val contextUsage by remember { derivedStateOf { activeSessionId?.let { vm.sessionUsage[it] } } }
+    val contextUsage = activeSessionId?.let { vm.sessionUsage[it] }
     val isAtBottom by produceState(false, listState, vm.chatListItems.value.size) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .collect { (index, offset) ->

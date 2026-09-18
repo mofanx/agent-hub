@@ -220,6 +220,12 @@ export class AcpAgent {
   private conn: acp.ClientConnection | null = null;
   private ctx: acp.ClientContext | null = null;
   private sessions = new Map<string, SessionEntry>();
+  private readonly contextUsage = new Map<string, ContextUsage>();
+
+  getContextUsage(sessionId: string): ContextUsage | undefined {
+    const usage = this.contextUsage.get(sessionId);
+    return usage ? { ...usage, ...(usage.cost ? { cost: { ...usage.cost } } : {}) } : undefined;
+  }
   private pendingPermissions = new Map<string, (optionId: string) => void>();
   private pendingElicitations = new Map<string, (resp: acp.CreateElicitationResponse) => void>();
   private starting: Promise<void> | null = null;
@@ -393,17 +399,16 @@ export class AcpAgent {
       this.cachedConfigOptions = u.configOptions;
     }
     if (u.sessionUpdate === "usage_update") {
-      this.emit({
-        method: "session.usage",
-        params: {
-          sessionId: params.sessionId,
-          usage: {
-            used: u.used ?? 0,
-            size: u.size ?? 0,
-            cost: u.cost ?? null,
-          },
-        },
-      });
+      const used = typeof u.used === "number" && Number.isFinite(u.used) && u.used >= 0 ? u.used : undefined;
+      const size = typeof u.size === "number" && Number.isFinite(u.size) && u.size >= 0 ? u.size : undefined;
+      if (used !== undefined && size !== undefined) {
+        const usage: ContextUsage = { used, size, cost: (u.cost as ContextUsage["cost"]) ?? null };
+        this.contextUsage.set(params.sessionId, usage);
+        this.emit({
+          method: "session.usage",
+          params: { sessionId: params.sessionId, usage },
+        });
+      }
     } else if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
       entry.turnText += u.content.text ?? "";
     } else if (u.sessionUpdate === "agent_message" && u.content?.type === "text") {
@@ -707,6 +712,7 @@ export class AcpAgent {
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
+        this.contextUsage.delete(sessionId);
         logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
         return false;
       }
@@ -847,6 +853,7 @@ export class AcpAgent {
   /** 本地摘除会话（不通知 agent，用于删除） */
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.contextUsage.delete(sessionId);
   }
 
   renameSession(sessionId: string, name: string): void {

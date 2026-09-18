@@ -554,16 +554,14 @@ function onTurnEnd(sessionId: string, text: string): void {
       text,
     });
     // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
-    if (roomModeManager.isRoomTurn(sessionId)) {
-      for (const room of rooms.roomsFor(sessionId)) {
-        if (roomModeManager.isHiddenTurn(sessionId, room.roomId)) continue;
-        store.append("room", room.roomId, {
-          at: Date.now(),
-          kind: "assistant",
-          author: displayName,
-          text,
-        });
-      }
+    const roomId = roomModeManager.roomIdForTurn(sessionId);
+    if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
+      store.append("room", roomId, {
+        at: Date.now(),
+        kind: "assistant",
+        author: displayName,
+        text,
+      });
     }
   }
 }
@@ -579,19 +577,16 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
   sessionLedger.addFileEvent(sessionId, { author, action: existed ? "modify" : "add", summary, path: relPath });
 
   // 只有群聊回合才同步产物/事件到 room，单聊操作不泄漏到群聊
-  if (roomModeManager.isRoomTurn(sessionId)) {
-    for (const room of rooms.roomsFor(sessionId)) {
-      rooms.addFile?.(room.roomId, { author, summary, path: relPath, content });
-      rooms.addFileEvent?.(room.roomId, { author, action: existed ? "modify" : "add", summary, path: relPath });
-    }
+  const roomId = roomModeManager.roomIdForTurn(sessionId);
+  if (roomId) {
+    rooms.addFile?.(roomId, { author, summary, path: relPath, content });
+    rooms.addFileEvent?.(roomId, { author, action: existed ? "modify" : "add", summary, path: relPath });
   }
 
   persistState();
   broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
-  if (roomModeManager.isRoomTurn(sessionId)) {
-    for (const room of rooms.roomsFor(sessionId)) {
-      broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
-    }
+  if (roomId) {
+    broadcast({ method: "room.artifact", params: { roomId } } as HubEvent);
   }
 }
 
@@ -616,19 +611,17 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
     sessionLedger.addEvent(sessionId, { author: meta.name, action, summary, path: relPath });
 
     // 只有群聊回合才同步事件到 room，单聊操作不泄漏到群聊
-    if (roomModeManager.isRoomTurn(sessionId)) {
-      for (const room of rooms.roomsFor(sessionId)) {
-        rooms.addEvent?.(room.roomId, { author: meta.name, action, summary, path: relPath });
-      }
+    const roomId = roomModeManager.roomIdForTurn(sessionId);
+    if (roomId) {
+      rooms.addEvent?.(roomId, { author: meta.name, action, summary, path: relPath });
     }
   }
 
   persistState();
   broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
-  if (roomModeManager.isRoomTurn(sessionId)) {
-    for (const room of rooms.roomsFor(sessionId)) {
-      broadcast({ method: "room.artifact", params: { roomId: room.roomId } } as HubEvent);
-    }
+  const artifactRoomId = roomModeManager.roomIdForTurn(sessionId);
+  if (artifactRoomId) {
+    broadcast({ method: "room.artifact", params: { roomId: artifactRoomId } } as HubEvent);
   }
 }
 
@@ -646,12 +639,12 @@ function onAgentEvent(event: HubEvent): void {
     const baseName = meta?.name ?? sessionId!;
     const origin = originFor(meta);
     const displayName = origin ? `${baseName} (${origin})` : baseName;
-    if (!roomModeManager.isHiddenSession(sessionId!) && roomModeManager.isRoomTurn(sessionId!)) {
-      const touched = rooms.recordOutput(sessionId!, displayName, output);
-      for (const roomId of touched) {
+    const turnRoomId = roomModeManager.roomIdForTurn(sessionId!);
+    if (!roomModeManager.isHiddenSession(sessionId!) && turnRoomId) {
+      if (rooms.recordOutput(turnRoomId, sessionId!, displayName, output)) {
         broadcast({
           method: "room.blackboardUpdate",
-          params: { roomId, blackboard: rooms.getBlackboard(roomId) },
+          params: { roomId: turnRoomId, blackboard: rooms.getBlackboard(turnRoomId) },
         } as HubEvent);
       }
     }
@@ -1399,6 +1392,11 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         throw new Error(`unknown session: ${sessionId}`);
       }
       return { events: sessionLedger.getEvents(sessionId, 100) };
+    }
+    case "session.contextUsage": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      return { usage: ownerOf(sessionId).getContextUsage(sessionId) ?? null };
     }
     case "session.removeArtifact": {
       const sessionId = String(req.params?.sessionId ?? "");

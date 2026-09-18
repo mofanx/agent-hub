@@ -414,7 +414,7 @@ describe("room", () => {
   it("getBlackboard 与 recordOutput", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    rooms.recordOutput("s1", "a1", "完成了任务");
+    rooms.recordOutput(room.roomId, "s1", "a1", "完成了任务");
     const board = rooms.getBlackboard(room.roomId);
     assert.equal(board.length, 1);
     assert.ok(board[0]!.id);
@@ -423,10 +423,19 @@ describe("room", () => {
     assert.equal(board[0]!.detail, "完成了任务");
   });
 
+  it("recordOutput 只写入来源房间，不串到其他房间", () => {
+    const rooms = new RoomManager();
+    const roomA = rooms.create("teamA", [{ sessionId: "s1", name: "a1" }]);
+    const roomB = rooms.create("teamB", [{ sessionId: "s1", name: "a1" }]);
+    assert.equal(rooms.recordOutput(roomA.roomId, "s1", "a1", "完成了任务"), true);
+    assert.equal(rooms.getBlackboard(roomA.roomId).length, 1);
+    assert.equal(rooms.getBlackboard(roomB.roomId).length, 0);
+  });
+
   it("removeBlackboard 删除指定黑板条目", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    rooms.recordOutput("s1", "a1", "任务一");
+    rooms.recordOutput(room.roomId, "s1", "a1", "任务一");
     const board = rooms.getBlackboard(room.roomId);
     assert.equal(board.length, 1);
     assert.ok(rooms.removeBlackboard(room.roomId, board[0]!.id));
@@ -437,8 +446,8 @@ describe("room", () => {
   it("clearBlackboard 清空黑板", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
-    rooms.recordOutput("s1", "a1", "任务一");
-    rooms.recordOutput("s1", "a1", "任务二");
+    rooms.recordOutput(room.roomId, "s1", "a1", "任务一");
+    rooms.recordOutput(room.roomId, "s1", "a1", "任务二");
     assert.equal(rooms.getBlackboard(room.roomId).length, 2);
     assert.ok(rooms.clearBlackboard(room.roomId));
     assert.equal(rooms.getBlackboard(room.roomId).length, 0);

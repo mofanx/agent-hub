@@ -636,6 +636,7 @@ export class ConductorOrchestrator {
   }
 
   private async summarize(flow: Flow, room: Room): Promise<void> {
+    if (flow.phase !== "working") return;
     flow.phase = "summarizing";
     this.emitFlow?.(flow.roomId);
     const failedTasks = [...flow.tasks.values()].filter((t) => t.status === "failed");
