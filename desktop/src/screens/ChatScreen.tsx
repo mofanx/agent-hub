@@ -32,7 +32,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { stringsFor } from "../hub/strings";
+import { stringsFor, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, QualitySummary, QualityCheck, QualityFinding, QualityPolicyInfo, QualityPolicyV2, RequirementSpec, RequirementVerification, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { qualityStageLabel, qualityFailureLabel, actionGuide, compactQualityProgress, TERMINAL_STAGES } from "../hub/quality-labels";
 import { FileTreePanel } from "./FileTreePanel";
@@ -93,17 +93,18 @@ function formatArtifactTime(at: number): string {
   return `${date} ${time}`;
 }
 
-function formatTokenUsage(u: TokenUsage): string {
-  const parts = [`输入 ${formatNumber(u.inputTokens)} · 输出 ${formatNumber(u.outputTokens)}`];
-  if (u.cachedReadTokens) parts.push(`缓存 ${formatNumber(u.cachedReadTokens)}`);
-  if (u.cachedWriteTokens) parts.push(`写缓存 ${formatNumber(u.cachedWriteTokens)}`);
-  if (u.thoughtTokens) parts.push(`思考 ${formatNumber(u.thoughtTokens)}`);
-  parts.push(`总计 ${formatNumber(u.totalTokens)}`);
+function formatTokenUsage(u: TokenUsage, S: Strings): string {
+  const parts = [`${S.tokenInput} ${formatNumber(u.inputTokens)} · ${S.tokenOutput} ${formatNumber(u.outputTokens)}`];
+  if (u.cachedReadTokens) parts.push(`${S.tokenCached} ${formatNumber(u.cachedReadTokens)}`);
+  if (u.cachedWriteTokens) parts.push(`${S.tokenCachedWrite} ${formatNumber(u.cachedWriteTokens)}`);
+  if (u.thoughtTokens) parts.push(`${S.tokenThought} ${formatNumber(u.thoughtTokens)}`);
+  parts.push(`${S.tokenTotal} ${formatNumber(u.totalTokens)}`);
   return parts.join(" · ");
 }
 
-function formatContextUsage(u: ContextUsage): string {
-  const parts = [`上下文 ${formatNumber(u.used)} / ${formatNumber(u.size)}`];
+function formatContextUsage(u: ContextUsage, S: Strings): string {
+  const max = u.size > 0 ? ` / ${S.contextMax} ${formatNumber(u.size)}` : "";
+  const parts = [`${S.context} ${formatNumber(u.used)}${max}`];
   if (u.costAmount != null && u.costCurrency) {
     parts.push(`${u.costCurrency} ${u.costAmount.toFixed(4)}`);
   }
@@ -156,6 +157,7 @@ function highlightHtml(html: string, query: string): string {
 
 export function ChatScreen() {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [input, setInput] = useState("");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [showThought, setShowThought] = useState<Record<number, boolean>>({});
@@ -198,8 +200,8 @@ export function ChatScreen() {
   const quotaSummary =
     !isRoom && store.currentSession?.agent === "devin" && quota?.available
       ? `Devin ${[
-          quota.daily ? `日已用 ${quota.daily.usedPercent}%` : "",
-          quota.weekly ? `周已用 ${quota.weekly.usedPercent}%` : "",
+          quota.daily ? S.quotaDaily.replace("%s", String(quota.daily.usedPercent)) : "",
+          quota.weekly ? S.quotaWeekly.replace("%s", String(quota.weekly.usedPercent)) : "",
         ].filter(Boolean).join(" · ")}`
       : "";
 
@@ -208,7 +210,7 @@ export function ChatScreen() {
     if (!searchQuery) return [];
     const q = searchQuery.toLowerCase();
     return store.chatItems
-      .map((item, i) => (getItemText(item).toLowerCase().includes(q) ? i : -1))
+      .map((item, i) => (getItemText(item, S).toLowerCase().includes(q) ? i : -1))
       .filter((i) => i >= 0);
   }, [searchQuery, store.chatItems]);
   const chatSearchMatchCount = matchPositions.length;
@@ -256,7 +258,7 @@ export function ChatScreen() {
     const q = store.jumpQuery.trim().toLowerCase();
     if (q) {
       const positions = store.chatItems
-        .map((item, i) => (getItemText(item).toLowerCase().includes(q) ? i : -1))
+        .map((item, i) => (getItemText(item, S).toLowerCase().includes(q) ? i : -1))
         .filter((i) => i >= 0);
       setInChatSearchQuery(store.jumpQuery);
       setChatSearchMatchIndex(positions.indexOf(idx));
@@ -685,7 +687,7 @@ export function ChatScreen() {
           <div className="title-block">
             <div className="chat-title">{title}</div>
             {subtitle && <div className="chat-subtitle">{subtitle}</div>}
-            {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage)}</div>}
+            {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage, S)}</div>}
             {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
           </div>
         ) : (
@@ -694,7 +696,7 @@ export function ChatScreen() {
               ref={searchInputRef}
               value={inChatSearchQuery}
               onChange={(e) => setInChatSearchQuery(e.currentTarget.value)}
-              placeholder="搜索聊天内容…"
+              placeholder={S.searchPlaceholder}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && e.shiftKey) {
                   e.preventDefault();
@@ -855,7 +857,7 @@ export function ChatScreen() {
               value={input}
               onChange={(e) => setInput(e.currentTarget.value)}
               onKeyDown={onKeyDown}
-              placeholder={isRoom ? "群聊消息，@名字 指定成员" : "给 AI 下指令…"}
+              placeholder={isRoom ? S.roomPlaceholder : S.chatPlaceholder}
             />
 
             {suggestOpen && mention && (
@@ -1212,13 +1214,13 @@ export function ChatScreen() {
   );
 }
 
-function getItemText(item: ChatItem): string {
+function getItemText(item: ChatItem, S: Strings): string {
   if ("text" in item) return item.text;
   if (item.kind === "plan") return item.entries.join("\n");
   if (item.kind === "tool") return `[${item.title}] ${item.status}`;
-  if (item.kind === "permission") return `审批请求: ${item.title}`;
-  if (item.kind === "elicitation") return `输入请求: ${item.message}`;
-  if (item.kind === "clarification") return `需求澄清: ${item.questions.length} 个问题`;
+  if (item.kind === "permission") return `${S.permissionRequestLabel}: ${item.title}`;
+  if (item.kind === "elicitation") return `${S.elicitationRequestLabel}: ${item.message}`;
+  if (item.kind === "clarification") return S.clarificationSummary.replace("%s", String(item.questions.length));
   return "";
 }
 
@@ -1244,6 +1246,7 @@ function ChatMessage({
   onFilePillClick?: (path: string) => void;
 }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [selectOpen, setSelectOpen] = useState(false);
   const currentMatchClass = isCurrentMatch ? "current-match" : "";
@@ -1256,7 +1259,7 @@ function ChatMessage({
   };
 
   const doCopy = () => {
-    navigator.clipboard.writeText(getItemText(item)).catch(() => {});
+    navigator.clipboard.writeText(getItemText(item, S)).catch(() => {});
     setMenu(null);
   };
 
@@ -1266,7 +1269,7 @@ function ChatMessage({
   };
 
   const doQuote = () => {
-    if (canQuote) store.setQuote([item.author || "我", getItemText(item)]);
+    if (canQuote) store.setQuote([item.author || "我", getItemText(item, S)]);
     setMenu(null);
   };
 
@@ -1277,14 +1280,14 @@ function ChatMessage({
       onClick={(e) => e.stopPropagation()}
     >
       <div className="message-menu-item" onClick={doCopy}>
-        复制
+        {S.copy}
       </div>
       <div className="message-menu-item" onClick={doSelect}>
-        选取
+        {S.selectText}
       </div>
       {canQuote && (
         <div className="message-menu-item" onClick={doQuote}>
-          引用
+          {S.quoting}
         </div>
       )}
     </div>
@@ -1293,10 +1296,10 @@ function ChatMessage({
   const selectModal = selectOpen ? (
     <div className="dialog-backdrop" onClick={() => setSelectOpen(false)}>
       <div className="dialog selection-modal" onClick={(e) => e.stopPropagation()}>
-        <h4>选取文字</h4>
-        <pre>{getItemText(item)}</pre>
+        <h4>{S.selectText}</h4>
+        <pre>{getItemText(item, S)}</pre>
         <div className="form-row" style={{ justifyContent: "flex-end" }}>
-          <button onClick={() => setSelectOpen(false)}>关闭</button>
+          <button onClick={() => setSelectOpen(false)}>{S.close}</button>
         </div>
       </div>
     </div>
@@ -1305,7 +1308,7 @@ function ChatMessage({
   const usageText =
     item.kind === "assistant" && item.usage ? (
       <div>
-        <span className="usage-pill">{formatTokenUsage(item.usage)}</span>
+        <span className="usage-pill">{formatTokenUsage(item.usage, S)}</span>
       </div>
     ) : null;
 
@@ -1393,7 +1396,7 @@ function ChatMessage({
               </div>
             )}
             <button className="thought-toggle" onClick={onToggleThought}>
-              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} 思考过程
+              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {S.thoughtProcess}
             </button>
             {expanded && (
               <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
@@ -1428,7 +1431,7 @@ function ChatMessage({
           <div className="msg-body">
             {showAuthor && item.author && <div className="author">{item.author}</div>}
             <div className="plan-head">
-              <ListTodo size={12} /> 计划
+              <ListTodo size={12} /> {S.plan}
             </div>
             {item.entries.map((e, i) => (
               <div key={i} className="text">
@@ -1446,7 +1449,7 @@ function ChatMessage({
         <div className={`message error ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
             <div className="text">
-              {item.author ? `[${item.author}] ` : ""}错误: {highlight ? highlightText(item.text, highlight) : item.text}
+              {item.author ? `[${item.author}] ` : ""}{S.errorLabel}: {highlight ? highlightText(item.text, highlight) : item.text}
             </div>
           </div>
           {menuEl}

@@ -184,6 +184,16 @@ interface Strings {
     val clonedRoom: String
     val deleteRoomConfirmTitle: String
     val deleteRoomConfirmText: String
+    val tokenInput: String
+    val tokenOutput: String
+    val tokenCached: String
+    val tokenCachedWrite: String
+    val tokenThought: String
+    val tokenTotal: String
+    val context: String
+    val contextMax: String
+    val quotaDaily: String
+    val quotaWeekly: String
 }
 
 object ZhStrings : Strings {
@@ -368,6 +378,16 @@ object ZhStrings : Strings {
     override val clonedRoom = "已克隆群聊「%s」"
     override val deleteRoomConfirmTitle = "删除群聊「%s」？"
     override val deleteRoomConfirmText = "将从 Hub 移除该群聊及其聊天记录。不可撤销。"
+    override val tokenInput = "输入"
+    override val tokenOutput = "输出"
+    override val tokenCached = "缓存"
+    override val tokenCachedWrite = "写缓存"
+    override val tokenThought = "思考"
+    override val tokenTotal = "总计"
+    override val context = "上下文"
+    override val contextMax = "上限"
+    override val quotaDaily = "日已用 %d%%"
+    override val quotaWeekly = "周已用 %d%%"
 }
 
 object EnStrings : Strings {
@@ -552,6 +572,16 @@ object EnStrings : Strings {
     override val clonedRoom = "Cloned room \"%s\""
     override val deleteRoomConfirmTitle = "Delete room \"%s\"?"
     override val deleteRoomConfirmText = "Removes the room and its chat history from the Hub. This cannot be undone."
+    override val tokenInput = "Input"
+    override val tokenOutput = "Output"
+    override val tokenCached = "Cache"
+    override val tokenCachedWrite = "Cache write"
+    override val tokenThought = "Thought"
+    override val tokenTotal = "Total"
+    override val context = "Context"
+    override val contextMax = "max"
+    override val quotaDaily = "Day %d%% used"
+    override val quotaWeekly = "Week %d%% used"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }

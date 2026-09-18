@@ -197,16 +197,17 @@ internal fun formatArtifactTime(at: Long): String {
     return formatter.format(java.util.Date.from(instant))
 }
 
-private fun TokenUsage.format(): String = buildString {
-    append("输入 ${formatNumber(inputTokens)} · 输出 ${formatNumber(outputTokens)}")
-    if (cachedReadTokens != null && cachedReadTokens > 0) append(" · 缓存 ${formatNumber(cachedReadTokens)}")
-    if (cachedWriteTokens != null && cachedWriteTokens > 0) append(" · 写缓存 ${formatNumber(cachedWriteTokens)}")
-    if (thoughtTokens != null && thoughtTokens > 0) append(" · 思考 ${formatNumber(thoughtTokens)}")
-    append(" · 总计 ${formatNumber(totalTokens)}")
+private fun TokenUsage.format(S: Strings): String = buildString {
+    append("${S.tokenInput} ${formatNumber(inputTokens)} · ${S.tokenOutput} ${formatNumber(outputTokens)}")
+    if (cachedReadTokens != null && cachedReadTokens > 0) append(" · ${S.tokenCached} ${formatNumber(cachedReadTokens)}")
+    if (cachedWriteTokens != null && cachedWriteTokens > 0) append(" · ${S.tokenCachedWrite} ${formatNumber(cachedWriteTokens)}")
+    if (thoughtTokens != null && thoughtTokens > 0) append(" · ${S.tokenThought} ${formatNumber(thoughtTokens)}")
+    append(" · ${S.tokenTotal} ${formatNumber(totalTokens)}")
 }
 
-private fun ContextUsage.format(): String = buildString {
-    append("上下文 ${formatNumber(used)} / ${formatNumber(size)}")
+private fun ContextUsage.format(S: Strings): String = buildString {
+    val max = if (size > 0) " / ${S.contextMax} ${formatNumber(size)}" else ""
+    append("${S.context} ${formatNumber(used)}$max")
     if (costAmount != null && costCurrency != null) {
         append(" · ${costCurrency} ${String.format("%.4f", costAmount)}")
     }
@@ -389,7 +390,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                         if (contextUsage != null) {
                             Text(
-                                contextUsage!!.format(),
+                                contextUsage!!.format(S),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline,
                                 maxLines = 1,
@@ -404,8 +405,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 val quota = vm.backendQuota
                                 val quotaText = if (quota?.available == true) {
                                     listOfNotNull(
-                                        quota.daily?.let { "日已用 ${it.usedPercent}%" },
-                                        quota.weekly?.let { "周已用 ${it.usedPercent}%" },
+                                        quota.daily?.let { S.quotaDaily.format(it.usedPercent) },
+                                        quota.weekly?.let { S.quotaWeekly.format(it.usedPercent) },
                                     ).joinToString(" · ")
                                 } else ""
                                 if (quotaText.isNotEmpty()) "${vm.modelCurrent} · $quotaText" else vm.modelCurrent
@@ -1300,7 +1301,7 @@ private fun MessageBlock(
             }
             if (item.isLast && item.usage != null) {
                 Text(
-                    item.usage.format(),
+                    item.usage.format(S),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 4.dp),
@@ -1451,7 +1452,7 @@ private fun RawChatBubble(
             }
             if (item.usage != null) {
                 Text(
-                    item.usage.format(),
+                    item.usage.format(S),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 4.dp),

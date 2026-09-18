@@ -24,6 +24,26 @@ export interface Strings {
   modelNoResults: string;
   modelClearFilters: string;
   modelFilterHint: string;
+  tokenInput: string;
+  tokenOutput: string;
+  tokenCached: string;
+  tokenCachedWrite: string;
+  tokenThought: string;
+  tokenTotal: string;
+  context: string;
+  contextMax: string;
+  quotaDaily: string;
+  quotaWeekly: string;
+  chatPlaceholder: string;
+  roomPlaceholder: string;
+  searchPlaceholder: string;
+  close: string;
+  permissionRequestLabel: string;
+  elicitationRequestLabel: string;
+  clarificationSummary: string;
+  errorLabel: string;
+  thoughtProcess: string;
+  plan: string;
 }
 
 const zh: Strings = {
@@ -52,6 +72,26 @@ const zh: Strings = {
   modelNoResults: "没有匹配的模型",
   modelClearFilters: "清除筛选",
   modelFilterHint: "搜索模型名称、UID 或别名",
+  tokenInput: "输入",
+  tokenOutput: "输出",
+  tokenCached: "缓存",
+  tokenCachedWrite: "写缓存",
+  tokenThought: "思考",
+  tokenTotal: "总计",
+  context: "上下文",
+  contextMax: "上限",
+  quotaDaily: "日已用 %s%",
+  quotaWeekly: "周已用 %s%",
+  chatPlaceholder: "给 AI 下指令…",
+  roomPlaceholder: "群聊消息，@名字 指定成员",
+  searchPlaceholder: "搜索聊天内容…",
+  close: "关闭",
+  permissionRequestLabel: "审批请求",
+  elicitationRequestLabel: "输入请求",
+  clarificationSummary: "需求澄清: %s 个问题",
+  errorLabel: "错误",
+  thoughtProcess: "思考过程",
+  plan: "计划",
 };
 
 const en: Strings = {
@@ -80,6 +120,26 @@ const en: Strings = {
   modelNoResults: "No matching models",
   modelClearFilters: "Clear filters",
   modelFilterHint: "Search by name, UID or alias",
+  tokenInput: "Input",
+  tokenOutput: "Output",
+  tokenCached: "Cache",
+  tokenCachedWrite: "Cache write",
+  tokenThought: "Thought",
+  tokenTotal: "Total",
+  context: "Context",
+  contextMax: "max",
+  quotaDaily: "Day %s% used",
+  quotaWeekly: "Week %s% used",
+  chatPlaceholder: "Send an instruction…",
+  roomPlaceholder: "Message, @name to mention",
+  searchPlaceholder: "Search chat…",
+  close: "Close",
+  permissionRequestLabel: "Permission request",
+  elicitationRequestLabel: "Input request",
+  clarificationSummary: "Clarification: %s questions",
+  errorLabel: "Error",
+  thoughtProcess: "Thinking",
+  plan: "Plan",
 };
 
 export function stringsFor(lang: string): Strings {
