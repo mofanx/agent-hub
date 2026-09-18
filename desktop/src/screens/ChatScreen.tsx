@@ -194,6 +194,14 @@ export function ChatScreen() {
       : "";
   const activeSessionId = store.currentRoom?.activeSpeaker || store.currentSession?.sessionId || "";
   const contextUsage = activeSessionId ? store.sessionUsage[activeSessionId] : undefined;
+  const quota = store.backendQuota;
+  const quotaSummary =
+    !isRoom && store.currentSession?.agent === "devin" && quota?.available
+      ? `Devin ${[
+          quota.daily ? `日已用 ${quota.daily.usedPercent}%` : "",
+          quota.weekly ? `周已用 ${quota.weekly.usedPercent}%` : "",
+        ].filter(Boolean).join(" · ")}`
+      : "";
 
   const searchQuery = inChatSearchQuery.trim();
   const matchPositions = useMemo(() => {
@@ -678,6 +686,7 @@ export function ChatScreen() {
             <div className="chat-title">{title}</div>
             {subtitle && <div className="chat-subtitle">{subtitle}</div>}
             {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage)}</div>}
+            {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
           </div>
         ) : (
           <div className="chat-search-bar">
@@ -2814,6 +2823,15 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
   );
 }
 
+function formatQuotaReset(unix: number): string {
+  return new Date(unix * 1000).toLocaleString(undefined, {
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function copyArtifact(a: FlowArtifact) {
   const text = a.path ? `${a.path}\n${a.summary}` : a.summary;
   navigator.clipboard
@@ -2980,6 +2998,32 @@ function ModelPicker() {
             ))}
           </div>
         )}
+        {(() => {
+          const q = store.backendQuota;
+          const pickerBackend = isRoom
+            ? memberModels[selectedMember ?? ""]?.backend
+            : store.currentSession?.agent;
+          if (pickerBackend !== "devin" || !q?.available) return null;
+          const windows = [
+            ["今日已用", q.daily],
+            ["本周已用", q.weekly],
+          ] as const;
+          return (
+            <div className="quota-card">
+              <div className="quota-card-title">
+                Devin 用量{q.planName ? ` · ${q.planName}` : ""}
+              </div>
+              {windows.map(([label, w]) => w && (
+                <div className="quota-row" key={label}>
+                  <span className="quota-label">{label}</span>
+                  <span className="quota-bar"><span style={{ width: `${w.usedPercent}%` }} /></span>
+                  <span className="quota-pct">{w.usedPercent}%</span>
+                  {w.resetAtUnix && <span className="quota-reset">重置 {formatQuotaReset(w.resetAtUnix)}</span>}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
         {(availableTiers.length > 1 || availableVendors.length > 1) && (
           <div className="model-picker-filters">
             {availableTiers.length > 1 && (

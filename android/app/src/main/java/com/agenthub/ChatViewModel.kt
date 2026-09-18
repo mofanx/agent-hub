@@ -89,6 +89,19 @@ data class ModelInfo(
     val backend: String = "devin",
 )
 
+data class QuotaWindow(
+    val remainingPercent: Int,
+    val usedPercent: Int,
+    val resetAtUnix: Long? = null,
+)
+
+data class BackendQuota(
+    val available: Boolean,
+    val planName: String? = null,
+    val daily: QuotaWindow? = null,
+    val weekly: QuotaWindow? = null,
+)
+
 data class ElicitationOption(val value: String, val label: String)
 
 data class ElicitationField(
@@ -865,6 +878,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val modelList = mutableStateListOf<ModelInfo>()
     var modelFilter by mutableStateOf("")
     var modelCurrent by mutableStateOf("")
+    var backendQuota by mutableStateOf<BackendQuota?>(null)
     /** 群聊模式：成员模型信息 sessionId -> (name, backend, model) */
     val roomMemberModels = mutableStateMapOf<String, Triple<String, String, String>>()
     /** 群聊模式：当前选中的成员 sessionId */
@@ -1115,15 +1129,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     // 显示第一个成员的模型作为概览
                     modelCurrent = roomMemberModels.values.firstOrNull()?.third ?: ""
+                    if (roomMemberModels.values.any { it.second == "devin" }) refreshBackendQuota()
                 } else {
                     val session = currentSession ?: return@launch
                     val backend = session.agent ?: "devin"
+                    if (backend == "devin") refreshBackendQuota()
                     val result = hub.call("model.current", buildJsonObject {
                         put("backend", backend)
                         put("sessionId", session.sessionId)
                     })
                     modelCurrent = result["uid"]?.jsonPrimitive?.content ?: ""
                 }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun refreshBackendQuota() {
+        viewModelScope.launch {
+            if (!hub.isConnected) return@launch
+            try {
+                val r = hub.call("model.usage", buildJsonObject { put("backend", "devin") })
+                fun window(key: String): QuotaWindow? {
+                    val w = r[key]?.jsonObject ?: return null
+                    val remaining = w["remainingPercent"]?.jsonPrimitive?.intOrNull ?: return null
+                    return QuotaWindow(
+                        remainingPercent = remaining,
+                        usedPercent = w["usedPercent"]?.jsonPrimitive?.intOrNull ?: (100 - remaining),
+                        resetAtUnix = w["resetAtUnix"]?.jsonPrimitive?.longOrNull,
+                    )
+                }
+                backendQuota = BackendQuota(
+                    available = r["available"]?.jsonPrimitive?.booleanOrNull == true,
+                    planName = r["planName"]?.jsonPrimitive?.contentOrNull,
+                    daily = window("daily"),
+                    weekly = window("weekly"),
+                )
             } catch (_: Exception) {}
         }
     }
@@ -1218,6 +1258,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 单聊模式
                 try {
                     val backend = currentSession?.agent ?: "devin"
+                    if (backend == "devin") refreshBackendQuota()
                     val sid = currentSession?.sessionId
                     val result = hub.call("model.list", buildJsonObject {
                         put("backend", backend)
@@ -1273,6 +1314,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun loadModelListForMember(sessionId: String) {
         val info = roomMemberModels[sessionId] ?: return
         val backend = info.second
+        if (backend == "devin") refreshBackendQuota()
         try {
             val result = hub.call("model.list", buildJsonObject {
                 put("backend", backend)

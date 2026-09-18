@@ -14,6 +14,7 @@ import type {
   FlowInfo,
   ModelInfo,
   ModelBackend,
+  BackendQuota,
   Attachment,
   QualityCheck,
   QualityFinding,
@@ -105,6 +106,7 @@ interface State {
   modelCurrent: string;
   modelFilter: string;
   showModelPicker: boolean;
+  backendQuota: BackendQuota | null;
   editRoomTarget: RoomInfo | null;
   /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
   roomMemberModels: Record<string, { name: string; backend: string; model: string }>;
@@ -276,6 +278,7 @@ interface Actions {
 
   showModelPickerDialog(): Promise<void>;
   refreshModelList(): Promise<void>;
+  refreshBackendQuota(force?: boolean): Promise<void>;
   refreshRoomMemberModels(): Promise<void>;
   refreshModelListForMember(sessionId: string): Promise<void>;
   switchModel(model: ModelInfo): Promise<void>;
@@ -508,6 +511,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const sid = String(params.sessionId ?? "");
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
+        if (get().sessions.find((s) => s.sessionId === sid)?.agent === "devin") {
+          void get().refreshBackendQuota();
+        }
         if (params.usage) {
           const usage = params.usage as Record<string, unknown>;
           const items = [...get().chatItems];
@@ -1072,6 +1078,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     modelCurrent: "",
     modelFilter: "",
     showModelPicker: false,
+    backendQuota: null,
     editRoomTarget: null,
     roomMemberModels: {},
     selectedMemberSession: null,
@@ -1271,6 +1278,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         modelCurrent: "",
         modelFilter: "",
         showModelPicker: false,
+        backendQuota: null,
         roomMemberModels: {},
         selectedMemberSession: null,
         pendingAttachments: [],
@@ -1498,6 +1506,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
       get().refreshArtifacts({ sessionId: session.sessionId });
       void get().loadSessionQuality(session.sessionId);
+      if (session.agent === "devin") void get().refreshBackendQuota();
     },
 
     openRoom: async (room: RoomInfo, anchorAt?: number) => {
@@ -2587,9 +2596,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const firstSid = Object.keys(first)[0] ?? null;
         set({ showModelPicker: true, selectedMemberSession: firstSid });
         if (firstSid) await get().refreshModelListForMember(firstSid);
+        void get().refreshBackendQuota();
       } else {
         await get().refreshModelList();
         set({ showModelPicker: true, selectedMemberSession: null });
+        void get().refreshBackendQuota();
       }
     },
 
@@ -2606,6 +2617,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
         await get().listBackends();
       } catch (e) {
         set({ connectError: String(e) });
+      }
+    },
+
+    refreshBackendQuota: async (force = false) => {
+      try {
+        const q = await getOrCall<BackendQuota>("model.usage", { backend: "devin", ...(force ? { refresh: true } : {}) });
+        set({ backendQuota: q });
+      } catch {
+        // 拉取失败保留旧数据，避免界面闪烁
       }
     },
 

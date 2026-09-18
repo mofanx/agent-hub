@@ -24,6 +24,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -38,10 +39,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.agenthub.ChatViewModel
 import com.agenthub.ModelInfo
+import com.agenthub.QuotaWindow
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -136,6 +142,37 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     singleLine = true,
                     shape = RoundedCornerShape(24.dp),
                 )
+
+                // Devin 账号用量（仅在 Devin 后端上下文显示）
+                val pickerBackend = if (isRoom) memberModels[selectedMember]?.second else vm.currentSession?.agent
+                val quota = vm.backendQuota
+                if (pickerBackend == "devin" && quota?.available == true) {
+                    Spacer(Modifier.height(8.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        ),
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                            Text(
+                                "Devin 用量${quota.planName?.let { " · $it" } ?: ""}",
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            listOfNotNull(
+                                quota.daily?.let { "今日已用" to it },
+                                quota.weekly?.let { "本周已用" to it },
+                            ).forEach { (label, w) ->
+                                QuotaRow(label, w)
+                                Spacer(Modifier.height(4.dp))
+                            }
+                        }
+                    }
+                }
 
                 // 群聊模式：成员标签栏
                 if (isRoom) {
@@ -271,6 +308,40 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun QuotaRow(label: String, w: QuotaWindow) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(56.dp),
+            )
+            LinearProgressIndicator(
+                progress = { w.usedPercent.coerceIn(0, 100) / 100f },
+                modifier = Modifier.weight(1f).height(5.dp),
+            )
+            Text(
+                "${w.usedPercent}%",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(start = 8.dp).width(36.dp),
+            )
+        }
+        if (w.resetAtUnix != null) {
+            val reset = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault()).format(Date(w.resetAtUnix * 1000))
+            Text(
+                "重置 $reset",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 56.dp + 8.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

@@ -366,7 +366,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             TopAppBar(
                 title = {
                     Column {
-                        Text(title)
+                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (isRoom) {
                             val room = vm.currentRoom!!
                             val modeLabel = when (room.mode) {
@@ -383,6 +383,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 "${modeLabel}${room.subMode?.let { " · $it" } ?: ""} | ${room.members.joinToString("  ") { "@${it.second}" }}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         if (contextUsage != null) {
@@ -390,6 +392,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 contextUsage!!.format(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         if (vm.modelCurrent.isNotBlank()) {
@@ -397,12 +401,21 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 val count = vm.currentRoom?.members?.size ?: 0
                                 "成员模型 · ${count}人"
                             } else {
-                                vm.modelCurrent
+                                val quota = vm.backendQuota
+                                val quotaText = if (quota?.available == true) {
+                                    listOfNotNull(
+                                        quota.daily?.let { "日已用 ${it.usedPercent}%" },
+                                        quota.weekly?.let { "周已用 ${it.usedPercent}%" },
+                                    ).joinToString(" · ")
+                                } else ""
+                                if (quotaText.isNotEmpty()) "${vm.modelCurrent} · $quotaText" else vm.modelCurrent
                             }
                             Text(
                                 modelLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }

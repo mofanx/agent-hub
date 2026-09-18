@@ -1781,6 +1781,74 @@
   font-weight: 500;
 }
 
+/* ---- Devin quota 卡片 ---- */
+.quota-card {
+  margin: 0.6rem 1rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.quota-card-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quota-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.quota-label {
+  flex-shrink: 0;
+  min-width: 3.4rem;
+}
+
+.quota-bar {
+  flex: 1;
+  min-width: 2rem;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.quota-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.quota-pct {
+  flex-shrink: 0;
+  min-width: 2.4rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.quota-reset {
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.68rem;
+}
+
 .model-picker-filters {
   padding: 0.35rem 1rem 0.5rem;
   border-bottom: 1px solid var(--border);

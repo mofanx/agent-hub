@@ -223,6 +223,23 @@ export interface ModelInfo {
 
 export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "custom";
 
+export interface QuotaWindow {
+  remainingPercent: number;
+  usedPercent: number;
+  resetAtUnix?: number;
+}
+
+export interface BackendQuota {
+  backend: string;
+  available: boolean;
+  planName?: string;
+  billingStrategy?: string;
+  daily?: QuotaWindow;
+  weekly?: QuotaWindow;
+  updatedAt?: number;
+  error?: string;
+}
+
 export type ElicitationValue = string | number | boolean | string[];
 
 export type ElicitationField = {

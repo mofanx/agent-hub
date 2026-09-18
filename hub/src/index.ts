@@ -27,6 +27,7 @@ import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
+import { getDevinQuota } from "./quota.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
@@ -2813,6 +2814,11 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       await Promise.all(syncTasks);
 
       return { set: true, model, syncErrors };
+    }
+    case "model.usage": {
+      const backend = String(req.params?.backend ?? "devin");
+      if (backend !== "devin") return { backend, available: false };
+      return getDevinQuota(req.params?.refresh === true);
     }
     case "model.backends.list": {
       const backends = await modelManager.listBackends();
