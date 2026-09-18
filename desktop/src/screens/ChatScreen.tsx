@@ -2953,9 +2953,22 @@ function ModelPicker() {
       <div className="model-picker" onClick={(e) => e.stopPropagation()}>
         <div className="model-picker-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span>{S.modelListTitle} · {store.modelCurrent}</span>
-          <button className="icon-btn" onClick={store.closeModelPicker} title="关闭">
-            <X size={15} />
-          </button>
+          <span style={{ display: "flex", gap: "0.25rem" }}>
+            <button
+              className="icon-btn"
+              onClick={() => {
+                if (isRoom && selectedMember) void store.refreshModelListForMember(selectedMember);
+                else void store.refreshModelList();
+                void store.refreshBackendQuota(true);
+              }}
+              title="刷新"
+            >
+              <RotateCcw size={14} />
+            </button>
+            <button className="icon-btn" onClick={store.closeModelPicker} title="关闭">
+              <X size={15} />
+            </button>
+          </span>
         </div>
         <div className="model-picker-search">
           <input

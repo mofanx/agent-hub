@@ -1144,11 +1144,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun refreshBackendQuota() {
+    fun refreshBackendQuota(force: Boolean = false) {
         viewModelScope.launch {
             if (!hub.isConnected) return@launch
             try {
-                val r = hub.call("model.usage", buildJsonObject { put("backend", "devin") })
+                val r = hub.call("model.usage", buildJsonObject {
+                    put("backend", "devin")
+                    if (force) put("refresh", true)
+                })
                 fun window(key: String): QuotaWindow? {
                     val w = r[key]?.jsonObject ?: return null
                     val remaining = w["remainingPercent"]?.jsonPrimitive?.intOrNull ?: return null
@@ -4370,6 +4373,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (idx >= 0) {
                         chatItems[idx] = (chatItems[idx] as ChatItem.Assistant).copy(usage = usage)
                     }
+                }
+                if (sessions.firstOrNull { it.sessionId == sid }?.agent == "devin") {
+                    refreshBackendQuota()
                 }
                 refreshAll()
             }

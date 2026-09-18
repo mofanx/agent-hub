@@ -126,7 +126,10 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                         style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.weight(1f),
                     )
-                    IconButton(onClick = { vm.refreshModelList() }) {
+                    IconButton(onClick = {
+                        vm.refreshModelList()
+                        vm.refreshBackendQuota(force = true)
+                    }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                     }
                 }
