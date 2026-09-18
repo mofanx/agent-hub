@@ -89,6 +89,18 @@ data class ModelInfo(
     val backend: String = "devin",
 )
 
+data class ElicitationOption(val value: String, val label: String)
+
+data class ElicitationField(
+    val name: String,
+    val label: String,
+    val type: String,
+    val required: Boolean,
+    val description: String? = null,
+    val options: List<ElicitationOption> = emptyList(),
+    val defaultValue: JsonElement? = null,
+)
+
 sealed class ChatItem {
     abstract val id: Long
     abstract val author: String
@@ -146,6 +158,17 @@ sealed class ChatItem {
         override val at: Long = 0,
     ) : ChatItem() {
         override val text: String get() = title
+    }
+    data class Elicitation(
+        override val id: Long,
+        val requestId: String,
+        val message: String,
+        val fields: List<ElicitationField>,
+        val answered: String? = null,
+        override val author: String,
+        override val at: Long = 0,
+    ) : ChatItem() {
+        override val text: String get() = message
     }
     data class Clarification(
         override val id: Long,
@@ -1185,12 +1208,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun loadModelList() {
+    fun loadModelList(initialFilter: String = "") {
         viewModelScope.launch {
             val room = currentRoom
             if (room != null) {
                 // 群聊模式：加载成员模型，默认选第一个成员
-                loadRoomMemberModels(room.roomId)
+                loadRoomMemberModels(room.roomId, initialFilter)
             } else {
                 // 单聊模式
                 try {
@@ -1205,7 +1228,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     modelList.clear()
                     val list = result["models"]?.jsonArray ?: emptyList()
                     modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
-                    modelFilter = ""
+                    modelFilter = initialFilter
                     selectedMemberSession = null
                     showModelPicker = true
                 } catch (e: Exception) {
@@ -1216,7 +1239,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun loadRoomMemberModels(roomId: String) {
+    private suspend fun loadRoomMemberModels(roomId: String, initialFilter: String = "") {
         try {
             val result = hub.call("room.memberModels", buildJsonObject { put("roomId", roomId) })
             val members = result["members"]?.jsonArray ?: emptyList()
@@ -1233,7 +1256,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val firstSid = roomMemberModels.keys.firstOrNull()
             selectedMemberSession = firstSid
             if (firstSid != null) loadModelListForMember(firstSid)
-            modelFilter = ""
+            modelFilter = initialFilter
             showModelPicker = true
         } catch (e: Exception) {
             val S = stringsFor(lang)
@@ -1353,6 +1376,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 SlashCommand("stop", S.slashHelpStop),
                 SlashCommand("bypass", S.slashHelpBypass),
                 SlashCommand("model", S.slashHelpModel),
+                SlashCommand("fusion", "/fusion - 选择 Fusion 模型"),
             )
             val skillCmds = skills.map { SlashCommand(it.name, it.description) }
             return local + skillCmds
@@ -1374,11 +1398,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (!text.startsWith("/")) return false
         val parts = text.substring(1).trim().split("""\s+""".toRegex()).filter { it.isNotBlank() }
         val command = parts.firstOrNull() ?: return false
-        val arg = parts.drop(1).firstOrNull()
+        val arg = parts.drop(1).joinToString(" ").ifBlank { null }
         when (command) {
             "help" -> showSlashHelp()
             "bypass" -> toggleBypass(arg)
             "stop" -> stopCurrent()
+            "fusion" -> loadModelList("fusion")
             "model", "models" -> handleModelSlash(arg)
             else -> return false // 不匹配本地命令，透传给 agent（可能是 agent skill）
         }
@@ -4117,6 +4142,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun answerElicitation(requestId: String, action: String, content: Map<String, JsonElement> = emptyMap()) {
+        val idx = chatItems.indexOfLast { it is ChatItem.Elicitation && it.requestId == requestId }
+        if (idx >= 0) {
+            val item = chatItems[idx] as ChatItem.Elicitation
+            val answered = when (action) {
+                "accept" -> "accepted"
+                "decline" -> "declined"
+                else -> "cancelled"
+            }
+            chatItems[idx] = item.copy(answered = answered)
+        }
+        viewModelScope.launch {
+            try {
+                hub.call("elicitation.respond", buildJsonObject {
+                    put("requestId", requestId)
+                    put("action", action)
+                    put("content", JsonObject(content))
+                })
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun answerClarification(clarificationRequestId: String, answers: Map<String, String>) {
         val idx = chatItems.indexOfLast { it is ChatItem.Clarification && it.clarificationRequestId == clarificationRequestId }
         if (idx >= 0) {
@@ -4362,6 +4410,38 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         p["requestId"]!!.jsonPrimitive.content,
                         title,
                         options,
+                        author = sessionName(sid),
+                    )
+                )
+            }
+            "elicitation.request" -> {
+                val p = obj["params"]!!.jsonObject
+                val sid = p["sessionId"]!!.jsonPrimitive.content
+                if (!inScope(sid)) return
+                if (!busyIds.contains(sid)) busyIds.add(sid)
+                val fields = p["fields"]?.jsonArray?.map { f ->
+                    val fo = f.jsonObject
+                    ElicitationField(
+                        name = fo["name"]?.jsonPrimitive?.content ?: "",
+                        label = fo["label"]?.jsonPrimitive?.content ?: "",
+                        type = fo["type"]?.jsonPrimitive?.content ?: "string",
+                        required = fo["required"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        description = fo["description"]?.jsonPrimitive?.contentOrNull,
+                        options = fo["options"]?.jsonArray?.map { o ->
+                            val oo = o.jsonObject
+                            ElicitationOption(
+                                oo["value"]?.jsonPrimitive?.content ?: "",
+                                oo["label"]?.jsonPrimitive?.content ?: "",
+                            )
+                        } ?: emptyList(),
+                        defaultValue = fo["defaultValue"],
+                    )
+                } ?: emptyList()
+                chatItems.add(
+                    ChatItem.Elicitation(++itemSeq,
+                        p["requestId"]!!.jsonPrimitive.content,
+                        p["message"]?.jsonPrimitive?.content ?: "",
+                        fields,
                         author = sessionName(sid),
                     )
                 )

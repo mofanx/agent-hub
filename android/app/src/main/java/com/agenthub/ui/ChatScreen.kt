@@ -157,6 +157,7 @@ import com.agenthub.FileTreeNode
 import com.agenthub.FileTreeRoot
 import com.agenthub.Screen
 import com.agenthub.ContextUsage
+import com.agenthub.ElicitationField
 import com.agenthub.FlowArtifact
 import com.agenthub.FlowInfo
 import com.agenthub.FlowTask
@@ -165,8 +166,13 @@ import com.agenthub.QualityCheck
 import com.agenthub.QualityFinding
 import com.agenthub.RequirementVerification
 import com.agenthub.TokenUsage
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -1645,6 +1651,175 @@ private fun RawChatBubble(
                                         shape = RoundedCornerShape(12.dp),
                                     ) { Text(name) }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        is ChatItem.Elicitation -> Column(Modifier.padding(vertical = 4.dp)) {
+            if (showAuthor) AuthorLabel(item.author)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+            val answeredColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            MessageBubbleBox(
+                copyText = item.message,
+                quote = null,
+                vm = vm,
+                itemId = item.id.toString(),
+                canSelect = false,
+                modifier = bubbleModifier.fillMaxWidth(),
+            ) {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = bgColor),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            "输入请求",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = textColor,
+                        )
+                        if (item.message.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(item.message, style = MaterialTheme.typography.bodySmall, color = textColor)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        if (item.answered != null) {
+                            Text(
+                                when (item.answered) {
+                                    "accepted" -> "已提交"
+                                    "declined" -> "已拒绝"
+                                    else -> "已取消"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = answeredColor,
+                            )
+                        } else {
+                            val values = remember(item.requestId) {
+                                mutableStateMapOf<String, JsonElement>().apply {
+                                    item.fields.forEach { f ->
+                                        val d = f.defaultValue
+                                        when {
+                                            d != null -> put(f.name, d)
+                                            f.type == "boolean" -> put(f.name, JsonPrimitive(false))
+                                            f.type == "array" -> put(f.name, JsonArray(emptyList()))
+                                            else -> put(f.name, JsonPrimitive(""))
+                                        }
+                                    }
+                                }
+                            }
+                            fun fieldSatisfied(f: ElicitationField): Boolean {
+                                val v = values[f.name] ?: return false
+                                return when (f.type) {
+                                    "boolean" -> true
+                                    "array" -> (v as? JsonArray)?.isNotEmpty() == true
+                                    "number" -> v.jsonPrimitive.content.toDoubleOrNull() != null
+                                    "integer" -> v.jsonPrimitive.content.toLongOrNull() != null
+                                    else -> v.jsonPrimitive.content.isNotBlank()
+                                }
+                            }
+                            val canSubmit = item.fields.all { !it.required || fieldSatisfied(it) }
+                            item.fields.forEach { f ->
+                                Spacer(Modifier.height(8.dp))
+                                if (f.type != "boolean") {
+                                    Text(
+                                        f.label + if (f.required) " *" else "",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = textColor,
+                                    )
+                                }
+                                if (!f.description.isNullOrBlank()) {
+                                    Text(
+                                        f.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = answeredColor,
+                                    )
+                                }
+                                when {
+                                    f.type == "boolean" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(
+                                            checked = values[f.name]?.jsonPrimitive?.booleanOrNull == true,
+                                            onCheckedChange = { values[f.name] = JsonPrimitive(it) },
+                                        )
+                                        Text(f.label, style = MaterialTheme.typography.bodySmall, color = textColor)
+                                    }
+                                    f.type == "array" && f.options.isNotEmpty() -> Column {
+                                        val selected = (values[f.name] as? JsonArray)?.map { it.jsonPrimitive.content } ?: emptyList()
+                                        f.options.forEach { o ->
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Checkbox(
+                                                    checked = selected.contains(o.value),
+                                                    onCheckedChange = { checked ->
+                                                        values[f.name] = JsonArray(
+                                                            if (checked) (selected + o.value).map { JsonPrimitive(it) }
+                                                            else selected.filter { it != o.value }.map { JsonPrimitive(it) }
+                                                        )
+                                                    },
+                                                )
+                                                Text(o.label, style = MaterialTheme.typography.bodySmall, color = textColor)
+                                            }
+                                        }
+                                    }
+                                    f.type == "array" -> OutlinedTextField(
+                                        value = (values[f.name] as? JsonArray)?.joinToString(",") { it.jsonPrimitive.content } ?: "",
+                                        onValueChange = { s ->
+                                            values[f.name] = JsonArray(s.split(",").map { it.trim() }.filter { it.isNotEmpty() }.map { JsonPrimitive(it) })
+                                        },
+                                        placeholder = { Text("逗号分隔多个值") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                    )
+                                    f.type == "number" || f.type == "integer" -> OutlinedTextField(
+                                        value = values[f.name]?.jsonPrimitive?.content ?: "",
+                                        onValueChange = { values[f.name] = JsonPrimitive(it) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                    )
+                                    f.options.isNotEmpty() -> Column(
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        f.options.forEach { o ->
+                                            FilterChip(
+                                                selected = values[f.name]?.jsonPrimitive?.contentOrNull == o.value,
+                                                onClick = { values[f.name] = JsonPrimitive(o.value) },
+                                                label = { Text(o.label) },
+                                            )
+                                        }
+                                    }
+                                    else -> OutlinedTextField(
+                                        value = values[f.name]?.jsonPrimitive?.content ?: "",
+                                        onValueChange = { values[f.name] = JsonPrimitive(it) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    enabled = canSubmit,
+                                    onClick = {
+                                        val content = mutableMapOf<String, JsonElement>()
+                                        item.fields.forEach { f ->
+                                            val v = values[f.name] ?: return@forEach
+                                            if (f.type == "integer") {
+                                                v.jsonPrimitive.content.toLongOrNull()?.let { content[f.name] = JsonPrimitive(it) }
+                                            } else if (f.type == "number") {
+                                                v.jsonPrimitive.content.toDoubleOrNull()?.let { content[f.name] = JsonPrimitive(it) }
+                                            } else if (f.type == "string" && f.options.isEmpty() && v.jsonPrimitive.content.isBlank() && !f.required) {
+                                            } else {
+                                                content[f.name] = v
+                                            }
+                                        }
+                                        vm.answerElicitation(item.requestId, "accept", content)
+                                    },
+                                ) { Text("提交") }
+                                OutlinedButton(
+                                    onClick = { vm.answerElicitation(item.requestId, "decline") },
+                                ) { Text("拒绝") }
                             }
                         }
                     }

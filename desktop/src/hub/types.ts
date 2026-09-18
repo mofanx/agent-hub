@@ -223,6 +223,18 @@ export interface ModelInfo {
 
 export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "custom";
 
+export type ElicitationValue = string | number | boolean | string[];
+
+export type ElicitationField = {
+  name: string;
+  label: string;
+  type: "string" | "number" | "integer" | "boolean" | "array";
+  required: boolean;
+  description?: string;
+  options?: { value: string; label: string }[];
+  defaultValue?: ElicitationValue;
+};
+
 export interface BackendConfig {
   id: string;
   name: string;
@@ -247,6 +259,16 @@ export type ChatItem =
       title: string;
       options: [string, string][];
       answered: string | null;
+      author: string;
+    }
+  | {
+      kind: "elicitation";
+      at?: number;
+      historyId?: number;
+      requestId: string;
+      message: string;
+      fields: ElicitationField[];
+      answered: "accepted" | "declined" | "cancelled" | null;
       author: string;
     }
   | {

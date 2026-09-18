@@ -30,6 +30,18 @@ export type PromptDoneParams = {
   usage?: TokenUsage;
 };
 
+export type ElicitationValue = string | number | boolean | string[];
+
+export type ElicitationField = {
+  name: string;
+  label: string;
+  type: "string" | "number" | "integer" | "boolean" | "array";
+  required: boolean;
+  description?: string;
+  options?: { value: string; label: string }[];
+  defaultValue?: ElicitationValue;
+};
+
 export type HubEvent =
   | { method: "session.update"; params: { sessionId: string; update: unknown } }
   | { method: "session.generating"; params: { sessionId: string; stoppable: boolean } }
@@ -39,6 +51,15 @@ export type HubEvent =
       params: PromptDoneParams;
     }
   | { method: "prompt.error"; params: { sessionId: string; message: string } }
+  | {
+      method: "elicitation.request";
+      params: {
+        requestId: string;
+        sessionId: string;
+        message: string;
+        fields: ElicitationField[];
+      };
+    }
   | {
       method: "permission.request";
       params: {
@@ -88,8 +109,80 @@ type SessionEntry = {
 };
 
 const PERMISSION_TIMEOUT_MS = 120_000;
+const ELICITATION_TIMEOUT_MS = 600_000;
 const OUTPUT_CAPTURE_LEN = 800;
 let permissionBypass = process.env.HUB_PERMISSION_BYPASS === "1";
+
+export function sliceTextFile(
+  content: string,
+  line?: number | null,
+  limit?: number | null,
+): string {
+  if (line == null && limit == null) return content;
+  const start = Math.max(1, Math.floor(line ?? 1)) - 1;
+  const lines = content.split("\n");
+  const count = limit == null ? lines.length : Math.max(0, Math.floor(limit));
+  return lines.slice(start, start + count).join("\n");
+}
+
+function enumOptions(list: unknown): { value: string; label: string }[] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const opts = list
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => ({ value: v, label: v }));
+  return opts.length ? opts : undefined;
+}
+
+function titledOptions(list: unknown): { value: string; label: string }[] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const opts: { value: string; label: string }[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.const !== "string") continue;
+    opts.push({
+      value: o.const,
+      label: typeof o.title === "string" && o.title ? o.title : o.const,
+    });
+  }
+  return opts.length ? opts : undefined;
+}
+
+export function normalizeElicitationFields(schema: acp.ElicitationSchema): ElicitationField[] {
+  const required = new Set(schema.required ?? []);
+  const fields: ElicitationField[] = [];
+  for (const [name, prop] of Object.entries(schema.properties ?? {})) {
+    const p = prop as Record<string, unknown>;
+    const type = p.type;
+    if (type !== "string" && type !== "number" && type !== "integer" && type !== "boolean" && type !== "array") continue;
+    const field: ElicitationField = {
+      name,
+      label: typeof p.title === "string" && p.title ? p.title : name,
+      type,
+      required: required.has(name),
+    };
+    if (typeof p.description === "string" && p.description) field.description = p.description;
+    if (type === "string") {
+      const opts = titledOptions(p.oneOf) ?? enumOptions(p.enum);
+      if (opts) field.options = opts;
+      if (typeof p.default === "string") field.defaultValue = p.default;
+    } else if (type === "number" || type === "integer") {
+      if (typeof p.default === "number") field.defaultValue = p.default;
+    } else if (type === "boolean") {
+      if (typeof p.default === "boolean") field.defaultValue = p.default;
+    } else {
+      const items = (p.items ?? {}) as Record<string, unknown>;
+      const opts =
+        titledOptions(items.anyOf) ?? titledOptions(items.oneOf) ?? enumOptions(items.enum);
+      if (opts) field.options = opts;
+      if (Array.isArray(p.default) && p.default.every((v) => typeof v === "string")) {
+        field.defaultValue = p.default as string[];
+      }
+    }
+    fields.push(field);
+  }
+  return fields;
+}
 
 export function createPromptDoneParams(
   sessionId: string,
@@ -149,10 +242,17 @@ export class AcpAgent {
   private ctx: acp.ClientContext | null = null;
   private sessions = new Map<string, SessionEntry>();
   private pendingPermissions = new Map<string, (optionId: string) => void>();
+  private pendingElicitations = new Map<string, (resp: acp.CreateElicitationResponse) => void>();
   private starting: Promise<void> | null = null;
   private ready = false;
   private cachedConfigOptions: unknown[] | null = null;
-  private promptOnceWaiters = new Map<string, (output: string, stopReason: string) => void>();
+  private promptOnceWaiters = new Map<
+    string,
+    {
+      resolve: (v: { output: string; stopReason: string }) => void;
+      reject: (e: Error) => void;
+    }
+  >();
 
   constructor(
     private readonly name: string,
@@ -197,6 +297,9 @@ export class AcpAgent {
       .onRequest(acp.methods.client.fs.writeTextFile, (ctx) =>
         this.handleWriteTextFile(ctx.params),
       )
+      .onRequest(acp.methods.client.elicitation.create, (ctx) =>
+        this.handleElicitation(ctx.params),
+      )
       .onNotification(acp.methods.client.session.update, (ctx) =>
         this.routeUpdate(ctx.params),
       );
@@ -215,28 +318,35 @@ export class AcpAgent {
           readTextFile: true,
           writeTextFile: true,
         },
+        session: { configOptions: { boolean: {} } },
+        elicitation: { form: {} },
       },
-      clientInfo: { name: "agent-hub", version: "0.3.0" },
+      clientInfo: { name: "agent-hub", version: "0.9.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
 
     const authMethods = init.authMethods ?? [];
     if (authMethods.length > 0) {
-      const method = authMethods[0]!;
-      const methodType = "type" in method ? method.type : "agent";
+      const method =
+        authMethods.find((c) => ((c as { type?: string }).type ?? "agent") === "agent") ??
+        authMethods[0]!;
+      const methodType: string = "type" in method ? method.type : "agent";
       if (methodType === "terminal") {
         throw new Error(`本地 Agent ${this.name} 需要终端认证，当前环境无法交互`);
       }
-      if (methodType !== "env_var") {
-        const apiKey = process.env.DEVIN_API_KEY ?? process.env.ACP_API_KEY;
-        if (apiKey || process.env.DEVIN_ACP_BROWSER) {
-          const meta = apiKey ? { api_key: apiKey } : {};
-          await this.ctx.request(acp.methods.agent.authenticate, {
-            methodId: method.id,
-            _meta: meta,
-          });
+      if (methodType === "env_var") {
+        const vars = (method as { vars?: { name: string; optional?: boolean }[] }).vars ?? [];
+        const missing = vars.filter((v) => !v.optional && !process.env[v.name]);
+        if (missing.length > 0) {
+          throw new Error(`本地 Agent ${this.name} 缺少认证环境变量: ${missing.map((v) => v.name).join(", ")}`);
         }
       }
+      this.emit({ method: "agent.status", params: { status: "authenticating", detail: method.name } });
+      const apiKey = process.env.DEVIN_API_KEY ?? process.env.ACP_API_KEY;
+      await this.ctx.request(acp.methods.agent.authenticate, {
+        methodId: method.id,
+        ...(apiKey ? { _meta: { api_key: apiKey } } : {}),
+      });
     }
 
     this.ready = true;
@@ -247,15 +357,45 @@ export class AcpAgent {
   }
 
   private onDisconnected(): void {
+    const wasReady = this.ready;
+    this.ready = false;
     this.ctx = null;
     this.conn = null;
-    if (!this.ready && this.onClose) {
+    for (const [sessionId, entry] of this.sessions) {
+      if (!entry.busy && !entry.stoppable) continue;
+      entry.busy = false;
+      entry.stoppable = false;
+      this.emit({
+        method: "session.generating",
+        params: { sessionId, stoppable: false },
+      });
+      this.emit({
+        method: "prompt.error",
+        params: {
+          sessionId,
+          message: `agent ${this.name} disconnected while generating`,
+        },
+      });
+    }
+    for (const waiter of this.promptOnceWaiters.values()) {
+      waiter.reject(new Error(`agent ${this.name} disconnected`));
+    }
+    this.promptOnceWaiters.clear();
+    for (const resolve of this.pendingElicitations.values()) {
+      resolve({ action: "cancel" });
+    }
+    this.pendingElicitations.clear();
+    for (const respond of this.pendingPermissions.values()) {
+      respond("");
+    }
+    this.pendingPermissions.clear();
+    if (!wasReady && this.onClose) {
       this.onClose();
       return;
     }
     this.emit({
       method: "agent.status",
-      params: { status: this.ready ? "exited" : "error" },
+      params: { status: wasReady ? "exited" : "error" },
     });
     this.onClose?.();
   }
@@ -269,7 +409,11 @@ export class AcpAgent {
       used?: number;
       size?: number;
       cost?: { amount: number; currency: string };
+      configOptions?: unknown[];
     };
+    if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
+      this.cachedConfigOptions = u.configOptions;
+    }
     if (u.sessionUpdate === "usage_update") {
       this.emit({
         method: "session.usage",
@@ -318,7 +462,7 @@ export class AcpAgent {
     const waiter = this.promptOnceWaiters.get(sessionId);
     if (waiter) {
       this.promptOnceWaiters.delete(sessionId);
-      waiter(fullText, stopReason);
+      waiter.resolve({ output: fullText, stopReason });
     }
     entry.turnText = "";
   }
@@ -421,6 +565,55 @@ export class AcpAgent {
     return true;
   }
 
+  private handleElicitation(
+    params: acp.CreateElicitationRequest,
+  ): Promise<acp.CreateElicitationResponse> {
+    const sessionId =
+      "sessionId" in params && typeof params.sessionId === "string"
+        ? params.sessionId
+        : undefined;
+    const schema = (params as { requestedSchema?: acp.ElicitationSchema }).requestedSchema;
+    if (params.mode !== "form" || !sessionId || !schema) {
+      return Promise.resolve({ action: "decline" });
+    }
+    const requestId = randomUUID();
+    this.emit({
+      method: "elicitation.request",
+      params: {
+        requestId,
+        sessionId,
+        message: params.message,
+        fields: normalizeElicitationFields(schema),
+      },
+    });
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingElicitations.delete(requestId);
+        resolve({ action: "cancel" });
+      }, ELICITATION_TIMEOUT_MS);
+      this.pendingElicitations.set(requestId, (resp) => {
+        clearTimeout(timer);
+        this.pendingElicitations.delete(requestId);
+        resolve(resp);
+      });
+    });
+  }
+
+  respondElicitation(
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, ElicitationValue>,
+  ): boolean {
+    const resolve = this.pendingElicitations.get(requestId);
+    if (!resolve) return false;
+    if (action === "accept") {
+      resolve({ action: "accept", content: content ?? {} });
+    } else {
+      resolve({ action });
+    }
+    return true;
+  }
+
   private resolveSessionPath(sessionId: string, filePath: string): string {
     const entry = this.sessions.get(sessionId);
     const base = entry?.cwd ?? process.cwd();
@@ -478,10 +671,15 @@ export class AcpAgent {
     }
   }
 
-  private handleReadTextFile(params: { sessionId: string; path: string }): { content: string } {
+  private handleReadTextFile(params: {
+    sessionId: string;
+    path: string;
+    line?: number | null;
+    limit?: number | null;
+  }): { content: string } {
     const target = this.resolveSessionPath(params.sessionId, params.path);
     const content = fs.readFileSync(target, "utf-8");
-    return { content };
+    return { content: sliceTextFile(content, params.line, params.limit) };
   }
 
   private handleWriteTextFile(params: {
@@ -545,11 +743,13 @@ export class AcpAgent {
   async resumeSession(sessionId: string, cwd: string, name: string): Promise<boolean> {
     await this.ensureStarted();
     try {
-      await this.ctx!.request(acp.methods.agent.session.resume, {
+      const resp = await this.ctx!.request(acp.methods.agent.session.resume, {
         sessionId,
         cwd,
         mcpServers: [],
       });
+      const opts = (resp as { configOptions?: unknown }).configOptions;
+      if (Array.isArray(opts)) this.cachedConfigOptions = opts;
     } catch {
       try {
         this.sessions.set(sessionId, {
@@ -560,11 +760,13 @@ export class AcpAgent {
           turnText: "",
           loading: true,
         });
-        await this.ctx!.request(acp.methods.agent.session.load, {
+        const resp = await this.ctx!.request(acp.methods.agent.session.load, {
           sessionId,
           cwd,
           mcpServers: [],
         });
+        const opts = (resp as { configOptions?: unknown } | undefined)?.configOptions;
+        if (Array.isArray(opts)) this.cachedConfigOptions = opts;
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
@@ -606,22 +808,24 @@ export class AcpAgent {
         );
       })
       .catch((err: unknown) => {
+        const wasActive = entry.busy || entry.stoppable;
         entry.busy = false;
         entry.stoppable = false;
-        this.emit({
-          method: "session.generating",
-          params: { sessionId, stoppable: false },
-        });
-        this.emit({
-          method: "prompt.error",
-          params: { sessionId, message: String(err) },
-        });
+        if (wasActive) {
+          this.emit({
+            method: "session.generating",
+            params: { sessionId, stoppable: false },
+          });
+          this.emit({
+            method: "prompt.error",
+            params: { sessionId, message: String(err) },
+          });
+        }
         // promptOnce 等待者在错误时也需要被 reject
         const waiter = this.promptOnceWaiters.get(sessionId);
         if (waiter) {
           this.promptOnceWaiters.delete(sessionId);
-          // 用空输出 + error stopReason 触发安全失败路径
-          waiter("", "error");
+          waiter.reject(err instanceof Error ? err : new Error(String(err)));
         }
       });
   }
@@ -636,19 +840,33 @@ export class AcpAgent {
     text: string,
     timeoutMs = 300_000,
   ): Promise<{ output: string; stopReason: string }> {
+    if (this.promptOnceWaiters.has(sessionId)) {
+      throw new Error(`promptOnce already pending for session: ${sessionId}`);
+    }
     return new Promise<{ output: string; stopReason: string }>((resolve, reject) => {
       const timer = timeoutMs > 0 ? setTimeout(() => {
         this.promptOnceWaiters.delete(sessionId);
         reject(new Error(`promptOnce timeout after ${timeoutMs}ms`));
       }, timeoutMs) : null;
-      this.promptOnceWaiters.set(sessionId, (output, stopReason) => {
-        if (timer) clearTimeout(timer);
-        resolve({ output, stopReason });
+      this.promptOnceWaiters.set(sessionId, {
+        resolve: (v) => {
+          if (timer) clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          if (timer) clearTimeout(timer);
+          reject(e);
+        },
       });
       this.promptContent(sessionId, [{ type: "text", text }]).catch((err) => {
-        if (timer) clearTimeout(timer);
-        this.promptOnceWaiters.delete(sessionId);
-        reject(err);
+        const waiter = this.promptOnceWaiters.get(sessionId);
+        if (waiter) {
+          this.promptOnceWaiters.delete(sessionId);
+          waiter.reject(err instanceof Error ? err : new Error(String(err)));
+        } else {
+          if (timer) clearTimeout(timer);
+          reject(err);
+        }
       });
     });
   }
@@ -677,7 +895,9 @@ export class AcpAgent {
       configId,
       value,
     };
-    await this.ctx!.request(acp.methods.agent.session.setConfigOption, params as never);
+    const resp = await this.ctx!.request(acp.methods.agent.session.setConfigOption, params as never);
+    const opts = (resp as { configOptions?: unknown } | undefined)?.configOptions;
+    if (Array.isArray(opts)) this.cachedConfigOptions = opts;
   }
 
   isBusy(sessionId: string): boolean {

@@ -33,7 +33,7 @@ import {
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
-import type { ArtifactInfo, BlackboardInfo, ChatItem, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, QualitySummary, QualityCheck, QualityFinding, QualityPolicyInfo, QualityPolicyV2, RequirementSpec, RequirementVerification, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, QualitySummary, QualityCheck, QualityFinding, QualityPolicyInfo, QualityPolicyV2, RequirementSpec, RequirementVerification, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { qualityStageLabel, qualityFailureLabel, actionGuide, compactQualityProgress, TERMINAL_STAGES } from "../hub/quality-labels";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
@@ -1208,6 +1208,7 @@ function getItemText(item: ChatItem): string {
   if (item.kind === "plan") return item.entries.join("\n");
   if (item.kind === "tool") return `[${item.title}] ${item.status}`;
   if (item.kind === "permission") return `审批请求: ${item.title}`;
+  if (item.kind === "elicitation") return `输入请求: ${item.message}`;
   if (item.kind === "clarification") return `需求澄清: ${item.questions.length} 个问题`;
   return "";
 }
@@ -1475,6 +1476,18 @@ function ChatMessage({
         </div>
       );
 
+    case "elicitation":
+      return (
+        <ElicitationCard
+          item={item}
+          showAuthor={showAuthor}
+          onContextMenu={onContextMenu}
+          menuEl={menuEl}
+          selectModal={selectModal}
+          currentMatchClass={currentMatchClass}
+        />
+      );
+
     case "clarification":
       return (
         <ClarificationCard
@@ -1581,6 +1594,222 @@ function ClarificationCard({
                 onClick={async () => { setSubmitting(true); try { await store.cancelClarification(item.clarificationRequestId); } finally { setSubmitting(false); } }}
               >
                 取消
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      {menuEl}
+      {selectModal}
+    </div>
+  );
+}
+
+function ElicitationCard({
+  item,
+  showAuthor,
+  onContextMenu,
+  menuEl,
+  selectModal,
+  currentMatchClass,
+}: {
+  item: Extract<ChatItem, { kind: "elicitation" }>;
+  showAuthor: boolean;
+  onContextMenu: (e: React.MouseEvent) => void;
+  menuEl: ReactNode;
+  selectModal: ReactNode;
+  currentMatchClass: string;
+}) {
+  const store = useHubStore();
+  const [values, setValues] = useState<Record<string, ElicitationValue>>(() => {
+    const init: Record<string, ElicitationValue> = {};
+    for (const f of item.fields) {
+      if (f.defaultValue !== undefined) init[f.name] = f.defaultValue;
+      else if (f.type === "boolean") init[f.name] = false;
+      else if (f.type === "array") init[f.name] = [];
+      else init[f.name] = "";
+    }
+    return init;
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const resolved = item.answered !== null;
+
+  const satisfied = (f: ElicitationField): boolean => {
+    const v = values[f.name];
+    switch (f.type) {
+      case "boolean":
+        return typeof v === "boolean";
+      case "array":
+        return Array.isArray(v) && v.length > 0;
+      case "number":
+        return v !== "" && v !== undefined && !Number.isNaN(Number(v));
+      case "integer":
+        return v !== "" && v !== undefined && Number.isInteger(Number(v));
+      default:
+        return typeof v === "string" && v.trim().length > 0;
+    }
+  };
+  const canSubmit = item.fields.every((f) => !f.required || satisfied(f));
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    padding: "4px 6px",
+    fontSize: 12,
+    borderRadius: 4,
+    border: "1px solid var(--border)",
+    background: "var(--bg, #1e1e1e)",
+    color: "var(--text)",
+  };
+
+  const setValue = (name: string, v: ElicitationValue) =>
+    setValues((prev) => ({ ...prev, [name]: v }));
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    const content: Record<string, ElicitationValue> = {};
+    for (const f of item.fields) {
+      const v = values[f.name];
+      if (v === undefined || v === "") continue;
+      if (f.type === "integer") {
+        const n = Number(v);
+        if (Number.isInteger(n)) content[f.name] = n;
+      } else if (f.type === "number") {
+        const n = Number(v);
+        if (!Number.isNaN(n)) content[f.name] = n;
+      } else {
+        content[f.name] = v;
+      }
+    }
+    setSubmitting(true);
+    try { store.answerElicitation(item.requestId, "accept", content); } finally { setSubmitting(false); }
+  };
+
+  const renderField = (f: ElicitationField) => {
+    const v = values[f.name];
+    if (f.type === "boolean") {
+      return (
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={v === true}
+            onChange={(e) => setValue(f.name, e.target.checked)}
+          />
+          {f.label}
+        </label>
+      );
+    }
+    if (f.type === "array") {
+      const selected = Array.isArray(v) ? v : [];
+      if (!f.options?.length) {
+        return (
+          <input
+            style={inputStyle}
+            value={selected.join(",")}
+            placeholder="逗号分隔多个值"
+            onChange={(e) => setValue(f.name, e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+          />
+        );
+      }
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {f.options.map((o) => (
+            <label key={o.value} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={selected.includes(o.value)}
+                onChange={(e) =>
+                  setValue(
+                    f.name,
+                    e.target.checked
+                      ? [...selected, o.value]
+                      : selected.filter((s) => s !== o.value),
+                  )
+                }
+              />
+              {o.label}
+            </label>
+          ))}
+        </div>
+      );
+    }
+    if (f.type === "number" || f.type === "integer") {
+      return (
+        <input
+          type="number"
+          step={f.type === "integer" ? 1 : "any"}
+          style={inputStyle}
+          value={typeof v === "number" ? String(v) : String(v ?? "")}
+          onChange={(e) => setValue(f.name, e.target.value)}
+        />
+      );
+    }
+    if (f.options?.length) {
+      return (
+        <select
+          style={inputStyle}
+          value={typeof v === "string" ? v : ""}
+          onChange={(e) => setValue(f.name, e.target.value)}
+        >
+          <option value="">（请选择）</option>
+          {f.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    return (
+      <input
+        style={inputStyle}
+        value={typeof v === "string" ? v : ""}
+        onChange={(e) => setValue(f.name, e.target.value)}
+      />
+    );
+  };
+
+  return (
+    <div className={`message permission ${currentMatchClass}`} onContextMenu={onContextMenu}>
+      <div className="msg-body">
+        <div className="permission-head">
+          <NotebookText size={14} />
+          {showAuthor && item.author ? `${item.author} · ` : ""}输入请求
+        </div>
+        <div className="text">{item.message}</div>
+        {resolved ? (
+          <div className="subtitle">
+            {item.answered === "accepted" ? "已提交" : item.answered === "declined" ? "已拒绝" : "已取消"}
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+              {item.fields.map((f) => (
+                <div key={f.name}>
+                  {f.type !== "boolean" && (
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>
+                      {f.label}
+                      {f.required ? " *" : ""}
+                    </div>
+                  )}
+                  {f.description && (
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>
+                      {f.description}
+                    </div>
+                  )}
+                  {renderField(f)}
+                </div>
+              ))}
+            </div>
+            <div className="permission-actions" style={{ marginTop: 8 }}>
+              <button disabled={submitting || !canSubmit} onClick={() => void submit()}>
+                {submitting ? "提交中…" : "提交"}
+              </button>
+              <button
+                className="secondary"
+                disabled={submitting}
+                onClick={() => store.answerElicitation(item.requestId, "decline")}
+              >
+                拒绝
               </button>
             </div>
           </>

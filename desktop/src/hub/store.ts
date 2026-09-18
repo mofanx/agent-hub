@@ -8,6 +8,8 @@ import type {
   ConnProfile,
   ConnectionInfo,
   ContextUsage,
+  ElicitationField,
+  ElicitationValue,
   EventInfo,
   FlowInfo,
   ModelInfo,
@@ -221,6 +223,11 @@ interface Actions {
   stopCurrent(): void;
   cancelFlow(): Promise<void>;
   answerPermission(requestId: string, optionId: string, optionName: string): void;
+  answerElicitation(
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, ElicitationValue>,
+  ): void;
 
   search(query: string): Promise<void>;
   openSearchHit(hit: SearchHit): void;
@@ -635,6 +642,30 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({ chatItems: [...get().chatItems, next] });
         ensurePermission().then(() => {
           showNotification(`审批请求 · ${get().sessionName(sid)}`, title).catch(() => {});
+        });
+        break;
+      }
+      case "elicitation.request": {
+        const sid = String(params.sessionId ?? "");
+        if (!get().inScope(sid)) return;
+        if (!get().busyIds.includes(sid)) {
+          set({ busyIds: [...get().busyIds, sid] });
+        }
+        const fields = ((params.fields as unknown[] | undefined) ?? [])
+          .map((it) => it as ElicitationField)
+          .filter((f) => f && typeof f.name === "string");
+        const next: ChatItem = {
+          kind: "elicitation",
+          at: Date.now(),
+          requestId: String(params.requestId ?? ""),
+          message: String(params.message ?? ""),
+          fields,
+          answered: null,
+          author: get().sessionName(sid),
+        };
+        set({ chatItems: [...get().chatItems, next] });
+        ensurePermission().then(() => {
+          showNotification(`输入请求 · ${get().sessionName(sid)}`, String(params.message ?? "")).catch(() => {});
         });
         break;
       }
@@ -1782,6 +1813,28 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
+    answerElicitation: (requestId, action, content) => {
+      const idx = findLastIndex(
+        get().chatItems,
+        (it) => it.kind === "elicitation" && it.requestId === requestId,
+      );
+      if (idx >= 0) {
+        const items = [...get().chatItems];
+        const p = items[idx];
+        if (p.kind === "elicitation") {
+          const answered =
+            action === "accept" ? "accepted" : action === "decline" ? "declined" : "cancelled";
+          items[idx] = { ...p, answered };
+          set({ chatItems: items });
+        }
+      }
+      getOrCall("elicitation.respond", {
+        requestId,
+        action,
+        ...(content !== undefined ? { content } : {}),
+      }).catch(() => {});
+    },
+
     search: async (query) => {
       try {
         const result = (await getOrCall("history.searchGroups", { query, limit: 20, previewLimit: 3 })) as Record<
@@ -2164,7 +2217,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         .split(/\s+/)
         .filter(Boolean);
       const command = parts[0];
-      const arg = parts[1];
+      const arg = parts.slice(1).join(" ") || undefined;
       const S = stringsFor(get().lang);
       switch (command) {
         case "help": {
@@ -2177,6 +2230,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
           return true;
         case "stop":
           get().stopCurrent();
+          return true;
+        case "fusion":
+          void get().showModelPickerDialog().then(() => set({ modelFilter: "fusion" }));
           return true;
         case "model":
         case "models": {

@@ -217,6 +217,35 @@ describe("room-modes", () => {
     assert.equal(prompts.at(-1)?.sessionId, "worker");
   });
 
+  it("auto 决策 prompt 包含避免双重编排的选择原则", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-prompt",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const prompts: { sessionId: string; content: string | unknown[] }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(autoRoom, "做个决定");
+    const decision = prompts.find((p) => p.sessionId === "host");
+    assert.ok(decision);
+    assert.ok(String(decision.content).includes("避免双重编排"));
+  });
+
   it("parallel 汇总能读取长输出开头", async () => {
     const rooms = new RoomManager();
     const parallelRoom = rooms.create(

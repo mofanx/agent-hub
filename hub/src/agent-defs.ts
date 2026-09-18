@@ -25,8 +25,17 @@ function getDeepseekDef(): AgentDef | undefined {
   return undefined;
 }
 
+function splitArgs(raw: string | undefined, fallback: string[]): string[] {
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallback;
+  return trimmed.split(/\s+/).filter(Boolean);
+}
+
 export const AGENT_DEFS: Record<string, AgentDef> = {
-  devin: { bin: process.env.DEVIN_BIN ?? "devin", args: ["acp"] },
+  devin: {
+    bin: process.env.DEVIN_BIN ?? "devin",
+    args: splitArgs(process.env.DEVIN_ACP_ARGS, ["acp"]),
+  },
   claude: {
     bin: process.env.CLAUDE_ACP_BIN ?? "npx",
     args: process.env.CLAUDE_ACP_ARGS?.split(" ") ?? [

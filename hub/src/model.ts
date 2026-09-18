@@ -181,7 +181,7 @@ export class ModelManager {
     // 返回空字符串表示"使用 agent 默认模型"，不硬编码具体模型名
     // 实际模型列表由 ACP agent 上报的 configOptions 注入
     switch (backend) {
-      case "devin": return "swe-1-7";
+      case "devin": return "swe-2-high";
       case "opencode": return "opencode/big-pickle";
       default: return "";
     }
@@ -312,8 +312,17 @@ export class ModelManager {
   }
 
   private async loadDevinModels(): Promise<ModelInfo[]> {
-    const json = await runDevinModelsList();
-    return parseModels(json);
+    try {
+      const json = await runDevinModelsList();
+      return parseModels(json);
+    } catch (err) {
+      const injected = this.injectedModels.get("devin");
+      if (injected && injected.length > 0) {
+        logError("devin models list failed, using ACP configOptions fallback", err);
+        return injected;
+      }
+      throw err;
+    }
   }
 
   private async loadClaudeModels(config?: Record<string, string>): Promise<ModelInfo[]> {
@@ -543,30 +552,46 @@ function parseOpenClawModels(stdout: string): ModelInfo[] {
   });
 }
 
-function parseConfigOptionsModels(configOptions: unknown[], backend: ModelBackend): ModelInfo[] {
+export function parseConfigOptionsModels(configOptions: unknown[], backend: ModelBackend): ModelInfo[] {
   const models: ModelInfo[] = [];
+  const seen = new Set<string>();
+  const push = (op: Record<string, unknown>, family: string) => {
+    const uid = String(op.value ?? "");
+    if (!uid || seen.has(uid)) return;
+    seen.add(uid);
+    const meta = (op._meta ?? undefined) as Record<string, unknown> | undefined;
+    const m: ModelInfo = {
+      uid,
+      label: String(op.name ?? uid),
+      family,
+      familyUid: family.toLowerCase(),
+      slug: uid,
+      aliases: [],
+      costTier: String(meta?.costTier ?? op.costTier ?? "unknown"),
+      backend,
+    };
+    if (op.description !== undefined && op.description !== null) {
+      m.costSummary = String(op.description);
+    }
+    models.push(m);
+  };
   for (const opt of configOptions) {
     if (typeof opt !== "object" || opt === null) continue;
     const o = opt as Record<string, unknown>;
-    if (o.id !== "model" || o.category !== "model") continue;
+    if (o.id !== "model" && o.category !== "model") continue;
     const options = Array.isArray(o.options) ? o.options : [];
     for (const option of options) {
       if (typeof option !== "object" || option === null) continue;
       const op = option as Record<string, unknown>;
-      const uid = String(op.value ?? "");
-      if (!uid) continue;
-      const label = String(op.name ?? uid);
-      const family = String(op.family ?? backend);
-      models.push({
-        uid,
-        label,
-        family,
-        familyUid: family.toLowerCase(),
-        slug: uid,
-        aliases: [],
-        costTier: String(op.costTier ?? "unknown"),
-        backend,
-      });
+      if (Array.isArray(op.options)) {
+        const family = String(op.name ?? backend);
+        for (const sub of op.options) {
+          if (typeof sub !== "object" || sub === null) continue;
+          push(sub as Record<string, unknown>, family);
+        }
+      } else {
+        push(op, String(op.family ?? backend));
+      }
     }
   }
   return models;

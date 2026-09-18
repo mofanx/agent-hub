@@ -14,6 +14,7 @@ import {
   promptDoneInternalOutput,
   setPermissionBypass,
   toPublicHubEvent,
+  type ElicitationValue,
   type HubEvent,
 } from "./agent.js";
 import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
@@ -52,6 +53,15 @@ import { DirtyTracker } from "./quality/dirty-tracker.js";
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
 const WORKER_PATH = "/worker";
+
+function setSessionModel(
+  agent: AcpAgent,
+  _backend: ModelBackend,
+  sessionId: string,
+  model: string,
+): Promise<void> {
+  return agent.setConfigOption(sessionId, "model", model);
+}
 
 if (TOKEN === "dev-token") {
   logWarn("config", "using default token, set HUB_TOKEN in production");
@@ -196,7 +206,7 @@ const reviewerSessionRunner: ReviewerSessionRunner = {
               await modelManager.setForSession(modelInfo.uid, sessionId).catch((err) =>
                 logWarn("review", `set session model preference failed: ${String(err)}`)
               );
-              await agent.setConfigOption(sessionId, "model", modelInfo.uid).catch((err) =>
+              await setSessionModel(agent, modelInfo.backend, sessionId, modelInfo.uid).catch((err) =>
                 logWarn("review", `set agent model failed: ${String(err)}`)
               );
               sessionMetas.set(sessionId, {
@@ -1510,7 +1520,8 @@ function onAgentEvent(event: HubEvent): void {
   let skipBroadcast =
     sessionId != null &&
     roomModeManager.isHiddenSession(sessionId) &&
-    event.method !== "permission.request";
+    event.method !== "permission.request" &&
+    event.method !== "elicitation.request";
   if (event.method === "prompt.done") {
     const { output } = event.params;
     const internalOutput = promptDoneInternalOutput(event.params);
@@ -1765,8 +1776,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           modelManager.injectConfigOptions(backend, configOptions);
         }
         const current = modelManager.current(backend, s.sessionId);
-        await agent
-          .setConfigOption(s.sessionId, "model", current.uid)
+        await setSessionModel(agent, backend, s.sessionId, current.uid)
           .catch((err) => logWarn("session.create", `sync model failed: ${String(err)}`));
       }
 
@@ -1816,9 +1826,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       // 新建 session 时同步对应后端的当前模型
       if (connection.agent) {
-        const current = modelManager.current(connection.agent as ModelBackend, s.sessionId);
-        await agent
-          .setConfigOption(s.sessionId, "model", current.uid)
+        const backend = connection.agent as ModelBackend;
+        const current = modelManager.current(backend, s.sessionId);
+        await setSessionModel(agent, backend, s.sessionId, current.uid)
           .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
       }
 
@@ -1899,9 +1909,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
         // 重建 session 时同步对应后端的当前模型
         if (connection?.agent) {
-          const current = modelManager.current(connection.agent as ModelBackend, s.sessionId);
-          await agent
-            .setConfigOption(s.sessionId, "model", current.uid)
+          const backend = connection.agent as ModelBackend;
+          const current = modelManager.current(backend, s.sessionId);
+          await setSessionModel(agent, backend, s.sessionId, current.uid)
             .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
         }
 
@@ -1926,9 +1936,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       // 恢复 session 时同步对应后端的当前模型
       if (connection?.agent) {
-        const current = modelManager.current(connection.agent as ModelBackend, sessionId);
-        agent
-          .setConfigOption(sessionId, "model", current.uid)
+        const backend = connection.agent as ModelBackend;
+        const current = modelManager.current(backend, sessionId);
+        setSessionModel(agent, backend, sessionId, current.uid)
           .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
       }
 
@@ -2704,6 +2714,22 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!ok) throw new Error("unknown or expired permission request");
       return { responded: true };
     }
+    case "elicitation.respond": {
+      const requestId = String(req.params?.requestId ?? "");
+      const action = String(req.params?.action ?? "");
+      if (action !== "accept" && action !== "decline" && action !== "cancel") {
+        throw new Error(`invalid elicitation action: ${action}`);
+      }
+      const content =
+        req.params?.content && typeof req.params.content === "object"
+          ? (req.params.content as Record<string, ElicitationValue>)
+          : undefined;
+      const ok = [...agents.values()].some((a) =>
+        a.respondElicitation(requestId, action, content),
+      );
+      if (!ok) throw new Error("unknown or expired elicitation request");
+      return { responded: true };
+    }
     case "permission.bypass": {
       const raw = req.params?.enabled;
       let enabled: boolean;
@@ -2757,7 +2783,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         }
         const syncErrors: { sessionId: string; error: string }[] = [];
         try {
-          await agent.setConfigOption(targetSessionId, "model", model.uid);
+          await setSessionModel(agent, model.backend, targetSessionId, model.uid);
           console.log(`[model] session ${targetSessionId} switched to ${model.uid}`);
         } catch (err) {
           const msg = String(err);
@@ -2777,7 +2803,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         const agent = agents.get(connectionId);
         if (!agent) continue;
         syncTasks.push(
-          agent.setConfigOption(sessionId, "model", model.uid).catch((err) => {
+          setSessionModel(agent, model.backend, sessionId, model.uid).catch((err) => {
             const msg = String(err);
             logWarn("model.set", `sync to ${sessionId} failed: ${msg}`);
             syncErrors.push({ sessionId, error: msg });

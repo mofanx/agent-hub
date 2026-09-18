@@ -133,6 +133,41 @@ describe("conductor", () => {
     assert.equal("internalOutput" in publicEvent.params, false);
   });
 
+  it("planner/worker prompt 包含 Fusion 协作边界说明", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "fusion-boundary",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "任务");
+    const planner = prompts.find((p) => p.sessionId === "conductor");
+    assert.ok(planner);
+    assert.ok(planner.content.includes("独立责任边界"));
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    const worker = prompts.find((p) => p.sessionId === "worker");
+    assert.ok(worker);
+    assert.ok(worker.content.includes("端到端责任"));
+    assert.ok(worker.content.includes("Fusion"));
+  });
+
   it("计划无法解析时通知用户而不是静默结束", async () => {
     const rooms = new RoomManager();
     const conductorRoom = rooms.create(
