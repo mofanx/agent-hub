@@ -886,7 +886,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         newName = `${baseName} (${counter})`;
       }
 
-      const s = await agent.createSession(source.cwd, newName);
+      const s = await agent.cloneSession(sourceSessionId, source.cwd, newName);
       sessionMetas.set(s.sessionId, {
         sessionId: s.sessionId,
         cwd: source.cwd,
@@ -896,26 +896,28 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         roleId: source.roleId,
       });
       owners.set(s.sessionId, connection.id);
-      persistState();
-
-      // 新建 session 时同步对应后端的当前模型
-      if (connection.agent) {
-        const backend = connection.agent as ModelBackend;
-        const current = modelManager.current(backend, s.sessionId);
-        await setSessionModel(agent, backend, s.sessionId, current.uid)
-          .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
-      }
-
-      if (source.roleId) {
-        const role = store.listRoles().find((r) => r.id === source.roleId);
-        if (role) {
-          const personaPrompt =
-            `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
-          agentOps
-            .prompt(s.sessionId, personaPrompt)
-            .catch((err) => logWarn("persona", `inject failed: ${String(err)}`));
+      if (s.contextCloned) {
+        store.copyHistory("session", sourceSessionId, s.sessionId);
+        sessionLedger.clone(sourceSessionId, s.sessionId);
+      } else {
+        if (connection.agent) {
+          const backend = connection.agent as ModelBackend;
+          const current = modelManager.current(backend, sourceSessionId);
+          await setSessionModel(agent, backend, s.sessionId, current.uid)
+            .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
+        }
+        if (source.roleId) {
+          const role = store.listRoles().find((r) => r.id === source.roleId);
+          if (role) {
+            const personaPrompt =
+              `${role.persona}\n\n（以上是角色设定，请只回复一句话确认已就绪）`;
+            agentOps
+              .prompt(s.sessionId, personaPrompt)
+              .catch((err) => logWarn("persona", `inject failed: ${String(err)}`));
+          }
         }
       }
+      persistState();
       return {
         ...s,
         agent: connection.agent,

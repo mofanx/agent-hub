@@ -362,6 +362,18 @@ export class Store {
     }
   }
 
+  copyHistory(scope: "session" | "room", sourceId: string, targetId: string): void {
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO history(scope, scope_id, at, kind, author, text) SELECT scope, ?, at, kind, author, text FROM history WHERE scope = ? AND scope_id = ? ORDER BY id",
+        )
+        .run(targetId, scope, sourceId);
+    } catch (err) {
+      logWarn("store", `copyHistory failed: ${String(err)}`);
+    }
+  }
+
   read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryItem[] {
     const rows = this.db
       .prepare(

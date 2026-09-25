@@ -167,6 +167,7 @@ async function waitFor<T>(fn: () => T | undefined, ms = 2000): Promise<T> {
 describe("AcpAgent integration (in-memory stream)", () => {
   function setup(options?: {
     authMethods?: acp.AuthMethod[];
+    agentCapabilities?: acp.AgentCapabilities;
     promptHandler?: (params: acp.PromptRequest) => Promise<acp.PromptResponse>;
   }) {
     const c2a = memPipe();
@@ -176,7 +177,9 @@ describe("AcpAgent integration (in-memory stream)", () => {
     const agentStream = acp.ndJsonStream(a2c.writable, c2a.readable);
     const authCalls: acp.AuthenticateRequest[] = [];
     const prompts: acp.PromptRequest[] = [];
+    const forkCalls: acp.ForkSessionRequest[] = [];
     const order: string[] = [];
+    let newSessionSeq = 0;
     const seenClientCapabilities: (acp.ClientCapabilities | null | undefined)[] = [];
     const agentConn = acp
       .agent()
@@ -185,7 +188,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
         seenClientCapabilities.push(params.clientCapabilities);
         return {
           protocolVersion: acp.PROTOCOL_VERSION,
-          agentCapabilities: {},
+          agentCapabilities: options?.agentCapabilities ?? {},
           ...(options?.authMethods ? { authMethods: options.authMethods } : {}),
         };
       })
@@ -195,7 +198,12 @@ describe("AcpAgent integration (in-memory stream)", () => {
       })
       .onRequest(acp.methods.agent.session.new, () => {
         order.push("session.new");
-        return { sessionId: "s1" };
+        return { sessionId: `s${++newSessionSeq}` };
+      })
+      .onRequest(acp.methods.agent.session.fork, ({ params }) => {
+        order.push("session.fork");
+        forkCalls.push(params);
+        return { sessionId: "s2" };
       })
       .onRequest(acp.methods.agent.session.prompt, ({ params }) => {
         prompts.push(params);
@@ -204,7 +212,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       .connect(agentStream);
     const events: HubEvent[] = [];
     const hub = new AcpAgent("test", clientStream, (e) => events.push(e));
-    return { agentConn, hub, events, pipes, authCalls, prompts, order, seenClientCapabilities };
+    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, order, seenClientCapabilities };
   }
 
   it("elicitation request -> Hub event -> respond -> agent 收到 accept", async () => {
@@ -383,6 +391,40 @@ describe("AcpAgent integration (in-memory stream)", () => {
       size: 200,
       cost: { amount: 0.5, currency: "USD" },
     });
+    hub.close();
+    agentConn.close();
+  });
+
+  it("cloneSession 在 agent 声明 fork capability 时使用 session/fork", async () => {
+    const { agentConn, hub, forkCalls, order } = setup({
+      agentCapabilities: {
+        sessionCapabilities: { fork: {} },
+      } as acp.AgentCapabilities,
+    });
+    await hub.createSession("/tmp", "s");
+    const cloned = await hub.cloneSession("s1", "/tmp", "副本");
+    assert.equal(forkCalls.length, 1);
+    assert.equal(forkCalls[0]!.sessionId, "s1");
+    assert.equal(forkCalls[0]!.cwd, "/tmp");
+    assert.deepEqual(forkCalls[0]!.mcpServers, []);
+    assert.equal(cloned.sessionId, "s2");
+    assert.equal(cloned.name, "副本");
+    assert.equal(cloned.contextCloned, true);
+    assert.equal(order.filter((m) => m === "session.new").length, 1);
+    hub.renameSession("s2", "副本-renamed");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("cloneSession 在 agent 不支持 fork 时降级为新建会话", async () => {
+    const { agentConn, hub, forkCalls, order } = setup();
+    await hub.createSession("/tmp", "s");
+    const cloned = await hub.cloneSession("s1", "/tmp", "副本");
+    assert.equal(forkCalls.length, 0);
+    assert.equal(order.filter((m) => m === "session.new").length, 2);
+    assert.equal(cloned.contextCloned, false);
+    assert.equal(cloned.sessionId, "s2");
+    hub.renameSession("s2", "副本-renamed");
     hub.close();
     agentConn.close();
   });

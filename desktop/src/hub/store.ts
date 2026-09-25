@@ -1347,10 +1347,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     cloneSession: async (session) => {
+      set({ connectError: null });
       try {
         const result = await getOrCall<SessionInfo>("session.clone", { sessionId: session.sessionId });
         await get().refreshAll();
-        return result;
+        const cloned = get().sessions.find((s) => s.sessionId === result.sessionId) ?? result;
+        get().openChat(cloned);
+        return cloned;
       } catch (e) {
         set({ connectError: String(e) });
         return null;

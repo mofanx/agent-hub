@@ -231,6 +231,7 @@ export class AcpAgent {
   private starting: Promise<void> | null = null;
   private ready = false;
   private cachedConfigOptions: unknown[] | null = null;
+  private supportsSessionFork = false;
   private promptOnceWaiters = new Map<
     string,
     {
@@ -308,6 +309,7 @@ export class AcpAgent {
       clientInfo: { name: "agent-hub", version: "0.9.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
+    this.supportsSessionFork = init.agentCapabilities?.sessionCapabilities?.fork != null;
 
     const authMethods = init.authMethods ?? [];
     if (authMethods.length > 0) {
@@ -343,6 +345,7 @@ export class AcpAgent {
   private onDisconnected(): void {
     const wasReady = this.ready;
     this.ready = false;
+    this.supportsSessionFork = false;
     this.ctx = null;
     this.conn = null;
     for (const [sessionId, entry] of this.sessions) {
@@ -674,6 +677,31 @@ export class AcpAgent {
       turnText: "",
     });
     return { sessionId: resp.sessionId, name: sessionName };
+  }
+
+  async cloneSession(sessionId: string, cwd: string, name: string): Promise<{ sessionId: string; name: string; contextCloned: boolean }> {
+    await this.ensureStarted();
+    if (!this.supportsSessionFork) {
+      const created = await this.createSession(cwd, name);
+      return { ...created, contextCloned: false };
+    }
+    const resp = await this.ctx!.request(acp.methods.agent.session.fork, {
+      sessionId,
+      cwd,
+      mcpServers: [],
+    });
+    if (Array.isArray(resp.configOptions)) {
+      this.cachedConfigOptions = resp.configOptions;
+    }
+    const sessionName = name.trim() || resp.sessionId;
+    this.sessions.set(resp.sessionId, {
+      cwd,
+      name: sessionName,
+      busy: false,
+      stoppable: false,
+      turnText: "",
+    });
+    return { sessionId: resp.sessionId, name: sessionName, contextCloned: true };
   }
 
   /** 返回最近一次 session.new 的 configOptions（含模型列表等） */

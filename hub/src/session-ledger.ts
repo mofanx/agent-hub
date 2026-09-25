@@ -40,6 +40,12 @@ export class SessionLedger {
     this.aliasSeqs.set(sessionId, artifacts.length);
   }
 
+  clone(sourceSessionId: string, targetSessionId: string): void {
+    const artifacts = (this.artifacts.get(sourceSessionId) ?? []).map((a) => ({ ...a }));
+    const events = (this.events.get(sourceSessionId) ?? []).map((e) => ({ ...e }));
+    this.import(targetSessionId, { artifacts, events });
+  }
+
   attachTo(sessions: SessionMeta[]): SessionMeta[] {
     return sessions.map((s) => ({
       ...s,
