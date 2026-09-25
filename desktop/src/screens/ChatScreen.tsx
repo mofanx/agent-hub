@@ -2618,6 +2618,30 @@ function ModelPicker() {
             </div>
           );
         })()}
+        {(() => {
+          const targetSid = isRoom ? selectedMember : store.currentSession?.sessionId;
+          const opts = store.sessionConfigOptions;
+          if (!targetSid || opts.length === 0) return null;
+          return (
+            <div className="model-picker-filters">
+              {opts.map((opt) => (
+                <div className="model-picker-chip-row" key={opt.id} style={{ alignItems: "center" }}>
+                  <span style={{ opacity: 0.6, fontSize: "0.8rem", marginRight: "0.25rem" }}>{opt.name}</span>
+                  {(opt.options ?? []).map((o) => (
+                    <button
+                      key={o.value}
+                      className={`model-chip ${opt.currentValue === o.value ? "active" : ""}`}
+                      title={o.description ?? o.value}
+                      onClick={() => void store.setSessionConfigOption(targetSid, opt.id, o.value)}
+                    >
+                      {o.name}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
         {(availableTiers.length > 1 || availableVendors.length > 1) && (
           <div className="model-picker-filters">
             {availableTiers.length > 1 && (

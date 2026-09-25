@@ -245,6 +245,21 @@ export interface BackendConfig {
   config?: Record<string, string>;
 }
 
+export interface SessionConfigOptionValue {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+export interface SessionConfigOption {
+  id: string;
+  name: string;
+  category?: string;
+  type?: string;
+  currentValue?: string;
+  options?: SessionConfigOptionValue[];
+}
+
 export type ChatItem =
   | { kind: "user"; at?: number; historyId?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string }
   | { kind: "system"; at?: number; historyId?: number; text: string; author: string }

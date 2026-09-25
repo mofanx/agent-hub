@@ -29,6 +29,7 @@ export type BackendConfig = {
 const HUB_CONFIG_DIR = path.join(homedir(), ".config/agent-hub");
 const HUB_MODEL_PREF_PATH = path.join(HUB_CONFIG_DIR, "model-preference.json");
 const HUB_SESSION_PREF_PATH = path.join(HUB_CONFIG_DIR, "session-model-preferences.json");
+const HUB_SESSION_CONFIG_PREF_PATH = path.join(HUB_CONFIG_DIR, "session-config-preferences.json");
 const HUB_BACKENDS_PATH = path.join(HUB_CONFIG_DIR, "backends.json");
 const ACP_MODEL_PATH = path.join(homedir(), ".config/devin/acp-model.json");
 const CONFIG_PATH = path.join(homedir(), ".config/devin/config.json");
@@ -153,6 +154,41 @@ export class ModelManager {
     return match;
   }
 
+  /** 读取某 session 保存的非模型 config 偏好（如 thought_level/mode） */
+  sessionConfig(sessionId: string): Record<string, string> {
+    return this.loadSessionConfigPreferences()[sessionId] ?? {};
+  }
+
+  /** 保存某 session 的非模型 config 偏好，resume 时重新应用 */
+  setSessionConfigForSession(sessionId: string, configId: string, value: string): void {
+    const prefs = this.loadSessionConfigPreferences();
+    prefs[sessionId] = { ...(prefs[sessionId] ?? {}), [configId]: value };
+    this.writeSessionConfigPreferences(prefs);
+  }
+
+  /** 克隆/重建会话时复制模型偏好，使新 session 恢复时继承选择 */
+  copySessionPreference(sourceId: string, targetId: string): void {
+    const source = this.loadSessionPreferences()[sourceId];
+    if (source) this.writeSessionPreference(targetId, source);
+  }
+
+  /** 克隆会话时复制配置偏好 */
+  copySessionConfig(sourceId: string, targetId: string): void {
+    const prefs = this.loadSessionConfigPreferences();
+    const source = prefs[sourceId];
+    if (!source) return;
+    prefs[targetId] = { ...source };
+    this.writeSessionConfigPreferences(prefs);
+  }
+
+  /** 删除会话时清理配置偏好 */
+  clearSessionConfig(sessionId: string): void {
+    const prefs = this.loadSessionConfigPreferences();
+    if (!(sessionId in prefs)) return;
+    delete prefs[sessionId];
+    this.writeSessionConfigPreferences(prefs);
+  }
+
   /** 强制刷新模型列表缓存 */
   async refresh(): Promise<ModelInfo[]> {
     this.all = null;
@@ -233,6 +269,25 @@ export class ModelManager {
     const prefs = this.loadSessionPreferences();
     prefs[sessionId] = model;
     writeFileSync(HUB_SESSION_PREF_PATH, JSON.stringify(prefs, null, 2));
+  }
+
+  private loadSessionConfigPreferences(): Record<string, Record<string, string>> {
+    if (existsSync(HUB_SESSION_CONFIG_PREF_PATH)) {
+      try {
+        const raw = JSON.parse(readFileSync(HUB_SESSION_CONFIG_PREF_PATH, "utf8"));
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          return raw as Record<string, Record<string, string>>;
+        }
+      } catch {
+        // fallthrough
+      }
+    }
+    return {};
+  }
+
+  private writeSessionConfigPreferences(prefs: Record<string, Record<string, string>>): void {
+    if (!existsSync(HUB_CONFIG_DIR)) mkdirSync(HUB_CONFIG_DIR, { recursive: true });
+    writeFileSync(HUB_SESSION_CONFIG_PREF_PATH, JSON.stringify(prefs, null, 2));
   }
 
   private loadBackends(): void {

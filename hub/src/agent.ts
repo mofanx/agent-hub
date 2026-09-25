@@ -231,6 +231,7 @@ export class AcpAgent {
   private starting: Promise<void> | null = null;
   private ready = false;
   private cachedConfigOptions: unknown[] | null = null;
+  private sessionConfigOptions = new Map<string, unknown[]>();
   private supportsSessionFork = false;
   private promptOnceWaiters = new Map<
     string,
@@ -348,6 +349,7 @@ export class AcpAgent {
     this.supportsSessionFork = false;
     this.ctx = null;
     this.conn = null;
+    this.sessionConfigOptions.clear();
     for (const [sessionId, entry] of this.sessions) {
       if (!entry.busy && !entry.stoppable) continue;
       entry.busy = false;
@@ -399,7 +401,7 @@ export class AcpAgent {
       configOptions?: unknown[];
     };
     if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
-      this.cachedConfigOptions = u.configOptions;
+      this.recordConfigOptions(params.sessionId, u.configOptions);
     }
     if (u.sessionUpdate === "usage_update") {
       const used = typeof u.used === "number" && Number.isFinite(u.used) && u.used >= 0 ? u.used : undefined;
@@ -656,6 +658,12 @@ export class AcpAgent {
     return {};
   }
 
+  private recordConfigOptions(sessionId: string | undefined, opts: unknown): void {
+    if (!Array.isArray(opts)) return;
+    this.cachedConfigOptions = opts;
+    if (sessionId) this.sessionConfigOptions.set(sessionId, opts);
+  }
+
   async createSession(
     cwd: string,
     name?: string,
@@ -665,9 +673,7 @@ export class AcpAgent {
       cwd,
       mcpServers: [],
     });
-    if (Array.isArray(resp.configOptions)) {
-      this.cachedConfigOptions = resp.configOptions;
-    }
+    this.recordConfigOptions(resp.sessionId, resp.configOptions);
     const sessionName = name?.trim() || resp.sessionId;
     this.sessions.set(resp.sessionId, {
       cwd,
@@ -690,9 +696,7 @@ export class AcpAgent {
       cwd,
       mcpServers: [],
     });
-    if (Array.isArray(resp.configOptions)) {
-      this.cachedConfigOptions = resp.configOptions;
-    }
+    this.recordConfigOptions(resp.sessionId, resp.configOptions);
     const sessionName = name.trim() || resp.sessionId;
     this.sessions.set(resp.sessionId, {
       cwd,
@@ -704,8 +708,12 @@ export class AcpAgent {
     return { sessionId: resp.sessionId, name: sessionName, contextCloned: true };
   }
 
-  /** 返回最近一次 session.new 的 configOptions（含模型列表等） */
-  getConfigOptions(): unknown[] | null {
+  /** 返回 configOptions（含模型/思考强度/模式列表等），优先 session 级 */
+  getConfigOptions(sessionId?: string): unknown[] | null {
+    if (sessionId) {
+      const sessionOpts = this.sessionConfigOptions.get(sessionId);
+      if (sessionOpts) return sessionOpts;
+    }
     return this.cachedConfigOptions;
   }
 
@@ -718,8 +726,7 @@ export class AcpAgent {
         cwd,
         mcpServers: [],
       });
-      const opts = (resp as { configOptions?: unknown }).configOptions;
-      if (Array.isArray(opts)) this.cachedConfigOptions = opts;
+      this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown }).configOptions);
     } catch {
       try {
         this.sessions.set(sessionId, {
@@ -735,8 +742,7 @@ export class AcpAgent {
           cwd,
           mcpServers: [],
         });
-        const opts = (resp as { configOptions?: unknown } | undefined)?.configOptions;
-        if (Array.isArray(opts)) this.cachedConfigOptions = opts;
+        this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown } | undefined)?.configOptions);
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
@@ -866,8 +872,7 @@ export class AcpAgent {
       value,
     };
     const resp = await this.ctx!.request(acp.methods.agent.session.setConfigOption, params as never);
-    const opts = (resp as { configOptions?: unknown } | undefined)?.configOptions;
-    if (Array.isArray(opts)) this.cachedConfigOptions = opts;
+    this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown } | undefined)?.configOptions);
   }
 
   isBusy(sessionId: string): boolean {
@@ -882,6 +887,7 @@ export class AcpAgent {
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.contextUsage.delete(sessionId);
+    this.sessionConfigOptions.delete(sessionId);
   }
 
   renameSession(sessionId: string, name: string): void {

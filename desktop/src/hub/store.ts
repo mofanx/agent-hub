@@ -23,6 +23,7 @@ import type {
   Screen,
   SearchGroup,
   SearchHit,
+  SessionConfigOption,
   SessionInfo,
   SkillInfo,
   SlashCommand,
@@ -89,6 +90,8 @@ interface State {
   modelCurrent: string;
   modelFilter: string;
   showModelPicker: boolean;
+  /** 当前选中会话的非模型 ACP 配置项（mode/thought_level 等） */
+  sessionConfigOptions: SessionConfigOption[];
   backendQuota: BackendQuota | null;
   editRoomTarget: RoomInfo | null;
   /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
@@ -239,6 +242,8 @@ interface Actions {
 
   showModelPickerDialog(): Promise<void>;
   refreshModelList(): Promise<void>;
+  refreshSessionConfigOptions(sessionId: string): Promise<void>;
+  setSessionConfigOption(sessionId: string, configId: string, value: string): Promise<void>;
   refreshBackendQuota(force?: boolean): Promise<void>;
   refreshRoomMemberModels(): Promise<void>;
   refreshModelListForMember(sessionId: string): Promise<void>;
@@ -759,6 +764,19 @@ export const useHubStore = create<State & Actions>((set, get) => {
     backend: (o.backend as ModelBackend | undefined) ?? "devin",
   });
 
+  // 过滤出非模型的 select 型会话配置项（mode/thought_level 等）
+  const parseSessionConfigOptions = (raw: unknown): SessionConfigOption[] =>
+    ((raw as unknown[] | undefined) ?? [])
+      .map((it) => it as SessionConfigOption)
+      .filter(
+        (o) =>
+          o &&
+          typeof o.id === "string" &&
+          o.id !== "model" &&
+          Array.isArray(o.options) &&
+          o.options.length > 0,
+      );
+
   const store: State & Actions = {
     client: null,
     profiles: [],
@@ -810,6 +828,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     modelCurrent: "",
     modelFilter: "",
     showModelPicker: false,
+    sessionConfigOptions: [],
     backendQuota: null,
     editRoomTarget: null,
     roomMemberModels: {},
@@ -986,6 +1005,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         modelCurrent: "",
         modelFilter: "",
         showModelPicker: false,
+        sessionConfigOptions: [],
         backendQuota: null,
         roomMemberModels: {},
         selectedMemberSession: null,
@@ -2295,6 +2315,26 @@ export const useHubStore = create<State & Actions>((set, get) => {
         );
         set({ modelList: list, modelCurrent: current, modelFilter: "" });
         await get().listBackends();
+        if (sessionId) void get().refreshSessionConfigOptions(sessionId);
+        else set({ sessionConfigOptions: [] });
+      } catch (e) {
+        set({ connectError: String(e) });
+      }
+    },
+
+    refreshSessionConfigOptions: async (sessionId: string) => {
+      try {
+        const result = await getOrCall<Record<string, unknown>>("session.configOptions", { sessionId });
+        set({ sessionConfigOptions: parseSessionConfigOptions(result.configOptions) });
+      } catch {
+        set({ sessionConfigOptions: [] });
+      }
+    },
+
+    setSessionConfigOption: async (sessionId: string, configId: string, value: string) => {
+      try {
+        const result = await getOrCall<Record<string, unknown>>("session.setConfigOption", { sessionId, configId, value });
+        set({ sessionConfigOptions: parseSessionConfigOptions(result.configOptions) });
       } catch (e) {
         set({ connectError: String(e) });
       }
@@ -2333,6 +2373,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           parseModelInfo({ ...(it as Record<string, unknown>), isCurrent: (it as Record<string, unknown>).uid === current }),
         );
         set({ modelList: list, modelCurrent: current, modelFilter: "" });
+        void get().refreshSessionConfigOptions(sessionId);
       } catch (e) {
         set({ connectError: String(e) });
       }

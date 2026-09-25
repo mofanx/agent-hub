@@ -44,6 +44,16 @@ function setSessionModel(
   return agent.setConfigOption(sessionId, "model", model);
 }
 
+/** resume/clone 后重新应用保存的非模型 config 偏好（thought_level/mode 等） */
+async function syncSessionConfigPrefs(agent: AcpAgent, sessionId: string): Promise<void> {
+  const prefs = modelManager.sessionConfig(sessionId);
+  for (const [configId, value] of Object.entries(prefs)) {
+    await agent
+      .setConfigOption(sessionId, configId, value)
+      .catch((err) => logWarn("session.config", `sync ${configId} failed: ${String(err)}`));
+  }
+}
+
 if (TOKEN === "dev-token") {
   logWarn("config", "using default token, set HUB_TOKEN in production");
 }
@@ -900,11 +910,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         store.copyHistory("session", sourceSessionId, s.sessionId);
         sessionLedger.clone(sourceSessionId, s.sessionId);
       } else {
+        modelManager.copySessionPreference(sourceSessionId, s.sessionId);
+        modelManager.copySessionConfig(sourceSessionId, s.sessionId);
         if (connection.agent) {
           const backend = connection.agent as ModelBackend;
           const current = modelManager.current(backend, sourceSessionId);
           await setSessionModel(agent, backend, s.sessionId, current.uid)
             .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
+          await syncSessionConfigPrefs(agent, s.sessionId);
         }
         if (source.roleId) {
           const role = store.listRoles().find((r) => r.id === source.roleId);
@@ -924,6 +937,31 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         connectionId: connection.id,
         roleId: source.roleId,
       };
+    }
+    case "session.configOptions": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (!sessionId) throw new Error("sessionId required");
+      const agent = agentForSession(sessionId);
+      if (!agent) throw new Error("agent 未连接");
+      return { sessionId, configOptions: agent.getConfigOptions(sessionId) ?? [] };
+    }
+    case "session.setConfigOption": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      const configId = String(req.params?.configId ?? "");
+      const value = req.params?.value;
+      if (!sessionId || !configId) throw new Error("sessionId and configId required");
+      if (typeof value !== "string" && typeof value !== "boolean") {
+        throw new Error("value must be string or boolean");
+      }
+      const agent = ownerOf(sessionId);
+      await agent.setConfigOption(sessionId, configId, String(value));
+      if (configId === "model") {
+        await modelManager.setForSession(String(value), sessionId)
+          .catch((err) => logWarn("session.config", `persist model pref failed: ${String(err)}`));
+      } else {
+        modelManager.setSessionConfigForSession(sessionId, configId, String(value));
+      }
+      return { set: true, configOptions: agent.getConfigOptions(sessionId) ?? [] };
     }
     case "role.list":
       return { roles: store.listRoles() };
@@ -983,12 +1021,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         // 无论是否有历史，agent 已无法恢复该 session，直接用同名/cwd 重建
         const s = await agent.createSession(meta.cwd, meta.name);
 
-        // 重建 session 时同步对应后端的当前模型
+        // 重建 session 时继承旧会话的模型与 config 偏好
+        modelManager.copySessionPreference(sessionId, s.sessionId);
+        modelManager.copySessionConfig(sessionId, s.sessionId);
         if (connection?.agent) {
           const backend = connection.agent as ModelBackend;
           const current = modelManager.current(backend, s.sessionId);
           await setSessionModel(agent, backend, s.sessionId, current.uid)
             .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
+          await syncSessionConfigPrefs(agent, s.sessionId);
         }
 
         if (hasHistory) {
@@ -1010,12 +1051,14 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       }
       owners.set(sessionId, connectionId);
 
-      // 恢复 session 时同步对应后端的当前模型
+      // 恢复 session 时同步对应后端的当前模型与 config 偏好
       if (connection?.agent) {
         const backend = connection.agent as ModelBackend;
         const current = modelManager.current(backend, sessionId);
         setSessionModel(agent, backend, sessionId, current.uid)
           .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
+        syncSessionConfigPrefs(agent, sessionId)
+          .catch((err) => logWarn("session.resume", `sync config failed: ${String(err)}`));
       }
 
       return { resumed: true };
@@ -1054,6 +1097,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       owners.delete(sessionId);
       sessionMetas.delete(sessionId);
       sessionLedger.drop(sessionId);
+      modelManager.clearSessionConfig(sessionId);
       store.deleteHistory("session", sessionId);
       const dissolved = rooms.removeMember(sessionId);
       for (const roomId of dissolved) store.deleteHistory("room", roomId);
@@ -1080,6 +1124,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         owners.delete(sessionId);
         sessionMetas.delete(sessionId);
         sessionLedger.drop(sessionId);
+        modelManager.clearSessionConfig(sessionId);
         store.deleteHistory("session", sessionId);
         dissolved.push(...rooms.removeMember(sessionId));
       }

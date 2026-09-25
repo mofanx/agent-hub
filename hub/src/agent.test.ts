@@ -178,6 +178,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
     const authCalls: acp.AuthenticateRequest[] = [];
     const prompts: acp.PromptRequest[] = [];
     const forkCalls: acp.ForkSessionRequest[] = [];
+    const setConfigCalls: { sessionId: string; configId: string; value: unknown }[] = [];
     const order: string[] = [];
     let newSessionSeq = 0;
     const seenClientCapabilities: (acp.ClientCapabilities | null | undefined)[] = [];
@@ -198,7 +199,38 @@ describe("AcpAgent integration (in-memory stream)", () => {
       })
       .onRequest(acp.methods.agent.session.new, () => {
         order.push("session.new");
-        return { sessionId: `s${++newSessionSeq}` };
+        return {
+          sessionId: `s${++newSessionSeq}`,
+          configOptions: [
+            {
+              id: "thought_level",
+              name: "Thinking",
+              type: "select",
+              currentValue: "high",
+              options: [
+                { value: "medium", name: "Medium" },
+                { value: "high", name: "High" },
+                { value: "max", name: "Max" },
+              ],
+            },
+          ],
+        };
+      })
+      .onRequest(acp.methods.agent.session.setConfigOption, ({ params }) => {
+        order.push("session.setConfigOption");
+        const p = params as { sessionId: string; configId: string; value: unknown };
+        setConfigCalls.push(p);
+        return {
+          configOptions: [
+            {
+              id: p.configId,
+              name: p.configId,
+              type: "select" as const,
+              currentValue: String(p.value),
+              options: [{ value: String(p.value), name: String(p.value) }],
+            },
+          ],
+        };
       })
       .onRequest(acp.methods.agent.session.fork, ({ params }) => {
         order.push("session.fork");
@@ -212,7 +244,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       .connect(agentStream);
     const events: HubEvent[] = [];
     const hub = new AcpAgent("test", clientStream, (e) => events.push(e));
-    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, order, seenClientCapabilities };
+    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, setConfigCalls, order, seenClientCapabilities };
   }
 
   it("elicitation request -> Hub event -> respond -> agent 收到 accept", async () => {
@@ -425,6 +457,47 @@ describe("AcpAgent integration (in-memory stream)", () => {
     assert.equal(cloned.contextCloned, false);
     assert.equal(cloned.sessionId, "s2");
     hub.renameSession("s2", "副本-renamed");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("configOptions 按 session 隔离，setConfigOption 只更新目标会话", async () => {
+    const { agentConn, hub, setConfigCalls } = setup();
+    await hub.createSession("/tmp", "a");
+    await hub.createSession("/tmp", "b");
+    const optOf = (sid: string) =>
+      (hub.getConfigOptions(sid) as { currentValue?: string }[] | null)?.[0]?.currentValue;
+    assert.equal(optOf("s1"), "high");
+    assert.equal(optOf("s2"), "high");
+
+    await hub.setConfigOption("s1", "thought_level", "max");
+    assert.equal(setConfigCalls.length, 1);
+    assert.equal(setConfigCalls[0]!.sessionId, "s1");
+    assert.equal(optOf("s1"), "max");
+    assert.equal(optOf("s2"), "high");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("config_option_update 通知更新对应 session 的 configOptions", async () => {
+    const { agentConn, hub } = setup();
+    await hub.createSession("/tmp", "a");
+    await hub.createSession("/tmp", "b");
+    await agentConn.client.notify(acp.methods.client.session.update, {
+      sessionId: "s1",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [
+          { id: "mode", name: "Session Mode", type: "select", currentValue: "plan", options: [] },
+        ],
+      },
+    });
+    await waitFor(() => {
+      const opts = hub.getConfigOptions("s1") as { id?: string }[] | null;
+      return opts?.[0]?.id === "mode" ? true : undefined;
+    });
+    const s2Opts = hub.getConfigOptions("s2") as { id?: string }[] | null;
+    assert.equal(s2Opts?.[0]?.id, "thought_level");
     hub.close();
     agentConn.close();
   });
