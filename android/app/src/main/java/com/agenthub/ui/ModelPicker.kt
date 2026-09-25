@@ -195,6 +195,49 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     }
                 }
 
+                // 会话配置项（Session Mode / Thinking 等）：群聊作用于选中成员，单聊作用于当前会话
+                val configTargetSid = if (isRoom) selectedMember else vm.currentSession?.sessionId
+                if (configTargetSid != null && vm.sessionConfigOptions.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        ),
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                            vm.sessionConfigOptions.forEach { opt ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        opt.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.width(88.dp),
+                                    )
+                                    LazyRow(Modifier.weight(1f)) {
+                                        items(opt.options, key = { it.value }) { o ->
+                                            FilterChip(
+                                                selected = opt.currentValue == o.value,
+                                                onClick = {
+                                                    vm.setSessionConfigOption(configTargetSid, opt.id, o.value)
+                                                },
+                                                label = { Text(o.name) },
+                                                modifier = Modifier.padding(end = 8.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 清空筛选按钮（单聊/群聊通用）
                 if ((if (!isRoom) selectedBackends.isNotEmpty() else false) ||
                     selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()

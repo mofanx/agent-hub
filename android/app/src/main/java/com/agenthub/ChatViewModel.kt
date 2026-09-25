@@ -24,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
@@ -60,6 +61,19 @@ data class ModelInfo(
     val costSummary: String?,
     val isCurrent: Boolean = false,
     val backend: String = "devin",
+)
+
+data class SessionConfigOptionValue(
+    val value: String,
+    val name: String,
+    val description: String? = null,
+)
+
+data class SessionConfigOption(
+    val id: String,
+    val name: String,
+    val currentValue: String,
+    val options: List<SessionConfigOptionValue>,
 )
 
 data class QuotaWindow(
@@ -582,6 +596,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val roomMemberModels = mutableStateMapOf<String, Triple<String, String, String>>()
     /** 群聊模式：当前选中的成员 sessionId */
     var selectedMemberSession by mutableStateOf<String?>(null)
+    /** 当前选中会话的非模型 ACP 配置项（mode/thought_level 等） */
+    val sessionConfigOptions = mutableStateListOf<SessionConfigOption>()
 
     init {
         prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
@@ -998,10 +1014,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     modelFilter = initialFilter
                     selectedMemberSession = null
                     showModelPicker = true
+                    if (!sid.isNullOrBlank()) loadSessionConfigOptions(sid) else sessionConfigOptions.clear()
                 } catch (e: Exception) {
                     val S = stringsFor(lang)
                     chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
                 }
+            }
+        }
+    }
+
+    fun loadSessionConfigOptions(sessionId: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("session.configOptions", buildJsonObject {
+                    put("sessionId", sessionId)
+                })
+                sessionConfigOptions.clear()
+                sessionConfigOptions.addAll(parseSessionConfigOptions(result["configOptions"]?.jsonArray))
+            } catch (_: Exception) {
+                sessionConfigOptions.clear()
+            }
+        }
+    }
+
+    fun setSessionConfigOption(sessionId: String, configId: String, value: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("session.setConfigOption", buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("configId", configId)
+                    put("value", value)
+                })
+                sessionConfigOptions.clear()
+                sessionConfigOptions.addAll(parseSessionConfigOptions(result["configOptions"]?.jsonArray))
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "set config failed"))
             }
         }
     }
@@ -1051,6 +1098,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             modelList.clear()
             val list = result["models"]?.jsonArray ?: emptyList()
             modelList.addAll(list.map { it.jsonObject.toModelInfo(current) })
+            loadSessionConfigOptions(sessionId)
         } catch (e: Exception) {
             val S = stringsFor(lang)
             chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
@@ -3625,6 +3673,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 quoteText = quoteText,
                 attachments = attachments,
                 usage = usage,
+            )
+        }
+    }
+
+    // 过滤出非模型的 select 型会话配置项（mode/thought_level 等）
+    private fun parseSessionConfigOptions(raw: JsonArray?): List<SessionConfigOption> {
+        if (raw == null) return emptyList()
+        return raw.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val id = o["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+            if (id == "model") return@mapNotNull null
+            val options = o["options"]?.jsonArray?.mapNotNull { v ->
+                val vo = v as? JsonObject ?: return@mapNotNull null
+                val value = vo["value"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                SessionConfigOptionValue(
+                    value = value,
+                    name = vo["name"]?.jsonPrimitive?.content ?: value,
+                    description = vo["description"]?.jsonPrimitive?.content,
+                )
+            } ?: return@mapNotNull null
+            if (options.isEmpty()) return@mapNotNull null
+            SessionConfigOption(
+                id = id,
+                name = o["name"]?.jsonPrimitive?.content ?: id,
+                currentValue = o["currentValue"]?.jsonPrimitive?.content ?: "",
+                options = options,
             )
         }
     }
