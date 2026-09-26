@@ -2011,3 +2011,76 @@
   background: var(--danger);
   color: var(--surface);
 }
+
+.help-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.4rem;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.help-banner svg {
+  color: var(--warn);
+  flex-shrink: 0;
+}
+
+.help-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.help-banner-hint {
+  color: var(--muted);
+  font-size: 0.68rem;
+  flex-shrink: 0;
+}
+
+.flow-badge-help {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.flow-task-help {
+  font-size: 0.72rem;
+  color: var(--warn);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.flow-task-verify {
+  border-left: 2px solid var(--info);
+  padding-left: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.flow-verdict {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.flow-supplements {
+  margin-top: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.flow-supplement {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

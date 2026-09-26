@@ -89,6 +89,12 @@ export interface FileTreeNode {
 }
 
 
+export interface FlowVerification {
+  by: string;
+  verdict: string;
+  evidence: string;
+}
+
 export interface FlowTask {
   id: string;
   sessionId: string;
@@ -100,6 +106,11 @@ export interface FlowTask {
   failureMessage?: string;
   output?: string;
   retries?: number;
+  /** 任务挂起等待求助回复：目标成员名或 "user" */
+  waitingFor?: string;
+  waitingQuestion?: string;
+  /** 其他成员对本任务的独立验证记录 */
+  verifications?: FlowVerification[];
 }
 
 export interface ArtifactInfo {
@@ -121,6 +132,8 @@ export interface FlowInfo {
   maxIterations?: number;
   progress: { done: number; running: number; pending: number; failed: number; total: number };
   tasks: FlowTask[];
+  /** 流程进行中用户补充并已并入的信息 */
+  supplements?: string[];
 }
 
 export interface RoomInfo {

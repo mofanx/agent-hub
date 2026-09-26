@@ -89,6 +89,7 @@ interface Strings {
     val copied: String
     val inputRoom: String
     val inputSingle: String
+    val inputFlowActive: String
     val send: String
     val thought: String
     val thoughtOf: String
@@ -284,6 +285,7 @@ object ZhStrings : Strings {
     override val inputRoom = "群聊消息，@名字 指定成员"
     override val inputSingle = "给 AI 下指令…"
     override val send = "发送"
+    override val inputFlowActive = "补充信息或答复求助（不打断编排，发送「取消」中断）"
     override val thought = "思考过程"
     override val thoughtOf = "%s 的思考"
     override val plan = "计划"
@@ -479,6 +481,7 @@ object EnStrings : Strings {
     override val inputSingle = "Send an instruction…"
     override val send = "Send"
     override val thought = "Thinking"
+    override val inputFlowActive = "Add info or reply (won't interrupt; send \"cancel\" to stop)"
     override val thoughtOf = "%s's thinking"
     override val plan = "Plan"
     override val permissionRequest = "Approval request"

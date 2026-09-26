@@ -317,4 +317,102 @@ describe("room-modes", () => {
       assert.match(String(prompts.at(-1)?.content), /首段关键证据/);
     }
   });
+
+  it("活跃流程中用户消息被吸收为补充而非取消编排", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "tester" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const prompts: { sessionId: string; text: string | unknown[] }[] = [];
+    const cancelled: string[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
+        isBusy: () => false,
+        cancel: async (sid) => { cancelled.push(sid); },
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(room, "/task @tester 做A");
+    assert.equal(manager.hasActiveFlow(room.roomId), true);
+
+    const res = await manager.handle(room, "补充：要兼容 Windows", {});
+    assert.deepEqual(res.sent, []);
+    assert.equal(cancelled.length, 0);
+    assert.equal(manager.hasActiveFlow(room.roomId), true);
+    const flow = manager.getFlow(room.roomId) as { supplements?: string[] };
+    assert.deepEqual(flow.supplements, ["补充：要兼容 Windows"]);
+
+    // 补充进入下一阶段：任务完成后验收 prompt 携带补充
+    await manager.onPromptDone("s2", "done");
+    const review = prompts.filter((p) => p.sessionId === "s1").at(-1);
+    assert.ok(review);
+    assert.match(String(review!.text), /兼容 Windows/);
+  });
+
+  it("活跃流程中显式取消词仍然终止编排", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "tester" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const manager = new RoomModeManager(
+      { prompt: async () => {}, isBusy: () => false, cancel: async () => {} },
+      rooms,
+      () => {},
+    );
+    await manager.handle(room, "/task @tester 做A");
+    assert.equal(manager.hasActiveFlow(room.roomId), true);
+    const res = await manager.handle(room, "取消", {});
+    assert.deepEqual(res.sent, []);
+    assert.equal(manager.hasActiveFlow(room.roomId), false);
+  });
+
+  it("成员向用户求助后，下一条用户消息作为答复唤醒原任务", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "tester" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const prompts: { sessionId: string; text: string | unknown[] }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(room, "/task @tester 起服务");
+    await manager.onPromptDone(
+      "s2",
+      '```json\n{"help":{"to":"user","question":"端口用哪个？"}}\n```',
+    );
+    const flow = manager.getFlow(room.roomId) as { tasks: { waitingFor?: string }[] };
+    assert.equal(flow.tasks[0]!.waitingFor, "user");
+
+    const res = await manager.handle(room, "用 3000", {});
+    assert.deepEqual(res.sent, ["s2"]);
+    const last = prompts.filter((p) => p.sessionId === "s2").at(-1)!;
+    assert.match(String(last.text), /3000/);
+    assert.equal(manager.hasActiveFlow(room.roomId), true);
+  });
 });

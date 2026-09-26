@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { logError } from "./logger.js";
 
@@ -21,6 +22,8 @@ type TaskArtifact = {
 type TaskResult = {
   text: string;
   artifacts: TaskArtifact[];
+  /** 对其他任务的独立验证声明（verify 字段） */
+  verifications?: { taskId: string; verdict: string; evidence: string }[];
 };
 
 type FlowPhase = "planning" | "working" | "reviewing" | "summarizing" | "awaiting-retry" | "done";
@@ -31,6 +34,32 @@ type ReviewDecision =
   | { decision: "complete"; reason: string }
   | { decision: "continue"; reason: string; tasks: ParsedTask[] };
 
+/** 其他成员对某个任务的独立验证记录 */
+export type TaskVerification = {
+  by: string;
+  verdict: string;
+  evidence: string;
+  at: number;
+};
+
+/** 任务执行中的定向求助交换：worker 提问 → 目标成员/用户回复 → 唤醒原 worker 继续 */
+type HelpExchange = {
+  id: string;
+  taskId: string;
+  from: string;
+  /** 成员 sessionId，或 "user" 表示向用户求助 */
+  to: string;
+  question: string;
+  /** 求助发起时的输出摘录，随求助一起转发给目标 */
+  context?: string;
+  answer?: string;
+  status: "pending" | "answered";
+  /** 是否已向目标成员发出求助 prompt */
+  dispatched: boolean;
+};
+
+type Supplement = { text: string; at: number };
+
 type FlowTask = {
   id: string;
   sessionId: string;
@@ -40,6 +69,12 @@ type FlowTask = {
   iteration: number;
   failureMessage?: string;
   retries?: number;
+  /** 已发起的求助轮数（上限 MAX_HELP_ROUNDS） */
+  helpRounds?: number;
+  /** 等待中的求助交换 id */
+  waitingForHelp?: string;
+  /** 其他成员对本任务的独立验证记录 */
+  verifications?: TaskVerification[];
 };
 
 type Flow = {
@@ -55,12 +90,19 @@ type Flow = {
   results: Map<string, TaskResult>;
   artifactContext?: { refs?: string[] } | undefined;
   reviewReason?: string;
+  /** 用户在流程执行中补充的信息，并入后续派发/验收/汇总 prompt */
+  supplements: Supplement[];
+  /** 任务执行中的定向求助交换 */
+  help: Map<string, HelpExchange>;
+  /** 是否已有求助派发重试定时器在跑 */
+  helpRetrying?: boolean;
 };
 
 export type ConductorNotice = { roomId: string; message: string };
 
 const PLAN_RESULT_LEN = 4000;
 const MAX_ITERATIONS = 3;
+const MAX_HELP_ROUNDS = 2;
 const DEFAULT_ACCEPTANCE_CRITERIA = ["交付结果满足用户目标，并包含必要的实现与验证证据"];
 const BUSY_RETRY_MS = 5000;
 
@@ -110,6 +152,7 @@ export class ConductorOrchestrator {
     const room = this.rooms.get(roomId);
     const tasks = [...flow.tasks.values()].map((t) => {
       const result = flow.results.get(t.id);
+      const waiting = t.waitingForHelp ? flow.help.get(t.waitingForHelp) : undefined;
       return {
         id: t.id,
         sessionId: t.sessionId,
@@ -119,6 +162,24 @@ export class ConductorOrchestrator {
         dependsOn: t.dependsOn,
         iteration: t.iteration,
         artifacts: result?.artifacts ?? [],
+        ...(waiting
+          ? {
+              waitingFor:
+                waiting.to === "user"
+                  ? "user"
+                  : room?.members.find((m) => m.sessionId === waiting.to)?.name ?? waiting.to,
+              waitingQuestion: waiting.question.slice(0, 200),
+            }
+          : {}),
+        ...(t.verifications?.length
+          ? {
+              verifications: t.verifications.map((v) => ({
+                by: room?.members.find((m) => m.sessionId === v.by)?.name ?? v.by,
+                verdict: v.verdict,
+                evidence: v.evidence.slice(0, 500),
+              })),
+            }
+          : {}),
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
         ...(t.retries !== undefined && t.retries > 0 ? { retries: t.retries } : {}),
@@ -137,6 +198,9 @@ export class ConductorOrchestrator {
       maxIterations: flow.maxIterations,
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
+      ...(flow.supplements.length > 0
+        ? { supplements: flow.supplements.map((s) => s.text.slice(0, 300)) }
+        : {}),
     };
   }
 
@@ -187,11 +251,22 @@ export class ConductorOrchestrator {
         return roomId;
       }
       if (flow.phase === "working") {
+        // 求助对象出错/中断：视为无响应，继续唤醒原任务
+        const pendingReply = [...flow.help.values()].find(
+          (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
+        );
+        if (pendingReply) {
+          pendingReply.status = "answered";
+          pendingReply.answer = "（对方出错或中断，未能提供回复）";
+          this.repromptAsker(flow, room, pendingReply);
+          return roomId;
+        }
         const running = [...flow.tasks.values()].find(
           (t) => t.sessionId === sessionId && t.status === "running",
         );
         if (running) {
           running.status = "pending";
+          delete running.waitingForHelp;
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
           this.notice({
             roomId,
@@ -238,6 +313,8 @@ export class ConductorOrchestrator {
       tasks: new Map(),
       results: new Map(),
       artifactContext,
+      supplements: [],
+      help: new Map(),
     };
   }
 
@@ -346,14 +423,37 @@ export class ConductorOrchestrator {
         }
       }
       if (flow.phase === "working") {
+        // 定向求助回复：helper 的输出被消费为答案，唤醒原任务继续
+        const reply = [...flow.help.values()].find(
+          (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
+        );
+        if (reply) {
+          reply.status = "answered";
+          reply.answer = output;
+          const toName = room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+          const fromName = room.members.find((m) => m.sessionId === reply.from)?.name ?? reply.from;
+          this.notice({
+            roomId: flow.roomId,
+            message: `@${toName} 已回复 @${fromName} 的求助（任务 ${reply.taskId}），任务继续`,
+          });
+          this.repromptAsker(flow, room, reply);
+          this.emitFlow?.(flow.roomId);
+          return flow.roomId;
+        }
         const running = [...flow.tasks.values()].find(
           (t) => t.sessionId === sessionId && t.status === "running",
         );
         if (running) {
           const name =
             room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+          // 定向求助：命中则挂起任务等待回复，而不是按结果收尾
+          const helpReq = extractHelpRequest(output);
+          if (helpReq && this.handleHelpRequest(flow, room, running, helpReq, output)) {
+            return flow.roomId;
+          }
           const result = extractTaskResult(output);
           flow.results.set(running.id, result);
+          this.recordVerifications(flow, room, sessionId, result.verifications ?? []);
           for (const a of result.artifacts) {
             this.commitArtifact(flow.roomId, a, sessionId, running.id);
           }
@@ -399,6 +499,231 @@ export class ConductorOrchestrator {
       path: a.path,
       taskId,
     });
+  }
+
+  /** 用户补充信息并入活跃流程（不取消任务）；返回 false 表示当前阶段不吸收 */
+  addSupplement(roomId: string, text: string): boolean {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase === "awaiting-retry" || flow.phase === "done") return false;
+    flow.supplements.push({ text, at: Date.now() });
+    this.emitFlow?.(roomId);
+    return true;
+  }
+
+  /** 用户消息答复指向 "user" 的求助；返回被重新唤醒的成员 sessionId 列表 */
+  answerUserHelp(roomId: string, text: string): string[] {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase !== "working") return [];
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+    const answered: string[] = [];
+    for (const e of flow.help.values()) {
+      if (e.status !== "pending" || e.to !== "user") continue;
+      e.status = "answered";
+      e.answer = text;
+      this.repromptAsker(flow, room, e);
+      answered.push(e.from);
+    }
+    if (answered.length > 0) this.emitFlow?.(roomId);
+    return answered;
+  }
+
+  /** worker 输出命中求助块：挂起任务并转达目标成员或用户；返回 false 表示按普通完成处理 */
+  private handleHelpRequest(
+    flow: Flow,
+    room: Room,
+    task: FlowTask,
+    req: { to: string; question: string },
+    output: string,
+  ): boolean {
+    const rounds = task.helpRounds ?? 0;
+    if (rounds >= MAX_HELP_ROUNDS) {
+      this.notice({
+        roomId: flow.roomId,
+        message: `@${room.members.find((m) => m.sessionId === task.sessionId)?.name ?? task.sessionId} 求助次数已达上限（${MAX_HELP_ROUNDS}），按当前输出收尾`,
+      });
+      return false;
+    }
+    const toRaw = req.to.trim();
+    const toUser = toRaw === "" || /^(user|用户|我)$/i.test(toRaw);
+    const target = toUser ? undefined : resolveMemberByString(room, toRaw);
+    if (!toUser && (!target || target.sessionId === task.sessionId)) {
+      this.notice({
+        roomId: flow.roomId,
+        message: `求助目标「${req.to}」无法解析，按当前输出继续`,
+      });
+      return false;
+    }
+    task.helpRounds = rounds + 1;
+    const exchange: HelpExchange = {
+      id: randomUUID().slice(0, 8),
+      taskId: task.id,
+      from: task.sessionId,
+      to: toUser ? "user" : target!.sessionId,
+      question: req.question,
+      context: output.trim().slice(0, 800),
+      status: "pending",
+      dispatched: false,
+    };
+    flow.help.set(exchange.id, exchange);
+    task.waitingForHelp = exchange.id;
+    const fromName = room.members.find((m) => m.sessionId === task.sessionId)?.name ?? task.sessionId;
+    if (toUser) {
+      this.notice({
+        roomId: flow.roomId,
+        message: `🆘 @${fromName} 在任务 ${task.id} 向你求助：${req.question.slice(0, 300)}（回复任意消息即可答复）`,
+      });
+      this.emitFlow?.(flow.roomId);
+      return true;
+    }
+    this.notice({
+      roomId: flow.roomId,
+      message: `🆘 @${fromName} 在任务 ${task.id} 向 @${target!.name} 求助：${req.question.slice(0, 160)}`,
+    });
+    this.dispatchPendingHelp(flow, room);
+    this.ensureHelpDispatch(flow, room);
+    this.emitFlow?.(flow.roomId);
+    return true;
+  }
+
+  /** 把可派发的成员求助送出去；目标忙碌或有自己在跑的任务时留待下次调度 */
+  private dispatchPendingHelp(flow: Flow, room: Room): void {
+    for (const e of flow.help.values()) {
+      if (e.status !== "pending" || e.dispatched) continue;
+      const task = flow.tasks.get(e.taskId);
+      if (!task || task.waitingForHelp !== e.id) {
+        // 任务已被重新调度/结束，清理陈旧求助
+        e.status = "answered";
+        e.answer = "（任务已变更，求助未送出）";
+        continue;
+      }
+      if (e.to === "user") continue;
+      // 对方自己还有未完成任务时，先等它空闲
+      const ownActive = [...flow.tasks.values()].some(
+        (t) =>
+          t.sessionId === e.to &&
+          (t.status === "pending" || (t.status === "running" && !t.waitingForHelp)),
+      );
+      if (ownActive || this.agent.isBusy(e.to)) continue;
+      e.dispatched = true;
+      const fromName = room.members.find((m) => m.sessionId === e.from)?.name ?? e.from;
+      const toName = room.members.find((m) => m.sessionId === e.to)?.name ?? e.to;
+      const body = [
+        `群聊「${room.name}」成员 @${fromName} 在执行子任务「${task.task.slice(0, 200)}」时向你求助：`,
+        "",
+        e.question,
+        ...(e.context ? ["", `相关上下文：${e.context}`] : []),
+        "",
+        "请直接给出结论与依据；这不是派工，无需执行完整任务。",
+      ].join("\n");
+      const prompt = this.rooms.buildPrompt(room.roomId, body, e.to, undefined, undefined, {
+        taskId: e.taskId,
+      });
+      this.agent.prompt(e.to, prompt).catch((err: unknown) => {
+        e.dispatched = false;
+        logError("conductor help dispatch", err);
+        this.notice({
+          roomId: flow.roomId,
+          message: `向 @${toName} 转达求助失败，稍后重试`,
+        });
+        this.ensureHelpDispatch(flow, room);
+      });
+    }
+  }
+
+  /** 存在未派发的成员求助时，启动退避重试直到派发成功或流程结束 */
+  private ensureHelpDispatch(flow: Flow, room: Room): void {
+    if (flow.helpRetrying) return;
+    const hasPending = [...flow.help.values()].some(
+      (e) => e.status === "pending" && !e.dispatched && e.to !== "user",
+    );
+    if (!hasPending) return;
+    flow.helpRetrying = true;
+    setTimeout(() => {
+      flow.helpRetrying = false;
+      const f = this.flows.get(flow.roomId);
+      if (!f || f.phase !== "working") return;
+      this.dispatchPendingHelp(f, room);
+      this.ensureHelpDispatch(f, room);
+    }, this.promptRetryMs);
+  }
+
+  /** 求助获得答复后唤醒原 worker，把答案注入并让其继续完成任务 */
+  private repromptAsker(flow: Flow, room: Room, e: HelpExchange): void {
+    const task = flow.tasks.get(e.taskId);
+    if (!task || task.status !== "running" || task.waitingForHelp !== e.id) return;
+    delete task.waitingForHelp;
+    const fromLabel =
+      e.to === "user"
+        ? "用户"
+        : `@${room.members.find((m) => m.sessionId === e.to)?.name ?? e.to}`;
+    const remaining = MAX_HELP_ROUNDS - (task.helpRounds ?? 0);
+    const taskBody = [
+      `你此前在执行子任务（id: ${task.id}）时向 ${fromLabel} 求助。`,
+      `你的问题：${e.question}`,
+      `${fromLabel} 的回复：${(e.answer ?? "（未获得回复）").slice(0, 2000)}`,
+      "",
+      `请据此继续完成子任务：${task.task}`,
+      remaining > 0
+        ? `若仍有关键阻塞可再次求助（剩余 ${remaining} 次）；否则完成任务并输出 artifact 报告 JSON。`
+        : "请基于现有信息完成任务并输出 artifact 报告 JSON。",
+    ].join("\n");
+    const prompt = this.rooms.buildPrompt(room.roomId, taskBody, task.sessionId, undefined, undefined, {
+      taskId: task.id,
+      dependsOn: task.dependsOn,
+    });
+    this.agent.prompt(task.sessionId, prompt).catch((err: unknown) => {
+      task.retries = (task.retries ?? 0) + 1;
+      const msg = String(err);
+      if (task.retries >= 3) {
+        task.status = "failed";
+        task.failureMessage = msg;
+        this.emitFlow?.(flow.roomId);
+        this.scheduleTasks(flow, room).catch((e2) =>
+          logError("conductor schedule after help fail", e2),
+        );
+        return;
+      }
+      // 恢复等待标记后重试唤醒
+      task.waitingForHelp = e.id;
+      setTimeout(() => {
+        const f = this.flows.get(flow.roomId);
+        if (f) this.repromptAsker(f, room, e);
+      }, this.promptRetryMs);
+    });
+    this.emitFlow?.(flow.roomId);
+  }
+
+  /** 把跨成员的 verify 声明记录到被验证任务上，并落一条 test 事件关联 taskId */
+  private recordVerifications(
+    flow: Flow,
+    room: Room,
+    verifierId: string,
+    verifs: { taskId: string; verdict: string; evidence: string }[],
+  ): void {
+    const verifierName =
+      room.members.find((m) => m.sessionId === verifierId)?.name ?? verifierId;
+    for (const v of verifs) {
+      const target = flow.tasks.get(v.taskId);
+      // 只记录跨成员的独立验证，自我验证走正常 artifact
+      if (!target || target.sessionId === verifierId) continue;
+      (target.verifications ??= []).push({
+        by: verifierId,
+        verdict: v.verdict,
+        evidence: v.evidence,
+        at: Date.now(),
+      });
+      this.rooms.addEvent(flow.roomId, {
+        author: verifierId,
+        action: "test",
+        summary: `验证任务 ${v.taskId}：${v.verdict}${v.evidence ? ` — ${v.evidence.slice(0, 160)}` : ""}`,
+        taskId: v.taskId,
+      });
+      this.notice({
+        roomId: flow.roomId,
+        message: `🧪 @${verifierName} 对任务 ${v.taskId} 的独立验证：${v.verdict}`,
+      });
+    }
   }
 
   private resolveMember(
@@ -550,6 +875,10 @@ export class ConductorOrchestrator {
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
     if (!this.flows.has(flow.roomId)) return;
 
+    // 先把可派发的求助送出去（目标空闲且无自己在跑的任务）
+    this.dispatchPendingHelp(flow, room);
+    this.ensureHelpDispatch(flow, room);
+
     // 依赖失败传播：任何 failed task 的下游 pending task 标记为 failed
     const failedIds = new Set<string>();
     for (const [id, t] of flow.tasks) {
@@ -644,8 +973,22 @@ export class ConductorOrchestrator {
             ]
           : []),
         `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
+        ...(flow.supplements.length > 0
+          ? [
+              "",
+              "用户在执行中补充了要求（请遵循）：",
+              ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
+            ]
+          : []),
         "",
         "你拥有该子任务的端到端责任；若当前 Agent 支持 Fusion 或内部子代理，可用于本任务内的探索、实现和验证，但不要把工作再次分派给群聊中的其他成员。",
+        "",
+        "协作约定：",
+        "- 如遇阻塞需要他人关键信息，在输出末尾附一个求助块并结束本轮，Hub 会把回复转回给你后继续；",
+        '  ```json',
+        '  {"help":{"to":"成员名/id 或 \\"user\\"（求助用户）","question":"具体问题"}}',
+        '  ```',
+        '- 若你的产出是对其他成员任务的独立验证，请在报告 JSON 中附加 verify 数组：{"verify":[{"task":"tX","verdict":"pass|fail|partial","evidence":"证据"}]}',
         "",
         "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试等）：",
         '```json',
@@ -755,9 +1098,16 @@ export class ConductorOrchestrator {
           return `    - ${parts.join(" ")}`;
         })
         .join("\n");
+      const verifs = (t.verifications ?? [])
+        .map(
+          (v) =>
+            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${v.evidence.slice(0, 300)}）` : ""}`,
+        )
+        .join("\n");
       lines.push([
         `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
+        ...(verifs ? ["  独立验证:", verifs] : []),
       ].join("\n"));
     }
     const criteria = flow.acceptanceCriteria.length > 0
@@ -773,6 +1123,13 @@ export class ConductorOrchestrator {
       "",
       `第 ${flow.iteration}/${flow.maxIterations} 轮子任务已全部完成，结果如下：`,
       ...lines,
+      ...(flow.supplements.length > 0
+        ? [
+            "",
+            "用户在执行中补充的要求（验收时请一并核查）：",
+            ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
+          ]
+        : []),
       "",
       "请对照验收标准逐条核查以上结果是否已满足目标。",
       "不要调用任何工具，只输出一个 JSON code block，二选一：",
@@ -861,9 +1218,16 @@ export class ConductorOrchestrator {
           return `    - ${parts.join(" ")}`;
         })
         .join("\n");
+      const verifs = (t.verifications ?? [])
+        .map(
+          (v) =>
+            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${v.evidence.slice(0, 300)}）` : ""}`,
+        )
+        .join("\n");
       lines.push([
         `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
+        ...(verifs ? ["  独立验证:", verifs] : []),
       ].join("\n"));
     }
     const promptLines: string[] = [
@@ -875,6 +1239,13 @@ export class ConductorOrchestrator {
         ? `你之前派发的子任务部分完成、部分失败，结果如下：`
         : `你之前派发的子任务已全部完成，结果如下：`,
       ...lines,
+      ...(flow.supplements.length > 0
+        ? [
+            "",
+            "用户在执行中补充的要求：",
+            ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
+          ]
+        : []),
       "",
     ];
     if (hasFailures) {
@@ -977,7 +1348,12 @@ export class ConductorOrchestrator {
           iteration: t.iteration,
           ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
           ...(t.retries !== undefined ? { retries: t.retries } : {}),
+          ...(t.helpRounds !== undefined ? { helpRounds: t.helpRounds } : {}),
+          ...(t.waitingForHelp !== undefined ? { waitingForHelp: t.waitingForHelp } : {}),
+          ...(t.verifications !== undefined ? { verifications: t.verifications } : {}),
         })),
+        supplements: flow.supplements,
+        help: [...flow.help.values()],
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
         ),
@@ -1015,6 +1391,12 @@ export class ConductorOrchestrator {
         tasks: new Map(),
         results: new Map(),
         artifactContext,
+        supplements: Array.isArray(f.supplements)
+          ? f.supplements
+              .map((s) => ({ text: String((s as Record<string, unknown>)?.text ?? ""), at: Number((s as Record<string, unknown>)?.at ?? 0) }))
+              .filter((s) => s.text)
+          : [],
+        help: new Map(),
         ...(typeof f.reviewReason === "string" ? { reviewReason: f.reviewReason } : {}),
       };
       for (const t of (f.tasks as unknown[]) ?? []) {
@@ -1037,7 +1419,51 @@ export class ConductorOrchestrator {
           iteration: typeof o.iteration === "number" && o.iteration > 0 ? o.iteration : 1,
           ...(typeof o.failureMessage === "string" ? { failureMessage: o.failureMessage } : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
+          ...(typeof o.helpRounds === "number" ? { helpRounds: o.helpRounds } : {}),
+          ...(Array.isArray(o.verifications)
+            ? {
+                verifications: o.verifications
+                  .map((v) => {
+                    const vo = v as Record<string, unknown>;
+                    return {
+                      by: String(vo.by ?? ""),
+                      verdict: String(vo.verdict ?? ""),
+                      evidence: String(vo.evidence ?? ""),
+                      at: Number(vo.at ?? 0),
+                    };
+                  })
+                  .filter((v) => v.by && v.verdict),
+              }
+            : {}),
         });
+      }
+      // 恢复求助交换：成员求助重新标记为未派发，等 scheduleTasks 重新送出
+      for (const rawHelp of (f.help as unknown[]) ?? []) {
+        const h = rawHelp as Record<string, unknown>;
+        const taskId = String(h.taskId ?? "");
+        const from = String(h.from ?? "");
+        const to = String(h.to ?? "");
+        const question = String(h.question ?? "");
+        if (!taskId || !from || !to || !question) continue;
+        const status = h.status === "answered" ? "answered" : "pending";
+        const id = String(h.id ?? randomUUID().slice(0, 8));
+        flow.help.set(id, {
+          id,
+          taskId,
+          from,
+          to,
+          question,
+          ...(typeof h.context === "string" ? { context: h.context } : {}),
+          ...(typeof h.answer === "string" ? { answer: h.answer } : {}),
+          status,
+          dispatched: false,
+        });
+        // 等待中的任务恢复为 running 挂起，避免被重新派发丢失求助上下文
+        const waitingTask = flow.tasks.get(taskId);
+        if (status === "pending" && waitingTask && waitingTask.status === "pending" && waitingTask.sessionId === from) {
+          waitingTask.status = "running";
+          waitingTask.waitingForHelp = id;
+        }
       }
       const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;
       if (results) {
@@ -1112,10 +1538,24 @@ function extractTaskResult(output: string): TaskResult {
           }
         }
       }
-      if (text || artifacts.length > 0) {
+      const verifications: NonNullable<TaskResult["verifications"]> = [];
+      const rawVerify = obj.verify ?? obj.verifications;
+      const vList = Array.isArray(rawVerify) ? rawVerify : rawVerify ? [rawVerify] : [];
+      for (const v of vList) {
+        const vo = v as Record<string, unknown>;
+        const taskId = String(vo.task ?? vo.taskId ?? vo.id ?? "").trim();
+        const verdict = String(vo.verdict ?? vo.result ?? "").trim() || "pass";
+        const evidence = String(vo.evidence ?? vo.summary ?? vo.detail ?? "").trim();
+        if (taskId) verifications.push({ taskId, verdict, evidence });
+      }
+      if (text || artifacts.length > 0 || verifications.length > 0) {
         // 去掉 JSON code fence 后的内容作为额外文本
         const plain = output.replace(fenceRe, "").trim().replace(/\s+/g, " ");
-        return { text: text || plain.slice(0, PLAN_RESULT_LEN), artifacts };
+        return {
+          text: text || plain.slice(0, PLAN_RESULT_LEN),
+          artifacts,
+          ...(verifications.length > 0 ? { verifications } : {}),
+        };
       }
     } catch {
       // 继续尝试下一个候选
@@ -1305,6 +1745,30 @@ export function resolveMemberByString(
   );
   if (byPrefix) return byPrefix;
   return room.members.find((m) => m.name.toLowerCase().includes(to.toLowerCase()));
+}
+
+/** 从 worker 输出中提取定向求助块：{"help":{"to":"成员|user","question":"..."}} */
+export function extractHelpRequest(
+  output: string,
+): { to: string; question: string } | undefined {
+  for (const raw of jsonCandidates(output, '"help"')) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const help =
+        typeof obj.help === "object" && obj.help !== null
+          ? (obj.help as Record<string, unknown>)
+          : obj.type === "help"
+            ? obj
+            : undefined;
+      if (!help) continue;
+      const question = String(help.question ?? help.q ?? "").trim();
+      if (!question) continue;
+      return { to: String(help.to ?? "").trim(), question };
+    } catch {
+      // 继续尝试下一个候选
+    }
+  }
+  return undefined;
 }
 
 export { parseTasks, extractTaskResult };

@@ -272,6 +272,12 @@ data class FlowArtifact(
     val summary: String = "",
 )
 
+data class FlowVerification(
+    val by: String,
+    val verdict: String,
+    val evidence: String,
+)
+
 data class ScheduledTask(
     val id: String,
     val name: String,
@@ -315,6 +321,9 @@ data class FlowTask(
     val failureMessage: String? = null,
     val output: String? = null,
     val retries: Int = 0,
+    val waitingFor: String? = null,
+    val waitingQuestion: String? = null,
+    val verifications: List<FlowVerification> = emptyList(),
 )
 
 data class FlowProgress(
@@ -334,6 +343,7 @@ data class FlowInfo(
     val acceptanceCriteria: List<String> = emptyList(),
     val iteration: Int = 0,
     val maxIterations: Int = 0,
+    val supplements: List<String> = emptyList(),
 )
 
 
@@ -2158,6 +2168,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             acceptanceCriteria = obj["acceptanceCriteria"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
             iteration = obj["iteration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             maxIterations = obj["maxIterations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            supplements = obj["supplements"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
         )
     }
 
@@ -2174,6 +2185,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             failureMessage = obj["failureMessage"]?.jsonPrimitive?.contentOrNull,
             output = obj["output"]?.jsonPrimitive?.contentOrNull,
             retries = obj["retries"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            waitingFor = obj["waitingFor"]?.jsonPrimitive?.contentOrNull,
+            waitingQuestion = obj["waitingQuestion"]?.jsonPrimitive?.contentOrNull,
+            verifications = obj["verifications"]?.jsonArray?.map { v ->
+                val vo = v.jsonObject
+                FlowVerification(
+                    by = vo["by"]?.jsonPrimitive?.content ?: "",
+                    verdict = vo["verdict"]?.jsonPrimitive?.content ?: "",
+                    evidence = vo["evidence"]?.jsonPrimitive?.content ?: "",
+                )
+            } ?: emptyList(),
         )
     }
 

@@ -36,6 +36,7 @@ export interface Strings {
   quotaWeekly: string;
   chatPlaceholder: string;
   roomPlaceholder: string;
+  roomFlowPlaceholder: string;
   searchPlaceholder: string;
   close: string;
   permissionRequestLabel: string;
@@ -83,6 +84,7 @@ const zh: Strings = {
   quotaWeekly: "周已用 %s%",
   chatPlaceholder: "给 AI 下指令…",
   roomPlaceholder: "群聊消息，@名字 指定成员",
+  roomFlowPlaceholder: "流程进行中：发送将并入为补充/答复，输入“取消”中止",
   searchPlaceholder: "搜索聊天内容…",
   close: "关闭",
   permissionRequestLabel: "审批请求",
@@ -130,6 +132,7 @@ const en: Strings = {
   quotaWeekly: "Week %s% used",
   chatPlaceholder: "Send an instruction…",
   roomPlaceholder: "Message, @name to mention",
+  roomFlowPlaceholder: "Flow running: messages join as input; send “cancel” to abort",
   searchPlaceholder: "Search chat…",
   close: "Close",
   permissionRequestLabel: "Permission request",

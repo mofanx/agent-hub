@@ -13,6 +13,7 @@ import {
   FileCode,
   FolderTree,
   ImagePlus,
+  LifeBuoy,
   ListTodo,
   Loader2,
   NotebookText,
@@ -654,6 +655,11 @@ export function ChatScreen() {
   const artifactCount = store.currentArtifacts?.length ?? 0;
   const eventCount = store.currentEvents?.length ?? 0;
   const flowCount = store.flow?.tasks?.length ?? 0;
+  const flowActive = isRoom && !!store.flow &&
+    store.flow.phase !== "done" && store.flow.phase !== "awaiting-retry";
+  const pendingUserHelp = flowActive
+    ? store.flow?.tasks.find((t) => t.waitingFor === "user")
+    : undefined;
   const blackboardCount = store.blackboard?.length ?? 0;
   const newTotal = store.newCounts.artifact + store.newCounts.event + store.newCounts.blackboard;
   const isContextPanel =
@@ -804,6 +810,20 @@ export function ChatScreen() {
           </div>
 
           <div className="compose-wrap">
+            {pendingUserHelp && (
+              <div
+                className="help-banner"
+                onClick={() => inputRef.current?.focus()}
+                title="点击输入框回复求助"
+              >
+                <LifeBuoy size={13} />
+                <span className="help-banner-text">
+                  @{pendingUserHelp.name} 在任务 {pendingUserHelp.id} 向你求助：
+                  {pendingUserHelp.waitingQuestion ?? "需要你的回复"}
+                </span>
+                <span className="help-banner-hint">回复任意消息即可答复</span>
+              </div>
+            )}
             {store.quote && (
               <div className="quote-bar">
                 <span className="subtitle">
@@ -841,7 +861,9 @@ export function ChatScreen() {
               value={input}
               onChange={(e) => setInput(e.currentTarget.value)}
               onKeyDown={onKeyDown}
-              placeholder={isRoom ? S.roomPlaceholder : S.chatPlaceholder}
+              placeholder={
+                isRoom ? (flowActive ? S.roomFlowPlaceholder : S.roomPlaceholder) : S.chatPlaceholder
+              }
             />
 
             {suggestOpen && mention && (
@@ -948,13 +970,25 @@ export function ChatScreen() {
           </div>
 
               {store.isGenerating() ? (
-                <button
-                  className="send-btn danger"
-                  onClick={store.stopCurrent}
-                  title="停止生成"
-                >
-                  <Square size={14} />
-                </button>
+                <>
+                  {flowActive && (
+                    <button
+                      className="send-btn"
+                      onClick={send}
+                      disabled={!input.trim() && !store.pendingAttachments.length}
+                      title={`发送 (${store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter"}) — 并入当前流程`}
+                    >
+                      <ArrowUp size={16} />
+                    </button>
+                  )}
+                  <button
+                    className="send-btn danger"
+                    onClick={store.stopCurrent}
+                    title="停止生成"
+                  >
+                    <Square size={14} />
+                  </button>
+                </>
               ) : (
                 <button
                   className="send-btn"
@@ -1799,11 +1833,22 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   const phaseTag = phaseLabel[phase] ?? "";
   const showRetry = phase === "awaiting-retry";
   const content = (
-    <div className="flow-tasks">
-      {tasks.map((t) => (
-        <FlowTaskItem key={t.id} task={t} showRetry={showRetry} />
-      ))}
-    </div>
+    <>
+      <div className="flow-tasks">
+        {tasks.map((t) => (
+          <FlowTaskItem key={t.id} task={t} showRetry={showRetry} />
+        ))}
+      </div>
+      {flow.supplements && flow.supplements.length > 0 && (
+        <div className="flow-supplements">
+          {flow.supplements.map((s, i) => (
+            <div key={i} className="flow-supplement" title={s}>
+              📝 补充: {s}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
   if (minimal) {
     return <div className="context-content">{content}</div>;
@@ -2344,7 +2389,13 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     ) : (
       <Circle size={11} />
     );
-  const hasDetail = task.output || task.failureMessage || task.dependsOn.length > 0 || task.retries;
+  const hasDetail =
+    task.output ||
+    task.failureMessage ||
+    task.dependsOn.length > 0 ||
+    task.retries ||
+    task.waitingQuestion ||
+    (task.verifications?.length ?? 0) > 0;
   const handleRetry = async () => {
     const client = store.client;
     const roomId = store.currentRoom?.roomId;
@@ -2364,6 +2415,14 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
           {task.retries && task.retries > 0 && (
             <span className="flow-task-badge">重试 {task.retries}</span>
           )}
+          {task.waitingFor && (
+            <span
+              className="flow-task-badge flow-badge-help"
+              title={task.waitingQuestion ?? "等待求助回复"}
+            >
+              🆘 {task.waitingFor === "user" ? "向你求助" : `求助 @${task.waitingFor}`}
+            </span>
+          )}
           {hasDetail && (
             <span className="flow-task-expand">{expanded ? "▾" : "▸"}</span>
           )}
@@ -2376,6 +2435,19 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
             {task.output && (
               <div className="flow-task-output">{task.output}</div>
             )}
+            {task.waitingQuestion && (
+              <div className="flow-task-help">
+                🆘 求助{task.waitingFor === "user" ? "你" : ` @${task.waitingFor}`}：{task.waitingQuestion}
+              </div>
+            )}
+            {task.verifications?.map((v, i) => (
+              <div key={i} className="flow-task-verify">
+                <div className="flow-task-meta">
+                  验证 @{v.by}：<span className="flow-verdict">{v.verdict}</span>
+                </div>
+                {v.evidence && <div className="flow-task-output">{v.evidence}</div>}
+              </div>
+            ))}
             {task.failureMessage && (
               <div className="flow-task-error">{task.failureMessage}</div>
             )}

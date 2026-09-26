@@ -269,6 +269,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     }
     var listBounds by remember { mutableStateOf<Rect?>(null) }
     val isRoom = vm.currentRoom != null
+    val flowAbsorbing = isRoom &&
+        vm.flow?.phase in setOf("planning", "working", "reviewing", "summarizing")
     val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.addAttachment(it) }
@@ -699,7 +701,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             ) {
                                 if (input.isEmpty()) {
                                     Text(
-                                        if (isRoom) S.inputRoom else S.inputSingle,
+                                        if (flowAbsorbing) S.inputFlowActive else if (isRoom) S.inputRoom else S.inputSingle,
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -888,6 +890,18 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     )
                 }
                 if (vm.generating) {
+                    if (flowAbsorbing && (input.isNotBlank() || vm.pendingAttachments.isNotEmpty())) {
+                        Spacer(Modifier.size(4.dp))
+                        FilledIconButton(
+                            onClick = {
+                                vm.sendRoomMessage(input.trim())
+                                input = ""
+                            },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = S.send)
+                        }
+                    }
                     Spacer(Modifier.size(4.dp))
                     FilledIconButton(
                         onClick = { vm.stopCurrent() },
@@ -1855,6 +1869,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
     }
     val showRetry = flow.phase == "awaiting-retry"
     val canCancel = flow.phase != "done" && flow.phase != "summarizing" && flow.phase != "reviewing"
+    val waitingOnUser = flow.tasks.any { it.waitingFor == "user" }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1887,6 +1902,20 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                             )
                         }
                     }
+                    if (waitingOnUser) {
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(4.dp),
+                        ) {
+                            Text(
+                                "向你求助",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
                 }
                 Text(
                     "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行" +
@@ -1908,6 +1937,22 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->
                     FlowTaskRow(task, showRetry, vm) { vm.retryTask(task.id) }
+                }
+                if (flow.supplements.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "用户补充 ${flow.supplements.size} 条",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    flow.supplements.takeLast(5).forEach { s ->
+                        Text(
+                            "· ${s.take(200)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
@@ -1932,7 +1977,8 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() || task.retries > 0
+    val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() ||
+        task.retries > 0 || task.waitingFor != null || task.verifications.isNotEmpty()
     val showRetryBtn = showRetry && task.status == "failed"
     Column(Modifier.padding(vertical = 3.dp)) {
         Row(
@@ -1963,10 +2009,37 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                 Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
             }
         }
+        task.waitingFor?.let { target ->
+            val label = if (target == "user") "你" else "@$target"
+            Text(
+                "⏳ 等待 $label 回复：${task.waitingQuestion.orEmpty().take(160)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (target == "user") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.padding(start = 20.dp, top = 2.dp),
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         if (expanded && hasDetail) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
                 if (task.dependsOn.isNotEmpty()) {
                     Text("依赖: ${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                task.verifications.forEach { v ->
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "验证 @${v.by}：${v.verdict}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    if (v.evidence.isNotBlank()) {
+                        Text(
+                            v.evidence.take(400),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 6,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 task.output?.let {
                     Spacer(Modifier.height(2.dp))

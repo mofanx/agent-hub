@@ -91,6 +91,8 @@ type ParallelFlow = {
   quote?: { author: string; text: string } | undefined;
   content?: PromptContent | undefined;
   artifactContext?: PromptOptions["artifactContext"];
+  /** 流程进行期间用户补充的信息，并入汇总 prompt */
+  extras?: string[] | undefined;
 };
 
 type PipelineFlow = {
@@ -102,6 +104,8 @@ type PipelineFlow = {
   quote?: { author: string; text: string } | undefined;
   content?: PromptContent | undefined;
   artifactContext?: PromptOptions["artifactContext"];
+  /** 流程进行期间用户补充的信息，并入后续阶段 prompt */
+  extras?: string[] | undefined;
 };
 
 type DebateOutput = {
@@ -122,7 +126,12 @@ type DebateFlow = {
   quote?: { author: string; text: string } | undefined;
   content?: PromptContent | undefined;
   artifactContext?: PromptOptions["artifactContext"];
+  /** 流程进行期间用户补充的信息，并入后续发言 prompt */
+  extras?: string[] | undefined;
 };
+
+/** 活跃流程中的显式取消指令（除此之外的新消息视为补充/答复） */
+const CANCEL_TEXT = /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i;
 
 const MODE_LABELS: Record<RuntimeMode, string> = {
   mention: "点名应答",
@@ -273,6 +282,7 @@ export class RoomModeManager {
       phase: running > 0 ? "working" : done === tasks.length ? "summarizing" : "working",
       progress: { done, running, pending, failed: 0, total: tasks.length },
       tasks,
+      ...(flow.extras?.length ? { supplements: flow.extras } : {}),
     };
   }
 
@@ -301,6 +311,7 @@ export class RoomModeManager {
       phase: flow.stage >= flow.order.length ? "summarizing" : "working",
       progress: { done, running, pending, failed: 0, total: tasks.length },
       tasks,
+      ...(flow.extras?.length ? { supplements: flow.extras } : {}),
     };
   }
 
@@ -345,6 +356,7 @@ export class RoomModeManager {
       phase: completed >= total ? "summarizing" : "working",
       progress: { done, running, pending, failed: 0, total: tasks.length },
       tasks,
+      ...(flow.extras?.length ? { supplements: flow.extras } : {}),
     };
   }
 
@@ -397,14 +409,71 @@ export class RoomModeManager {
     this.emitFlowUpdate(roomId);
   }
 
+  /**
+   * 活跃流程中的新消息优先被吸收：先答复指向用户的求助，
+   * 否则作为补充信息并入当前流程。返回被重新唤醒/通知的 sessionId，
+   * 返回 undefined 表示当前阶段不吸收（如 awaiting-retry，走旧的取消-重来语义）。
+   */
+  private absorbActiveMessage(room: Room, text: string): string[] | undefined {
+    const roomId = room.roomId;
+
+    // 1. 指向用户的定向求助待答复：本条消息作为答案直接唤醒原任务
+    const helped = this.conductor.answerUserHelp(roomId, text);
+    if (helped.length > 0) {
+      this.notice({
+        roomId,
+        message: `已将你的回复转达给 ${helped.map((sid) => `@${this.nameFor(roomId, sid)}`).join("、")}，任务继续`,
+      });
+      return helped;
+    }
+
+    // 2. conductor 流程：并入 supplements，注入后续派发/验收/汇总
+    if (this.conductor.addSupplement(roomId, text)) {
+      this.notice({
+        roomId,
+        message: `📝 已并入当前流程的补充：${text.slice(0, 80)}（如需中止请发送 /stop 或“取消”）`,
+      });
+      return [];
+    }
+
+    // 3. 其他编排模式：作为 extras 注入后续 prompt
+    const pFlow = this.parallelFlows.get(roomId);
+    if (pFlow) {
+      (pFlow.extras ??= []).push(text);
+      this.notice({ roomId, message: `📝 补充信息已记录，将在汇总时纳入：${text.slice(0, 80)}` });
+      return [];
+    }
+    const pipe = this.pipelineFlows.get(roomId);
+    if (pipe) {
+      (pipe.extras ??= []).push(text);
+      this.notice({ roomId, message: `📝 补充信息已记录，将在后续阶段纳入：${text.slice(0, 80)}` });
+      return [];
+    }
+    const debate = this.debateFlows.get(roomId);
+    if (debate) {
+      (debate.extras ??= []).push(text);
+      this.notice({ roomId, message: `📝 补充信息已记录，将在后续发言中纳入：${text.slice(0, 80)}` });
+      return [];
+    }
+
+    // 4. auto 决策进行中：并入决策上下文
+    const host = this.hostFor(roomId);
+    const autoCtx = this.autoDecisions.get(host);
+    if (autoCtx && autoCtx.roomId === roomId) {
+      autoCtx.note = autoCtx.note ? `${autoCtx.note}\n\n用户补充：${text}` : `用户补充：${text}`;
+      this.notice({ roomId, message: `📝 补充信息已并入本轮决策：${text.slice(0, 80)}` });
+      return [];
+    }
+
+    return undefined;
+  }
+
   /** 处理一条新的房间消息 */
   async handle(
     room: Room,
     text: string,
     options?: PromptOptions,
   ): Promise<ModeResult> {
-    await this.cancelActive(room.roomId, "收到新消息，当前流程已取消");
-
     const last = this.lastAuto.get(room.roomId);
     if (last) {
       this.lastAuto.delete(room.roomId);
@@ -419,6 +488,21 @@ export class RoomModeManager {
       ? { ...(options?.artifactContext ?? {}), refs: [...new Set([...(options?.artifactContext?.refs ?? []), ...refs])] }
       : options?.artifactContext;
     const mergedOptions: PromptOptions = { ...options, artifactContext };
+
+    // 活跃流程中的新消息默认视为补充/答复，不再取消编排；显式取消词或 /stop 除外
+    if (this.hasActiveFlow(room.roomId)) {
+      if (CANCEL_TEXT.test(text.trim())) {
+        await this.cancelActive(room.roomId, "用户取消当前流程");
+        this.emitFlowUpdate(room.roomId);
+        return { sent: [], mentioned: [], skipped: [] };
+      }
+      const absorbed = this.absorbActiveMessage(room, text);
+      if (absorbed) {
+        this.emitFlowUpdate(room.roomId);
+        return { sent: absorbed, mentioned: [], skipped: [] };
+      }
+      await this.cancelActive(room.roomId, "收到新消息，当前流程已取消");
+    }
 
     if (room.mode === "auto") {
       const result = await this.handleAuto(room, text, mergedOptions);
@@ -919,7 +1003,10 @@ export class RoomModeManager {
     const lines = [...flow.results.entries()].map(([sid, out]) => {
       return `- @${this.nameFor(roomId, sid)}: ${out.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
-    const promptText = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
+    const extrasText = flow.extras?.length
+      ? `\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`
+      : "";
+    const promptText = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}${extrasText}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
     const prompt = this.buildPromptContent(room, promptText, flow.summarizer, { artifactContext: flow.artifactContext });
     this.parallelFlows.delete(roomId);
     this.notice({ roomId, message: "并行回答完成，汇总者正在整理…" });
@@ -1008,6 +1095,9 @@ export class RoomModeManager {
     if (prevName && prevOutput !== undefined) {
       quote = { author: prevName, text: prevOutput };
       task = `请继续下一阶段处理原始任务：${task}`;
+    }
+    if (flow.extras?.length) {
+      task = `${task}\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`;
     }
     return this.buildPromptContent(room, task, flow.order[stage]!, { quote, content: flow.content, artifactContext: flow.artifactContext });
   }
@@ -1131,6 +1221,9 @@ export class RoomModeManager {
     }。`;
     let task = `${text}\n\n辩题：${flow.topic}`;
     if (flow.note) task = `${flow.note}\n\n${task}`;
+    if (flow.extras?.length) {
+      task = `${task}\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`;
+    }
     return this.buildPromptContent(room, task, flow.sides[sideIndex]!, { quote, content: flow.content, artifactContext: flow.artifactContext });
   }
 
@@ -1139,7 +1232,10 @@ export class RoomModeManager {
       const side = o.side === 0 ? "正方" : "反方";
       return `- 第 ${o.round} 轮 ${side}：${o.text.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
-    const text = `你是辩论裁判。辩题：${flow.topic}\n\n辩论记录：\n${lines.join("\n")}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
+    const extrasText = flow.extras?.length
+      ? `\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`
+      : "";
+    const text = `你是辩论裁判。辩题：${flow.topic}\n\n辩论记录：\n${lines.join("\n")}${extrasText}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
     return this.buildPromptContent(room, text, flow.judge, { artifactContext: flow.artifactContext });
   }
 
