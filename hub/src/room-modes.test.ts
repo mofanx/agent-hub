@@ -161,7 +161,12 @@ describe("room-modes", () => {
     assert.equal(lastFlow()?.phase, "working");
 
     await manager.onPromptDone("s2", "完成了");
+    assert.equal(lastFlow()?.phase, "reviewing");
+    assert.equal(manager.isHiddenSession("s1"), true);
+
+    await manager.onPromptDone("s1", '```json\n{"decision":"complete","reason":"达标"}\n```');
     assert.equal(lastFlow()?.phase, "summarizing");
+    assert.equal(manager.isHiddenSession("s1"), false);
 
     await manager.onPromptDone("s1", "最终总结");
     assert.equal(lastFlow(), undefined);

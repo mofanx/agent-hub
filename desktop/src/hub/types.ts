@@ -115,6 +115,10 @@ export interface ArtifactInfo {
 export interface FlowInfo {
   roomId: string;
   phase: string;
+  goal?: string;
+  acceptanceCriteria?: string[];
+  iteration?: number;
+  maxIterations?: number;
   progress: { done: number; running: number; pending: number; failed: number; total: number };
   tasks: FlowTask[];
 }

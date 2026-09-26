@@ -23,29 +23,45 @@ type TaskResult = {
   artifacts: TaskArtifact[];
 };
 
+type FlowPhase = "planning" | "working" | "reviewing" | "summarizing" | "awaiting-retry" | "done";
+
+type ParsedTask = { id?: string; to: string; task: string; dependsOn?: string[] };
+type ConductorPlan = { goal?: string | undefined; acceptanceCriteria: string[]; tasks: ParsedTask[] };
+type ReviewDecision =
+  | { decision: "complete"; reason: string }
+  | { decision: "continue"; reason: string; tasks: ParsedTask[] };
+
 type FlowTask = {
   id: string;
   sessionId: string;
   task: string;
   dependsOn: string[];
   status: "pending" | "running" | "done" | "failed";
+  iteration: number;
   failureMessage?: string;
   retries?: number;
 };
 
 type Flow = {
   roomId: string;
-  phase: "planning" | "working" | "summarizing" | "awaiting-retry" | "done";
+  phase: FlowPhase;
+  goal: string;
+  acceptanceCriteria: string[];
+  iteration: number;
+  maxIterations: number;
   /** 任务以 taskId 为 key */
   tasks: Map<string, FlowTask>;
   /** 结果以 taskId 为 key */
   results: Map<string, TaskResult>;
   artifactContext?: { refs?: string[] } | undefined;
+  reviewReason?: string;
 };
 
 export type ConductorNotice = { roomId: string; message: string };
 
 const PLAN_RESULT_LEN = 4000;
+const MAX_ITERATIONS = 3;
+const DEFAULT_ACCEPTANCE_CRITERIA = ["交付结果满足用户目标，并包含必要的实现与验证证据"];
 const BUSY_RETRY_MS = 5000;
 
 const PROMPT_RETRY_MS = 5000;
@@ -101,6 +117,7 @@ export class ConductorOrchestrator {
         status: t.status,
         task: t.task,
         dependsOn: t.dependsOn,
+        iteration: t.iteration,
         artifacts: result?.artifacts ?? [],
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
@@ -114,6 +131,10 @@ export class ConductorOrchestrator {
     return {
       roomId: flow.roomId,
       phase: flow.phase,
+      goal: flow.goal,
+      acceptanceCriteria: flow.acceptanceCriteria,
+      iteration: flow.iteration,
+      maxIterations: flow.maxIterations,
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
     };
@@ -197,11 +218,27 @@ export class ConductorOrchestrator {
 
   private buildExample(room: Room): string {
     const others = room.members.filter((m) => m.sessionId !== room.conductorId);
-    if (others.length === 0) return '{"tasks":[]}';
+    if (others.length === 0) {
+      return '{"goal":"用一句话重述最终目标","acceptanceCriteria":["可验证标准1"],"tasks":[]}';
+    }
     const sample = others.slice(0, 2).map((m, i) =>
       JSON.stringify({ to: m.sessionId, task: i === 0 ? "先处理第一个子任务" : "再处理第二个子任务" })
     );
-    return `{"tasks":[${sample.join(",")}]}`;
+    return `{"goal":"用一句话重述最终目标","acceptanceCriteria":["可验证标准1"],"tasks":[${sample.join(",")}]}`;
+  }
+
+  private newFlow(roomId: string, goal: string, artifactContext?: { refs?: string[] }): Flow {
+    return {
+      roomId,
+      phase: "planning",
+      goal,
+      acceptanceCriteria: [...DEFAULT_ACCEPTANCE_CRITERIA],
+      iteration: 1,
+      maxIterations: MAX_ITERATIONS,
+      tasks: new Map(),
+      results: new Map(),
+      artifactContext,
+    };
   }
 
   async start(
@@ -213,13 +250,7 @@ export class ConductorOrchestrator {
     if (!room.conductorId) throw new Error("room has no conductor");
     if (initialTasks && initialTasks.length > 0) {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
-      this.flows.set(room.roomId, {
-        roomId: room.roomId,
-        phase: "planning",
-        tasks: new Map(),
-        results: new Map(),
-        artifactContext,
-      });
+      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
       const flow = this.flows.get(room.roomId)!;
       await this.dispatchFromTasks(flow, room, initialTasks, text);
       return;
@@ -236,12 +267,13 @@ export class ConductorOrchestrator {
       "",
       "输出格式要求（必须严格遵守）：",
       "1. 必须输出一个 JSON code block；tasks 非空时 JSON 外不要有文字。",
-      "2. JSON 顶层字段必须是 `tasks`，值为数组。",
+      "2. JSON 顶层字段必须包含 `goal`（用一句话重述最终目标）、`acceptanceCriteria`（数组，每条是可验证的验收标准）和 `tasks`（数组）。",
       "3. 每个任务对象包含 `to`（接收成员）、`task`（具体子任务描述），可选 `id`（任务标识）和 `dependsOn`（依赖的 id 数组）。",
       "4. `to` 可以是：成员 ID（括号里的 `id:...`）、`@成员名` 或成员名。",
       "5. `task` 必须具体、可执行，不要写占位符。",
       "6. 如果任务有依赖关系，请用 `dependsOn` 指定前置任务 `id`。",
-      "7. 如果任务简单、无需分工，输出 `{\"tasks\":[]}`；tasks 为空时允许在 code block 之前直接写出你的最终回答。",
+      "7. `acceptanceCriteria` 每条都必须是可验证的标准，用于任务完成后验收是否达标。",
+      "8. 如果任务简单、无需分工，tasks 输出 `[]`；tasks 为空时允许在 code block 之前直接写出你的最终回答。",
       "",
       "正确示例（请用实际成员 ID 替换）：",
       "```json",
@@ -266,13 +298,7 @@ export class ConductorOrchestrator {
       }
     }
     const promptText = prompt.join("\n");
-    this.flows.set(room.roomId, {
-      roomId: room.roomId,
-      phase: "planning",
-      tasks: new Map(),
-      results: new Map(),
-      artifactContext,
-    });
+    this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
     this.notice({ roomId: room.roomId, message: "指挥家拆解任务中…" });
     await this.agent.prompt(room.conductorId, promptText);
   }
@@ -288,6 +314,10 @@ export class ConductorOrchestrator {
       if (sessionId === room.conductorId) {
         if (flow.phase === "planning") {
           await this.dispatch(flow, room, output);
+          return flow.roomId;
+        }
+        if (flow.phase === "reviewing") {
+          await this.handleReview(flow, room, output);
           return flow.roomId;
         }
         if (flow.phase === "summarizing") {
@@ -379,8 +409,8 @@ export class ConductorOrchestrator {
   }
 
   private async dispatch(flow: Flow, room: Room, conductorOutput: string): Promise<void> {
-    const tasks = parseTasks(conductorOutput, room);
-    if (tasks === null) {
+    const plan = parsePlan(conductorOutput, room);
+    if (plan === null) {
       this.flows.delete(flow.roomId);
       this.notice({
         roomId: flow.roomId,
@@ -388,6 +418,13 @@ export class ConductorOrchestrator {
       });
       return;
     }
+    if (typeof plan.goal === "string" && plan.goal.trim()) {
+      flow.goal = plan.goal.trim();
+    }
+    if (plan.acceptanceCriteria.length > 0) {
+      flow.acceptanceCriteria = plan.acceptanceCriteria;
+    }
+    const tasks = plan.tasks;
     if (tasks.length === 0) {
       this.flows.delete(flow.roomId);
       const answer = conductorOutput.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
@@ -403,7 +440,7 @@ export class ConductorOrchestrator {
   private async dispatchFromTasks(
     flow: Flow,
     room: Room,
-    tasks: { id?: string; to: string; task: string; dependsOn?: string[] }[],
+    tasks: ParsedTask[],
     originalText?: string,
   ): Promise<void> {
     if (tasks.length === 0) {
@@ -429,6 +466,7 @@ export class ConductorOrchestrator {
         task: t.task.trim(),
         dependsOn,
         status: "pending",
+        iteration: flow.iteration,
       });
       idMap.set(String(i), taskId);
     }
@@ -542,8 +580,13 @@ export class ConductorOrchestrator {
       const hasActive = values.some((t) => t.status === "running");
       if (hasActive) return;
       const doneCount = values.filter((t) => t.status === "done").length;
+      const failedCount = values.filter((t) => t.status === "failed").length;
       if (doneCount > 0) {
-        await this.summarize(flow, room);
+        if (failedCount === 0) {
+          await this.review(flow, room);
+        } else {
+          await this.summarize(flow, room);
+        }
       } else {
         const failedTasks = values.filter((t) => t.status === "failed");
         const names = failedTasks.map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId);
@@ -576,7 +619,30 @@ export class ConductorOrchestrator {
       const artifactContext = refs && refs.length > 0
         ? { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}), refs }
         : { taskId: t.id, dependsOn: t.dependsOn, ...(flow.artifactContext ?? {}) };
+      const upstreamLines: string[] = [];
+      for (const depId of t.dependsOn) {
+        const depResult = flow.results.get(depId);
+        if (!depResult) continue;
+        const depTask = flow.tasks.get(depId);
+        const depName = depTask
+          ? room.members.find((m) => m.sessionId === depTask.sessionId)?.name ?? depTask.sessionId
+          : depId;
+        upstreamLines.push(`- [${depId}] @${depName}：${depResult.text.slice(0, PLAN_RESULT_LEN)}`);
+        for (const a of depResult.artifacts) {
+          const parts = [`[${a.type}]`];
+          if (a.path) parts.push(a.path);
+          parts.push(a.summary);
+          upstreamLines.push(`  artifacts: ${parts.join(" ")}`);
+        }
+      }
       const taskBody = [
+        ...(upstreamLines.length > 0
+          ? [
+              "前置任务结果（这是你的直接输入，请在此基础上继续）：",
+              ...upstreamLines,
+              "",
+            ]
+          : []),
         `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
         "",
         "你拥有该子任务的端到端责任；若当前 Agent 支持 Fusion 或内部子代理，可用于本任务内的探索、实现和验证，但不要把工作再次分派给群聊中的其他成员。",
@@ -635,8 +701,144 @@ export class ConductorOrchestrator {
     this.emitFlow?.(flow.roomId);
   }
 
+  private appendTasks(flow: Flow, room: Room, tasks: ParsedTask[]): number {
+    let added = 0;
+    const assigned = new Set<string>();
+    for (let i = 0; i < tasks.length; i++) {
+      const t = tasks[i]!;
+      if (!t.task.trim()) continue;
+      const member = this.resolveMember(room, t.to);
+      if (!member) continue;
+      let taskId = t.id?.trim() || `r${flow.iteration}t${i + 1}`;
+      if (flow.tasks.has(taskId) || assigned.has(taskId)) {
+        taskId = `r${flow.iteration}t${i + 1}`;
+      }
+      while (flow.tasks.has(taskId) || assigned.has(taskId)) taskId = `${taskId}x`;
+      const dependsOn = [...new Set(
+        (t.dependsOn ?? [])
+          .map((d) => d.trim())
+          .filter((d) => d && d !== taskId && (flow.tasks.has(d) || assigned.has(d))),
+      )];
+      flow.tasks.set(taskId, {
+        id: taskId,
+        sessionId: member.sessionId,
+        task: t.task.trim(),
+        dependsOn,
+        status: "pending",
+        iteration: flow.iteration,
+      });
+      assigned.add(taskId);
+      added++;
+    }
+    return added;
+  }
+
+  private async review(flow: Flow, room: Room): Promise<void> {
+    if (flow.phase !== "working" && flow.phase !== "reviewing") return;
+    if (flow.phase === "reviewing" && this.agent.isBusy(room.conductorId!)) return;
+    flow.phase = "reviewing";
+    this.emitFlow?.(flow.roomId);
+    this.notice({
+      roomId: flow.roomId,
+      message: `第 ${flow.iteration}/${flow.maxIterations} 轮任务完成，指挥家验收中…`,
+    });
+    const lines: string[] = [];
+    for (const t of flow.tasks.values()) {
+      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      const result = flow.results.get(t.id);
+      if (!result) continue;
+      const artifacts = result.artifacts
+        .map((a) => {
+          const parts = [`[${a.type}]`];
+          if (a.path) parts.push(a.path);
+          parts.push(a.summary.slice(0, 1000));
+          return `    - ${parts.join(" ")}`;
+        })
+        .join("\n");
+      lines.push([
+        `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
+        ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
+      ].join("\n"));
+    }
+    const criteria = flow.acceptanceCriteria.length > 0
+      ? flow.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+      : "（未提供，按用户目标自行判断）";
+    const prompt = [
+      `你是群聊「${room.name}」的指挥家。`,
+      "",
+      `原始目标：${flow.goal || "（未记录）"}`,
+      "",
+      "验收标准：",
+      criteria,
+      "",
+      `第 ${flow.iteration}/${flow.maxIterations} 轮子任务已全部完成，结果如下：`,
+      ...lines,
+      "",
+      "请对照验收标准逐条核查以上结果是否已满足目标。",
+      "不要调用任何工具，只输出一个 JSON code block，二选一：",
+      '```json',
+      '{"decision":"complete","reason":"为什么已经满足全部验收标准"}',
+      '```',
+      "或",
+      '```json',
+      '{"decision":"continue","reason":"尚缺什么","tasks":[{"id":"可选","to":"成员 id/名称","task":"明确返工或补充任务","dependsOn":["已有或本轮任务 id"]}]}',
+      '```',
+      "要求：只针对验收缺口派最少的任务，不要重复已完成的工作。",
+      `可派工的成员：${this.buildMemberList(room)}。`,
+    ].join("\n");
+    try {
+      await this.agent.prompt(room.conductorId!, prompt);
+    } catch (err) {
+      logError("conductor review prompt", err);
+      this.notice({ roomId: flow.roomId, message: `指挥家验收派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
+      setTimeout(() => {
+        if (!this.flows.has(flow.roomId)) return;
+        if (flow.phase !== "reviewing") return;
+        this.review(flow, room).catch((e) => logError("conductor review retry", e));
+      }, this.promptRetryMs);
+    }
+  }
+
+  private async handleReview(flow: Flow, room: Room, output: string): Promise<void> {
+    const decision = parseReviewDecision(output, room);
+    if (decision?.decision === "complete") {
+      flow.reviewReason = decision.reason;
+      await this.summarize(flow, room);
+      return;
+    }
+    if (
+      decision?.decision === "continue" &&
+      decision.tasks.length > 0 &&
+      flow.iteration < flow.maxIterations
+    ) {
+      flow.iteration += 1;
+      flow.reviewReason = decision.reason;
+      const added = this.appendTasks(flow, room, decision.tasks);
+      if (added > 0) {
+        flow.phase = "working";
+        this.emitFlow?.(flow.roomId);
+        this.notice({
+          roomId: flow.roomId,
+          message: `验收未通过：${decision.reason}。新增 ${added} 项任务，进入第 ${flow.iteration}/${flow.maxIterations} 轮`,
+        });
+        await this.scheduleTasks(flow, room);
+        return;
+      }
+    }
+    if (decision) flow.reviewReason = decision.reason;
+    const hitLimit = flow.iteration >= flow.maxIterations;
+    this.notice({
+      roomId: flow.roomId,
+      message: hitLimit
+        ? `达到迭代上限（${flow.maxIterations} 轮），指挥家汇总当前成果`
+        : "验收决策无法执行，指挥家汇总当前成果",
+    });
+    await this.summarize(flow, room);
+  }
+
   private async summarize(flow: Flow, room: Room): Promise<void> {
-    if (flow.phase !== "working") return;
+    if (flow.phase !== "working" && flow.phase !== "reviewing" && flow.phase !== "summarizing") return;
+    if (flow.phase === "summarizing" && this.agent.isBusy(room.conductorId!)) return;
     flow.phase = "summarizing";
     this.emitFlow?.(flow.roomId);
     const failedTasks = [...flow.tasks.values()].filter((t) => t.status === "failed");
@@ -655,17 +857,20 @@ export class ConductorOrchestrator {
         .map((a) => {
           const parts = [`[${a.type}]`];
           if (a.path) parts.push(a.path);
-          parts.push(a.summary);
+          parts.push(a.summary.slice(0, 1000));
           return `    - ${parts.join(" ")}`;
         })
         .join("\n");
       lines.push([
-        `- [${t.id}] @${name}: ${result.text}`,
+        `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
       ].join("\n"));
     }
     const promptLines: string[] = [
       `你是群聊「${room.name}」的指挥家。`,
+      `原始目标：${flow.goal || "（未记录）"}`,
+      `验收标准：${flow.acceptanceCriteria.length > 0 ? flow.acceptanceCriteria.join("；") : "（未提供）"}`,
+      ...(flow.reviewReason ? [`验收结论：${flow.reviewReason}`] : []),
       hasFailures
         ? `你之前派发的子任务部分完成、部分失败，结果如下：`
         : `你之前派发的子任务已全部完成，结果如下：`,
@@ -685,7 +890,9 @@ export class ConductorOrchestrator {
         "",
       );
     }
-    promptLines.push("请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复。如果涉及文件修改，请引用文件路径。");
+    promptLines.push(
+      "请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复：明确说明完成了什么、有哪些验证证据、以及尚未满足的验收缺口。如果涉及文件修改，请引用文件路径。",
+    );
     const prompt = promptLines.join("\n");
     this.notice({
       roomId: flow.roomId,
@@ -711,6 +918,8 @@ export class ConductorOrchestrator {
       if (!room) continue;
       if (flow.phase === "summarizing") {
         this.summarize(flow, room).catch((e) => logError("conductor resume summarize", e));
+      } else if (flow.phase === "reviewing") {
+        this.review(flow, room).catch((e) => logError("conductor resume review", e));
       } else if (flow.phase === "working") {
         this.scheduleTasks(flow, room).catch((e) => logError("conductor resume schedule", e));
       }
@@ -754,12 +963,18 @@ export class ConductorOrchestrator {
       flows: [...this.flows.values()].map((flow) => ({
         roomId: flow.roomId,
         phase: flow.phase,
+        goal: flow.goal,
+        acceptanceCriteria: flow.acceptanceCriteria,
+        iteration: flow.iteration,
+        maxIterations: flow.maxIterations,
+        ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
         tasks: [...flow.tasks.values()].map((t) => ({
           id: t.id,
           sessionId: t.sessionId,
           task: t.task,
           dependsOn: t.dependsOn,
           status: t.status,
+          iteration: t.iteration,
           ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
           ...(t.retries !== undefined ? { retries: t.retries } : {}),
         })),
@@ -788,9 +1003,19 @@ export class ConductorOrchestrator {
       const flow: Flow = {
         roomId,
         phase: (f.phase as Flow["phase"]) ?? "working",
+        goal: typeof f.goal === "string" ? f.goal : "",
+        acceptanceCriteria: Array.isArray(f.acceptanceCriteria)
+          ? f.acceptanceCriteria.map((s) => String(s)).filter(Boolean)
+          : [...DEFAULT_ACCEPTANCE_CRITERIA],
+        iteration: typeof f.iteration === "number" && f.iteration > 0 ? f.iteration : 1,
+        maxIterations:
+          typeof f.maxIterations === "number" && f.maxIterations > 0
+            ? f.maxIterations
+            : MAX_ITERATIONS,
         tasks: new Map(),
         results: new Map(),
         artifactContext,
+        ...(typeof f.reviewReason === "string" ? { reviewReason: f.reviewReason } : {}),
       };
       for (const t of (f.tasks as unknown[]) ?? []) {
         const o = t as Record<string, unknown>;
@@ -809,6 +1034,7 @@ export class ConductorOrchestrator {
             ? o.dependsOn.map((s) => String(s)).filter(Boolean)
             : [],
           status,
+          iteration: typeof o.iteration === "number" && o.iteration > 0 ? o.iteration : 1,
           ...(typeof o.failureMessage === "string" ? { failureMessage: o.failureMessage } : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
         });
@@ -838,9 +1064,15 @@ export class ConductorOrchestrator {
       }
       this.flows.set(roomId, flow);
       this.notice({ roomId, message: "🔄 已恢复指挥编排，继续执行待派发任务" });
-      await this.scheduleTasks(flow, room).catch((err) => {
-        logError("conductor import schedule", err);
-      });
+      if (flow.phase === "reviewing") {
+        await this.review(flow, room).catch((err) => logError("conductor import review", err));
+      } else if (flow.phase === "summarizing") {
+        await this.summarize(flow, room).catch((err) => logError("conductor import summarize", err));
+      } else {
+        await this.scheduleTasks(flow, room).catch((err) => {
+          logError("conductor import schedule", err);
+        });
+      }
       this.emitFlow?.(roomId);
     }
   }
@@ -954,17 +1186,15 @@ function isNoisePath(path: string): boolean {
   return /(?:^|\/)(node_modules|\.gradle|\.git|build|dist)(?:\/|$)/i.test(path);
 }
 
-function parseTasks(output: string, room: Room): { id?: string; to: string; task: string; dependsOn?: string[] }[] | null {
+function jsonCandidates(output: string, marker: string): string[] {
   const candidates: string[] = [];
 
-  // 1. 提取所有 ```json / ``` code fence 里的内容
   const fenceRe = /```(?:json)?\s*([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
   while ((m = fenceRe.exec(output)) !== null) {
     if (m[1]) candidates.push(m[1].trim());
   }
 
-  // 2. 没有 code fence 时，尝试扫描所有平衡的 JSON 对象
   if (candidates.length === 0) {
     let depth = 0;
     let start = -1;
@@ -977,41 +1207,78 @@ function parseTasks(output: string, room: Room): { id?: string; to: string; task
         if (depth > 0) depth--;
         if (depth === 0 && start >= 0) {
           const raw = output.slice(start, i + 1);
-          if (raw.includes('"tasks"')) candidates.push(raw);
+          if (raw.includes(marker)) candidates.push(raw);
           start = -1;
         }
       }
     }
   }
+  return candidates;
+}
 
-  // 3. 逐个尝试解析，找包含 tasks 数组的那个
-  for (const raw of candidates) {
+function resolveParsedTasks(raw: unknown, room: Room): ParsedTask[] | null {
+  if (!Array.isArray(raw)) return null;
+  const tasks = raw
+    .map((t: unknown) => {
+      const o = t as Record<string, unknown>;
+      if (typeof o?.to !== "string" || typeof o?.task !== "string") return null;
+      const toRaw = o.to.replace(/^@/, "").trim();
+      const taskRaw = String(o.task).trim();
+      if (!taskRaw) return null;
+      // 允许 to 使用成员名、name (id: xxx) 或 sessionId
+      const member = resolveMemberByString(room, toRaw);
+      if (!member) return null;
+      const id = typeof o.id === "string" ? o.id : undefined;
+      const dependsOn = Array.isArray(o.dependsOn)
+        ? o.dependsOn.map((s) => String(s)).filter(Boolean)
+        : undefined;
+      return { id, to: member.sessionId, task: taskRaw, dependsOn };
+    })
+    .filter((t) => t !== null);
+  return tasks as ParsedTask[];
+}
+
+function parsePlan(output: string, room: Room): ConductorPlan | null {
+  for (const raw of jsonCandidates(output, '"tasks"')) {
     try {
       const obj = JSON.parse(raw) as Record<string, unknown>;
-      if (!Array.isArray(obj.tasks)) continue;
-      const tasks = obj.tasks
-        .map((t: unknown) => {
-          const o = t as Record<string, unknown>;
-          if (typeof o?.to !== "string" || typeof o?.task !== "string") return null;
-          const toRaw = o.to.replace(/^@/, "").trim();
-          const taskRaw = String(o.task).trim();
-          // 允许 to 使用成员名、name (id: xxx) 或 sessionId
-          const member = resolveMemberByString(room, toRaw);
-          if (!member) return null;
-          const id = typeof o.id === "string" ? o.id : undefined;
-          const dependsOn = Array.isArray(o.dependsOn)
-            ? o.dependsOn.map((s) => String(s)).filter(Boolean)
-            : undefined;
-          return { id, to: member.sessionId, task: taskRaw, dependsOn };
-        })
-        .filter((t) => t !== null);
-      return tasks as { id?: string; to: string; task: string; dependsOn?: string[] }[];
+      const tasks = resolveParsedTasks(obj.tasks, room);
+      if (tasks === null) continue;
+      const goal = typeof obj.goal === "string" ? obj.goal : undefined;
+      const acceptanceCriteria = Array.isArray(obj.acceptanceCriteria)
+        ? obj.acceptanceCriteria
+            .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+            .map((s) => s.trim())
+        : [];
+      return { goal, acceptanceCriteria, tasks };
     } catch {
       // 继续尝试下一个候选
     }
   }
-
   return null;
+}
+
+function parseReviewDecision(output: string, room: Room): ReviewDecision | null {
+  for (const raw of jsonCandidates(output, '"decision"')) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const decision = obj.decision;
+      const reason = typeof obj.reason === "string" ? obj.reason.trim() : "";
+      if (decision === "complete") {
+        return { decision: "complete", reason };
+      }
+      if (decision === "continue") {
+        return { decision: "continue", reason, tasks: resolveParsedTasks(obj.tasks, room) ?? [] };
+      }
+    } catch {
+      // 继续尝试下一个候选
+    }
+  }
+  return null;
+}
+
+function parseTasks(output: string, room: Room): ParsedTask[] | null {
+  return parsePlan(output, room)?.tasks ?? null;
 }
 
 export function resolveMemberByString(

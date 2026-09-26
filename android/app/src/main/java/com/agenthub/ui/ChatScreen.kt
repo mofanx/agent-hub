@@ -1847,13 +1847,14 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
     val phaseLabel = when (flow.phase) {
         "planning" -> "规划中"
         "working" -> "执行中"
+        "reviewing" -> "验收中"
         "summarizing" -> "汇总中"
         "awaiting-retry" -> "等待重试"
         "done" -> "已完成"
         else -> ""
     }
     val showRetry = flow.phase == "awaiting-retry"
-    val canCancel = flow.phase != "done" && flow.phase != "summarizing"
+    val canCancel = flow.phase != "done" && flow.phase != "summarizing" && flow.phase != "reviewing"
     Card(
         modifier = Modifier
             .fillMaxWidth()

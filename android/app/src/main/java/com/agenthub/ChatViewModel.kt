@@ -330,6 +330,10 @@ data class FlowInfo(
     val phase: String,
     val progress: FlowProgress,
     val tasks: List<FlowTask>,
+    val goal: String? = null,
+    val acceptanceCriteria: List<String> = emptyList(),
+    val iteration: Int = 0,
+    val maxIterations: Int = 0,
 )
 
 
@@ -2150,6 +2154,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 total = progress?.get("total")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
             ),
             tasks = tasks?.map { parseFlowTask(it.jsonObject) } ?: emptyList(),
+            goal = obj["goal"]?.jsonPrimitive?.contentOrNull,
+            acceptanceCriteria = obj["acceptanceCriteria"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+            iteration = obj["iteration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            maxIterations = obj["maxIterations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
         )
     }
 

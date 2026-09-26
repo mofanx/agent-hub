@@ -1791,6 +1791,7 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   const phaseLabel: Record<string, string> = {
     planning: "规划中",
     working: "执行中",
+    reviewing: "验收中",
     summarizing: "汇总中",
     "awaiting-retry": "等待重试",
     done: "已完成",
@@ -1818,7 +1819,7 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
           {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
           {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
         </span>
-        {phase !== "done" && phase !== "summarizing" && (
+        {phase !== "done" && phase !== "summarizing" && phase !== "reviewing" && (
           <button
             className="flow-cancel-btn"
             title="中断当前编排"

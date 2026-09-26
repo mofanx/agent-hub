@@ -573,6 +573,531 @@ describe("conductor", () => {
     assert.ok(!workerPrompts.some((p) => p.sessionId === "worker2"));
   });
 
+  it("planner prompt 要求输出 goal 与 acceptanceCriteria", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "goal-plan",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "实现登录功能");
+    const planner = prompts.find((p) => p.sessionId === "conductor");
+    assert.ok(planner);
+    assert.ok(planner.content.includes("goal"));
+    assert.ok(planner.content.includes("acceptanceCriteria"));
+    assert.ok(planner.content.includes("可验证"));
+  });
+
+  it("planner 输出的 goal/acceptanceCriteria 会更新 flow", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "goal-update",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "原始需求");
+    const plan =
+      '```json\n{"goal":"重写后的目标","acceptanceCriteria":["标准A","标准B"],"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+    const flow = orchestrator.getFlow(r.roomId)!;
+    assert.equal((flow as { goal: string }).goal, "重写后的目标");
+    assert.deepEqual((flow as { acceptanceCriteria: string[] }).acceptanceCriteria, ["标准A", "标准B"]);
+    assert.equal((flow as { iteration: number }).iteration, 1);
+    assert.equal((flow as { maxIterations: number }).maxIterations, 3);
+  });
+
+  it("dependsOn 任务的 prompt 注入前置任务结果", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "dep-handoff",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "任务");
+    const plan =
+      '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"先做"},{"id":"t2","to":"worker2","task":"再做","dependsOn":["t1"]}]}\n```';
+    await orchestrator.onPromptDone("conductor", plan);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker2").length, 0);
+
+    await orchestrator.onPromptDone(
+      "worker1",
+      '```json\n{"text":"T1的结果文本","artifacts":[{"type":"file","path":"src/x.ts","summary":"新增"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    const w2 = prompts.find((p) => p.sessionId === "worker2");
+    assert.ok(w2);
+    assert.ok(w2.content.includes("前置任务结果"));
+    assert.ok(w2.content.includes("T1的结果文本"));
+    assert.ok(w2.content.includes("src/x.ts"));
+  });
+
+  it("全部 worker 完成后进入 reviewing 而非直接 summarizing", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "review-phase",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (n) => notices.push(n.message),
+    );
+    await orchestrator.start(r, "目标X");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"goal":"目标X","acceptanceCriteria":["完成X"],"tasks":[{"id":"t1","to":"worker","task":"做X"}]}\n```',
+    );
+    await orchestrator.onPromptDone("worker", "完成了 X");
+    const flow = orchestrator.getFlow(r.roomId)!;
+    assert.equal((flow as { phase: string }).phase, "reviewing");
+    assert.ok(notices.some((m) => m.includes("验收中")));
+    const reviewPrompt = prompts.filter((p) => p.sessionId === "conductor").at(-1)!;
+    assert.ok(reviewPrompt.content.includes("原始目标"));
+    assert.ok(reviewPrompt.content.includes("验收标准"));
+    assert.ok(reviewPrompt.content.includes("decision"));
+  });
+
+  it("review complete 后进入 summarizing，最终答复后 flow 删除", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "review-complete",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做"}]}\n```',
+    );
+    await orchestrator.onPromptDone("worker", "done");
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "reviewing");
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"complete","reason":"已满足"}\n```',
+    );
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "summarizing");
+
+    await orchestrator.onPromptDone("conductor", "最终答复");
+    assert.equal(orchestrator.hasActiveFlow(r.roomId), false);
+  });
+
+  it("review continue 追加任务进入下一轮，已完成任务不重跑", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "review-continue",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"做"}]}\n```',
+    );
+    await orchestrator.onPromptDone("worker1", "done");
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "reviewing");
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"continue","reason":"缺测试","tasks":[{"to":"worker2","task":"补测试","dependsOn":["t1"]}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    const flow = orchestrator.getFlow(r.roomId)!;
+    assert.equal((flow as { phase: string }).phase, "working");
+    assert.equal((flow as { iteration: number }).iteration, 2);
+    const tasks = flow.tasks as { id: string; status: string; iteration: number }[];
+    assert.equal(tasks.find((t) => t.id === "t1")?.status, "done");
+    const added = tasks.filter((t) => t.iteration === 2);
+    assert.equal(added.length, 1);
+    assert.equal(added[0]!.status, "running");
+    assert.ok(prompts.some((p) => p.sessionId === "worker2" && p.content.includes("补测试")));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker1").length, 1);
+  });
+
+  it("达到迭代上限仍 continue 时直接 summarizing，不再派工", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "review-max",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做"}]}\n```',
+    );
+    await orchestrator.onPromptDone("worker", "done1");
+    // 第 1 轮验收 -> continue
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"continue","reason":"还差","tasks":[{"id":"r2","to":"worker","task":"补1"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    await orchestrator.onPromptDone("worker", "done2");
+    // 第 2 轮验收 -> continue
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"continue","reason":"还差","tasks":[{"id":"r3","to":"worker","task":"补2"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal((orchestrator.getFlow(r.roomId) as { iteration: number }).iteration, 3);
+    await orchestrator.onPromptDone("worker", "done3");
+    // 第 3 轮验收仍 continue -> 达到上限，直接汇总
+    const workerPromptsBefore = prompts.filter((p) => p.sessionId === "worker").length;
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"continue","reason":"还差","tasks":[{"id":"r4","to":"worker","task":"补3"}]}\n```',
+    );
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "summarizing");
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "worker").length,
+      workerPromptsBefore,
+      "should not dispatch a 4th round",
+    );
+    await orchestrator.onPromptDone("conductor", "最终答复");
+    assert.equal(orchestrator.hasActiveFlow(r.roomId), false);
+  });
+
+  it("export/import 保留 goal/criteria/iteration 并可恢复 reviewing", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "export-flow",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标G");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"goal":"目标G","acceptanceCriteria":["标准1"],"tasks":[{"id":"t1","to":"worker","task":"做"}]}\n```',
+    );
+    await orchestrator.onPromptDone("worker", "done");
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "reviewing");
+
+    const state = orchestrator.export();
+    const flows = state.flows as Record<string, unknown>[];
+    assert.equal(flows[0]!.goal, "目标G");
+    assert.deepEqual(flows[0]!.acceptanceCriteria, ["标准1"]);
+    assert.equal(flows[0]!.phase, "reviewing");
+
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator2 = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator2.import(state);
+    const restored = orchestrator2.getFlow(r.roomId)!;
+    assert.equal((restored as { goal: string }).goal, "目标G");
+    assert.deepEqual((restored as { acceptanceCriteria: string[] }).acceptanceCriteria, ["标准1"]);
+    assert.equal((restored as { phase: string }).phase, "reviewing");
+    assert.ok(
+      prompts.some((p) => p.sessionId === "conductor" && p.content.includes("验收标准")),
+      "imported reviewing flow should re-send review prompt",
+    );
+  });
+
+  it("import summarizing flow 会重新发送汇总 prompt", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "import-summary",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.import({
+      flows: [
+        {
+          roomId: r.roomId,
+          phase: "summarizing",
+          tasks: [
+            { id: "t1", sessionId: "worker", task: "做", dependsOn: [], status: "done" },
+          ],
+          results: { t1: { text: "结果", artifacts: [] } },
+        },
+      ],
+    });
+    const flow = orchestrator.getFlow(r.roomId)!;
+    assert.equal((flow as { phase: string }).phase, "summarizing");
+    assert.equal((flow as { iteration: number }).iteration, 1);
+    assert.ok(
+      prompts.some((p) => p.sessionId === "conductor" && p.content.includes("汇总") || p.sessionId === "conductor" && p.content.includes("原始目标")),
+      "imported summarizing flow should re-send summarize prompt",
+    );
+  });
+
+  it("conductor 忙碌时 resumeFlows 不重复发送 review/summarize prompt", async () => {
+    for (const phase of ["reviewing", "summarizing"] as const) {
+      const rooms = new RoomManager();
+      const r = rooms.create(
+        `busy-${phase}`,
+        [
+          { sessionId: "conductor", name: "leader" },
+          { sessionId: "worker", name: "coder" },
+        ],
+        "conductor",
+        { conductorId: "conductor" },
+      );
+      const prompts: { sessionId: string; content: string }[] = [];
+      const notices: string[] = [];
+      let flowUpdates = 0;
+      const orchestrator = new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content: String(content) });
+          },
+          isBusy: () => true,
+        },
+        rooms,
+        (n) => notices.push(n.message),
+        () => flowUpdates++,
+      );
+      await orchestrator.import({
+        flows: [
+          {
+            roomId: r.roomId,
+            phase,
+            tasks: [
+              { id: "t1", sessionId: "worker", task: "做", dependsOn: [], status: "done" },
+            ],
+            results: { t1: { text: "结果", artifacts: [] } },
+          },
+        ],
+      });
+      assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, phase);
+      prompts.length = 0;
+      notices.length = 0;
+      flowUpdates = 0;
+      orchestrator.resumeFlows();
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      assert.equal(
+        prompts.filter((p) => p.sessionId === "conductor").length,
+        0,
+        `busy conductor should not get a duplicate ${phase} prompt`,
+      );
+      assert.equal(notices.length, 0, `busy ${phase} should not emit new notices`);
+      assert.equal(flowUpdates, 0, `busy ${phase} should not emit flow updates`);
+      assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, phase);
+    }
+  });
+
+  it("超长 worker 结果在 review prompt 中被截断", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "long-result",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做"}]}\n```',
+    );
+    const tailMarker = "TAIL_MARKER_NEVER_IN_PROMPT";
+    await orchestrator.onPromptDone(
+      "worker",
+      `\`\`\`json\n${JSON.stringify({ text: "结果".repeat(3000) + tailMarker, artifacts: [] })}\n\`\`\``,
+    );
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "reviewing");
+    const reviewPrompt = prompts.filter((p) => p.sessionId === "conductor").at(-1)!;
+    assert.ok(reviewPrompt.content.includes("验收标准"));
+    assert.ok(!reviewPrompt.content.includes(tailMarker), "tail of long result must be truncated");
+  });
+
+  it("review continue 只含空 task 时不增加 iteration，直接 summarizing", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "empty-continue",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做"}]}\n```',
+    );
+    await orchestrator.onPromptDone("worker", "done");
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "reviewing");
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"continue","reason":"勉强算缺","tasks":[{"to":"worker","task":"   "}]}\n```',
+    );
+    const flow = orchestrator.getFlow(r.roomId)!;
+    assert.equal((flow as { iteration: number }).iteration, 1);
+    assert.equal((flow as { phase: string }).phase, "summarizing");
+    assert.equal((flow.tasks as { status: string }[]).length, 1);
+  });
+
+  it("acceptanceCriteria 中的非字符串项被忽略", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "bad-criteria",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "目标");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"acceptanceCriteria":["标准A",{"x":1},42,null,"  "],"tasks":[{"id":"t1","to":"worker","task":"做"}]}\n```',
+    );
+    const flow = orchestrator.getFlow(r.roomId)!;
+    assert.deepEqual((flow as { acceptanceCriteria: string[] }).acceptanceCriteria, ["标准A"]);
+  });
+
   it("非 awaiting-retry 状态调用 retryFailedTasks 返回 false", async () => {
     const rooms = new RoomManager();
     const qRoom = rooms.create(
