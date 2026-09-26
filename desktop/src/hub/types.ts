@@ -89,10 +89,23 @@ export interface FileTreeNode {
 }
 
 
+export interface VerificationEvidenceDetail {
+  summary?: string;
+  baseline?: string;
+  diff?: string;
+  reproSteps?: string[];
+  command?: string;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  artifactRefs?: string[];
+}
+
 export interface FlowVerification {
   by: string;
   verdict: string;
   evidence: string;
+  evidenceDetail?: VerificationEvidenceDetail;
 }
 
 export interface FlowTask {
@@ -113,6 +126,14 @@ export interface FlowTask {
   waitingHelpId?: string;
   /** 其他成员对本任务的独立验证记录 */
   verifications?: FlowVerification[];
+  /** 实现者为可复核交付提交的证据 */
+  baseline?: string;
+  diff?: string;
+  reproSteps?: string[];
+  verifyCommand?: string;
+  verifyExitCode?: number;
+  verifyStdout?: string;
+  verifyStderr?: string;
 }
 
 export interface ArtifactInfo {

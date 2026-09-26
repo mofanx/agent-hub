@@ -19,11 +19,33 @@ type TaskArtifact = {
   content?: string | undefined;
 };
 
+export type VerificationEvidence = {
+  summary?: string;
+  baseline?: string;
+  diff?: string;
+  reproSteps?: string[];
+  command?: string;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  artifactRefs?: string[];
+};
+
+export type TaskVerificationEvidence = VerificationEvidence;
+
 type TaskResult = {
   text: string;
   artifacts: TaskArtifact[];
+  /** 实现者为可复核交付提交的证据 */
+  baseline?: string;
+  diff?: string;
+  reproSteps?: string[];
+  verifyCommand?: string;
+  verifyExitCode?: number;
+  verifyStdout?: string;
+  verifyStderr?: string;
   /** 对其他任务的独立验证声明（verify 字段） */
-  verifications?: { taskId: string; verdict: string; evidence: string }[];
+  verifications?: { taskId: string; verdict: string; evidence: VerificationEvidence }[];
 };
 
 type FlowPhase = "planning" | "working" | "reviewing" | "summarizing" | "awaiting-retry" | "done";
@@ -38,7 +60,7 @@ type ReviewDecision =
 export type TaskVerification = {
   by: string;
   verdict: string;
-  evidence: string;
+  evidence: VerificationEvidence;
   at: number;
 };
 
@@ -109,6 +131,50 @@ const BUSY_RETRY_MS = 5000;
 const PROMPT_RETRY_MS = 5000;
 const SUMMARIZE_RETRY_MS = 5000;
 
+function normalizeEvidence(raw: unknown): VerificationEvidence {
+  if (typeof raw === "string" && raw.trim()) return { summary: raw.trim() };
+  if (raw && typeof raw === "object") {
+    const o = raw as Record<string, unknown>;
+    const strArr = (key: string) =>
+      Array.isArray(o[key]) ? o[key].filter((x): x is string => typeof x === "string") : undefined;
+    const num = (key: string) =>
+      typeof o[key] === "number" ? (o[key] as number) : undefined;
+    const str = (key: string) =>
+      typeof o[key] === "string" ? (o[key] as string) : undefined;
+    const evidence: VerificationEvidence = {};
+    const summary = str("summary");
+    if (summary) evidence.summary = summary;
+    const baseline = str("baseline");
+    if (baseline) evidence.baseline = baseline;
+    const diff = str("diff");
+    if (diff) evidence.diff = diff;
+    const reproSteps = strArr("reproSteps");
+    if (reproSteps?.length) evidence.reproSteps = reproSteps;
+    const command = str("command");
+    if (command) evidence.command = command;
+    const exitCode = num("exitCode");
+    if (exitCode !== undefined) evidence.exitCode = exitCode;
+    const stdout = str("stdout");
+    if (stdout) evidence.stdout = stdout;
+    const stderr = str("stderr");
+    if (stderr) evidence.stderr = stderr;
+    const artifactRefs = strArr("artifactRefs");
+    if (artifactRefs?.length) evidence.artifactRefs = artifactRefs;
+    return evidence;
+  }
+  return {};
+}
+
+function summarizeEvidence(ev: VerificationEvidence): string {
+  const parts: string[] = [];
+  if (ev.summary) parts.push(ev.summary);
+  if (ev.command) parts.push(`cmd: ${ev.command}`);
+  if (ev.exitCode !== undefined) parts.push(`exit=${ev.exitCode}`);
+  if (ev.stdout) parts.push(ev.stdout.slice(0, 120));
+  if (ev.stderr) parts.push(`stderr: ${ev.stderr.slice(0, 120)}`);
+  return parts.join("；") || "无证据详情";
+}
+
 export class ConductorOrchestrator {
   private flows = new Map<string, Flow>();
   private readonly promptRetryMs: number;
@@ -177,12 +243,24 @@ export class ConductorOrchestrator {
               verifications: t.verifications.map((v) => ({
                 by: room?.members.find((m) => m.sessionId === v.by)?.name ?? v.by,
                 verdict: v.verdict,
-                evidence: v.evidence.slice(0, 500),
+                evidence: summarizeEvidence(v.evidence).slice(0, 500),
+                evidenceDetail: v.evidence,
               })),
             }
           : {}),
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
+        ...(result?.baseline ? { baseline: result.baseline.slice(0, 2000) } : {}),
+        ...(result?.diff ? { diff: result.diff.slice(0, 4000) } : {}),
+        ...(result?.reproSteps?.length ? { reproSteps: result.reproSteps } : {}),
+        ...(result?.verifyCommand
+          ? {
+              verifyCommand: result.verifyCommand,
+              ...(result.verifyExitCode !== undefined ? { verifyExitCode: result.verifyExitCode } : {}),
+              ...(result.verifyStdout ? { verifyStdout: result.verifyStdout.slice(0, 1000) } : {}),
+              ...(result.verifyStderr ? { verifyStderr: result.verifyStderr.slice(0, 1000) } : {}),
+            }
+          : {}),
         ...(t.retries !== undefined && t.retries > 0 ? { retries: t.retries } : {}),
       };
     });
@@ -712,7 +790,7 @@ export class ConductorOrchestrator {
     flow: Flow,
     room: Room,
     verifierId: string,
-    verifs: { taskId: string; verdict: string; evidence: string }[],
+    verifs: { taskId: string; verdict: string; evidence: VerificationEvidence }[],
   ): void {
     const verifierName =
       room.members.find((m) => m.sessionId === verifierId)?.name ?? verifierId;
@@ -726,10 +804,11 @@ export class ConductorOrchestrator {
         evidence: v.evidence,
         at: Date.now(),
       });
+      const summary = summarizeEvidence(v.evidence).slice(0, 160);
       this.rooms.addEvent(flow.roomId, {
         author: verifierId,
         action: "test",
-        summary: `验证任务 ${v.taskId}：${v.verdict}${v.evidence ? ` — ${v.evidence.slice(0, 160)}` : ""}`,
+        summary: `验证任务 ${v.taskId}：${v.verdict}${summary ? ` — ${summary}` : ""}`,
         taskId: v.taskId,
       });
       this.notice({
@@ -976,6 +1055,20 @@ export class ConductorOrchestrator {
           parts.push(a.summary);
           upstreamLines.push(`  artifacts: ${parts.join(" ")}`);
         }
+        if (depResult.baseline) {
+          upstreamLines.push(`  baseline（修改前）：${depResult.baseline.slice(0, 2000)}`);
+        }
+        if (depResult.diff) {
+          upstreamLines.push(`  diff（实际修改）：${depResult.diff.slice(0, 4000)}`);
+        }
+        if (depResult.reproSteps?.length) {
+          upstreamLines.push(`  reproSteps：${depResult.reproSteps.join("；")}`);
+        }
+        if (depResult.verifyCommand) {
+          upstreamLines.push(
+            `  verifyCommand：${depResult.verifyCommand}（exitCode=${depResult.verifyExitCode ?? "unknown"}${depResult.verifyStdout ? `, stdout=${depResult.verifyStdout.slice(0, 500)}` : ""}）`,
+          );
+        }
       }
       const taskBody = [
         ...(upstreamLines.length > 0
@@ -1001,13 +1094,17 @@ export class ConductorOrchestrator {
         '  ```json',
         '  {"help":{"to":"成员名/id 或 \\"user\\"（求助用户）","question":"具体问题"}}',
         '  ```',
-        '- 若你的产出是对其他成员任务的独立验证，请在报告 JSON 中附加 verify 数组：{"verify":[{"task":"tX","verdict":"pass|fail|partial","evidence":"证据"}]}',
+        "- 若你的产出是对其他成员任务的独立验证，请在报告 JSON 中附加 verify 数组；evidence 必须基于被验证任务提交的 baseline/diff/verifyCommand 进行实际复核，并包含你实际运行的 command、exitCode、stdout：",
+        '  ```json',
+        '  {"verify":[{"task":"tX","verdict":"pass|fail|partial","evidence":{"summary":"结论","command":"npm test","exitCode":0,"stdout":"8 passing","baseline":"修改前代码","diff":"..."}}]}',
+        '  ```',
         "",
-        "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试等）：",
+        "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试结果、以及用于他人复核的证据）：",
         '```json',
         '{"text":"你的总结","artifacts":[{"type":"file","path":"/path/to/file","summary":"改动摘要"},{"type":"command","summary":"运行的命令和结果"},{"type":"test","summary":"测试结果"}]}',
         '```',
         "",
+        "若子任务涉及代码修改，强烈建议在 JSON 中附加可验证字段：baseline（修改前代码/状态）、diff（实际修改）、reproSteps（复现步骤）、verifyCommand（验证命令）。这些会直接进入验收证据，供其他成员或用户复查。",
         "如果没有 artifact，可以只输出文本，不必输出 JSON。",
       ].join("\n");
       const prompt = this.rooms.buildPrompt(
@@ -1114,7 +1211,7 @@ export class ConductorOrchestrator {
       const verifs = (t.verifications ?? [])
         .map(
           (v) =>
-            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${v.evidence.slice(0, 300)}）` : ""}`,
+            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${summarizeEvidence(v.evidence).slice(0, 300)}）` : ""}`,
         )
         .join("\n");
       lines.push([
@@ -1234,7 +1331,7 @@ export class ConductorOrchestrator {
       const verifs = (t.verifications ?? [])
         .map(
           (v) =>
-            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${v.evidence.slice(0, 300)}）` : ""}`,
+            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${summarizeEvidence(v.evidence).slice(0, 300)}）` : ""}`,
         )
         .join("\n");
       lines.push([
@@ -1368,7 +1465,20 @@ export class ConductorOrchestrator {
         supplements: flow.supplements,
         help: [...flow.help.values()],
         results: Object.fromEntries(
-          [...flow.results.entries()].map(([id, r]) => [id, { text: r.text, artifacts: r.artifacts }]),
+          [...flow.results.entries()].map(([id, r]) => [
+            id,
+            {
+              text: r.text,
+              artifacts: r.artifacts,
+              ...(r.baseline !== undefined ? { baseline: r.baseline } : {}),
+              ...(r.diff !== undefined ? { diff: r.diff } : {}),
+              ...(r.reproSteps !== undefined ? { reproSteps: r.reproSteps } : {}),
+              ...(r.verifyCommand !== undefined ? { verifyCommand: r.verifyCommand } : {}),
+              ...(r.verifyExitCode !== undefined ? { verifyExitCode: r.verifyExitCode } : {}),
+              ...(r.verifyStdout !== undefined ? { verifyStdout: r.verifyStdout } : {}),
+              ...(r.verifyStderr !== undefined ? { verifyStderr: r.verifyStderr } : {}),
+            },
+          ]),
         ),
         artifactContext: flow.artifactContext,
       })),
@@ -1441,7 +1551,7 @@ export class ConductorOrchestrator {
                     return {
                       by: String(vo.by ?? ""),
                       verdict: String(vo.verdict ?? ""),
-                      evidence: String(vo.evidence ?? ""),
+                      evidence: normalizeEvidence(vo.evidence),
                       at: Number(vo.at ?? 0),
                     };
                   })
@@ -1478,10 +1588,13 @@ export class ConductorOrchestrator {
           waitingTask.waitingForHelp = id;
         }
       }
-      const results = f.results as Record<string, { text: string; artifacts: TaskArtifact[] }> | undefined;
+      const results = f.results as Record<string, Record<string, unknown>> | undefined;
       if (results) {
         for (const [id, r] of Object.entries(results)) {
           if (typeof r.text !== "string") continue;
+          const reproSteps = Array.isArray(r.reproSteps)
+            ? r.reproSteps.filter((x): x is string => typeof x === "string")
+            : undefined;
           flow.results.set(id, {
             text: r.text,
             artifacts: Array.isArray(r.artifacts)
@@ -1498,6 +1611,13 @@ export class ConductorOrchestrator {
                   })
                   .filter((a) => a !== null) as TaskArtifact[]
               : [],
+            ...(typeof r.baseline === "string" ? { baseline: r.baseline } : {}),
+            ...(typeof r.diff === "string" ? { diff: r.diff } : {}),
+            ...(reproSteps?.length ? { reproSteps } : {}),
+            ...(typeof r.verifyCommand === "string" ? { verifyCommand: r.verifyCommand } : {}),
+            ...(typeof r.verifyExitCode === "number" ? { verifyExitCode: r.verifyExitCode } : {}),
+            ...(typeof r.verifyStdout === "string" ? { verifyStdout: r.verifyStdout } : {}),
+            ...(typeof r.verifyStderr === "string" ? { verifyStderr: r.verifyStderr } : {}),
           });
         }
       }
@@ -1558,17 +1678,33 @@ function extractTaskResult(output: string): TaskResult {
         const vo = v as Record<string, unknown>;
         const taskId = String(vo.task ?? vo.taskId ?? vo.id ?? "").trim();
         const verdict = String(vo.verdict ?? vo.result ?? "").trim() || "pass";
-        const evidence = String(vo.evidence ?? vo.summary ?? vo.detail ?? "").trim();
+        const evidence = normalizeEvidence(vo.evidence ?? vo.summary ?? vo.detail ?? "");
         if (taskId) verifications.push({ taskId, verdict, evidence });
       }
       if (text || artifacts.length > 0 || verifications.length > 0) {
         // 去掉 JSON code fence 后的内容作为额外文本
         const plain = output.replace(fenceRe, "").trim().replace(/\s+/g, " ");
-        return {
+        const reproSteps = Array.isArray(obj.reproSteps)
+          ? obj.reproSteps.filter((x): x is string => typeof x === "string")
+          : undefined;
+        const result: TaskResult = {
           text: text || plain.slice(0, PLAN_RESULT_LEN),
           artifacts,
           ...(verifications.length > 0 ? { verifications } : {}),
         };
+        const baseline = typeof obj.baseline === "string" ? obj.baseline.trim() : undefined;
+        if (baseline) result.baseline = baseline;
+        const diff = typeof obj.diff === "string" ? obj.diff.trim() : undefined;
+        if (diff) result.diff = diff;
+        if (reproSteps?.length) result.reproSteps = reproSteps;
+        const verifyCommand = typeof obj.verifyCommand === "string" ? obj.verifyCommand.trim() : undefined;
+        if (verifyCommand) result.verifyCommand = verifyCommand;
+        if (typeof obj.verifyExitCode === "number") result.verifyExitCode = obj.verifyExitCode;
+        const verifyStdout = typeof obj.verifyStdout === "string" ? obj.verifyStdout.trim() : undefined;
+        if (verifyStdout) result.verifyStdout = verifyStdout;
+        const verifyStderr = typeof obj.verifyStderr === "string" ? obj.verifyStderr.trim() : undefined;
+        if (verifyStderr) result.verifyStderr = verifyStderr;
+        return result;
       }
     } catch {
       // 继续尝试下一个候选

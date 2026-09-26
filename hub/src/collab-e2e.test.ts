@@ -13,7 +13,7 @@ type FlowTaskView = {
   waitingFor?: string;
   waitingQuestion?: string;
   waitingHelpId?: string;
-  verifications?: { by: string; verdict: string; evidence: string }[];
+  verifications?: { by: string; verdict: string; evidence: string; evidenceDetail?: Record<string, unknown> }[];
 };
 
 type FlowView = {
@@ -154,6 +154,7 @@ describe("collab-e2e", () => {
     assert.equal(verifiedT1.verifications?.[0]?.by, "tester");
     assert.equal(verifiedT1.verifications?.[0]?.verdict, "pass");
     assert.match(verifiedT1.verifications?.[0]?.evidence ?? "", /npm test 8\/8/);
+    assert.equal(verifiedT1.verifications?.[0]?.evidenceDetail?.summary, "npm test 8/8 通过");
     assert.ok(h.notices().some((m) => m.includes("独立验证")));
     const ev = h.rooms.getEvents(h.room.roomId).find((e) => e.action === "test" && e.taskId === "t1");
     assert.ok(ev, "事件时间轴应有验证记录");
