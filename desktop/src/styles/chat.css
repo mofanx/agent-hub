@@ -2045,6 +2045,22 @@
   flex-shrink: 0;
 }
 
+.help-banner-btn {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--warn);
+  background: var(--warn);
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.help-banner-btn:hover {
+  opacity: 0.88;
+}
+
 .flow-badge-help {
   border-color: var(--warn);
   color: var(--warn);

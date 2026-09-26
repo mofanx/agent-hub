@@ -109,6 +109,8 @@ export interface FlowTask {
   /** 任务挂起等待求助回复：目标成员名或 "user" */
   waitingFor?: string;
   waitingQuestion?: string;
+  /** 待答复的求助交换 id，用于 room.message 的 replyTo 定向答复 */
+  waitingHelpId?: string;
   /** 其他成员对本任务的独立验证记录 */
   verifications?: FlowVerification[];
 }

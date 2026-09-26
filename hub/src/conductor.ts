@@ -169,6 +169,7 @@ export class ConductorOrchestrator {
                   ? "user"
                   : room?.members.find((m) => m.sessionId === waiting.to)?.name ?? waiting.to,
               waitingQuestion: waiting.question.slice(0, 200),
+              waitingHelpId: waiting.id,
             }
           : {}),
         ...(t.verifications?.length
@@ -510,8 +511,19 @@ export class ConductorOrchestrator {
     return true;
   }
 
-  /** 用户消息答复指向 "user" 的求助；返回被重新唤醒的成员 sessionId 列表 */
-  answerUserHelp(roomId: string, text: string): string[] {
+  /** 等待用户答复的求助交换（to === "user" 且 pending） */
+  pendingUserHelps(
+    roomId: string,
+  ): { id: string; taskId: string; from: string; question: string }[] {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase !== "working") return [];
+    return [...flow.help.values()]
+      .filter((e) => e.status === "pending" && e.to === "user")
+      .map((e) => ({ id: e.id, taskId: e.taskId, from: e.from, question: e.question }));
+  }
+
+  /** 用户消息答复指向 "user" 的求助；helpId 可指定具体交换；返回被重新唤醒的成员 sessionId 列表 */
+  answerUserHelp(roomId: string, text: string, helpId?: string): string[] {
     const flow = this.flows.get(roomId);
     if (!flow || flow.phase !== "working") return [];
     const room = this.rooms.get(roomId);
@@ -519,6 +531,7 @@ export class ConductorOrchestrator {
     const answered: string[] = [];
     for (const e of flow.help.values()) {
       if (e.status !== "pending" || e.to !== "user") continue;
+      if (helpId && e.id !== helpId) continue;
       e.status = "answered";
       e.answer = text;
       this.repromptAsker(flow, room, e);
@@ -571,7 +584,7 @@ export class ConductorOrchestrator {
     if (toUser) {
       this.notice({
         roomId: flow.roomId,
-        message: `🆘 @${fromName} 在任务 ${task.id} 向你求助：${req.question.slice(0, 300)}（回复任意消息即可答复）`,
+        message: `🆘 @${fromName} 在任务 ${task.id} 向你求助：${req.question.slice(0, 300)}（回复「答：内容」或带 replyTo 参数即可答复；其他消息将作为补充信息并入流程）`,
       });
       this.emitFlow?.(flow.roomId);
       return true;

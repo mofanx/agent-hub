@@ -35,6 +35,22 @@ export type HistoryEntry = {
   text: string;
 };
 
+/**
+ * 判定是否需要"回复丢失"占位符/提示。
+ * replyStillOpen 为 true（活跃编排尚未产出最终回复）时一律不误报。
+ * 返回 "append"（需写入占位符并提示）/ "repeat"（占位符已在末尾，只提示）/ undefined。
+ */
+export function lostReplyAction(
+  last: Pick<HistoryEntry, "kind" | "text"> | undefined,
+  placeholder: string,
+  replyStillOpen: boolean,
+): "append" | "repeat" | undefined {
+  if (!last || replyStillOpen) return undefined;
+  if (last.kind === "user") return "append";
+  if (last.kind === "assistant" && last.text === placeholder) return "repeat";
+  return undefined;
+}
+
 type HistoryItem = HistoryEntry & { id: number; at: number };
 
 export type Role = {

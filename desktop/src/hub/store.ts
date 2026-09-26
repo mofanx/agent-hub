@@ -185,7 +185,7 @@ interface Actions {
   cloneRoom(room: RoomInfo, newName: string): Promise<RoomInfo | null>;
 
   sendPrompt(text: string): void;
-  sendRoomMessage(text: string): void;
+  sendRoomMessage(text: string, opts?: { replyTo?: string }): void;
   stopCurrent(): void;
   cancelFlow(): Promise<void>;
   answerPermission(requestId: string, optionId: string, optionName: string): void;
@@ -1447,7 +1447,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
     },
 
-    sendRoomMessage: (text: string) => {
+    sendRoomMessage: (text: string, opts?: { replyTo?: string }) => {
       const room = get().currentRoom;
       if (!room) return;
       if (get().handleSlashCommand(text)) return;
@@ -1477,6 +1477,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const params: Record<string, unknown> = { roomId: room.roomId, text: text || "（图片）", content };
       if (q) {
         params.quote = { author: q[0], text: q[1] };
+      }
+      if (opts?.replyTo) {
+        params.replyTo = opts.replyTo;
       }
 
       getOrCall("room.message", params)

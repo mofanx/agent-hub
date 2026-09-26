@@ -19,7 +19,7 @@ import {
 import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
-import { Store, type SessionMeta, type Connection } from "./store.js";
+import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
@@ -91,9 +91,8 @@ function sessionLostReplyNote(sessionId: string): string | undefined {
   const origin = originFor(meta);
   const displayName = origin ? `${baseName} (${origin})` : baseName;
   const entries = store.read("session", sessionId);
-  const last = entries[entries.length - 1];
-  if (!last) return undefined;
-  if (last.kind === "user") {
+  const action = lostReplyAction(entries[entries.length - 1], LOST_REPLY_PLACEHOLDER, false);
+  if (action === "append") {
     store.append("session", sessionId, {
       at: Date.now(),
       kind: "assistant",
@@ -102,9 +101,7 @@ function sessionLostReplyNote(sessionId: string): string | undefined {
     });
     return LOST_REPLY_NOTE;
   }
-  if (last.kind === "assistant" && last.text === LOST_REPLY_PLACEHOLDER) {
-    return LOST_REPLY_NOTE;
-  }
+  if (action === "repeat") return LOST_REPLY_NOTE;
   return undefined;
 }
 
@@ -112,9 +109,12 @@ function roomLostReplyNote(roomId: string): string | undefined {
   const room = rooms.get(roomId);
   if (!room) return undefined;
   const entries = store.read("room", roomId);
-  const last = entries[entries.length - 1];
-  if (!last) return undefined;
-  if (last.kind === "user") {
+  const action = lostReplyAction(
+    entries[entries.length - 1],
+    LOST_REPLY_PLACEHOLDER,
+    roomModeManager.hasActiveFlow(roomId),
+  );
+  if (action === "append") {
     store.append("room", roomId, {
       at: Date.now(),
       kind: "assistant",
@@ -123,9 +123,7 @@ function roomLostReplyNote(roomId: string): string | undefined {
     });
     return LOST_REPLY_NOTE;
   }
-  if (last.kind === "assistant" && last.text === LOST_REPLY_PLACEHOLDER) {
-    return LOST_REPLY_NOTE;
-  }
+  if (action === "repeat") return LOST_REPLY_NOTE;
   return undefined;
 }
 
@@ -145,7 +143,18 @@ function repairHistoryAtStartup(): void {
       });
     }
   }
+  // 重启前有未完成编排的房间会在运行时恢复后继续产出回复，跳过占位符以免误报
+  const liveFlowRooms = new Set(
+    (
+      ((savedRuntime?.conductor as Record<string, unknown> | undefined)?.flows as
+        | Record<string, unknown>[]
+        | undefined) ?? []
+    )
+      .filter((f) => f.phase !== "done")
+      .map((f) => String(f.roomId ?? "")),
+  );
   for (const room of rooms.list()) {
+    if (liveFlowRooms.has(room.roomId)) continue;
     const entries = store.read("room", room.roomId);
     const last = entries[entries.length - 1];
     if (last && last.kind === "user") {

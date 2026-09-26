@@ -75,6 +75,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.FormatQuote
+import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -280,6 +281,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         vm.chatSearchMatchCount = matchPositions.size
         if (vm.chatSearchMatchIndex == -1 && matchPositions.isNotEmpty()) {
             vm.chatSearchMatchIndex = 0
+        }
+    }
+
+    LaunchedEffect(vm.flow, vm.helpReplyTo) {
+        val target = vm.helpReplyTo ?: return@LaunchedEffect
+        if (vm.flow?.tasks?.any { it.waitingFor == "user" && it.waitingHelpId == target } != true) {
+            vm.cancelHelpReply()
         }
     }
 
@@ -609,6 +617,58 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
+            val helpTasks = if (isRoom) vm.flow?.tasks?.filter {
+                it.waitingFor == "user" && !it.waitingHelpId.isNullOrBlank()
+            }.orEmpty() else emptyList()
+            Column(
+                Modifier
+                    .heightIn(max = 160.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                helpTasks.forEach { helpTask ->
+                    val isReplyTarget = vm.helpReplyTo != null && helpTask.waitingHelpId == vm.helpReplyTo
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.QuestionAnswer,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Spacer(Modifier.size(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    if (isReplyTarget) "${S.helpReplying} @${helpTask.name}" else "@${helpTask.name}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                Text(
+                                    helpTask.waitingQuestion.orEmpty().take(100),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 2,
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    if (isReplyTarget) vm.cancelHelpReply()
+                                    else helpTask.waitingHelpId?.let { vm.startHelpReply(it) }
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            ) {
+                                Text(
+                                    if (isReplyTarget) S.exitHelpReply else S.helpReplyAction,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
             Row(
                 Modifier
                     .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -701,7 +761,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             ) {
                                 if (input.isEmpty()) {
                                     Text(
-                                        if (flowAbsorbing) S.inputFlowActive else if (isRoom) S.inputRoom else S.inputSingle,
+                                        if (vm.helpReplyTo != null) S.inputHelpReply
+                                        else if (flowAbsorbing) S.inputFlowActive
+                                        else if (isRoom) S.inputRoom else S.inputSingle,
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -2010,15 +2072,28 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
             }
         }
         task.waitingFor?.let { target ->
-            val label = if (target == "user") "你" else "@$target"
-            Text(
-                "⏳ 等待 $label 回复：${task.waitingQuestion.orEmpty().take(160)}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (target == "user") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(start = 20.dp, top = 2.dp),
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
+            ) {
+                Text(
+                    "⏳ 等待 ${if (target == "user") "你" else "@$target"} 回复：${task.waitingQuestion.orEmpty().take(160)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (target == "user") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (target == "user" && task.waitingHelpId != null) {
+                    Spacer(Modifier.width(6.dp))
+                    TextButton(
+                        onClick = { vm.startHelpReply(task.waitingHelpId) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text("答复", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
         }
         if (expanded && hasDetail) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {

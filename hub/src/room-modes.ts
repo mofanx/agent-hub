@@ -133,6 +133,37 @@ type DebateFlow = {
 /** 活跃流程中的显式取消指令（除此之外的新消息视为补充/答复） */
 const CANCEL_TEXT = /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i;
 
+/** 旧客户端兼容路径：以「答：」「answer:」「/reply」开头的文本视为对用户求助的答复 */
+const HELP_ANSWER_PREFIX = /^(?:(?:答|answer|reply)\s*[:：]\s*|\/reply\s+)/i;
+
+/**
+ * 判定消息是否是对用户求助的显式答复。
+ * 新客户端用 params.replyTo / params.answer / params.intent 标记；
+ * 旧客户端用「答：」「answer:」「/reply 」前缀。其余消息一律视为补充信息。
+ */
+function helpAnswerIntent(
+  text: string,
+  params?: Record<string, unknown>,
+): { text: string; helpId?: string } | undefined {
+  const intent = String(params?.intent ?? "").trim().toLowerCase();
+  if (intent === "supplement" || intent === "note") return undefined;
+  const replyTo = typeof params?.replyTo === "string" ? params.replyTo.trim() : "";
+  if (
+    replyTo !== "" ||
+    params?.answer === true ||
+    params?.answer === "true" ||
+    intent === "answer"
+  ) {
+    return { text, ...(replyTo ? { helpId: replyTo } : {}) };
+  }
+  const m = text.match(HELP_ANSWER_PREFIX);
+  if (m?.[0]) {
+    const body = text.slice(m[0].length).trim();
+    if (body) return { text: body };
+  }
+  return undefined;
+}
+
 const MODE_LABELS: Record<RuntimeMode, string> = {
   mention: "点名应答",
   conductor: "指挥家编排",
@@ -414,17 +445,37 @@ export class RoomModeManager {
    * 否则作为补充信息并入当前流程。返回被重新唤醒/通知的 sessionId，
    * 返回 undefined 表示当前阶段不吸收（如 awaiting-retry，走旧的取消-重来语义）。
    */
-  private absorbActiveMessage(room: Room, text: string): string[] | undefined {
+  private absorbActiveMessage(
+    room: Room,
+    text: string,
+    options?: PromptOptions,
+  ): string[] | undefined {
     const roomId = room.roomId;
 
-    // 1. 指向用户的定向求助待答复：本条消息作为答案直接唤醒原任务
-    const helped = this.conductor.answerUserHelp(roomId, text);
-    if (helped.length > 0) {
+    // 1. 指向用户的定向求助待答复：仅显式答复（replyTo/answer 参数或「答：」前缀）消费为答案；
+    //    追问、补充等普通消息不再默认当作答案，而是并入流程并提醒仍在等待答复
+    const pendingUser = this.conductor.pendingUserHelps(roomId);
+    if (pendingUser.length > 0) {
+      const intent = helpAnswerIntent(text, options?.params);
+      if (intent) {
+        const helped = this.conductor.answerUserHelp(roomId, intent.text, intent.helpId);
+        if (helped.length > 0) {
+          this.notice({
+            roomId,
+            message: `已将你的回复转达给 ${helped.map((sid) => `@${this.nameFor(roomId, sid)}`).join("、")}，任务继续`,
+          });
+          return helped;
+        }
+      }
+      const merged = this.conductor.addSupplement(roomId, text);
+      const waiting = pendingUser
+        .map((e) => `@${this.nameFor(roomId, e.from)} 的提问「${e.question.slice(0, 80)}」`)
+        .join("；");
       this.notice({
         roomId,
-        message: `已将你的回复转达给 ${helped.map((sid) => `@${this.nameFor(roomId, sid)}`).join("、")}，任务继续`,
+        message: `${merged ? "📝 已并入当前流程的补充" : "📝 已记录"}：${text.slice(0, 80)}。仍在等待答复的求助：${waiting}（回复「答：内容」即可答复）`,
       });
-      return helped;
+      return [];
     }
 
     // 2. conductor 流程：并入 supplements，注入后续派发/验收/汇总
@@ -496,7 +547,7 @@ export class RoomModeManager {
         this.emitFlowUpdate(room.roomId);
         return { sent: [], mentioned: [], skipped: [] };
       }
-      const absorbed = this.absorbActiveMessage(room, text);
+      const absorbed = this.absorbActiveMessage(room, text, options);
       if (absorbed) {
         this.emitFlowUpdate(room.roomId);
         return { sent: absorbed, mentioned: [], skipped: [] };

@@ -175,6 +175,7 @@ export function ChatScreen() {
     loading: boolean;
   } | null>(null);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [replyHelp, setReplyHelp] = useState<{ helpId: string; name: string; taskId: string; question: string } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -545,8 +546,10 @@ export function ChatScreen() {
   const send = () => {
     const text = input.trim();
     if (!text && !store.pendingAttachments.length) return;
-    if (isRoom) store.sendRoomMessage(text);
-    else store.sendPrompt(text);
+    if (isRoom) {
+      store.sendRoomMessage(text, replyHelp ? { replyTo: replyHelp.helpId } : undefined);
+      setReplyHelp(null);
+    } else store.sendPrompt(text);
     setInput("");
   };
 
@@ -657,9 +660,20 @@ export function ChatScreen() {
   const flowCount = store.flow?.tasks?.length ?? 0;
   const flowActive = isRoom && !!store.flow &&
     store.flow.phase !== "done" && store.flow.phase !== "awaiting-retry";
-  const pendingUserHelp = flowActive
-    ? store.flow?.tasks.find((t) => t.waitingFor === "user")
-    : undefined;
+  const pendingUserHelps = flowActive
+    ? (store.flow?.tasks.filter((t) => t.waitingFor === "user") ?? [])
+    : [];
+
+  useEffect(() => {
+    if (
+      replyHelp &&
+      !store.flow?.tasks.some(
+        (t) => t.waitingFor === "user" && t.waitingHelpId === replyHelp.helpId,
+      )
+    ) {
+      setReplyHelp(null);
+    }
+  }, [store.flow, replyHelp]);
   const blackboardCount = store.blackboard?.length ?? 0;
   const newTotal = store.newCounts.artifact + store.newCounts.event + store.newCounts.blackboard;
   const isContextPanel =
@@ -810,18 +824,44 @@ export function ChatScreen() {
           </div>
 
           <div className="compose-wrap">
-            {pendingUserHelp && (
-              <div
-                className="help-banner"
-                onClick={() => inputRef.current?.focus()}
-                title="点击输入框回复求助"
-              >
+            {pendingUserHelps.map((t) => (
+              <div key={t.id} className="help-banner">
                 <LifeBuoy size={13} />
                 <span className="help-banner-text">
-                  @{pendingUserHelp.name} 在任务 {pendingUserHelp.id} 向你求助：
-                  {pendingUserHelp.waitingQuestion ?? "需要你的回复"}
+                  @{t.name} 在任务 {t.id} 向你求助：
+                  {t.waitingQuestion ?? "需要你的回复"}
                 </span>
-                <span className="help-banner-hint">回复任意消息即可答复</span>
+                <span className="help-banner-hint">直接发送并入补充</span>
+                <button
+                  className="help-banner-btn"
+                  onClick={() => {
+                    if (!t.waitingHelpId) return;
+                    setReplyHelp({
+                      helpId: t.waitingHelpId,
+                      name: t.name,
+                      taskId: t.id,
+                      question: t.waitingQuestion ?? "",
+                    });
+                    inputRef.current?.focus();
+                  }}
+                >
+                  答复
+                </button>
+              </div>
+            ))}
+            {replyHelp && (
+              <div className="quote-bar">
+                <span className="subtitle">
+                  答复 @{replyHelp.name} 的求助（任务 {replyHelp.taskId}）：
+                  {replyHelp.question.slice(0, 80)}
+                </span>
+                <button
+                  className="icon-btn"
+                  onClick={() => setReplyHelp(null)}
+                  title="取消答复，消息将作为补充发送"
+                >
+                  <X size={13} />
+                </button>
               </div>
             )}
             {store.quote && (

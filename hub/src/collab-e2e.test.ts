@@ -12,6 +12,7 @@ type FlowTaskView = {
   status: string;
   waitingFor?: string;
   waitingQuestion?: string;
+  waitingHelpId?: string;
   verifications?: { by: string; verdict: string; evidence: string }[];
 };
 
@@ -107,8 +108,15 @@ describe("collab-e2e", () => {
     assert.ok(h.notices().some((m) => m.includes("向你求助")));
     assert.equal(h.prompts.filter((p) => p.sessionId === "s2").length, 1, "求助期间不应重复派发");
 
-    // 3. 用户回复任意消息 → 作为答案唤醒原任务
-    const res = await h.manager.handle(h.room, "用快速排序", {});
+    // 3. 追问不当作答案（hub-test 实踩路径）；客户端显式答复（intent=answer + replyTo）唤醒原任务
+    const followUp = await h.manager.handle(h.room, "问的是什么问题呀？", {});
+    assert.deepEqual(followUp.sent, []);
+    const waitingT1 = h.flow()!.tasks.find((t) => t.id === "t1")!;
+    assert.equal(waitingT1.waitingFor, "user");
+    assert.ok(waitingT1.waitingHelpId, "flow 视图应暴露 waitingHelpId 供客户端定向答复");
+    const res = await h.manager.handle(h.room, "用快速排序", {
+      params: { intent: "answer", replyTo: waitingT1.waitingHelpId },
+    });
     assert.deepEqual(res.sent, ["s2"]);
     const woke = h.lastPrompt("s2")!;
     assert.match(woke.text, /快速排序/);
@@ -119,7 +127,10 @@ describe("collab-e2e", () => {
     const sup = await h.manager.handle(h.room, "补充：要兼容 Windows", {});
     assert.deepEqual(sup.sent, []);
     assert.equal(h.cancelled.length, 0, "补充不应触发取消");
-    assert.deepEqual(h.flow()?.supplements, ["补充：要兼容 Windows"]);
+    assert.deepEqual(h.flow()?.supplements, [
+      "问的是什么问题呀？",
+      "补充：要兼容 Windows",
+    ]);
     assert.ok(h.notices().some((m) => m.includes("已并入")));
 
     // 5. t1 完成 → t2 派发，prompt 携带用户补充

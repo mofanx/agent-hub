@@ -323,6 +323,7 @@ data class FlowTask(
     val retries: Int = 0,
     val waitingFor: String? = null,
     val waitingQuestion: String? = null,
+    val waitingHelpId: String? = null,
     val verifications: List<FlowVerification> = emptyList(),
 )
 
@@ -596,6 +597,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
+    var helpReplyTo by mutableStateOf<String?>(null)
+        private set
+
+    fun startHelpReply(helpId: String) {
+        helpReplyTo = helpId
+    }
+
+    fun cancelHelpReply() {
+        helpReplyTo = null
+    }
+
     var multiSelectMode by mutableStateOf(false)
     val selectedMessageIds = mutableStateListOf<String>()
     var fileRefToInsert by mutableStateOf<String?>(null)
@@ -1296,6 +1308,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         busyIds.clear()
         currentSession = null
         currentRoom = null
+        helpReplyTo = null
         currentArtifacts.clear()
         currentEvents.clear()
         blackboard.clear()
@@ -1943,6 +1956,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         listTab.value = 0
         currentSession = session
         currentRoom = null
+        helpReplyTo = null
         if (!isSameSession) {
             currentArtifacts.clear()
             currentEvents.clear()
@@ -1991,6 +2005,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     blackboard.clear()
                     quote = null
                     flow = null
+                    helpReplyTo = null
                     chatItems.clear()
                 }
                 resetNewCounts()
@@ -2187,6 +2202,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             retries = obj["retries"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             waitingFor = obj["waitingFor"]?.jsonPrimitive?.contentOrNull,
             waitingQuestion = obj["waitingQuestion"]?.jsonPrimitive?.contentOrNull,
+            waitingHelpId = obj["waitingHelpId"]?.jsonPrimitive?.contentOrNull,
             verifications = obj["verifications"]?.jsonArray?.map { v ->
                 val vo = v.jsonObject
                 FlowVerification(
@@ -2704,6 +2720,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (text.isBlank() && pendingAttachments.isEmpty()) return
         if (handleSlashCommand(text)) return
         val q = quote
+        val helpReply = helpReplyTo
         val attachments = pendingAttachments.toList()
         chatItems.add(
             ChatItem.User(
@@ -2715,6 +2732,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             ),
         )
         quote = null
+        helpReplyTo = null
         pendingAttachments.clear()
         viewModelScope.launch {
             try {
@@ -2742,6 +2760,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             put("author", q.first)
                             put("text", q.second)
                         })
+                    }
+                    if (helpReply != null) {
+                        put("intent", "answer")
+                        put("replyTo", helpReply)
                     }
                 })
                 result["sent"]?.jsonArray?.forEach {

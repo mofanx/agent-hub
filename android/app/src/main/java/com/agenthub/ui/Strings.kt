@@ -90,6 +90,10 @@ interface Strings {
     val inputRoom: String
     val inputSingle: String
     val inputFlowActive: String
+    val inputHelpReply: String
+    val helpReplying: String
+    val helpReplyAction: String
+    val exitHelpReply: String
     val send: String
     val thought: String
     val thoughtOf: String
@@ -167,6 +171,7 @@ interface Strings {
     val modelNoResults: String
     val modelClearFilters: String
     val modelCurrentLabel: String
+    val modelSessionConfig: String
     val unknownCommandHint: String
     val exit: String
     val exitConfirmTitle: String
@@ -284,8 +289,12 @@ object ZhStrings : Strings {
     override val copied = "已复制"
     override val inputRoom = "群聊消息，@名字 指定成员"
     override val inputSingle = "给 AI 下指令…"
-    override val send = "发送"
     override val inputFlowActive = "补充信息或答复求助（不打断编排，发送「取消」中断）"
+    override val inputHelpReply = "答复该求助…（追问/其他内容请退出答复模式）"
+    override val helpReplying = "答复"
+    override val helpReplyAction = "答复"
+    override val exitHelpReply = "退出答复"
+    override val send = "发送"
     override val thought = "思考过程"
     override val thoughtOf = "%s 的思考"
     override val plan = "计划"
@@ -362,6 +371,7 @@ object ZhStrings : Strings {
     override val modelNoResults = "没有匹配的模型"
     override val modelClearFilters = "清除筛选"
     override val modelCurrentLabel = "当前"
+    override val modelSessionConfig = "用量与会话配置"
     override val unknownCommandHint = "未知命令，输入 /help 查看说明"
     override val exit = "退出"
     override val exitConfirmTitle = "退出当前连接？"
@@ -479,9 +489,13 @@ object EnStrings : Strings {
     override val copied = "Copied"
     override val inputRoom = "Message, @name to mention"
     override val inputSingle = "Send an instruction…"
+    override val inputFlowActive = "Add info or reply (won't interrupt; send \"cancel\" to stop)"
+    override val inputHelpReply = "Reply to this help request…"
+    override val helpReplying = "Replying to"
+    override val helpReplyAction = "Reply"
+    override val exitHelpReply = "Exit reply"
     override val send = "Send"
     override val thought = "Thinking"
-    override val inputFlowActive = "Add info or reply (won't interrupt; send \"cancel\" to stop)"
     override val thoughtOf = "%s's thinking"
     override val plan = "Plan"
     override val permissionRequest = "Approval request"
@@ -557,6 +571,7 @@ object EnStrings : Strings {
     override val modelNoResults = "No matching models"
     override val modelClearFilters = "Clear filters"
     override val modelCurrentLabel = "Current"
+    override val modelSessionConfig = "Usage & session config"
     override val unknownCommandHint = "Unknown command, type /help for usage"
     override val exit = "Exit"
     override val exitConfirmTitle = "Exit current connection?"

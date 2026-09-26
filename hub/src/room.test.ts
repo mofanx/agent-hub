@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { RoomManager, type Room } from "./room.js";
+import { lostReplyAction } from "./store.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
 const WORKSPACE_ROOT = path.resolve(PROJECT_ROOT, "..");
@@ -552,5 +553,44 @@ describe("room", () => {
     const rooms = new RoomManager();
     rooms.setCwdResolver((sessionId) => (sessionId === "s1" ? WORKSPACE_ROOT : undefined));
     assert.throws(() => rooms.sessionDeleteFile("s1", "/etc/passwd"), /outside project root/);
+  });
+});
+
+describe("lostReplyAction", () => {
+  const PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]";
+
+  it("活跃编排未产出最终回复时不误报", () => {
+    assert.equal(
+      lostReplyAction({ kind: "user", text: "红" }, PLACEHOLDER, true),
+      undefined,
+    );
+    // 占位符已在末尾同样不重复提示
+    assert.equal(
+      lostReplyAction({ kind: "assistant", text: PLACEHOLDER }, PLACEHOLDER, true),
+      undefined,
+    );
+  });
+
+  it("无活跃流程时保持原有判定", () => {
+    // 上一条是用户消息且流程已结束 → 追加占位符并提示
+    assert.equal(
+      lostReplyAction({ kind: "user", text: "做X" }, PLACEHOLDER, false),
+      "append",
+    );
+    // 占位符已在末尾 → 只提示不重复追加
+    assert.equal(
+      lostReplyAction({ kind: "assistant", text: PLACEHOLDER }, PLACEHOLDER, false),
+      "repeat",
+    );
+    // 正常 assistant 回复 / 系统消息 / 空历史 → 不提示
+    assert.equal(
+      lostReplyAction({ kind: "assistant", text: "完成了" }, PLACEHOLDER, false),
+      undefined,
+    );
+    assert.equal(
+      lostReplyAction({ kind: "system", text: "通知" }, PLACEHOLDER, false),
+      undefined,
+    );
+    assert.equal(lostReplyAction(undefined, PLACEHOLDER, false), undefined);
   });
 });

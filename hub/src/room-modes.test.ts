@@ -380,7 +380,105 @@ describe("room-modes", () => {
     assert.equal(manager.hasActiveFlow(room.roomId), false);
   });
 
-  it("成员向用户求助后，下一条用户消息作为答复唤醒原任务", async () => {
+  it("成员向用户求助后，追问默认并入补充而非答案", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "tester" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const prompts: { sessionId: string; text: string | unknown[] }[] = [];
+    const notices: string[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      (method, params) => {
+        if (method === "room.notice") notices.push(String(params.message));
+      },
+    );
+    await manager.handle(room, "/task @tester 起服务");
+    await manager.onPromptDone(
+      "s2",
+      '```json\n{"help":{"to":"user","question":"端口用哪个？"}}\n```',
+    );
+    const waiting = manager.getFlow(room.roomId) as {
+      tasks: { waitingFor?: string }[];
+    };
+    assert.equal(waiting.tasks[0]!.waitingFor, "user");
+
+    // 追问不当作答案：任务保持等待，消息并入补充并提醒仍有求助未答复
+    const res = await manager.handle(room, "问的是什么问题呀？", {});
+    assert.deepEqual(res.sent, []);
+    const flow = manager.getFlow(room.roomId) as {
+      tasks: { waitingFor?: string }[];
+      supplements?: string[];
+    };
+    assert.equal(flow.tasks[0]!.waitingFor, "user");
+    assert.deepEqual(flow.supplements, ["问的是什么问题呀？"]);
+    assert.ok(notices.some((m) => m.includes("仍在等待答复")));
+    // 没有唤醒 worker
+    assert.equal(prompts.filter((p) => p.sessionId === "s2").length, 1);
+
+    // 追问后再用「答：」前缀显式答复，唤醒原任务且前缀被剥离
+    const res2 = await manager.handle(room, "答：用 3000", {});
+    assert.deepEqual(res2.sent, ["s2"]);
+    const last = prompts.filter((p) => p.sessionId === "s2").at(-1)!;
+    assert.match(String(last.text), /用 3000/);
+    assert.equal(manager.hasActiveFlow(room.roomId), true);
+  });
+
+  it("room.message 显式参数答复求助：params.answer 与 params.replyTo", async () => {
+    for (const useReplyTo of [false, true]) {
+      const rooms = new RoomManager();
+      const room = rooms.create(
+        "team",
+        [
+          { sessionId: "s1", name: "coder" },
+          { sessionId: "s2", name: "tester" },
+        ],
+        "conductor",
+        { conductorId: "s1" },
+      );
+      const prompts: { sessionId: string; text: string | unknown[] }[] = [];
+      const manager = new RoomModeManager(
+        {
+          prompt: async (sid, text) => { prompts.push({ sessionId: sid, text }); },
+          isBusy: () => false,
+          cancel: async () => {},
+        },
+        rooms,
+        () => {},
+      );
+      await manager.handle(room, "/task @tester 起服务");
+      await manager.onPromptDone(
+        "s2",
+        '```json\n{"help":{"to":"user","question":"端口用哪个？"}}\n```',
+      );
+      const flow = manager.getFlow(room.roomId) as {
+        tasks: { waitingFor?: string; waitingHelpId?: string }[];
+      };
+      assert.equal(flow.tasks[0]!.waitingFor, "user");
+      assert.ok(flow.tasks[0]!.waitingHelpId);
+
+      const options = useReplyTo
+        ? { params: { replyTo: flow.tasks[0]!.waitingHelpId } }
+        : { params: { answer: true } };
+      const res = await manager.handle(room, "用 3000", options);
+      assert.deepEqual(res.sent, ["s2"]);
+      const last = prompts.filter((p) => p.sessionId === "s2").at(-1)!;
+      assert.match(String(last.text), /3000/);
+    }
+  });
+
+  it("「答：」前缀之外的消息不会误消费求助，intent=supplement 也强制走补充", async () => {
     const rooms = new RoomManager();
     const room = rooms.create(
       "team",
@@ -406,13 +504,22 @@ describe("room-modes", () => {
       "s2",
       '```json\n{"help":{"to":"user","question":"端口用哪个？"}}\n```',
     );
-    const flow = manager.getFlow(room.roomId) as { tasks: { waitingFor?: string }[] };
-    assert.equal(flow.tasks[0]!.waitingFor, "user");
 
-    const res = await manager.handle(room, "用 3000", {});
-    assert.deepEqual(res.sent, ["s2"]);
+    // intent=supplement 即使文本像答复也不消费求助
+    const res = await manager.handle(room, "答：先别答复", {
+      params: { intent: "supplement" },
+    });
+    assert.deepEqual(res.sent, []);
+    const flow = manager.getFlow(room.roomId) as {
+      tasks: { waitingFor?: string }[];
+      supplements?: string[];
+    };
+    assert.equal(flow.tasks[0]!.waitingFor, "user");
+    assert.deepEqual(flow.supplements, ["答：先别答复"]);
+
+    const res2 = await manager.handle(room, "answer: 8080", {});
+    assert.deepEqual(res2.sent, ["s2"]);
     const last = prompts.filter((p) => p.sessionId === "s2").at(-1)!;
-    assert.match(String(last.text), /3000/);
-    assert.equal(manager.hasActiveFlow(room.roomId), true);
+    assert.match(String(last.text), /8080/);
   });
 });

@@ -1238,6 +1238,120 @@ describe("conductor", () => {
     assert.match(last.content, /起服务/);
   });
 
+  it("answerUserHelp 支持 helpId 定向答复；pendingUserHelps 列出待答求助", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "help-target",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"a","task":"起服务"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    await orchestrator.onPromptDone(
+      "worker1",
+      '```json\n{"help":{"to":"user","question":"端口用哪个？"}}\n```',
+    );
+
+    const pending = orchestrator.pendingUserHelps(r.roomId);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]!.taskId, "t1");
+    assert.equal(pending[0]!.from, "worker1");
+    assert.equal(pending[0]!.question, "端口用哪个？");
+
+    // 不匹配的 helpId 不消费
+    assert.deepEqual(orchestrator.answerUserHelp(r.roomId, "x", "nope"), []);
+    assert.equal(orchestrator.pendingUserHelps(r.roomId).length, 1);
+
+    // 定向答复命中
+    assert.deepEqual(
+      orchestrator.answerUserHelp(r.roomId, "用 4000", pending[0]!.id),
+      ["worker1"],
+    );
+    const last = prompts.filter((p) => p.sessionId === "worker1").at(-1)!;
+    assert.match(last.content, /4000/);
+  });
+
+  it("export/import 恢复后仍可向用户求助任务答复", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "help-restore",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"a","task":"起服务"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    await orchestrator.onPromptDone(
+      "worker1",
+      '```json\n{"help":{"to":"user","question":"端口用哪个？"}}\n```',
+    );
+    assert.equal(orchestrator.pendingUserHelps(r.roomId).length, 1);
+
+    const state = orchestrator.export();
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator2 = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    await orchestrator2.import(state);
+    // 恢复后等待中的用户求助仍在，任务保持挂起
+    const restored = orchestrator2.pendingUserHelps(r.roomId);
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0]!.question, "端口用哪个？");
+    const flow = orchestrator2.getFlow(r.roomId)!;
+    assert.equal(
+      (flow.tasks as Record<string, unknown>[])[0]!.waitingFor,
+      "user",
+    );
+
+    assert.deepEqual(orchestrator2.answerUserHelp(r.roomId, "用 4000"), ["worker1"]);
+    const last = prompts.filter((p) => p.sessionId === "worker1").at(-1)!;
+    assert.match(last.content, /4000/);
+  });
+
   it("addSupplement 注入后续派发与验收 prompt，不中断流程", async () => {
     const rooms = new RoomManager();
     const r = rooms.create(

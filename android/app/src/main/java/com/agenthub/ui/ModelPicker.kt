@@ -1,5 +1,7 @@
 package com.agenthub.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,6 +18,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
@@ -35,7 +39,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -65,6 +71,8 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
     val selectedVendors = remember { mutableStateListOf<String>() }
 
     val filter = vm.modelFilter
+    var filtersExpanded by remember { mutableStateOf(false) }
+    var configExpanded by remember { mutableStateOf(false) }
     // 切换成员时清空筛选（模型列表已换为成员后端）
     LaunchedEffect(selectedMember) {
         selectedTiers.clear()
@@ -107,6 +115,14 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
     val availableTiers = remember(all) { all.map { it.costTier }.toSet().sortedBy { costOrder.indexOf(it) } }
     val availableVendors = remember(all) { all.map { it.vendor }.toSet().sorted() }
 
+    val pickerBackend = if (isRoom) memberModels[selectedMember]?.second else vm.currentSession?.agent
+    val quota = vm.backendQuota
+    val showQuota = pickerBackend == "devin" && quota?.available == true
+    val configTargetSid = if (isRoom) selectedMember else vm.currentSession?.sessionId
+    val hasConfig = configTargetSid != null && vm.sessionConfigOptions.isNotEmpty()
+    val activeFilters = (if (isRoom) 0 else selectedBackends.size) +
+        selectedTiers.size + selectedVendors.size
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -134,52 +150,8 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     }
                 }
 
-                Spacer(Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = vm.modelFilter,
-                    onValueChange = { vm.modelFilter = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text(S.modelFilterHint) },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(24.dp),
-                )
-
-                // Devin 账号用量（仅在 Devin 后端上下文显示）
-                val pickerBackend = if (isRoom) memberModels[selectedMember]?.second else vm.currentSession?.agent
-                val quota = vm.backendQuota
-                if (pickerBackend == "devin" && quota?.available == true) {
-                    Spacer(Modifier.height(8.dp))
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                        ),
-                    ) {
-                        Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                            Text(
-                                "Devin 用量${quota.planName?.let { " · $it" } ?: ""}",
-                                style = MaterialTheme.typography.labelLarge,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            listOfNotNull(
-                                quota.daily?.let { "今日已用" to it },
-                                quota.weekly?.let { "本周已用" to it },
-                            ).forEach { (label, w) ->
-                                QuotaRow(label, w)
-                                Spacer(Modifier.height(4.dp))
-                            }
-                        }
-                    }
-                }
-
                 // 群聊模式：成员标签栏
                 if (isRoom) {
-                    Spacer(Modifier.height(8.dp))
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 2.dp),
@@ -195,59 +167,25 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                     }
                 }
 
-                // 会话配置项（Session Mode / Thinking 等）：群聊作用于选中成员，单聊作用于当前会话
-                val configTargetSid = if (isRoom) selectedMember else vm.currentSession?.sessionId
-                if (configTargetSid != null && vm.sessionConfigOptions.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                        ),
-                    ) {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                            vm.sessionConfigOptions.forEach { opt ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        opt.name,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.width(88.dp),
-                                    )
-                                    LazyRow(Modifier.weight(1f)) {
-                                        items(opt.options, key = { it.value }) { o ->
-                                            FilterChip(
-                                                selected = opt.currentValue == o.value,
-                                                onClick = {
-                                                    vm.setSessionConfigOption(configTargetSid, opt.id, o.value)
-                                                },
-                                                label = { Text(o.name) },
-                                                modifier = Modifier.padding(end = 8.dp),
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                Spacer(Modifier.height(8.dp))
 
-                // 清空筛选按钮（单聊/群聊通用）
-                if ((if (!isRoom) selectedBackends.isNotEmpty() else false) ||
-                    selectedTiers.isNotEmpty() || selectedVendors.isNotEmpty() || filter.isNotBlank()
+                OutlinedTextField(
+                    value = vm.modelFilter,
+                    onValueChange = { vm.modelFilter = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text(S.modelFilterHint) },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(24.dp),
+                )
+
+                // 筛选分区（默认折叠，激活数量显示在标题上）
+                SectionHeader(
+                    title = if (activeFilters > 0) "${S.filter} ($activeFilters)" else S.filter,
+                    expanded = filtersExpanded,
+                    onToggle = { filtersExpanded = !filtersExpanded },
                 ) {
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Spacer(Modifier.weight(1f))
+                    if (activeFilters > 0 || filter.isNotBlank()) {
                         TextButton(
                             onClick = {
                                 vm.modelFilter = ""
@@ -258,69 +196,139 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                         ) { Text(S.modelClearFilters) }
                     }
                 }
-
-                Spacer(Modifier.height(8.dp))
-
-                // 单聊模式：后端筛选（群聊已按成员后端加载，无需再筛）
-                if (!isRoom) {
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 2.dp),
-                    ) {
-                        items(availableBackends, key = { "backend:$it" }) { backend ->
-                            FilterChip(
-                                selected = selectedBackends.contains(backend),
-                                onClick = {
-                                    if (selectedBackends.contains(backend)) selectedBackends.remove(backend)
-                                    else selectedBackends.add(backend)
-                                },
-                                label = { Text(backendDisplayName(backend)) },
-                                modifier = Modifier.padding(end = 8.dp),
-                            )
+                AnimatedVisibility(filtersExpanded) {
+                    Column {
+                        // 单聊模式：后端筛选（群聊已按成员后端加载，无需再筛）
+                        if (!isRoom) {
+                            LazyRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 2.dp),
+                            ) {
+                                items(availableBackends, key = { "backend:$it" }) { backend ->
+                                    FilterChip(
+                                        selected = selectedBackends.contains(backend),
+                                        onClick = {
+                                            if (selectedBackends.contains(backend)) selectedBackends.remove(backend)
+                                            else selectedBackends.add(backend)
+                                        },
+                                        label = { Text(backendDisplayName(backend)) },
+                                        modifier = Modifier.padding(end = 8.dp),
+                                    )
+                                }
+                            }
+                        }
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 2.dp),
+                        ) {
+                            items(availableTiers, key = { "tier:$it" }) { tier ->
+                                FilterChip(
+                                    selected = selectedTiers.contains(tier),
+                                    onClick = {
+                                        if (selectedTiers.contains(tier)) selectedTiers.remove(tier)
+                                        else selectedTiers.add(tier)
+                                    },
+                                    label = { Text(tierName(S, tier)) },
+                                    modifier = Modifier.padding(end = 8.dp),
+                                )
+                            }
+                        }
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 2.dp),
+                        ) {
+                            items(availableVendors, key = { "vendor:$it" }) { vendor ->
+                                FilterChip(
+                                    selected = selectedVendors.contains(vendor),
+                                    onClick = {
+                                        if (selectedVendors.contains(vendor)) selectedVendors.remove(vendor)
+                                        else selectedVendors.add(vendor)
+                                    },
+                                    label = { Text(vendor) },
+                                    modifier = Modifier.padding(end = 8.dp),
+                                )
+                            }
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
                 }
 
-                // tier 筛选（单聊/群聊通用）
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 2.dp),
-                ) {
-                    items(availableTiers, key = { "tier:$it" }) { tier ->
-                        FilterChip(
-                            selected = selectedTiers.contains(tier),
-                            onClick = {
-                                if (selectedTiers.contains(tier)) selectedTiers.remove(tier)
-                                else selectedTiers.add(tier)
-                            },
-                            label = { Text(tierName(S, tier)) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
+                // 用量与会话配置分区（默认折叠）：群聊作用于选中成员，单聊作用于当前会话
+                if (showQuota || hasConfig) {
+                    SectionHeader(
+                        title = S.modelSessionConfig,
+                        expanded = configExpanded,
+                        onToggle = { configExpanded = !configExpanded },
+                    )
+                    AnimatedVisibility(configExpanded) {
+                        Column {
+                            if (showQuota) {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                    ),
+                                ) {
+                                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                                        Text(
+                                            "Devin 用量${quota.planName?.let { " · $it" } ?: ""}",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Spacer(Modifier.height(6.dp))
+                                        listOfNotNull(
+                                            quota.daily?.let { "今日已用" to it },
+                                            quota.weekly?.let { "本周已用" to it },
+                                        ).forEach { (label, w) ->
+                                            QuotaRow(label, w)
+                                            Spacer(Modifier.height(4.dp))
+                                        }
+                                    }
+                                }
+                            }
+                            if (hasConfig) {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                    ),
+                                ) {
+                                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                        vm.sessionConfigOptions.forEach { opt ->
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Text(
+                                                    opt.name,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.width(88.dp),
+                                                )
+                                                LazyRow(Modifier.weight(1f)) {
+                                                    items(opt.options, key = { it.value }) { o ->
+                                                        FilterChip(
+                                                            selected = opt.currentValue == o.value,
+                                                            onClick = {
+                                                                vm.setSessionConfigOption(configTargetSid, opt.id, o.value)
+                                                            },
+                                                            label = { Text(o.name) },
+                                                            modifier = Modifier.padding(end = 8.dp),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-
-                Spacer(Modifier.height(8.dp))
-
-                // vendor 筛选（单聊/群聊通用）
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 2.dp),
-                ) {
-                    items(availableVendors, key = { "vendor:$it" }) { vendor ->
-                        FilterChip(
-                            selected = selectedVendors.contains(vendor),
-                            onClick = {
-                                if (selectedVendors.contains(vendor)) selectedVendors.remove(vendor)
-                                else selectedVendors.add(vendor)
-                            },
-                            label = { Text(vendor) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
 
                 LazyColumn(
                     modifier = Modifier.fillMaxWidth().weight(1f),
@@ -355,6 +363,36 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SectionHeader(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    trailing: @Composable () -> Unit = {},
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            title,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f).padding(start = 4.dp),
+        )
+        trailing()
     }
 }
 
@@ -397,8 +435,8 @@ private fun ModelItem(S: Strings, m: ModelInfo, current: String, onClick: () -> 
     val isCurrent = m.uid == current
     Card(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isCurrent) {
                 MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
@@ -407,11 +445,13 @@ private fun ModelItem(S: Strings, m: ModelInfo, current: String, onClick: () -> 
             },
         ),
     ) {
-        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     m.label,
                     style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 if (isCurrent) {
@@ -423,11 +463,12 @@ private fun ModelItem(S: Strings, m: ModelInfo, current: String, onClick: () -> 
                     )
                 }
             }
-            Spacer(Modifier.height(2.dp))
             Text(
                 m.uid,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -435,21 +476,20 @@ private fun ModelItem(S: Strings, m: ModelInfo, current: String, onClick: () -> 
                     style = MaterialTheme.typography.labelSmall,
                     color = costColor(m.costTier),
                 )
-                if (!m.costSummary.isNullOrBlank()) {
+                val extras = listOfNotNull(
+                    m.costSummary?.takeIf { it.isNotBlank() },
+                    m.aliases.takeIf { it.isNotEmpty() }?.joinToString(", ") { "@$it" },
+                ).joinToString(" · ")
+                if (extras.isNotEmpty()) {
                     Text(
-                        " · ${m.costSummary}",
+                        " · $extras",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                 }
-            }
-            if (m.aliases.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    m.aliases.joinToString(", ") { "@$it" },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
     }
