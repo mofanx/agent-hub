@@ -1,6 +1,16 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ConductorOrchestrator, parseTasks, extractTaskResult, extractHelpRequest } from "./conductor.js";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  ConductorOrchestrator,
+  parseTasks,
+  extractTaskResult,
+  extractHelpRequest,
+  runIsolatedCheck,
+} from "./conductor.js";
 import { createPromptDoneParams, promptDoneInternalOutput, toPublicHubEvent } from "./agent.js";
 import { RoomManager, type Room } from "./room.js";
 
@@ -1491,6 +1501,186 @@ describe("conductor", () => {
     const flow = orchestrator.getFlow(r.roomId)!;
     const t1 = (flow.tasks as Record<string, unknown>[]).find((t) => t.id === "t1")!;
     assert.equal(t1.verifications, undefined);
+  });
+
+  it("同一 session 在多个 flow 均有运行中任务时拒绝工具回传归属", async () => {
+    const rooms = new RoomManager();
+    const members = [
+      { sessionId: "conductor", name: "leader" },
+      { sessionId: "worker", name: "coder" },
+    ];
+    const r1 = rooms.create("amb-a", members, "conductor", { conductorId: "conductor" });
+    const r2 = rooms.create("amb-b", members, "conductor", { conductorId: "conductor" });
+    const orchestrator = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    const plan = (task: string) =>
+      `\`\`\`json\n{"tasks":[{"id":"t1","to":"coder","task":"${task}"}]}\n\`\`\``;
+    const tick = async () => {
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    };
+    const taskView = (roomId: string) =>
+      (orchestrator.getFlow(roomId)!.tasks as Record<string, unknown>[]).find(
+        (t) => t.id === "t1",
+      )!;
+    await orchestrator.start(r1, "任务");
+    await orchestrator.onPromptDone("conductor", plan("A"));
+    await orchestrator.start(r2, "任务");
+    await orchestrator.onPromptDone("conductor", plan("B"));
+    await tick();
+    orchestrator.observeToolUpdate("worker", {
+      sessionUpdate: "tool_call",
+      toolCallId: "tcA",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { command: "npm test" },
+    });
+    orchestrator.observeToolUpdate("worker", {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tcA",
+      status: "completed",
+      rawOutput: { exitCode: 0 },
+    });
+    assert.equal(taskView(r1.roomId).backendRuns, undefined, "歧义会话不得在 r1 归属");
+    assert.equal(taskView(r2.roomId).backendRuns, undefined, "歧义会话不得在 r2 归属");
+    await orchestrator.onPromptDone("worker", '```json\n{"text":"done"}\n```');
+    await tick();
+    orchestrator.observeToolUpdate("worker", {
+      sessionUpdate: "tool_call",
+      toolCallId: "tcB",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { command: "npm test" },
+    });
+    orchestrator.observeToolUpdate("worker", {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tcB",
+      status: "completed",
+      rawOutput: { exitCode: 0 },
+    });
+    assert.equal(taskView(r1.roomId).backendRuns, undefined);
+    const runs = taskView(r2.roomId).backendRuns as { toolCallId: string; exitCode?: number }[];
+    assert.equal(runs.length, 1, "歧义解除后应归属唯一运行中任务");
+    assert.equal(runs[0]!.toolCallId, "tcB");
+    assert.equal(runs[0]!.exitCode, 0);
+  });
+
+  it("隔离检查器：命令校验、快照哈希、沙箱隔离与 fail-closed", async () => {
+    const sandboxReady =
+      process.platform === "linux" &&
+      fs.existsSync("/usr/bin/bwrap") &&
+      fs.existsSync("/usr/bin/systemd-run") &&
+      fs.existsSync("/usr/bin/git") &&
+      Boolean(process.env.XDG_RUNTIME_DIR);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-iso-test-"));
+    const git = (args: string[]) =>
+      execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
+    try {
+      git(["init", "--quiet"]);
+      fs.writeFileSync(path.join(dir, ".gitignore"), "data/\n");
+      fs.mkdirSync(path.join(dir, "data"));
+      fs.writeFileSync(
+        path.join(dir, "data", "big.bin"),
+        Buffer.alloc(6 * 1024 * 1024),
+      );
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v1");
+      git(["add", ".gitignore", "marker.txt"]);
+      const nonGit = fs.mkdtempSync(path.join(os.tmpdir(), "ah-iso-nongit-"));
+      try {
+        const ng = await runIsolatedCheck(nonGit, "node -e 'process.exit(0)'");
+        assert.equal(ng.status, "blocked");
+        assert.equal(ng.reason, "snapshot_error", "非 Git 工作区必须 fail closed");
+      } finally {
+        fs.rmSync(nonGit, { recursive: true, force: true });
+      }
+      const multi = await runIsolatedCheck(dir, "echo a\necho b");
+      assert.equal(multi.status, "blocked");
+      assert.equal(multi.reason, "invalid_command");
+      const long = await runIsolatedCheck(dir, `node -e '${"x".repeat(300)}'`);
+      assert.equal(long.status, "blocked");
+      assert.equal(long.reason, "invalid_command");
+      const empty = await runIsolatedCheck(dir, "   ");
+      assert.equal(empty.status, "blocked");
+      assert.equal(empty.reason, "invalid_command");
+      if (!sandboxReady) {
+        const un = await runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+        assert.equal(un.status, "blocked", "无沙箱设施时必须 fail closed");
+        return;
+      }
+      const ok = await runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+      assert.equal(ok.status, "exited_zero");
+      assert.equal(ok.runner, "bubblewrap");
+      assert.equal(ok.exitCode, 0);
+      assert.ok(ok.snapshotHash);
+      assert.ok(!JSON.stringify(ok).includes("process.exit"), "结果不得回显原始命令");
+      const ignored = await runIsolatedCheck(
+        dir,
+        "node -e 'process.exit(require(\"fs\").existsSync(\"data\")?1:0)'",
+      );
+      assert.equal(ignored.status, "exited_zero", "gitignore 的运行时目录不得进入沙箱");
+      const siblingName = `ah-iso-sibling-${process.pid}.txt`;
+      const parentWrite = await runIsolatedCheck(
+        dir,
+        `node -e 'require("fs").writeFileSync("../${siblingName}","x")'`,
+      );
+      assert.equal(parentWrite.status, "exited_zero", "沙箱虚拟父级 tmpfs 应可写");
+      assert.ok(
+        !fs.existsSync(path.join(os.tmpdir(), siblingName)),
+        "沙箱父级写入不得泄漏到宿主",
+      );
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v2");
+      const ok2 = await runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+      assert.equal(ok2.status, "exited_zero");
+      assert.notEqual(ok2.snapshotHash, ok.snapshotHash, "快照内容变化应改变 hash");
+      fs.writeFileSync(path.join(dir, "untracked.txt"), "u");
+      const ok3 = await runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+      assert.equal(ok3.status, "exited_zero");
+      assert.notEqual(ok3.snapshotHash, ok2.snapshotHash, "未跟踪未忽略文件应计入快照");
+      fs.rmSync(path.join(dir, "marker.txt"));
+      const ok4 = await runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+      assert.equal(ok4.status, "exited_zero");
+      assert.notEqual(ok4.snapshotHash, ok3.snapshotHash, "已跟踪文件删除应改变 hash");
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v2");
+      const nz = await runIsolatedCheck(dir, "node -e 'process.exit(2)'");
+      assert.equal(nz.status, "exited_nonzero");
+      assert.equal(nz.exitCode, 2);
+      const iso = await runIsolatedCheck(
+        dir,
+        "node -e 'require(\"fs\").existsSync(\"/etc/shadow\") ? process.exit(1) : process.exit(0)'",
+      );
+      assert.equal(iso.status, "exited_zero", "沙箱内不得看到宿主敏感路径");
+      const secretFile = path.join(os.tmpdir(), `ah-iso-secret-${process.pid}`);
+      fs.writeFileSync(secretFile, "topsecret");
+      fs.writeFileSync(path.join(dir, ".env.local"), "TOKEN=x");
+      fs.symlinkSync(secretFile, path.join(dir, "leak_link"));
+      const leak = await runIsolatedCheck(
+        dir,
+        "node -e 'const f=require(\"fs\");process.exit(f.existsSync(\".env.local\")||f.existsSync(\"leak_link\")?1:0)'",
+      );
+      assert.equal(leak.status, "exited_zero", ".env.* 与符号链接不得进入沙箱");
+      fs.rmSync(secretFile, { force: true });
+      const mutate = await runIsolatedCheck(
+        dir,
+        "node -e 'require(\"fs\").writeFileSync(\"marker.txt\",\"hacked\")'",
+      );
+      assert.equal(mutate.status, "exited_zero");
+      assert.equal(
+        fs.readFileSync(path.join(dir, "marker.txt"), "utf8"),
+        "v2",
+        "沙箱写快照副本不得改动宿主文件",
+      );
+      const inflight = runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+      const busy = await runIsolatedCheck(dir, "node -e 'process.exit(0)'");
+      assert.equal(busy.status, "blocked");
+      assert.equal(busy.reason, "busy");
+      await inflight;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
 });

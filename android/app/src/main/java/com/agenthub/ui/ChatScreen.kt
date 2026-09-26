@@ -2041,8 +2041,9 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val S = LocalStrings.current
-    val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() ||
-        task.retries > 0 || task.waitingFor != null || task.verifications.isNotEmpty()
+    val hasDetail = task.status == "done" || task.output != null || task.failureMessage != null ||
+        task.dependsOn.isNotEmpty() || task.retries > 0 || task.waitingFor != null ||
+        task.verifications.isNotEmpty() || task.backendRuns.isNotEmpty()
     val showRetryBtn = showRetry && task.status == "failed"
     Column(Modifier.padding(vertical = 3.dp)) {
         Row(
@@ -2099,6 +2100,48 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
         }
         if (expanded && hasDetail) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+                if (task.status == "done") {
+                    val statusText = when (task.verificationStatus) {
+                        "member_pass" -> S.verificationStatusMemberPass
+                        "member_nonpass" -> S.verificationStatusMemberNonpass
+                        "unverified" -> S.verificationStatusUnverified
+                        else -> {
+                            val vs = task.verifications.map { it.verdict.trim().lowercase() }
+                            when {
+                                vs.isEmpty() -> S.verificationStatusUnverified
+                                vs.any { it != "pass" } -> S.verificationStatusMemberNonpass
+                                else -> S.verificationStatusMemberPass
+                            }
+                        }
+                    }
+                    Text("${S.verificationStatusLabel}$statusText", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val acText = when (task.automaticCheckStatus) {
+                        "exited_zero" -> S.automaticCheckExitedZero
+                        "exited_nonzero" -> task.automaticCheckExitCode
+                            ?.let { S.automaticCheckExitedNonzero.format(it) }
+                            ?: S.automaticCheckBlocked
+                        "blocked" -> S.automaticCheckBlocked +
+                            (task.automaticCheckReason?.let { "（$it）" } ?: "")
+                        "timed_out" -> S.automaticCheckTimedOut
+                        else -> S.automaticCheckNotRun
+                    }
+                    Text(
+                        "${S.automaticCheckLabel}$acText",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    val acExtra = listOfNotNull(
+                        task.automaticCheckSnapshot?.take(12)?.let { S.automaticCheckSnapshot.format(it) },
+                        if (task.automaticCheckTruncated) S.automaticCheckTruncated else null,
+                    ).joinToString(" · ")
+                    if (acExtra.isNotEmpty()) {
+                        Text(
+                            acExtra,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 if (task.dependsOn.isNotEmpty()) {
                     Text("${S.dependsOnLabel}${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -2136,9 +2179,15 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             )
                         }
                         if (expanded) {
+                            v.backendToolCallId?.let {
+                                Text(S.backendVerificationCall.format(it), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            }
                             v.evidenceDetail?.let { d ->
                                 if (d.summary.isNotBlank()) {
                                     Text("${S.evidenceSummaryLabel}${d.summary}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (d.command.isNotBlank() || d.exitCode != null || d.stdout.isNotBlank() || d.stderr.isNotBlank()) {
+                                    Text(S.memberReportedLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                                 }
                                 if (d.command.isNotBlank()) {
                                     Text("${S.evidenceCommandLabel}${d.command}", style = MaterialTheme.typography.bodySmall)
@@ -2190,6 +2239,24 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                         }
                     }
                 }
+                if (task.backendRuns.isNotEmpty()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(S.backendRunsLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    task.backendRuns.forEach { r ->
+                        val statusText = when (r.status) {
+                            "completed" -> S.backendRunCompleted
+                            "failed" -> S.backendRunFailed
+                            else -> r.status
+                        }
+                        Text(
+                            "${r.toolCallId} · $statusText · ${r.exitCode?.let { "${S.evidenceExitCodeLabel}$it" } ?: S.backendExitUnknown}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (task.backendClaimMatch) {
+                        Text(S.backendClaimMatchLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
                 if (task.baseline != null || task.diff != null || task.reproSteps.isNotEmpty() || task.verifyCommand != null) {
                     var deliverableExpanded by remember(task.id) { mutableStateOf(false) }
                     Spacer(Modifier.height(2.dp))
@@ -2221,6 +2288,9 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                                         Text("${i + 1}. $s", style = MaterialTheme.typography.bodySmall)
                                     }
                                 }
+                            }
+                            if (task.verifyCommand != null || task.verifyStdout != null || task.verifyStderr != null) {
+                                Text(S.memberReportedLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                             }
                             task.verifyCommand?.let { cmd ->
                                 Text(

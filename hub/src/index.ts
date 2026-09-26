@@ -21,7 +21,7 @@ import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
-import { extractTaskResult } from "./conductor.js";
+import { extractTaskResult, runIsolatedCheck } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
@@ -450,6 +450,8 @@ const agentOps: AgentOps = {
   },
   isBusy: (sessionId) => ownerOf(sessionId).isBusy(sessionId),
   cancel: (sessionId) => ownerOf(sessionId).cancel(sessionId),
+  cwd: (sessionId) => sessionMetas.get(sessionId)?.cwd,
+  runIsolatedCheck,
 };
 const roomModeManager = new RoomModeManager(
   agentOps,
@@ -691,6 +693,9 @@ function onAgentEvent(event: HubEvent): void {
       author: "",
       text: event.params.message,
     });
+  } else if (event.method === "session.update" && sessionId) {
+    const update = (event.params as Record<string, unknown> | undefined)?.update;
+    if (update !== undefined) roomModeManager.observeToolUpdate(sessionId, update);
   }
   if (!skipBroadcast) broadcast(toPublicHubEvent(event));
 }

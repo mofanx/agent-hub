@@ -1,4 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { logError } from "./logger.js";
 
@@ -7,6 +11,8 @@ export type PromptContent = Array<Record<string, unknown>>;
 export interface AgentOps {
   prompt(sessionId: string, content: string | PromptContent): Promise<void>;
   isBusy(sessionId: string): boolean;
+  cwd?(sessionId: string): string | undefined;
+  runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
 }
 
 type TaskArtifact = {
@@ -62,6 +68,36 @@ export type TaskVerification = {
   verdict: string;
   evidence: VerificationEvidence;
   at: number;
+  backendToolCallId?: string;
+};
+
+type BackendToolRun = {
+  toolCallId: string;
+  commandHash?: string;
+  status: "completed" | "failed";
+  exitCode?: number;
+  stdoutHash?: string;
+  stderrHash?: string;
+  at: number;
+};
+
+type AutomaticCheck =
+  | IsolatedCheckResult
+  | {
+      status: "blocked";
+      runner: "bubblewrap";
+      reason: string;
+      startedAt: number;
+      finishedAt: number;
+    };
+
+type PendingToolCall = {
+  roomId: string;
+  taskId: string;
+  commandHash?: string;
+  exitCode?: number;
+  stdoutHash?: string;
+  stderrHash?: string;
 };
 
 /** 任务执行中的定向求助交换：worker 提问 → 目标成员/用户回复 → 唤醒原 worker 继续 */
@@ -97,6 +133,8 @@ type FlowTask = {
   waitingForHelp?: string;
   /** 其他成员对本任务的独立验证记录 */
   verifications?: TaskVerification[];
+  backendRuns?: BackendToolRun[];
+  automaticCheck?: AutomaticCheck;
 };
 
 type Flow = {
@@ -130,6 +168,82 @@ const BUSY_RETRY_MS = 5000;
 
 const PROMPT_RETRY_MS = 5000;
 const SUMMARIZE_RETRY_MS = 5000;
+const TOOL_CALL_ID_MAX = 128;
+const TOOL_COMMAND_MAX = 8192;
+const TOOL_OUTPUT_MAX = 262144;
+const MAX_BACKEND_RUNS = 20;
+const MAX_PENDING_TOOL_CALLS = 20;
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  const status = String(o.status ?? "");
+  if (
+    status !== "exited_zero" &&
+    status !== "exited_nonzero" &&
+    status !== "blocked" &&
+    status !== "timed_out"
+  ) {
+    return undefined;
+  }
+  if (o.runner !== "bubblewrap") return undefined;
+  const hex64 = (x: unknown): x is string =>
+    typeof x === "string" && /^[0-9a-f]{64}$/.test(x);
+  for (const h of ["commandHash", "snapshotHash", "stdoutHash", "stderrHash"] as const) {
+    if (o[h] !== undefined && !hex64(o[h])) return undefined;
+  }
+  if (status === "exited_zero" && (o.exitCode !== 0 || !hex64(o.snapshotHash))) {
+    return undefined;
+  }
+  if (status === "exited_nonzero" && !Number.isInteger(o.exitCode)) return undefined;
+  const reason = typeof o.reason === "string" && /^[a-z_]+$/.test(o.reason) ? o.reason : undefined;
+  const startedAt = Number(o.startedAt ?? 0);
+  const finishedAt = Number(o.finishedAt ?? 0);
+  if (status === "blocked" && o.commandHash === undefined) {
+    return {
+      status: "blocked",
+      runner: "bubblewrap",
+      reason: reason ?? "unknown",
+      startedAt,
+      finishedAt,
+    };
+  }
+  if (o.commandHash === undefined) return undefined;
+  return {
+    status: status as IsolatedCheckResult["status"],
+    runner: "bubblewrap",
+    commandHash: o.commandHash as string,
+    ...(hex64(o.snapshotHash) ? { snapshotHash: o.snapshotHash } : {}),
+    ...(Number.isInteger(o.exitCode) ? { exitCode: o.exitCode as number } : {}),
+    ...(hex64(o.stdoutHash) ? { stdoutHash: o.stdoutHash } : {}),
+    ...(hex64(o.stderrHash) ? { stderrHash: o.stderrHash } : {}),
+    ...(o.stdoutTruncated === true ? { stdoutTruncated: true } : {}),
+    ...(o.stderrTruncated === true ? { stderrTruncated: true } : {}),
+    startedAt,
+    finishedAt,
+    ...(reason ? { reason } : {}),
+  };
+}
+
+function describeAutomaticCheck(c: AutomaticCheck): string {
+  const exitCode = "exitCode" in c ? c.exitCode : undefined;
+  const snapshot = "snapshotHash" in c ? c.snapshotHash : undefined;
+  return `隔离检查：${c.status},exitCode=${exitCode ?? "unknown"},snapshotHash=${snapshot?.slice(0, 12) ?? "none"}`;
+}
+
+function backendClaimMatch(task: FlowTask, result: TaskResult | undefined): boolean {
+  const command = result?.verifyCommand?.trim();
+  const exitCode = result?.verifyExitCode;
+  if (!command || exitCode === undefined) return false;
+  const commandHash = sha256Hex(command);
+  return (task.backendRuns ?? []).some(
+    (r) => r.status === "completed" && r.commandHash === commandHash && r.exitCode === exitCode,
+  );
+}
 
 function normalizeEvidence(raw: unknown): VerificationEvidence {
   if (typeof raw === "string" && raw.trim()) return { summary: raw.trim() };
@@ -177,6 +291,7 @@ function summarizeEvidence(ev: VerificationEvidence): string {
 
 export class ConductorOrchestrator {
   private flows = new Map<string, Flow>();
+  private pendingToolCalls = new Map<string, Map<string, PendingToolCall>>();
   private readonly promptRetryMs: number;
   private readonly emitFlow: ((roomId: string) => void) | undefined;
 
@@ -206,9 +321,179 @@ export class ConductorOrchestrator {
       }
     }
     this.flows.delete(roomId);
+    for (const sid of touched) this.pendingToolCalls.delete(sid);
     this.emitFlow?.(roomId);
     if (reason) this.notice({ roomId, message: reason });
     return [...touched];
+  }
+
+  observeToolUpdate(sessionId: string, update: unknown): void {
+    if (typeof update !== "object" || update === null) return;
+    const u = update as Record<string, unknown>;
+    const sessionUpdate = String(u.sessionUpdate ?? "");
+    if (sessionUpdate !== "tool_call" && sessionUpdate !== "tool_call_update") return;
+    const toolCallId = typeof u.toolCallId === "string" ? u.toolCallId : "";
+    if (!toolCallId || toolCallId.length > TOOL_CALL_ID_MAX) return;
+    const kind = typeof u.kind === "string" ? u.kind : undefined;
+    const status = typeof u.status === "string" ? u.status : "";
+    const map = this.pendingToolCalls.get(sessionId);
+    const existing = map?.get(toolCallId);
+    if (!existing) {
+      if (status !== "pending" && status !== "in_progress") return;
+      if (kind !== "execute") return;
+      const active = this.activeWorkerTask(sessionId);
+      if (!active) return;
+      const rawInput = u.rawInput;
+      const command =
+        typeof rawInput === "object" && rawInput !== null
+          ? (rawInput as Record<string, unknown>).command
+          : undefined;
+      if (typeof command !== "string") return;
+      const trimmed = command.trim();
+      if (!trimmed || trimmed.length > TOOL_COMMAND_MAX) return;
+      const p: PendingToolCall = {
+        roomId: active.flow.roomId,
+        taskId: active.task.id,
+        commandHash: sha256Hex(trimmed),
+      };
+      this.applyRawOutputPatch(p, u);
+      let m = map;
+      if (!m) {
+        m = new Map();
+        this.pendingToolCalls.set(sessionId, m);
+      }
+      if (m.size >= MAX_PENDING_TOOL_CALLS) return;
+      m.set(toolCallId, p);
+      return;
+    }
+    if (kind !== undefined && kind !== "execute") {
+      map!.delete(toolCallId);
+      return;
+    }
+    this.applyRawInputPatch(existing, u);
+    this.applyRawOutputPatch(existing, u);
+    if (status !== "completed" && status !== "failed") return;
+    map!.delete(toolCallId);
+    const active = this.activeWorkerTask(sessionId);
+    if (!active || active.task.id !== existing.taskId || active.flow.roomId !== existing.roomId) {
+      return;
+    }
+    const runs = (active.task.backendRuns ??= []);
+    runs.push({
+      toolCallId,
+      ...(existing.commandHash ? { commandHash: existing.commandHash } : {}),
+      status,
+      ...(existing.exitCode !== undefined ? { exitCode: existing.exitCode } : {}),
+      ...(existing.stdoutHash !== undefined ? { stdoutHash: existing.stdoutHash } : {}),
+      ...(existing.stderrHash !== undefined ? { stderrHash: existing.stderrHash } : {}),
+      at: Date.now(),
+    });
+    if (runs.length > MAX_BACKEND_RUNS) runs.splice(0, runs.length - MAX_BACKEND_RUNS);
+    this.emitFlow?.(active.flow.roomId);
+  }
+
+  private applyRawInputPatch(p: PendingToolCall, u: Record<string, unknown>): void {
+    if (!("rawInput" in u)) return;
+    delete p.commandHash;
+    const rawInput = u.rawInput;
+    if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) return;
+    const command = (rawInput as Record<string, unknown>).command;
+    if (typeof command !== "string") return;
+    const trimmed = command.trim();
+    if (trimmed && trimmed.length <= TOOL_COMMAND_MAX) {
+      p.commandHash = sha256Hex(trimmed);
+    }
+  }
+
+  private applyRawOutputPatch(p: PendingToolCall, u: Record<string, unknown>): void {
+    if (!("rawOutput" in u)) return;
+    delete p.exitCode;
+    delete p.stdoutHash;
+    delete p.stderrHash;
+    const rawOutput = u.rawOutput;
+    if (typeof rawOutput !== "object" || rawOutput === null || Array.isArray(rawOutput)) return;
+    const ro = rawOutput as Record<string, unknown>;
+    if (
+      typeof ro.exitCode === "number" &&
+      Number.isInteger(ro.exitCode) &&
+      ro.exitCode >= 0 &&
+      ro.exitCode <= 255
+    ) {
+      p.exitCode = ro.exitCode;
+    }
+    if (typeof ro.stdout === "string" && ro.stdout.length <= TOOL_OUTPUT_MAX) {
+      p.stdoutHash = sha256Hex(ro.stdout);
+    }
+    if (typeof ro.stderr === "string" && ro.stderr.length <= TOOL_OUTPUT_MAX) {
+      p.stderrHash = sha256Hex(ro.stderr);
+    }
+  }
+
+  private async maybeIsolatedCheck(
+    flow: Flow,
+    sessionId: string,
+    task: FlowTask,
+    result: TaskResult,
+  ): Promise<void> {
+    const runner = this.agent.runIsolatedCheck;
+    if (!runner || task.automaticCheck !== undefined) return;
+    const command = result.verifyCommand?.trim();
+    if (!command) return;
+    if (!result.artifacts.some((a) => a.type === "file")) return;
+    const cwd = this.agent.cwd?.(sessionId);
+    const startedAt = Date.now();
+    let check: AutomaticCheck;
+    if (!cwd) {
+      check = {
+        status: "blocked",
+        runner: "bubblewrap",
+        reason: "cwd_missing",
+        startedAt,
+        finishedAt: Date.now(),
+      };
+    } else {
+      try {
+        check = await runner(cwd, command);
+      } catch {
+        check = {
+          status: "blocked",
+          runner: "bubblewrap",
+          reason: "start_failed",
+          startedAt,
+          finishedAt: Date.now(),
+        };
+      }
+    }
+    if (
+      this.flows.get(flow.roomId) !== flow ||
+      task.status !== "running" ||
+      task.sessionId !== sessionId
+    ) {
+      return;
+    }
+    task.automaticCheck = check;
+    const exitCode = "exitCode" in check ? check.exitCode : undefined;
+    const snapshot = "snapshotHash" in check ? check.snapshotHash : undefined;
+    this.rooms.addEvent(flow.roomId, {
+      author: sessionId,
+      action: "test",
+      summary: `隔离检查 [${task.id}]：${check.status}（exit=${exitCode ?? "unknown"}, snapshot=${snapshot?.slice(0, 12) ?? "none"}）`,
+      taskId: task.id,
+    });
+    this.emitFlow?.(flow.roomId);
+  }
+
+  private activeWorkerTask(sessionId: string): { flow: Flow; task: FlowTask } | undefined {
+    let found: { flow: Flow; task: FlowTask } | undefined;
+    for (const flow of this.flows.values()) {
+      for (const t of flow.tasks.values()) {
+        if (t.sessionId === sessionId && t.status === "running" && !t.waitingForHelp) {
+          if (found) return undefined;
+          found = { flow, task: t };
+        }
+      }
+    }
+    return found;
   }
 
   /** 获取可用于前端展示的 flow 状态 */
@@ -219,6 +504,13 @@ export class ConductorOrchestrator {
     const tasks = [...flow.tasks.values()].map((t) => {
       const result = flow.results.get(t.id);
       const waiting = t.waitingForHelp ? flow.help.get(t.waitingForHelp) : undefined;
+      const verdicts = (t.verifications ?? []).map((v) => v.verdict.trim().toLowerCase());
+      const verificationStatus =
+        verdicts.length === 0
+          ? "unverified"
+          : verdicts.some((v) => v !== "pass")
+            ? "member_nonpass"
+            : "member_pass";
       return {
         id: t.id,
         sessionId: t.sessionId,
@@ -227,6 +519,8 @@ export class ConductorOrchestrator {
         task: t.task,
         dependsOn: t.dependsOn,
         iteration: t.iteration,
+        verificationStatus,
+        automaticCheck: t.automaticCheck ?? { status: "not_run" },
         artifacts: result?.artifacts ?? [],
         ...(waiting
           ? {
@@ -245,9 +539,21 @@ export class ConductorOrchestrator {
                 verdict: v.verdict,
                 evidence: summarizeEvidence(v.evidence).slice(0, 500),
                 evidenceDetail: v.evidence,
+                ...(v.backendToolCallId ? { backendToolCallId: v.backendToolCallId } : {}),
               })),
             }
           : {}),
+        ...(t.backendRuns?.length
+          ? {
+              backendRuns: t.backendRuns.map((r) => ({
+                toolCallId: r.toolCallId,
+                status: r.status,
+                ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+                at: r.at,
+              })),
+            }
+          : {}),
+        backendClaimMatch: backendClaimMatch(t, result),
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
         ...(result?.baseline ? { baseline: result.baseline.slice(0, 2000) } : {}),
@@ -318,6 +624,7 @@ export class ConductorOrchestrator {
 
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */
   onPromptError(sessionId: string): string | undefined {
+    this.pendingToolCalls.delete(sessionId);
     for (const [roomId, flow] of [...this.flows]) {
       const room = this.rooms.get(roomId);
       if (!room) {
@@ -461,6 +768,7 @@ export class ConductorOrchestrator {
 
   /** 每轮 prompt.done 时调用；返回 flow roomId 表示该事件属于某个编排流 */
   async onPromptDone(sessionId: string, output: string): Promise<string | undefined> {
+    this.pendingToolCalls.delete(sessionId);
     for (const flow of this.flows.values()) {
       const room = this.rooms.get(flow.roomId);
       if (!room) {
@@ -532,9 +840,17 @@ export class ConductorOrchestrator {
           }
           const result = extractTaskResult(output);
           flow.results.set(running.id, result);
-          this.recordVerifications(flow, room, sessionId, result.verifications ?? []);
+          this.recordVerifications(flow, room, sessionId, running, result.verifications ?? []);
           for (const a of result.artifacts) {
             this.commitArtifact(flow.roomId, a, sessionId, running.id);
+          }
+          await this.maybeIsolatedCheck(flow, sessionId, running, result);
+          if (
+            this.flows.get(flow.roomId) !== flow ||
+            running.status !== "running" ||
+            flow.tasks.get(running.id) !== running
+          ) {
+            return flow.roomId;
           }
           const artifactCount = result.artifacts.length;
           const extra = artifactCount > 0 ? `，发现 ${artifactCount} 个 artifact` : "";
@@ -658,6 +974,7 @@ export class ConductorOrchestrator {
     };
     flow.help.set(exchange.id, exchange);
     task.waitingForHelp = exchange.id;
+    this.pendingToolCalls.delete(task.sessionId);
     const fromName = room.members.find((m) => m.sessionId === task.sessionId)?.name ?? task.sessionId;
     if (toUser) {
       this.notice({
@@ -744,6 +1061,7 @@ export class ConductorOrchestrator {
     const task = flow.tasks.get(e.taskId);
     if (!task || task.status !== "running" || task.waitingForHelp !== e.id) return;
     delete task.waitingForHelp;
+    this.pendingToolCalls.delete(task.sessionId);
     const fromLabel =
       e.to === "user"
         ? "用户"
@@ -790,19 +1108,36 @@ export class ConductorOrchestrator {
     flow: Flow,
     room: Room,
     verifierId: string,
+    verifierTask: FlowTask,
     verifs: { taskId: string; verdict: string; evidence: VerificationEvidence }[],
   ): void {
     const verifierName =
       room.members.find((m) => m.sessionId === verifierId)?.name ?? verifierId;
+    const verifierRuns = verifierTask.backendRuns ?? [];
     for (const v of verifs) {
       const target = flow.tasks.get(v.taskId);
       // 只记录跨成员的独立验证，自我验证走正常 artifact
-      if (!target || target.sessionId === verifierId) continue;
+      if (!target || target.sessionId === verifierId || target.status !== "done") continue;
+      let backendToolCallId: string | undefined;
+      const evidenceCommand = v.evidence.command?.trim();
+      if (evidenceCommand && v.evidence.exitCode !== undefined) {
+        const commandHash = sha256Hex(evidenceCommand);
+        const matched = verifierRuns.find(
+          (r) =>
+            r.status === "completed" &&
+            r.commandHash === commandHash &&
+            r.exitCode === v.evidence.exitCode &&
+            (v.evidence.stdout === undefined || r.stdoutHash === sha256Hex(v.evidence.stdout)) &&
+            (v.evidence.stderr === undefined || r.stderrHash === sha256Hex(v.evidence.stderr)),
+        );
+        if (matched) backendToolCallId = matched.toolCallId;
+      }
       (target.verifications ??= []).push({
         by: verifierId,
         verdict: v.verdict,
         evidence: v.evidence,
         at: Date.now(),
+        ...(backendToolCallId ? { backendToolCallId } : {}),
       });
       const summary = summarizeEvidence(v.evidence).slice(0, 160);
       this.rooms.addEvent(flow.roomId, {
@@ -1030,6 +1365,9 @@ export class ConductorOrchestrator {
         continue;
       }
       t.status = "running";
+      delete t.backendRuns;
+      delete t.automaticCheck;
+      this.pendingToolCalls.delete(t.sessionId);
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       assignments.push(`@${name}：${t.task}`);
       const taskRefs = this.rooms.parseArtifactRefs(room.roomId, t.task);
@@ -1094,9 +1432,9 @@ export class ConductorOrchestrator {
         '  ```json',
         '  {"help":{"to":"成员名/id 或 \\"user\\"（求助用户）","question":"具体问题"}}',
         '  ```',
-        "- 若你的产出是对其他成员任务的独立验证，请在报告 JSON 中附加 verify 数组；evidence 必须基于被验证任务提交的 baseline/diff/verifyCommand 进行实际复核，并包含你实际运行的 command、exitCode、stdout：",
+        "- 若你的产出是对其他成员任务的独立验证，请在报告 JSON 中附加 verify 数组；evidence 必须基于被验证任务提交的 baseline/diff/verifyCommand 进行实际复核；command/exitCode/stdout 仅在你确实运行了命令且有工具输出反馈时填写，不要编造——该结论属于成员判断，不代表 Hub 自动执行了检查：",
         '  ```json',
-        '  {"verify":[{"task":"tX","verdict":"pass|fail|partial","evidence":{"summary":"结论","command":"npm test","exitCode":0,"stdout":"8 passing","baseline":"修改前代码","diff":"..."}}]}',
+        '  {"verify":[{"task":"tX","verdict":"pass|fail|partial","evidence":{"summary":"结论","baseline":"修改前代码","diff":"..."}}]}',
         '  ```',
         "",
         "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试结果、以及用于他人复核的证据）：",
@@ -1218,8 +1556,10 @@ export class ConductorOrchestrator {
         `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
         ...(verifs ? ["  独立验证:", verifs] : []),
+        ...(t.automaticCheck ? [`  ${describeAutomaticCheck(t.automaticCheck)}`] : []),
       ].join("\n"));
     }
+    const hasChecks = [...flow.tasks.values()].some((t) => t.automaticCheck);
     const criteria = flow.acceptanceCriteria.length > 0
       ? flow.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
       : "（未提供，按用户目标自行判断）";
@@ -1240,6 +1580,10 @@ export class ConductorOrchestrator {
             ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
           ]
         : []),
+      "",
+      hasChecks
+        ? "注意：成员自报字段不等于隔离检查；退出码0只表示进程退出0，不代表全部验收标准满足；依赖/运行时未包含在源码快照哈希内，请结合证据自行评估可信度。"
+        : "注意：以上结果中的命令、退出码、输出与「独立验证」条目均为成员自报，Hub 并未自动执行任何检查，不可称为自动检查通过，请结合证据自行评估可信度。",
       "",
       "请对照验收标准逐条核查以上结果是否已满足目标。",
       "不要调用任何工具，只输出一个 JSON code block，二选一：",
@@ -1338,8 +1682,10 @@ export class ConductorOrchestrator {
         `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
         ...(verifs ? ["  独立验证:", verifs] : []),
+        ...(t.automaticCheck ? [`  ${describeAutomaticCheck(t.automaticCheck)}`] : []),
       ].join("\n"));
     }
+    const hasChecks = [...flow.tasks.values()].some((t) => t.automaticCheck);
     const promptLines: string[] = [
       `你是群聊「${room.name}」的指挥家。`,
       `原始目标：${flow.goal || "（未记录）"}`,
@@ -1356,6 +1702,9 @@ export class ConductorOrchestrator {
             ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
           ]
         : []),
+      hasChecks
+        ? "注意：成员自报字段不等于隔离检查；退出码0只表示进程退出0，不代表全部验收标准满足；依赖/运行时未包含在源码快照哈希内，汇总时不要称为自动检查通过。"
+        : "注意：以上结果中的命令、退出码、输出与「独立验证」条目均为成员自报，Hub 并未自动执行任何检查，汇总时不要称为自动检查通过。",
       "",
     ];
     if (hasFailures) {
@@ -1461,6 +1810,8 @@ export class ConductorOrchestrator {
           ...(t.helpRounds !== undefined ? { helpRounds: t.helpRounds } : {}),
           ...(t.waitingForHelp !== undefined ? { waitingForHelp: t.waitingForHelp } : {}),
           ...(t.verifications !== undefined ? { verifications: t.verifications } : {}),
+          ...(t.backendRuns !== undefined ? { backendRuns: t.backendRuns } : {}),
+          ...(t.automaticCheck !== undefined ? { automaticCheck: t.automaticCheck } : {}),
         })),
         supplements: flow.supplements,
         help: [...flow.help.values()],
@@ -1553,10 +1904,45 @@ export class ConductorOrchestrator {
                       verdict: String(vo.verdict ?? ""),
                       evidence: normalizeEvidence(vo.evidence),
                       at: Number(vo.at ?? 0),
+                      ...(typeof vo.backendToolCallId === "string" && vo.backendToolCallId
+                        ? { backendToolCallId: vo.backendToolCallId }
+                        : {}),
                     };
                   })
                   .filter((v) => v.by && v.verdict),
               }
+            : {}),
+          ...(Array.isArray(o.backendRuns)
+            ? {
+                backendRuns: (o.backendRuns as unknown[])
+                  .map((r) => {
+                    const ro = r as Record<string, unknown>;
+                    const id = typeof ro.toolCallId === "string" ? ro.toolCallId : "";
+                    const st = String(ro.status ?? "");
+                    const commandHash = typeof ro.commandHash === "string" ? ro.commandHash : "";
+                    if (!id || (st !== "completed" && st !== "failed")) return null;
+                    const run: BackendToolRun = {
+                      toolCallId: id.slice(0, TOOL_CALL_ID_MAX),
+                      ...(commandHash ? { commandHash } : {}),
+                      status: st,
+                      ...(typeof ro.exitCode === "number" && Number.isInteger(ro.exitCode) && ro.exitCode >= 0 && ro.exitCode <= 255
+                        ? { exitCode: ro.exitCode }
+                        : {}),
+                      ...(typeof ro.stdoutHash === "string" ? { stdoutHash: ro.stdoutHash } : {}),
+                      ...(typeof ro.stderrHash === "string" ? { stderrHash: ro.stderrHash } : {}),
+                      at: Number(ro.at ?? 0),
+                    };
+                    return run;
+                  })
+                  .filter((r): r is BackendToolRun => r !== null)
+                  .slice(-MAX_BACKEND_RUNS),
+              }
+            : {}),
+          ...(status !== "pending" && o.automaticCheck !== undefined
+            ? (() => {
+                const ac = sanitizeAutomaticCheck(o.automaticCheck);
+                return ac ? { automaticCheck: ac } : {};
+              })()
             : {}),
         });
       }
@@ -1922,5 +2308,424 @@ export function extractHelpRequest(
 
 export { parseTasks, extractTaskResult };
 export type { TaskArtifact, TaskResult };
+
+export type IsolatedCheckResult = {
+  status: "exited_zero" | "exited_nonzero" | "blocked" | "timed_out";
+  runner: "bubblewrap";
+  commandHash: string;
+  snapshotHash?: string;
+  exitCode?: number;
+  stdoutHash?: string;
+  stderrHash?: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  startedAt: number;
+  finishedAt: number;
+  reason?: string;
+};
+
+const ISO_EXCLUDED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  ".gradle",
+  "build",
+  "dist",
+  "target",
+  ".ssh",
+  ".aws",
+]);
+const ISO_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const ISO_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
+const ISO_MAX_FILES = 5000;
+const ISO_STREAM_KEEP = 32 * 1024;
+const ISO_TIMEOUT_MS = 30000;
+const ISO_COMMAND_MAX = 256;
+
+let isolatedCheckInFlight = false;
+
+class IsoAbort extends Error {
+  constructor(public readonly reason: string) {
+    super(reason);
+  }
+}
+
+function isoExcludedFile(name: string): boolean {
+  return (
+    name === ".env" ||
+    name.startsWith(".env.") ||
+    name === ".npmrc" ||
+    name === ".pypirc" ||
+    name.endsWith(".pem") ||
+    name.endsWith(".key")
+  );
+}
+
+function gitLsFiles(realCwd: string): string[] {
+  try {
+    const inside = execFileSync(
+      "/usr/bin/git",
+      ["-c", "core.fsmonitor=false", "-C", realCwd, "rev-parse", "--is-inside-work-tree"],
+      { encoding: "utf8", maxBuffer: 1024 * 1024 },
+    ).trim();
+    if (inside !== "true") throw new IsoAbort("snapshot_error");
+    const out = execFileSync(
+      "/usr/bin/git",
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        realCwd,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ".",
+      ],
+      { maxBuffer: 4 * 1024 * 1024 },
+    );
+    return out.toString("utf8").split("\0").filter(Boolean);
+  } catch (e) {
+    if (e instanceof IsoAbort) throw e;
+    throw new IsoAbort("snapshot_error");
+  }
+}
+
+function snapshotWorkspace(srcRoot: string, dstRoot: string): string {
+  const seen = new Set<string>();
+  const rels: string[] = [];
+  for (const raw of gitLsFiles(srcRoot)) {
+    if (!raw || path.isAbsolute(raw)) throw new IsoAbort("snapshot_error");
+    if (raw.split("/").some((s) => s === "" || s === "..")) {
+      throw new IsoAbort("snapshot_error");
+    }
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    rels.push(raw);
+    if (rels.length > ISO_MAX_FILES) throw new IsoAbort("snapshot_limit");
+  }
+  rels.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+  const hash = createHash("sha256");
+  const marker = (rel: string, tag: string): void => {
+    hash.update(Buffer.from(rel, "utf8"));
+    hash.update(Buffer.from([0]));
+    hash.update(Buffer.from(tag, "utf8"));
+    hash.update(Buffer.from([0]));
+  };
+  let total = 0;
+  for (const rel of rels) {
+    if (rel.split("/").some((s) => ISO_EXCLUDED_DIRS.has(s))) continue;
+    if (isoExcludedFile(path.posix.basename(rel))) continue;
+    const full = path.join(srcRoot, rel);
+    let lst: fs.Stats;
+    try {
+      lst = fs.lstatSync(full);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        marker(rel, "DELETED");
+        continue;
+      }
+      throw new IsoAbort("snapshot_error");
+    }
+    if (lst.isSymbolicLink()) {
+      marker(rel, "SKIPPED_SYMLINK");
+      continue;
+    }
+    if (!lst.isFile()) throw new IsoAbort("snapshot_error");
+    const bytes = readSnapshotFile(full);
+    total += bytes.length;
+    if (total > ISO_MAX_TOTAL_BYTES) throw new IsoAbort("snapshot_limit");
+    const dst = path.join(dstRoot, rel);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.writeFileSync(dst, bytes);
+    hash.update(Buffer.from(rel, "utf8"));
+    hash.update(Buffer.from([0]));
+    hash.update(bytes);
+    hash.update(Buffer.from([0]));
+  }
+  return hash.digest("hex");
+}
+
+function gitRepoLayout(realCwd: string): { repoName: string; relCwd: string } {
+  try {
+    const top = execFileSync(
+      "/usr/bin/git",
+      ["-c", "core.fsmonitor=false", "-C", realCwd, "rev-parse", "--show-toplevel"],
+      { encoding: "utf8", maxBuffer: 1024 * 1024 },
+    ).trim();
+    const repoName = path.basename(top);
+    if (!/^[A-Za-z0-9._-]+$/.test(repoName) || repoName === "." || repoName === "..") {
+      throw new IsoAbort("snapshot_error");
+    }
+    const rel = path.relative(top, realCwd);
+    const segments = rel ? rel.split(path.sep) : [];
+    if (
+      path.isAbsolute(rel) ||
+      segments.length > 16 ||
+      segments.some((s) => s === "" || s === "." || s === "..")
+    ) {
+      throw new IsoAbort("snapshot_error");
+    }
+    return { repoName, relCwd: segments.join("/") };
+  } catch (e) {
+    if (e instanceof IsoAbort) throw e;
+    throw new IsoAbort("snapshot_error");
+  }
+}
+
+function readSnapshotFile(src: string): Buffer {
+  const fd = fs.openSync(src, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new IsoAbort("snapshot_error");
+    const chunks: Buffer[] = [];
+    const buf = Buffer.alloc(64 * 1024);
+    let got = 0;
+    for (;;) {
+      const n = fs.readSync(
+        fd,
+        buf,
+        0,
+        Math.min(buf.length, ISO_MAX_FILE_BYTES + 1 - got),
+        null,
+      );
+      if (n === 0) break;
+      got += n;
+      if (got > ISO_MAX_FILE_BYTES) throw new IsoAbort("snapshot_limit");
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export async function runIsolatedCheck(
+  cwd: string,
+  command: string,
+): Promise<IsolatedCheckResult> {
+  const startedAt = Date.now();
+  const commandHash = sha256Hex(typeof command === "string" ? command.trim() : "");
+  const finish = (
+    status: IsolatedCheckResult["status"],
+    extra: Partial<IsolatedCheckResult> = {},
+  ): IsolatedCheckResult => ({
+    status,
+    runner: "bubblewrap",
+    commandHash,
+    startedAt,
+    finishedAt: Date.now(),
+    ...extra,
+  });
+  const blocked = (reason: string) => finish("blocked", { reason });
+  const trimmed = typeof command === "string" ? command.trim() : "";
+  if (!trimmed || trimmed.length > ISO_COMMAND_MAX || /[\r\n]/.test(trimmed)) {
+    return blocked("invalid_command");
+  }
+  if (isolatedCheckInFlight) return blocked("busy");
+  if (process.platform !== "linux") return blocked("unavailable");
+  if (!fs.existsSync("/usr/bin/systemd-run") || !fs.existsSync("/usr/bin/bwrap")) {
+    return blocked("unavailable");
+  }
+  isolatedCheckInFlight = true;
+  let snapshotDir: string | undefined;
+  try {
+    const realCwd = fs.realpathSync(cwd);
+    if (!fs.statSync(realCwd).isDirectory()) throw new IsoAbort("snapshot_error");
+    snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-hub-iso-"));
+    fs.chmodSync(snapshotDir, 0o700);
+    const layout = gitRepoLayout(realCwd);
+    let snapshotHash: string;
+    try {
+      snapshotHash = snapshotWorkspace(realCwd, snapshotDir);
+    } catch (e) {
+      throw e instanceof IsoAbort ? e : new IsoAbort("snapshot_error");
+    }
+    const virtualCwd = `/workspace/${layout.repoName}${
+      layout.relCwd ? `/${layout.relCwd}` : ""
+    }`;
+    const binds: string[] = ["--dir", `/workspace/${layout.repoName}`];
+    {
+      let prefix = `/workspace/${layout.repoName}`;
+      const segs = layout.relCwd ? layout.relCwd.split("/") : [];
+      for (let i = 0; i < segs.length - 1; i++) {
+        prefix += `/${segs[i]}`;
+        binds.push("--dir", prefix);
+      }
+    }
+    binds.push("--bind", snapshotDir, virtualCwd);
+    try {
+      const nm = path.join(realCwd, "node_modules");
+      const lst = fs.lstatSync(nm);
+      if (lst.isDirectory() && !lst.isSymbolicLink()) {
+        binds.push("--ro-bind", nm, `${virtualCwd}/node_modules`);
+      }
+    } catch {}
+    const outcome = await new Promise<{
+      spawnError?: boolean;
+      code: number | null;
+      timedOut: boolean;
+      stdout: Buffer;
+      stderr: Buffer;
+      stdoutTruncated: boolean;
+      stderrTruncated: boolean;
+    }>((resolve) => {
+      const child = spawn(
+        "/usr/bin/systemd-run",
+        [
+          "--quiet",
+          "--user",
+          "--scope",
+          "--property=MemoryMax=1073741824",
+          "--property=TasksMax=64",
+          "--property=CPUQuota=100%",
+          "/usr/bin/bwrap",
+          "--unshare-user",
+          "--unshare-pid",
+          "--unshare-net",
+          "--unshare-ipc",
+          "--unshare-uts",
+          "--die-with-parent",
+          "--new-session",
+          "--clearenv",
+          "--setenv",
+          "PATH",
+          "/usr/bin:/bin",
+          "--setenv",
+          "HOME",
+          "/tmp",
+          "--ro-bind",
+          "/usr",
+          "/usr",
+          "--ro-bind",
+          "/bin",
+          "/bin",
+          "--ro-bind",
+          "/lib",
+          "/lib",
+          "--ro-bind",
+          "/lib64",
+          "/lib64",
+          "--proc",
+          "/proc",
+          "--dev",
+          "/dev",
+          "--tmpfs",
+          "/tmp",
+          "--tmpfs",
+          "/workspace",
+          ...binds,
+          "--chdir",
+          virtualCwd,
+          "--",
+          "/bin/sh",
+          "-c",
+          trimmed,
+        ],
+        {
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            PATH: "/usr/bin:/bin",
+            HOME: "/tmp",
+            XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR ?? "",
+          },
+        },
+      );
+      let stdout: Buffer = Buffer.alloc(0);
+      let stderr: Buffer = Buffer.alloc(0);
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
+      let timedOut = false;
+      const append = (buf: Buffer, chunk: Buffer) => {
+        const room = ISO_STREAM_KEEP - buf.length;
+        const kept = room > 0 ? Buffer.concat([buf, chunk.subarray(0, room)]) : buf;
+        return { buf: kept, truncated: chunk.length > Math.max(room, 0) };
+      };
+      child.stdout!.on("data", (chunk: Buffer) => {
+        const r = append(stdout, chunk);
+        stdout = r.buf;
+        stdoutTruncated = stdoutTruncated || r.truncated;
+      });
+      child.stderr!.on("data", (chunk: Buffer) => {
+        const r = append(stderr, chunk);
+        stderr = r.buf;
+        stderrTruncated = stderrTruncated || r.truncated;
+      });
+      const killTimer = setTimeout(() => {
+        timedOut = true;
+        try {
+          process.kill(-child.pid!, "SIGTERM");
+        } catch {}
+        setTimeout(() => {
+          try {
+            process.kill(-child.pid!, "SIGKILL");
+          } catch {}
+        }, 800).unref();
+      }, ISO_TIMEOUT_MS);
+      child.on("error", () => {
+        clearTimeout(killTimer);
+        resolve({
+          spawnError: true,
+          code: null,
+          timedOut,
+          stdout,
+          stderr,
+          stdoutTruncated,
+          stderrTruncated,
+        });
+      });
+      child.on("close", (code) => {
+        clearTimeout(killTimer);
+        resolve({
+          code,
+          timedOut,
+          stdout,
+          stderr,
+          stdoutTruncated,
+          stderrTruncated,
+        });
+      });
+    });
+    if (outcome.spawnError) return blocked("start_failed");
+    const shared = {
+      snapshotHash,
+      ...(outcome.stdout.length
+        ? { stdoutHash: createHash("sha256").update(outcome.stdout).digest("hex") }
+        : {}),
+      ...(outcome.stderr.length
+        ? { stderrHash: createHash("sha256").update(outcome.stderr).digest("hex") }
+        : {}),
+      ...(outcome.stdoutTruncated ? { stdoutTruncated: true } : {}),
+      ...(outcome.stderrTruncated ? { stderrTruncated: true } : {}),
+    };
+    if (outcome.timedOut) {
+      return finish("timed_out", {
+        ...shared,
+        ...(outcome.code !== null ? { exitCode: outcome.code } : {}),
+      });
+    }
+    const code = outcome.code ?? 1;
+    if (code !== 0) {
+      const stderrText = outcome.stderr.toString("utf8");
+      if (/bwrap:|systemd-run|Failed to (?:connect|start|create|allocate)/.test(stderrText)) {
+        return blocked("start_failed");
+      }
+      return finish("exited_nonzero", { ...shared, exitCode: code });
+    }
+    return finish("exited_zero", { ...shared, exitCode: 0 });
+  } catch (e) {
+    if (e instanceof IsoAbort) return blocked(e.reason);
+    return blocked("snapshot_error");
+  } finally {
+    if (snapshotDir) {
+      try {
+        fs.rmSync(snapshotDir, { recursive: true, force: true });
+      } catch {}
+    }
+    isolatedCheckInFlight = false;
+  }
+}
 // conductor-dispatch: verified by agent-hub
 // t2: 在 t1 确定的文件末尾追加此注释，标记子任务 t2 已完成

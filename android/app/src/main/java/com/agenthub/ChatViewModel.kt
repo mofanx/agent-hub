@@ -277,6 +277,14 @@ data class FlowVerification(
     val verdict: String,
     val evidence: String,
     val evidenceDetail: VerificationEvidenceDetail? = null,
+    val backendToolCallId: String? = null,
+)
+
+data class BackendToolRun(
+    val toolCallId: String,
+    val status: String,
+    val exitCode: Int? = null,
+    val at: Long = 0,
 )
 
 data class VerificationEvidenceDetail(
@@ -338,6 +346,14 @@ data class FlowTask(
     val waitingQuestion: String? = null,
     val waitingHelpId: String? = null,
     val verifications: List<FlowVerification> = emptyList(),
+    val verificationStatus: String? = null,
+    val automaticCheckStatus: String = "not_run",
+    val automaticCheckExitCode: Int? = null,
+    val automaticCheckSnapshot: String? = null,
+    val automaticCheckReason: String? = null,
+    val automaticCheckTruncated: Boolean = false,
+    val backendRuns: List<BackendToolRun> = emptyList(),
+    val backendClaimMatch: Boolean = false,
     val baseline: String? = null,
     val diff: String? = null,
     val reproSteps: List<String> = emptyList(),
@@ -2231,8 +2247,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     verdict = vo["verdict"]?.jsonPrimitive?.content ?: "",
                     evidence = vo["evidence"]?.jsonPrimitive?.content ?: "",
                     evidenceDetail = detail?.let { parseVerificationEvidenceDetail(it) },
+                    backendToolCallId = vo["backendToolCallId"]?.jsonPrimitive?.contentOrNull,
                 )
             } ?: emptyList(),
+            backendRuns = obj["backendRuns"]?.jsonArray?.mapNotNull { r ->
+                val ro = r.jsonObject
+                val id = ro["toolCallId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                BackendToolRun(
+                    toolCallId = id,
+                    status = ro["status"]?.jsonPrimitive?.contentOrNull ?: "",
+                    exitCode = ro["exitCode"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+                    at = ro["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0,
+                )
+            } ?: emptyList(),
+            backendClaimMatch = obj["backendClaimMatch"]?.jsonPrimitive?.contentOrNull == "true",
+            verificationStatus = obj["verificationStatus"]?.jsonPrimitive?.contentOrNull,
+            automaticCheckStatus = (obj["automaticCheck"] as? JsonObject)
+                ?.get("status")?.jsonPrimitive?.contentOrNull
+                ?.takeIf {
+                    it == "not_run" || it == "exited_zero" || it == "exited_nonzero" ||
+                        it == "blocked" || it == "timed_out"
+                } ?: "not_run",
+            automaticCheckExitCode = (obj["automaticCheck"] as? JsonObject)
+                ?.get("exitCode")?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+            automaticCheckSnapshot = (obj["automaticCheck"] as? JsonObject)
+                ?.get("snapshotHash")?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.matches(Regex("[0-9a-f]{64}")) },
+            automaticCheckReason = (obj["automaticCheck"] as? JsonObject)
+                ?.get("reason")?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.matches(Regex("[a-z_]+")) },
+            automaticCheckTruncated = (obj["automaticCheck"] as? JsonObject)
+                ?.let {
+                    it["stdoutTruncated"]?.jsonPrimitive?.contentOrNull == "true" ||
+                        it["stderrTruncated"]?.jsonPrimitive?.contentOrNull == "true"
+                } ?: false,
             baseline = obj["baseline"]?.jsonPrimitive?.contentOrNull,
             diff = obj["diff"]?.jsonPrimitive?.contentOrNull,
             reproSteps = obj["reproSteps"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),

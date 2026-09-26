@@ -201,6 +201,25 @@ interface Strings {
     val quotaDaily: String
     val quotaWeekly: String
     val verificationBy: String
+    val verificationStatusLabel: String
+    val verificationStatusUnverified: String
+    val verificationStatusMemberPass: String
+    val verificationStatusMemberNonpass: String
+    val automaticCheckLabel: String
+    val automaticCheckNotRun: String
+    val automaticCheckExitedZero: String
+    val automaticCheckExitedNonzero: String
+    val automaticCheckBlocked: String
+    val automaticCheckTimedOut: String
+    val automaticCheckSnapshot: String
+    val automaticCheckTruncated: String
+    val memberReportedLabel: String
+    val backendRunsLabel: String
+    val backendRunCompleted: String
+    val backendRunFailed: String
+    val backendExitUnknown: String
+    val backendClaimMatchLabel: String
+    val backendVerificationCall: String
     val deliverableEvidence: String
     val evidenceSummaryLabel: String
     val evidenceCommandLabel: String
@@ -417,7 +436,26 @@ object ZhStrings : Strings {
     override val contextMax = "上限"
     override val quotaDaily = "日已用 %d%%"
     override val quotaWeekly = "周已用 %d%%"
-    override val verificationBy = "验证 @%s："
+    override val verificationBy = "成员验证 @%s："
+    override val verificationStatusLabel = "验证："
+    override val verificationStatusUnverified = "尚未验证"
+    override val verificationStatusMemberPass = "成员判断通过"
+    override val verificationStatusMemberNonpass = "成员未确认通过"
+    override val automaticCheckLabel = "自动检查："
+    override val automaticCheckNotRun = "未运行"
+    override val automaticCheckExitedZero = "隔离检查：退出码 0（不代表验收通过）"
+    override val automaticCheckExitedNonzero = "隔离检查：退出码 %d"
+    override val automaticCheckBlocked = "隔离检查受阻"
+    override val automaticCheckTimedOut = "隔离检查超时"
+    override val automaticCheckSnapshot = "源码快照 %s"
+    override val automaticCheckTruncated = "输出已截断"
+    override val memberReportedLabel = "成员自报"
+    override val backendRunsLabel = "后端工具回传（未独立复核）"
+    override val backendRunCompleted = "完成"
+    override val backendRunFailed = "失败"
+    override val backendExitUnknown = "退出码未知"
+    override val backendClaimMatchLabel = "命令/退出码与成员报告匹配"
+    override val backendVerificationCall = "后端调用：%s（仅命令/退出码/可用输出字段匹配）"
     override val deliverableEvidence = "交付证据"
     override val evidenceSummaryLabel = "结论："
     override val evidenceCommandLabel = "命令："
@@ -634,7 +672,26 @@ object EnStrings : Strings {
     override val contextMax = "max"
     override val quotaDaily = "Day %d%% used"
     override val quotaWeekly = "Week %d%% used"
-    override val verificationBy = "Verified by @%s: "
+    override val verificationBy = "Member review by @%s: "
+    override val verificationStatusLabel = "Verification: "
+    override val verificationStatusUnverified = "Not yet verified"
+    override val verificationStatusMemberPass = "Passed by member review"
+    override val verificationStatusMemberNonpass = "Member review did not confirm pass"
+    override val automaticCheckLabel = "Automatic check: "
+    override val automaticCheckNotRun = "not run"
+    override val automaticCheckExitedZero = "Isolated check: exit code 0 (not a pass)"
+    override val automaticCheckExitedNonzero = "Isolated check: exit code %d"
+    override val automaticCheckBlocked = "Isolated check blocked"
+    override val automaticCheckTimedOut = "Isolated check timed out"
+    override val automaticCheckSnapshot = "source snapshot %s"
+    override val automaticCheckTruncated = "output truncated"
+    override val memberReportedLabel = "Member-reported"
+    override val backendRunsLabel = "Backend tool reports (not independently verified)"
+    override val backendRunCompleted = "completed"
+    override val backendRunFailed = "failed"
+    override val backendExitUnknown = "exit code unknown"
+    override val backendClaimMatchLabel = "Command/exit code matches member report"
+    override val backendVerificationCall = "Backend call: %s (command/exit code/available output fields match only)"
     override val deliverableEvidence = "Delivery evidence"
     override val evidenceSummaryLabel = "Summary: "
     override val evidenceCommandLabel = "Command: "

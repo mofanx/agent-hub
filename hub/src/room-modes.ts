@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
-import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString } from "./conductor.js";
+import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
@@ -9,6 +9,8 @@ export interface AgentOps {
   prompt(sessionId: string, content: string | PromptContent): Promise<void>;
   isBusy(sessionId: string): boolean;
   cancel(sessionId: string): Promise<void>;
+  cwd?(sessionId: string): string | undefined;
+  runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
 }
 
 type ConductorNotice = { roomId: string; message: string };
@@ -290,6 +292,10 @@ export class RoomModeManager {
 
   getFlow(roomId: string): Record<string, unknown> | undefined {
     return this.conductor.getFlow(roomId) ?? this.parallelFlowView(roomId) ?? this.pipelineFlowView(roomId) ?? this.debateFlowView(roomId);
+  }
+
+  observeToolUpdate(sessionId: string, update: unknown): void {
+    this.conductor.observeToolUpdate(sessionId, update);
   }
 
   private parallelFlowView(roomId: string): Record<string, unknown> | undefined {

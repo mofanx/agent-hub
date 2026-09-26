@@ -45,6 +45,25 @@ export interface Strings {
   thoughtProcess: string;
   plan: string;
   verificationBy: string;
+  verificationStatusLabel: string;
+  verificationStatusUnverified: string;
+  verificationStatusMemberPass: string;
+  verificationStatusMemberNonpass: string;
+  automaticCheckLabel: string;
+  automaticCheckNotRun: string;
+  automaticCheckExitedZero: string;
+  automaticCheckExitedNonzero: string;
+  automaticCheckBlocked: string;
+  automaticCheckTimedOut: string;
+  automaticCheckSnapshot: string;
+  automaticCheckTruncated: string;
+  memberReportedLabel: string;
+  backendRunsLabel: string;
+  backendRunCompleted: string;
+  backendRunFailed: string;
+  backendExitUnknown: string;
+  backendClaimMatchLabel: string;
+  backendVerificationCall: string;
   deliverableEvidence: string;
   evidenceSummaryLabel: string;
   evidenceCommandLabel: string;
@@ -114,7 +133,26 @@ const zh: Strings = {
   errorLabel: "错误",
   thoughtProcess: "思考过程",
   plan: "计划",
-  verificationBy: "验证 @%s：",
+  verificationBy: "成员验证 @%s：",
+  verificationStatusLabel: "验证：",
+  verificationStatusUnverified: "尚未验证",
+  verificationStatusMemberPass: "成员判断通过",
+  verificationStatusMemberNonpass: "成员未确认通过",
+  automaticCheckLabel: "自动检查：",
+  automaticCheckNotRun: "未运行",
+  automaticCheckExitedZero: "隔离检查：退出码 0（不代表验收通过）",
+  automaticCheckExitedNonzero: "隔离检查：退出码 %s",
+  automaticCheckBlocked: "隔离检查受阻",
+  automaticCheckTimedOut: "隔离检查超时",
+  automaticCheckSnapshot: "源码快照 %s",
+  automaticCheckTruncated: "输出已截断",
+  memberReportedLabel: "成员自报",
+  backendRunsLabel: "后端工具回传（未独立复核）",
+  backendRunCompleted: "完成",
+  backendRunFailed: "失败",
+  backendExitUnknown: "退出码未知",
+  backendClaimMatchLabel: "命令/退出码与成员报告匹配",
+  backendVerificationCall: "后端调用：%s（仅命令/退出码/可用输出字段匹配）",
   deliverableEvidence: "交付证据",
   evidenceSummaryLabel: "结论：",
   evidenceCommandLabel: "命令：",
@@ -184,7 +222,26 @@ const en: Strings = {
   errorLabel: "Error",
   thoughtProcess: "Thinking",
   plan: "Plan",
-  verificationBy: "Verified by @%s: ",
+  verificationBy: "Member review by @%s: ",
+  verificationStatusLabel: "Verification: ",
+  verificationStatusUnverified: "Not yet verified",
+  verificationStatusMemberPass: "Passed by member review",
+  verificationStatusMemberNonpass: "Member review did not confirm pass",
+  automaticCheckLabel: "Automatic check: ",
+  automaticCheckNotRun: "not run",
+  automaticCheckExitedZero: "Isolated check: exit code 0 (not a pass)",
+  automaticCheckExitedNonzero: "Isolated check: exit code %s",
+  automaticCheckBlocked: "Isolated check blocked",
+  automaticCheckTimedOut: "Isolated check timed out",
+  automaticCheckSnapshot: "source snapshot %s",
+  automaticCheckTruncated: "output truncated",
+  memberReportedLabel: "Member-reported",
+  backendRunsLabel: "Backend tool reports (not independently verified)",
+  backendRunCompleted: "completed",
+  backendRunFailed: "failed",
+  backendExitUnknown: "exit code unknown",
+  backendClaimMatchLabel: "Command/exit code matches member report",
+  backendVerificationCall: "Backend call: %s (command/exit code/available output fields match only)",
   deliverableEvidence: "Delivery evidence",
   evidenceSummaryLabel: "Summary: ",
   evidenceCommandLabel: "Command: ",

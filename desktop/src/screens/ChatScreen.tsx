@@ -2431,12 +2431,51 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
       <Circle size={11} />
     );
   const hasDetail =
+    task.status === "done" ||
     task.output ||
     task.failureMessage ||
     task.dependsOn.length > 0 ||
     task.retries ||
     task.waitingQuestion ||
-    (task.verifications?.length ?? 0) > 0;
+    (task.verifications?.length ?? 0) > 0 ||
+    (task.backendRuns?.length ?? 0) > 0;
+  const verdicts = (task.verifications ?? []).map((v) => v.verdict.trim().toLowerCase());
+  const derivedStatus =
+    verdicts.length === 0 ? "unverified" : verdicts.some((v) => v !== "pass") ? "member_nonpass" : "member_pass";
+  const verificationStatus =
+    task.verificationStatus === "unverified" ||
+    task.verificationStatus === "member_pass" ||
+    task.verificationStatus === "member_nonpass"
+      ? task.verificationStatus
+      : derivedStatus;
+  const verificationText =
+    verificationStatus === "member_pass"
+      ? S.verificationStatusMemberPass
+      : verificationStatus === "member_nonpass"
+        ? S.verificationStatusMemberNonpass
+        : S.verificationStatusUnverified;
+  const ac = task.automaticCheck;
+  const automaticCheckText =
+    ac?.status === "exited_zero"
+      ? S.automaticCheckExitedZero
+      : ac?.status === "exited_nonzero"
+        ? ac.exitCode !== undefined
+          ? S.automaticCheckExitedNonzero.replace("%s", String(ac.exitCode))
+          : S.automaticCheckBlocked
+        : ac?.status === "blocked"
+          ? S.automaticCheckBlocked +
+            (ac.reason && /^[a-z_]+$/.test(ac.reason) ? `（${ac.reason}）` : "")
+          : ac?.status === "timed_out"
+            ? S.automaticCheckTimedOut
+            : S.automaticCheckNotRun;
+  const automaticCheckExtra = [
+    ac?.snapshotHash && /^[0-9a-f]{64}$/.test(ac.snapshotHash)
+      ? S.automaticCheckSnapshot.replace("%s", ac.snapshotHash.slice(0, 12))
+      : null,
+    ac?.stdoutTruncated || ac?.stderrTruncated ? S.automaticCheckTruncated : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const handleRetry = async () => {
     const client = store.client;
     const roomId = store.currentRoom?.roomId;
@@ -2470,6 +2509,15 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
         </div>
         {expanded && hasDetail && (
           <div className="flow-task-detail">
+            {task.status === "done" && (
+              <>
+                <div className="flow-task-meta">{S.verificationStatusLabel}{verificationText}</div>
+                <div className="flow-task-meta">{S.automaticCheckLabel}{automaticCheckText}</div>
+                {automaticCheckExtra && (
+                  <div className="flow-task-meta">{automaticCheckExtra}</div>
+                )}
+              </>
+            )}
             {task.dependsOn.length > 0 && (
               <div className="flow-task-meta">{S.dependsOnLabel}{task.dependsOn.join(", ")}</div>
             )}
@@ -2490,6 +2538,9 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                       ))}
                     </ol>
                   </>
+                )}
+                {(task.verifyCommand || task.verifyStdout || task.verifyStderr) && (
+                  <div className="flow-verify-line">{S.memberReportedLabel}</div>
                 )}
                 {task.verifyCommand && (
                   <div className="flow-verify-line">
@@ -2512,9 +2563,15 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                   {S.verificationBy.replace("%s", v.by)}<span className="flow-verdict">{v.verdict}</span>
                   {v.evidence ? <span className="flow-verify-summary"> — {v.evidence}</span> : null}
                 </summary>
+                {v.backendToolCallId && (
+                  <div className="flow-verify-line">{S.backendVerificationCall.replace("%s", v.backendToolCallId)}</div>
+                )}
                 {v.evidenceDetail && (
                   <div className="flow-verify-detail">
                     {v.evidenceDetail.summary && <div className="flow-verify-line">{S.evidenceSummaryLabel}{v.evidenceDetail.summary}</div>}
+                    {(v.evidenceDetail.command || v.evidenceDetail.exitCode !== undefined || v.evidenceDetail.stdout || v.evidenceDetail.stderr) && (
+                      <div className="flow-verify-line">{S.memberReportedLabel}</div>
+                    )}
                     {v.evidenceDetail.command && (
                       <div className="flow-verify-line">{S.evidenceCommandLabel}{v.evidenceDetail.command}</div>
                     )}
@@ -2547,6 +2604,22 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                 )}
               </details>
             ))}
+            {(task.backendRuns?.length ?? 0) > 0 && (
+              <div className="flow-verify-detail">
+                <div className="flow-task-meta">{S.backendRunsLabel}</div>
+                {task.backendRuns!.map((r, i) => (
+                  <div key={i} className="flow-verify-line">
+                    {r.toolCallId} ·{" "}
+                    {r.status === "completed" ? S.backendRunCompleted : r.status === "failed" ? S.backendRunFailed : r.status}
+                    {" · "}
+                    {r.exitCode !== undefined ? `${S.evidenceExitCodeLabel}${r.exitCode}` : S.backendExitUnknown}
+                  </div>
+                ))}
+                {task.backendClaimMatch && (
+                  <div className="flow-verify-line">{S.backendClaimMatchLabel}</div>
+                )}
+              </div>
+            )}
             {task.failureMessage && (
               <div className="flow-task-error">{task.failureMessage}</div>
             )}

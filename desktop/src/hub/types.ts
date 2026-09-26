@@ -106,6 +106,14 @@ export interface FlowVerification {
   verdict: string;
   evidence: string;
   evidenceDetail?: VerificationEvidenceDetail;
+  backendToolCallId?: string;
+}
+
+export interface BackendToolRun {
+  toolCallId: string;
+  status: string;
+  exitCode?: number;
+  at: number;
 }
 
 export interface FlowTask {
@@ -126,6 +134,17 @@ export interface FlowTask {
   waitingHelpId?: string;
   /** 其他成员对本任务的独立验证记录 */
   verifications?: FlowVerification[];
+  verificationStatus?: "unverified" | "member_pass" | "member_nonpass";
+  automaticCheck?: {
+    status?: string;
+    exitCode?: number;
+    snapshotHash?: string;
+    reason?: string;
+    stdoutTruncated?: boolean;
+    stderrTruncated?: boolean;
+  };
+  backendRuns?: BackendToolRun[];
+  backendClaimMatch?: boolean;
   /** 实现者为可复核交付提交的证据 */
   baseline?: string;
   diff?: string;
