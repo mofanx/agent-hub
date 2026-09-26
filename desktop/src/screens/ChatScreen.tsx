@@ -2475,18 +2475,70 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
             {task.output && (
               <div className="flow-task-output">{task.output}</div>
             )}
+            {(task.baseline || task.diff || task.reproSteps || task.verifyCommand) && (
+              <details className="flow-task-deliverable">
+                <summary className="flow-task-meta">交付证据</summary>
+                {task.baseline && <pre className="flow-verify-output">baseline: {task.baseline}</pre>}
+                {task.diff && <pre className="flow-verify-output">diff: {task.diff}</pre>}
+                {task.reproSteps && task.reproSteps.length > 0 && (
+                  <ol className="flow-verify-steps">
+                    {task.reproSteps.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ol>
+                )}
+                {task.verifyCommand && (
+                  <div className="flow-verify-line">
+                    验证命令：{task.verifyCommand}
+                    {task.verifyExitCode !== undefined ? `（退出码：${task.verifyExitCode}）` : ""}
+                  </div>
+                )}
+                {task.verifyStdout && <pre className="flow-verify-output">{task.verifyStdout}</pre>}
+                {task.verifyStderr && <pre className="flow-verify-output">stderr: {task.verifyStderr}</pre>}
+              </details>
+            )}
             {task.waitingQuestion && (
               <div className="flow-task-help">
                 🆘 求助{task.waitingFor === "user" ? "你" : ` @${task.waitingFor}`}：{task.waitingQuestion}
               </div>
             )}
             {task.verifications?.map((v, i) => (
-              <div key={i} className="flow-task-verify">
-                <div className="flow-task-meta">
+              <details key={i} className="flow-task-verify">
+                <summary className="flow-task-meta">
                   验证 @{v.by}：<span className="flow-verdict">{v.verdict}</span>
-                </div>
-                {v.evidence && <div className="flow-task-output">{v.evidence}</div>}
-              </div>
+                  {v.evidence ? <span className="flow-verify-summary"> — {v.evidence}</span> : null}
+                </summary>
+                {v.evidenceDetail && (
+                  <div className="flow-verify-detail">
+                    {v.evidenceDetail.summary && <div className="flow-verify-line">结论：{v.evidenceDetail.summary}</div>}
+                    {v.evidenceDetail.command && (
+                      <div className="flow-verify-line">命令：{v.evidenceDetail.command}</div>
+                    )}
+                    {v.evidenceDetail.exitCode !== undefined && (
+                      <div className="flow-verify-line">退出码：{v.evidenceDetail.exitCode}</div>
+                    )}
+                    {v.evidenceDetail.stdout && (
+                      <pre className="flow-verify-output">{v.evidenceDetail.stdout}</pre>
+                    )}
+                    {v.evidenceDetail.stderr && (
+                      <pre className="flow-verify-output">stderr: {v.evidenceDetail.stderr}</pre>
+                    )}
+                    {v.evidenceDetail.baseline && (
+                      <pre className="flow-verify-output">baseline: {v.evidenceDetail.baseline}</pre>
+                    )}
+                    {v.evidenceDetail.diff && (
+                      <pre className="flow-verify-output">diff: {v.evidenceDetail.diff}</pre>
+                    )}
+                    {v.evidenceDetail.reproSteps && v.evidenceDetail.reproSteps.length > 0 && (
+                      <ol className="flow-verify-steps">
+                        {v.evidenceDetail.reproSteps.map((s, j) => (
+                          <li key={j}>{s}</li>
+                        ))}
+                      </ol>
+                    )}
+                  </div>
+                )}
+              </details>
             ))}
             {task.failureMessage && (
               <div className="flow-task-error">{task.failureMessage}</div>

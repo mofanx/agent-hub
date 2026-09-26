@@ -276,6 +276,19 @@ data class FlowVerification(
     val by: String,
     val verdict: String,
     val evidence: String,
+    val evidenceDetail: VerificationEvidenceDetail? = null,
+)
+
+data class VerificationEvidenceDetail(
+    val summary: String = "",
+    val baseline: String = "",
+    val diff: String = "",
+    val reproSteps: List<String> = emptyList(),
+    val command: String = "",
+    val exitCode: Int? = null,
+    val stdout: String = "",
+    val stderr: String = "",
+    val artifactRefs: List<String> = emptyList(),
 )
 
 data class ScheduledTask(
@@ -325,6 +338,13 @@ data class FlowTask(
     val waitingQuestion: String? = null,
     val waitingHelpId: String? = null,
     val verifications: List<FlowVerification> = emptyList(),
+    val baseline: String? = null,
+    val diff: String? = null,
+    val reproSteps: List<String> = emptyList(),
+    val verifyCommand: String? = null,
+    val verifyExitCode: Int? = null,
+    val verifyStdout: String? = null,
+    val verifyStderr: String? = null,
 )
 
 data class FlowProgress(
@@ -2205,12 +2225,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             waitingHelpId = obj["waitingHelpId"]?.jsonPrimitive?.contentOrNull,
             verifications = obj["verifications"]?.jsonArray?.map { v ->
                 val vo = v.jsonObject
+                val detail = vo["evidenceDetail"]?.jsonObject
                 FlowVerification(
                     by = vo["by"]?.jsonPrimitive?.content ?: "",
                     verdict = vo["verdict"]?.jsonPrimitive?.content ?: "",
                     evidence = vo["evidence"]?.jsonPrimitive?.content ?: "",
+                    evidenceDetail = detail?.let { parseVerificationEvidenceDetail(it) },
                 )
             } ?: emptyList(),
+            baseline = obj["baseline"]?.jsonPrimitive?.contentOrNull,
+            diff = obj["diff"]?.jsonPrimitive?.contentOrNull,
+            reproSteps = obj["reproSteps"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+            verifyCommand = obj["verifyCommand"]?.jsonPrimitive?.contentOrNull,
+            verifyExitCode = obj["verifyExitCode"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+            verifyStdout = obj["verifyStdout"]?.jsonPrimitive?.contentOrNull,
+            verifyStderr = obj["verifyStderr"]?.jsonPrimitive?.contentOrNull,
         )
     }
 
@@ -2219,6 +2248,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             type = obj["type"]?.jsonPrimitive?.content ?: "",
             path = obj["path"]?.jsonPrimitive?.content,
             summary = obj["summary"]?.jsonPrimitive?.content ?: "",
+        )
+    }
+
+    private fun parseVerificationEvidenceDetail(obj: JsonObject): VerificationEvidenceDetail {
+        return VerificationEvidenceDetail(
+            summary = obj["summary"]?.jsonPrimitive?.content ?: "",
+            baseline = obj["baseline"]?.jsonPrimitive?.content ?: "",
+            diff = obj["diff"]?.jsonPrimitive?.content ?: "",
+            reproSteps = obj["reproSteps"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+            command = obj["command"]?.jsonPrimitive?.content ?: "",
+            exitCode = obj["exitCode"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+            stdout = obj["stdout"]?.jsonPrimitive?.content ?: "",
+            stderr = obj["stderr"]?.jsonPrimitive?.content ?: "",
+            artifactRefs = obj["artifactRefs"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
         )
     }
 

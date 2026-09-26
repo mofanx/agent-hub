@@ -79,6 +79,7 @@ import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -2100,20 +2101,133 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                 if (task.dependsOn.isNotEmpty()) {
                     Text("依赖: ${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                task.verifications.forEach { v ->
+                task.verifications.forEachIndexed { _, v ->
+                    var expanded by remember(task.id, v.by, v.verdict) { mutableStateOf(false) }
                     Spacer(Modifier.height(2.dp))
-                    Text(
-                        "验证 @${v.by}：${v.verdict}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    if (v.evidence.isNotBlank()) {
-                        Text(
-                            v.evidence.take(400),
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 6,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { expanded = !expanded }
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "验证 @${v.by}：${v.verdict}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Icon(
+                                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (v.evidence.isNotBlank()) {
+                            Text(
+                                v.evidence.take(400),
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = if (expanded) Int.MAX_VALUE else 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (expanded) {
+                            v.evidenceDetail?.let { d ->
+                                if (d.summary.isNotBlank()) {
+                                    Text("结论：${d.summary}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (d.command.isNotBlank()) {
+                                    Text("命令：${d.command}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                d.exitCode?.let {
+                                    Text("退出码：$it", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (d.stdout.isNotBlank()) {
+                                    Text(
+                                        d.stdout,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 10,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (d.stderr.isNotBlank()) {
+                                    Text(
+                                        "stderr: ${d.stderr}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 5,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (d.baseline.isNotBlank()) {
+                                    Text(
+                                        "baseline: ${d.baseline.take(500)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 5,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (d.diff.isNotBlank()) {
+                                    Text(
+                                        "diff: ${d.diff.take(1000)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 8,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (d.reproSteps.isNotEmpty()) {
+                                    Column {
+                                        d.reproSteps.forEachIndexed { i, s ->
+                                            Text("${i + 1}. $s", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (task.baseline != null || task.diff != null || task.reproSteps.isNotEmpty() || task.verifyCommand != null) {
+                    var deliverableExpanded by remember(task.id) { mutableStateOf(false) }
+                    Spacer(Modifier.height(2.dp))
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { deliverableExpanded = !deliverableExpanded }
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("交付证据", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            Icon(
+                                imageVector = if (deliverableExpanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (deliverableExpanded) {
+                            task.baseline?.let { Text("baseline: ${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
+                            task.diff?.let { Text("diff: ${it.take(1000)}", style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis) }
+                            if (task.reproSteps.isNotEmpty()) {
+                                Column {
+                                    task.reproSteps.forEachIndexed { i, s ->
+                                        Text("${i + 1}. $s", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
+                            task.verifyCommand?.let { cmd ->
+                                Text(
+                                    "验证命令：$cmd${task.verifyExitCode?.let { "（退出码：$it）" } ?: ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            task.verifyStdout?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 10, overflow = TextOverflow.Ellipsis) }
+                            task.verifyStderr?.let { Text("stderr: ${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
+                        }
                     }
                 }
                 task.output?.let {
