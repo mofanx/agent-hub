@@ -169,6 +169,15 @@ describe("AcpAgent integration (in-memory stream)", () => {
     authMethods?: acp.AuthMethod[];
     agentCapabilities?: acp.AgentCapabilities;
     promptHandler?: (params: acp.PromptRequest) => Promise<acp.PromptResponse>;
+    authGated?: boolean;
+    stayGated?: boolean;
+    failAuthenticate?: boolean;
+    sessionNewError?: unknown;
+    resumeError?: unknown;
+    deferAuthErrors?: boolean;
+    initializeError?: unknown;
+    loadAuthGated?: boolean;
+    loadStayGated?: boolean;
   }) {
     const c2a = memPipe();
     const a2c = memPipe();
@@ -178,15 +187,23 @@ describe("AcpAgent integration (in-memory stream)", () => {
     const authCalls: acp.AuthenticateRequest[] = [];
     const prompts: acp.PromptRequest[] = [];
     const forkCalls: acp.ForkSessionRequest[] = [];
+    const resumeCalls: acp.ResumeSessionRequest[] = [];
+    const loadCalls: acp.LoadSessionRequest[] = [];
     const setConfigCalls: { sessionId: string; configId: string; value: unknown }[] = [];
     const order: string[] = [];
+    const deferredResolvers: (() => void)[] = [];
     let newSessionSeq = 0;
+    let authenticated = false;
+    const requiresAuth = () =>
+      (options?.authGated || options?.stayGated) &&
+      (!authenticated || options?.stayGated === true);
     const seenClientCapabilities: (acp.ClientCapabilities | null | undefined)[] = [];
     const agentConn = acp
       .agent()
       .onRequest(acp.methods.agent.initialize, ({ params }) => {
         order.push("initialize");
         seenClientCapabilities.push(params.clientCapabilities);
+        if (options?.initializeError) throw options.initializeError;
         return {
           protocolVersion: acp.PROTOCOL_VERSION,
           agentCapabilities: options?.agentCapabilities ?? {},
@@ -196,9 +213,18 @@ describe("AcpAgent integration (in-memory stream)", () => {
       .onRequest(acp.methods.agent.authenticate, ({ params }) => {
         order.push("authenticate");
         authCalls.push(params);
+        if (options?.failAuthenticate) throw new Error("login cancelled");
+        authenticated = true;
       })
-      .onRequest(acp.methods.agent.session.new, () => {
+      .onRequest(acp.methods.agent.session.new, async () => {
         order.push("session.new");
+        if (requiresAuth()) {
+          if (options?.deferAuthErrors) {
+            await new Promise<void>((r) => deferredResolvers.push(r));
+          }
+          throw acp.RequestError.authRequired();
+        }
+        if (options?.sessionNewError) throw options.sessionNewError;
         return {
           sessionId: `s${++newSessionSeq}`,
           configOptions: [
@@ -218,6 +244,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       })
       .onRequest(acp.methods.agent.session.setConfigOption, ({ params }) => {
         order.push("session.setConfigOption");
+        if (requiresAuth()) throw acp.RequestError.authRequired();
         const p = params as { sessionId: string; configId: string; value: unknown };
         setConfigCalls.push(p);
         return {
@@ -235,7 +262,27 @@ describe("AcpAgent integration (in-memory stream)", () => {
       .onRequest(acp.methods.agent.session.fork, ({ params }) => {
         order.push("session.fork");
         forkCalls.push(params);
+        if (requiresAuth()) throw acp.RequestError.authRequired();
         return { sessionId: "s2" };
+      })
+      .onRequest(acp.methods.agent.session.resume, ({ params }) => {
+        order.push("session.resume");
+        resumeCalls.push(params);
+        if (requiresAuth()) throw acp.RequestError.authRequired();
+        if (options?.resumeError) throw options.resumeError;
+        return {};
+      })
+      .onRequest(acp.methods.agent.session.load, ({ params }) => {
+        order.push("session.load");
+        loadCalls.push(params);
+        if (requiresAuth()) throw acp.RequestError.authRequired();
+        if (
+          (options?.loadAuthGated || options?.loadStayGated) &&
+          (!authenticated || options?.loadStayGated)
+        ) {
+          throw acp.RequestError.authRequired();
+        }
+        return {};
       })
       .onRequest(acp.methods.agent.session.prompt, ({ params }) => {
         prompts.push(params);
@@ -244,7 +291,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       .connect(agentStream);
     const events: HubEvent[] = [];
     const hub = new AcpAgent("test", clientStream, (e) => events.push(e));
-    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, setConfigCalls, order, seenClientCapabilities };
+    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, resumeCalls, loadCalls, setConfigCalls, order, deferredResolvers, seenClientCapabilities };
   }
 
   it("elicitation request -> Hub event -> respond -> agent 收到 accept", async () => {
@@ -334,38 +381,103 @@ describe("AcpAgent integration (in-memory stream)", () => {
     await assert.rejects(hub.promptOnce("s1", "after"));
   });
 
-  it("initialize 返回多个 authMethods 时优先 agent 并在 session/new 前 authenticate", async () => {
-    const savedDevin = process.env.DEVIN_API_KEY;
-    const savedAcp = process.env.ACP_API_KEY;
-    delete process.env.DEVIN_API_KEY;
-    delete process.env.ACP_API_KEY;
-    try {
-      const { hub, agentConn, authCalls, order, events } = setup({
-        authMethods: [
-          { id: "term", name: "Terminal", type: "terminal" } as acp.AuthMethod,
-          { id: "devin-browser", name: "Log in with browser", type: "agent" } as acp.AuthMethod,
-        ],
-      });
-      const session = await hub.createSession("/tmp", "s");
-      assert.equal(session.sessionId, "s1");
-      assert.equal(authCalls.length, 1);
-      assert.equal(authCalls[0]!.methodId, "devin-browser");
-      assert.ok(order.indexOf("authenticate") < order.indexOf("session.new"));
-      assert.ok(
-        events.some(
-          (e) => e.method === "agent.status" && e.params.status === "authenticating",
-        ),
-      );
-      hub.close();
-      agentConn.close();
-    } finally {
-      if (savedDevin !== undefined) process.env.DEVIN_API_KEY = savedDevin;
-      if (savedAcp !== undefined) process.env.ACP_API_KEY = savedAcp;
-    }
+  it("advertised agent auth 不触发预登录：已认证 agent 两次 session/new 零 authenticate", async () => {
+    const { hub, agentConn, authCalls, order } = setup({
+      authMethods: [
+        { id: "term", name: "Terminal", type: "terminal" } as acp.AuthMethod,
+        { id: "devin-browser", name: "Log in with browser", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    const a = await hub.createSession("/tmp", "a");
+    const b = await hub.createSession("/tmp", "b");
+    assert.equal(a.sessionId, "s1");
+    assert.equal(b.sessionId, "s2");
+    assert.equal(authCalls.length, 0);
+    assert.equal(order.filter((m) => m === "authenticate").length, 0);
+    assert.equal(order.filter((m) => m === "session.new").length, 2);
+    hub.close();
+    agentConn.close();
   });
 
-  it("仅 required env_var 且变量缺失时 createSession reject 并包含变量名", async () => {
-    const { hub, agentConn } = setup({
+  it("auth_required 时按需 authenticate 一次并重试原请求，后续请求不再认证", async () => {
+    const { hub, agentConn, authCalls, order, events } = setup({
+      authGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "Log in with browser", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    const s = await hub.createSession("/tmp", "s");
+    assert.equal(s.sessionId, "s1");
+    assert.equal(authCalls.length, 1);
+    assert.equal(authCalls[0]!.methodId, "devin-browser");
+    assert.deepEqual(
+      order.filter((m) => m === "session.new" || m === "authenticate"),
+      ["session.new", "authenticate", "session.new"],
+    );
+    assert.ok(
+      events.some(
+        (e) => e.method === "agent.status" && e.params.status === "authenticating",
+      ),
+    );
+    await hub.createSession("/tmp", "t");
+    assert.equal(authCalls.length, 1, "已认证后不得重复 authenticate");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("并发 auth_required 共享同一次 authenticate", async () => {
+    const { hub, agentConn, authCalls, order } = setup({
+      authGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    const [a, b] = await Promise.all([
+      hub.createSession("/tmp", "a"),
+      hub.createSession("/tmp", "b"),
+    ]);
+    assert.notEqual(a.sessionId, b.sessionId);
+    assert.equal(authCalls.length, 1, "并发挑战应去重为一次 authenticate");
+    assert.equal(order.filter((m) => m === "session.new").length, 4);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("非认证类错误不触发 authenticate", async () => {
+    const { hub, agentConn, authCalls } = setup({
+      sessionNewError: acp.RequestError.internalError(),
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.createSession("/tmp", "s"));
+    assert.equal(authCalls.length, 0);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("advertise env_var/terminal 但已认证时 session/new 直接成功且零 authenticate", async () => {
+    const { hub, agentConn, authCalls } = setup({
+      authMethods: [
+        {
+          id: "env",
+          name: "Env",
+          type: "env_var",
+          vars: [{ name: "DEFINITELY_MISSING_HUB_TEST_VAR", value: "" }],
+        } as acp.AuthMethod,
+        { id: "term", name: "Terminal", type: "terminal" } as acp.AuthMethod,
+      ],
+    });
+    const s = await hub.createSession("/tmp", "s");
+    assert.equal(s.sessionId, "s1");
+    assert.equal(authCalls.length, 0);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("env_var 缺失且 agent 要求认证时报变量名错误且不调用 authenticate", async () => {
+    const { hub, agentConn, authCalls } = setup({
+      authGated: true,
       authMethods: [
         {
           id: "env",
@@ -379,6 +491,237 @@ describe("AcpAgent integration (in-memory stream)", () => {
       hub.createSession("/tmp", "s"),
       /DEFINITELY_MISSING_HUB_TEST_VAR/,
     );
+    assert.equal(authCalls.length, 0, "env_var 方式不得发起 authenticate");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("authenticate 失败时不重试不循环", async () => {
+    const { hub, agentConn, authCalls, order } = setup({
+      authGated: true,
+      failAuthenticate: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.createSession("/tmp", "s"));
+    assert.equal(authCalls.length, 1);
+    assert.equal(order.filter((m) => m === "session.new").length, 1);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("认证后重试仍 auth_required 时不再二次认证", async () => {
+    const { hub, agentConn, authCalls, order } = setup({
+      stayGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.createSession("/tmp", "s"));
+    assert.equal(authCalls.length, 1);
+    assert.equal(order.filter((m) => m === "session.new").length, 2);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("resume 认证失败时上抛错误且不回退 load/重建造成二次弹窗", async () => {
+    const { hub, agentConn, authCalls, resumeCalls, loadCalls } = setup({
+      authGated: true,
+      failAuthenticate: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.resumeSession("hist1", "/tmp", "旧会话"));
+    assert.equal(resumeCalls.length, 1);
+    assert.equal(loadCalls.length, 0, "登录失败不得回退 load 触发二次认证");
+    assert.equal(authCalls.length, 1);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("resume 重试仍 auth_required 时上抛且不回退 load", async () => {
+    const { hub, agentConn, authCalls, resumeCalls, loadCalls } = setup({
+      stayGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.resumeSession("hist1", "/tmp", "旧会话"));
+    assert.equal(resumeCalls.length, 2);
+    assert.equal(loadCalls.length, 0);
+    assert.equal(authCalls.length, 1);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("认证失败代际内延迟到达的 auth_required 不再弹窗且零重试，后续独立请求可再试", async () => {
+    const { hub, agentConn, authCalls, order, deferredResolvers } = setup({
+      authGated: true,
+      failAuthenticate: true,
+      deferAuthErrors: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    const p1 = hub.createSession("/tmp", "a");
+    const p2 = hub.createSession("/tmp", "b");
+    await waitFor(() => (deferredResolvers.length === 2 ? true : undefined));
+    deferredResolvers[0]!();
+    await assert.rejects(p1);
+    deferredResolvers[1]!();
+    await assert.rejects(p2);
+    assert.equal(authCalls.length, 1, "失败代际内不得再次 authenticate");
+    assert.equal(
+      order.filter((m) => m === "session.new").length,
+      2,
+      "认证失败后不得重试已发请求",
+    );
+    const p3 = hub.createSession("/tmp", "c");
+    await waitFor(() => (deferredResolvers.length === 3 ? true : undefined));
+    deferredResolvers[2]!();
+    await assert.rejects(p3);
+    assert.equal(authCalls.length, 2, "后续独立请求允许再次尝试认证");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("load 认证失败时上抛且不重试 load、不走重建", async () => {
+    const { hub, agentConn, authCalls, resumeCalls, loadCalls, order } = setup({
+      resumeError: acp.RequestError.methodNotFound("session/resume"),
+      loadAuthGated: true,
+      failAuthenticate: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.resumeSession("hist1", "/tmp", "旧会话"));
+    assert.equal(resumeCalls.length, 1);
+    assert.equal(loadCalls.length, 1, "load 认证失败不得重试");
+    assert.equal(authCalls.length, 1);
+    assert.equal(
+      order.filter((m) => m === "session.new").length,
+      0,
+      "不得进入 createSession 重建路径",
+    );
+    hub.close();
+    agentConn.close();
+  });
+
+  it("load 重试仍 auth_required 时上抛且 load 恰为两次", async () => {
+    const { hub, agentConn, authCalls, resumeCalls, loadCalls, order } = setup({
+      resumeError: acp.RequestError.methodNotFound("session/resume"),
+      loadStayGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.resumeSession("hist1", "/tmp", "旧会话"));
+    assert.equal(resumeCalls.length, 1);
+    assert.equal(loadCalls.length, 2, "auth 成功后仅重试一次");
+    assert.equal(authCalls.length, 1);
+    assert.equal(order.filter((m) => m === "session.new").length, 0);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("认证失败时补发 auth-required 状态且不泄漏后端错误详情", async () => {
+    const { hub, agentConn, events } = setup({
+      authGated: true,
+      failAuthenticate: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await assert.rejects(hub.createSession("/tmp", "s"));
+    const seq = events
+      .filter((e) => e.method === "agent.status")
+      .map((e) => (e as { params: { status: string; detail?: string } }).params);
+    assert.deepEqual(
+      seq.map((s) => s.status),
+      ["starting", "ready", "authenticating", "auth-required"],
+    );
+    assert.equal(seq.at(-1)!.detail, undefined);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("按需认证成功后补发 agent.status ready", async () => {
+    const { hub, agentConn, events } = setup({
+      authGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    await hub.createSession("/tmp", "s");
+    const seq = events
+      .filter((e) => e.method === "agent.status")
+      .map((e) => (e as { params: { status: string } }).params.status);
+    assert.deepEqual(seq, ["starting", "ready", "authenticating", "ready"]);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("initialize 失败后 ensureStarted fail fast 且不重复建立连接", async () => {
+    const { hub, agentConn, order } = setup({
+      initializeError: acp.RequestError.internalError(),
+    });
+    await assert.rejects(hub.createSession("/tmp", "a"));
+    await assert.rejects(hub.createSession("/tmp", "b"));
+    assert.equal(
+      order.filter((m) => m === "initialize").length,
+      1,
+      "失败实例不得再次调用 start/connect",
+    );
+    hub.close();
+    agentConn.close();
+  });
+
+  it("resume 认证成功后重试成功且不走 load", async () => {
+    const { hub, agentConn, authCalls, resumeCalls, loadCalls } = setup({
+      authGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+    });
+    const ok = await hub.resumeSession("hist1", "/tmp", "旧会话");
+    assert.equal(ok, true);
+    assert.equal(resumeCalls.length, 2);
+    assert.equal(loadCalls.length, 0);
+    assert.equal(authCalls.length, 1);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("resume 普通失败仍保留 session/load 回退", async () => {
+    const { hub, agentConn, resumeCalls, loadCalls } = setup({
+      resumeError: acp.RequestError.methodNotFound("session/resume"),
+    });
+    const ok = await hub.resumeSession("hist1", "/tmp", "旧会话");
+    assert.equal(ok, true);
+    assert.equal(resumeCalls.length, 1);
+    assert.equal(loadCalls.length, 1);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("fork 在 auth_required 后按需认证并重试成功", async () => {
+    const { hub, agentConn, authCalls, forkCalls } = setup({
+      authGated: true,
+      authMethods: [
+        { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+      ],
+      agentCapabilities: {
+        sessionCapabilities: { fork: {} },
+      } as acp.AgentCapabilities,
+    });
+    const c = await hub.cloneSession("s1", "/tmp", "副本");
+    assert.equal(c.sessionId, "s2");
+    assert.equal(forkCalls.length, 2);
+    assert.equal(authCalls.length, 1);
+    await hub.createSession("/tmp", "s");
+    assert.equal(authCalls.length, 1, "认证后新会话不得再次弹窗");
     hub.close();
     agentConn.close();
   });

@@ -90,6 +90,7 @@ type SessionEntry = {
 const PERMISSION_TIMEOUT_MS = 120_000;
 const ELICITATION_TIMEOUT_MS = 600_000;
 const OUTPUT_CAPTURE_LEN = 800;
+const AUTH_REQUIRED_CODE = acp.RequestError.authRequired().code;
 let permissionBypass = process.env.HUB_PERMISSION_BYPASS === "1";
 
 export function sliceTextFile(
@@ -230,6 +231,12 @@ export class AcpAgent {
   private pendingElicitations = new Map<string, (resp: acp.CreateElicitationResponse) => void>();
   private starting: Promise<void> | null = null;
   private ready = false;
+  private authMethods: acp.AuthMethod[] = [];
+  private authInFlight: Promise<void> | null = null;
+  private authEpoch = 0;
+  private authFailedError: { epoch: number; err: unknown } | null = null;
+  private startError: Error | null = null;
+  private readonly authHandledErrors = new WeakSet<object>();
   private cachedConfigOptions: unknown[] | null = null;
   private sessionConfigOptions = new Map<string, unknown[]>();
   private supportsSessionFork = false;
@@ -253,7 +260,7 @@ export class AcpAgent {
   ) {}
 
   get isReady(): boolean {
-    return this.ctx !== null;
+    return this.ready;
   }
 
   close(): void {
@@ -264,8 +271,18 @@ export class AcpAgent {
   }
 
   async ensureStarted(): Promise<void> {
-    if (this.ctx) return;
-    this.starting ??= this.start().finally(() => (this.starting = null));
+    if (this.ready) return;
+    if (this.startError) throw this.startError;
+    if (!this.starting) {
+      this.starting = this.start()
+        .catch((e) => {
+          this.startError = e instanceof Error ? e : new Error(String(e));
+          throw this.startError;
+        })
+        .finally(() => {
+          this.starting = null;
+        });
+    }
     return this.starting;
   }
 
@@ -311,36 +328,117 @@ export class AcpAgent {
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
     this.supportsSessionFork = init.agentCapabilities?.sessionCapabilities?.fork != null;
-
-    const authMethods = init.authMethods ?? [];
-    if (authMethods.length > 0) {
-      const method =
-        authMethods.find((c) => ((c as { type?: string }).type ?? "agent") === "agent") ??
-        authMethods[0]!;
-      const methodType: string = "type" in method ? method.type : "agent";
-      if (methodType === "terminal") {
-        throw new Error(`本地 Agent ${this.name} 需要终端认证，当前环境无法交互`);
-      }
-      if (methodType === "env_var") {
-        const vars = (method as { vars?: { name: string; optional?: boolean }[] }).vars ?? [];
-        const missing = vars.filter((v) => !v.optional && !process.env[v.name]);
-        if (missing.length > 0) {
-          throw new Error(`本地 Agent ${this.name} 缺少认证环境变量: ${missing.map((v) => v.name).join(", ")}`);
-        }
-      }
-      this.emit({ method: "agent.status", params: { status: "authenticating", detail: method.name } });
-      const apiKey = process.env.DEVIN_API_KEY ?? process.env.ACP_API_KEY;
-      await this.ctx.request(acp.methods.agent.authenticate, {
-        methodId: method.id,
-        ...(apiKey ? { _meta: { api_key: apiKey } } : {}),
-      });
-    }
+    this.authMethods = init.authMethods ?? [];
 
     this.ready = true;
     this.emit({
       method: "agent.status",
       params: { status: "ready", detail: `protocol v${init.protocolVersion}` },
     });
+  }
+
+  private isAuthRequired(err: unknown): boolean {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { code?: unknown }).code === AUTH_REQUIRED_CODE
+    );
+  }
+
+  private markAuthHandled<T>(err: T): T {
+    if (typeof err === "object" && err !== null) {
+      this.authHandledErrors.add(err as object);
+    }
+    return err;
+  }
+
+  private wasAuthHandled(err: unknown): boolean {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      this.authHandledErrors.has(err as object)
+    );
+  }
+
+  private async requestWithAuth<T>(send: () => Promise<T>): Promise<T> {
+    const epoch = this.authEpoch;
+    try {
+      return await send();
+    } catch (err) {
+      if (!this.isAuthRequired(err)) throw err;
+      if (this.authEpoch === epoch) {
+        try {
+          await this.ensureAuthenticated();
+        } catch (authErr) {
+          throw this.markAuthHandled(authErr);
+        }
+      } else if (this.authFailedError?.epoch === this.authEpoch) {
+        throw this.markAuthHandled(this.authFailedError.err);
+      }
+      try {
+        return await send();
+      } catch (retryErr) {
+        if (this.isAuthRequired(retryErr)) throw this.markAuthHandled(retryErr);
+        throw retryErr;
+      }
+    }
+  }
+
+  private ensureAuthenticated(): Promise<void> {
+    this.authInFlight ??= this.authenticateOnDemand()
+      .then(() => {
+        this.authEpoch++;
+      })
+      .catch((err) => {
+        this.authEpoch++;
+        this.authFailedError = { epoch: this.authEpoch, err };
+        throw err;
+      })
+      .finally(() => {
+        this.authInFlight = null;
+      });
+    return this.authInFlight;
+  }
+
+  private async authenticateOnDemand(): Promise<void> {
+    const method = this.authMethods.find(
+      (m) => ((m as { type?: string }).type ?? "agent") === "agent",
+    );
+    if (!method) {
+      for (const m of this.authMethods) {
+        const t = (m as { type?: string }).type ?? "agent";
+        if (t === "terminal") {
+          throw new Error(`本地 Agent ${this.name} 需要终端认证，当前环境无法交互`);
+        }
+        if (t === "env_var") {
+          const vars = (m as { vars?: { name: string; optional?: boolean }[] }).vars ?? [];
+          const missing = vars.filter((v) => !v.optional && !process.env[v.name]);
+          if (missing.length > 0) {
+            throw new Error(`本地 Agent ${this.name} 缺少认证环境变量: ${missing.map((v) => v.name).join(", ")}`);
+          }
+        }
+      }
+      throw new Error(`本地 Agent ${this.name} 需要认证，但没有可用的认证方式`);
+    }
+    this.emit({
+      method: "agent.status",
+      params: { status: "authenticating", detail: method.name },
+    });
+    const apiKey = process.env.DEVIN_API_KEY ?? process.env.ACP_API_KEY;
+    try {
+      await this.ctx!.request(acp.methods.agent.authenticate, {
+        methodId: method.id,
+        ...(apiKey ? { _meta: { api_key: apiKey } } : {}),
+      });
+    } catch (err) {
+      if (this.ctx) {
+        this.emit({ method: "agent.status", params: { status: "auth-required" } });
+      }
+      throw err;
+    }
+    if (this.ctx) {
+      this.emit({ method: "agent.status", params: { status: "ready" } });
+    }
   }
 
   private onDisconnected(): void {
@@ -669,10 +767,12 @@ export class AcpAgent {
     name?: string,
   ): Promise<{ sessionId: string; name: string }> {
     await this.ensureStarted();
-    const resp = await this.ctx!.request(acp.methods.agent.session.new, {
-      cwd,
-      mcpServers: [],
-    });
+    const resp = await this.requestWithAuth(() =>
+      this.ctx!.request(acp.methods.agent.session.new, {
+        cwd,
+        mcpServers: [],
+      }),
+    );
     this.recordConfigOptions(resp.sessionId, resp.configOptions);
     const sessionName = name?.trim() || resp.sessionId;
     this.sessions.set(resp.sessionId, {
@@ -691,11 +791,13 @@ export class AcpAgent {
       const created = await this.createSession(cwd, name);
       return { ...created, contextCloned: false };
     }
-    const resp = await this.ctx!.request(acp.methods.agent.session.fork, {
-      sessionId,
-      cwd,
-      mcpServers: [],
-    });
+    const resp = await this.requestWithAuth(() =>
+      this.ctx!.request(acp.methods.agent.session.fork, {
+        sessionId,
+        cwd,
+        mcpServers: [],
+      }),
+    );
     this.recordConfigOptions(resp.sessionId, resp.configOptions);
     const sessionName = name.trim() || resp.sessionId;
     this.sessions.set(resp.sessionId, {
@@ -721,13 +823,19 @@ export class AcpAgent {
   async resumeSession(sessionId: string, cwd: string, name: string): Promise<boolean> {
     await this.ensureStarted();
     try {
-      const resp = await this.ctx!.request(acp.methods.agent.session.resume, {
-        sessionId,
-        cwd,
-        mcpServers: [],
-      });
+      const resp = await this.requestWithAuth(() =>
+        this.ctx!.request(acp.methods.agent.session.resume, {
+          sessionId,
+          cwd,
+          mcpServers: [],
+        }),
+      );
       this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown }).configOptions);
-    } catch {
+    } catch (err) {
+      if (this.wasAuthHandled(err) || this.isAuthRequired(err)) {
+        logWarn("agent", `resume ${sessionId} auth failed: ${String(err)}`);
+        throw err;
+      }
       try {
         this.sessions.set(sessionId, {
           cwd,
@@ -737,17 +845,20 @@ export class AcpAgent {
           turnText: "",
           loading: true,
         });
-        const resp = await this.ctx!.request(acp.methods.agent.session.load, {
-          sessionId,
-          cwd,
-          mcpServers: [],
-        });
+        const resp = await this.requestWithAuth(() =>
+          this.ctx!.request(acp.methods.agent.session.load, {
+            sessionId,
+            cwd,
+            mcpServers: [],
+          }),
+        );
         this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown } | undefined)?.configOptions);
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
         this.contextUsage.delete(sessionId);
         logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
+        if (this.wasAuthHandled(err) || this.isAuthRequired(err)) throw err;
         return false;
       }
     }
@@ -871,7 +982,9 @@ export class AcpAgent {
       configId,
       value,
     };
-    const resp = await this.ctx!.request(acp.methods.agent.session.setConfigOption, params as never);
+    const resp = await this.requestWithAuth(() =>
+      this.ctx!.request(acp.methods.agent.session.setConfigOption, params as never),
+    );
     this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown } | undefined)?.configOptions);
   }
 
