@@ -2040,6 +2040,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val S = LocalStrings.current
     val hasDetail = task.output != null || task.failureMessage != null || task.dependsOn.isNotEmpty() ||
         task.retries > 0 || task.waitingFor != null || task.verifications.isNotEmpty()
     val showRetryBtn = showRetry && task.status == "failed"
@@ -2064,7 +2065,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                     color = MaterialTheme.colorScheme.surface,
                     shape = RoundedCornerShape(4.dp),
                 ) {
-                    Text("重试 ${task.retries}", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                    Text(S.retryBadge.format(task.retries), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
                 }
                 Spacer(Modifier.width(4.dp))
             }
@@ -2078,7 +2079,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                 modifier = Modifier.padding(start = 20.dp, top = 2.dp),
             ) {
                 Text(
-                    "⏳ 等待 ${if (target == "user") "你" else "@$target"} 回复：${task.waitingQuestion.orEmpty().take(160)}",
+                    "${S.waitingReply.format(if (target == "user") S.you else "@$target")}${task.waitingQuestion.orEmpty().take(160)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (target == "user") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
                     maxLines = 3,
@@ -2091,7 +2092,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                         onClick = { vm.startHelpReply(task.waitingHelpId) },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     ) {
-                        Text("答复", style = MaterialTheme.typography.labelSmall)
+                        Text(S.helpReplyAction, style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -2099,7 +2100,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
         if (expanded && hasDetail) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
                 if (task.dependsOn.isNotEmpty()) {
-                    Text("依赖: ${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${S.dependsOnLabel}${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 task.verifications.forEachIndexed { _, v ->
                     var expanded by remember(task.id, v.by, v.verdict) { mutableStateOf(false) }
@@ -2115,7 +2116,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                "验证 @${v.by}：${v.verdict}",
+                                "${S.verificationBy.format(v.by)}${v.verdict}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary,
                             )
@@ -2137,17 +2138,17 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                         if (expanded) {
                             v.evidenceDetail?.let { d ->
                                 if (d.summary.isNotBlank()) {
-                                    Text("结论：${d.summary}", style = MaterialTheme.typography.bodySmall)
+                                    Text("${S.evidenceSummaryLabel}${d.summary}", style = MaterialTheme.typography.bodySmall)
                                 }
                                 if (d.command.isNotBlank()) {
-                                    Text("命令：${d.command}", style = MaterialTheme.typography.bodySmall)
+                                    Text("${S.evidenceCommandLabel}${d.command}", style = MaterialTheme.typography.bodySmall)
                                 }
                                 d.exitCode?.let {
-                                    Text("退出码：$it", style = MaterialTheme.typography.bodySmall)
+                                    Text("${S.evidenceExitCodeLabel}$it", style = MaterialTheme.typography.bodySmall)
                                 }
                                 if (d.stdout.isNotBlank()) {
                                     Text(
-                                        d.stdout,
+                                        "${S.evidenceStdoutLabel}\n${d.stdout}",
                                         style = MaterialTheme.typography.bodySmall,
                                         maxLines = 10,
                                         overflow = TextOverflow.Ellipsis,
@@ -2155,7 +2156,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                                 }
                                 if (d.stderr.isNotBlank()) {
                                     Text(
-                                        "stderr: ${d.stderr}",
+                                        "${S.evidenceStderrLabel}${d.stderr}",
                                         style = MaterialTheme.typography.bodySmall,
                                         maxLines = 5,
                                         overflow = TextOverflow.Ellipsis,
@@ -2163,7 +2164,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                                 }
                                 if (d.baseline.isNotBlank()) {
                                     Text(
-                                        "baseline: ${d.baseline.take(500)}",
+                                        "${S.evidenceBaselineLabel}${d.baseline.take(500)}",
                                         style = MaterialTheme.typography.bodySmall,
                                         maxLines = 5,
                                         overflow = TextOverflow.Ellipsis,
@@ -2171,13 +2172,14 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                                 }
                                 if (d.diff.isNotBlank()) {
                                     Text(
-                                        "diff: ${d.diff.take(1000)}",
+                                        "${S.evidenceDiffLabel}${d.diff.take(1000)}",
                                         style = MaterialTheme.typography.bodySmall,
                                         maxLines = 8,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
                                 if (d.reproSteps.isNotEmpty()) {
+                                    Text(S.evidenceReproStepsLabel, style = MaterialTheme.typography.bodySmall)
                                     Column {
                                         d.reproSteps.forEachIndexed { i, s ->
                                             Text("${i + 1}. $s", style = MaterialTheme.typography.bodySmall)
@@ -2201,7 +2203,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("交付证据", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            Text(S.deliverableEvidence, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                             Icon(
                                 imageVector = if (deliverableExpanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
                                 contentDescription = null,
@@ -2210,9 +2212,10 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             )
                         }
                         if (deliverableExpanded) {
-                            task.baseline?.let { Text("baseline: ${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
-                            task.diff?.let { Text("diff: ${it.take(1000)}", style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis) }
+                            task.baseline?.let { Text("${S.evidenceBaselineLabel}${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
+                            task.diff?.let { Text("${S.evidenceDiffLabel}${it.take(1000)}", style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis) }
                             if (task.reproSteps.isNotEmpty()) {
+                                Text(S.evidenceReproStepsLabel, style = MaterialTheme.typography.bodySmall)
                                 Column {
                                     task.reproSteps.forEachIndexed { i, s ->
                                         Text("${i + 1}. $s", style = MaterialTheme.typography.bodySmall)
@@ -2221,12 +2224,12 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             }
                             task.verifyCommand?.let { cmd ->
                                 Text(
-                                    "验证命令：$cmd${task.verifyExitCode?.let { "（退出码：$it）" } ?: ""}",
+                                    "${S.verificationCommandLabel}$cmd${task.verifyExitCode?.let { S.verificationExitCodeSuffix.format(it) } ?: ""}",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
-                            task.verifyStdout?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 10, overflow = TextOverflow.Ellipsis) }
-                            task.verifyStderr?.let { Text("stderr: ${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
+                            task.verifyStdout?.let { Text("${S.evidenceStdoutLabel}\n$it", style = MaterialTheme.typography.bodySmall, maxLines = 10, overflow = TextOverflow.Ellipsis) }
+                            task.verifyStderr?.let { Text("${S.evidenceStderrLabel}${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
                         }
                     }
                 }
@@ -2247,7 +2250,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                 modifier = Modifier.padding(start = 20.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
             ) {
-                Text("↻ 重试", style = MaterialTheme.typography.labelMedium)
+                Text("↻ ${S.retryAction}", style = MaterialTheme.typography.labelMedium)
             }
         }
         if (task.artifacts.isNotEmpty()) {
@@ -2264,7 +2267,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             scope.launch {
                                 clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, copyText)))
                             }
-                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, S.copied, Toast.LENGTH_SHORT).show()
                         },
                     ) {
                         Text(

@@ -44,6 +44,28 @@ export interface Strings {
   errorLabel: string;
   thoughtProcess: string;
   plan: string;
+  verificationBy: string;
+  deliverableEvidence: string;
+  evidenceSummaryLabel: string;
+  evidenceCommandLabel: string;
+  evidenceExitCodeLabel: string;
+  verificationCommandLabel: string;
+  verificationExitCodeSuffix: string;
+  evidenceBaselineLabel: string;
+  evidenceDiffLabel: string;
+  evidenceStdoutLabel: string;
+  evidenceStderrLabel: string;
+  evidenceReproStepsLabel: string;
+  dependsOnLabel: string;
+  retryBadge: string;
+  retryAction: string;
+  helpBadgeUser: string;
+  helpBadgeMember: string;
+  waitingHelpHint: string;
+  helpRequestUser: string;
+  helpRequestMember: string;
+  copyPathHint: string;
+  copySummaryHint: string;
 }
 
 const zh: Strings = {
@@ -92,6 +114,28 @@ const zh: Strings = {
   errorLabel: "错误",
   thoughtProcess: "思考过程",
   plan: "计划",
+  verificationBy: "验证 @%s：",
+  deliverableEvidence: "交付证据",
+  evidenceSummaryLabel: "结论：",
+  evidenceCommandLabel: "命令：",
+  evidenceExitCodeLabel: "退出码：",
+  verificationCommandLabel: "验证命令：",
+  verificationExitCodeSuffix: "（退出码：%s）",
+  evidenceBaselineLabel: "修改前：",
+  evidenceDiffLabel: "差异：",
+  evidenceStdoutLabel: "标准输出：",
+  evidenceStderrLabel: "错误输出：",
+  evidenceReproStepsLabel: "复现步骤：",
+  dependsOnLabel: "依赖：",
+  retryBadge: "重试 %s",
+  retryAction: "重试",
+  helpBadgeUser: "向你求助",
+  helpBadgeMember: "求助 @%s",
+  waitingHelpHint: "等待求助回复",
+  helpRequestUser: "🆘 求助你：",
+  helpRequestMember: "🆘 求助 @%s：",
+  copyPathHint: "点击复制路径：%s",
+  copySummaryHint: "点击复制摘要",
 };
 
 const en: Strings = {
@@ -140,6 +184,28 @@ const en: Strings = {
   errorLabel: "Error",
   thoughtProcess: "Thinking",
   plan: "Plan",
+  verificationBy: "Verified by @%s: ",
+  deliverableEvidence: "Delivery evidence",
+  evidenceSummaryLabel: "Summary: ",
+  evidenceCommandLabel: "Command: ",
+  evidenceExitCodeLabel: "Exit code: ",
+  verificationCommandLabel: "Verification command: ",
+  verificationExitCodeSuffix: " (exit code: %s)",
+  evidenceBaselineLabel: "Baseline: ",
+  evidenceDiffLabel: "Diff: ",
+  evidenceStdoutLabel: "Stdout: ",
+  evidenceStderrLabel: "Stderr: ",
+  evidenceReproStepsLabel: "Reproduction steps: ",
+  dependsOnLabel: "Depends on: ",
+  retryBadge: "Retry %s",
+  retryAction: "Retry",
+  helpBadgeUser: "Asking you",
+  helpBadgeMember: "Asking @%s",
+  waitingHelpHint: "Waiting for help reply",
+  helpRequestUser: "🆘 Asking you: ",
+  helpRequestMember: "🆘 Asking @%s: ",
+  copyPathHint: "Click to copy path: %s",
+  copySummaryHint: "Click to copy summary",
 };
 
 export function stringsFor(lang: string): Strings {

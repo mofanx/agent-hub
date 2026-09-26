@@ -2419,6 +2419,7 @@ function renderMarkdown(text: string): string {
 function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const statusIcon =
     task.status === "done" ? (
       <Check size={12} />
@@ -2453,14 +2454,14 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
           <span className="flow-task-name">@{task.name}</span>
           <span className="flow-task-desc" title={task.task}>{task.task}</span>
           {task.retries && task.retries > 0 && (
-            <span className="flow-task-badge">重试 {task.retries}</span>
+            <span className="flow-task-badge">{S.retryBadge.replace("%s", String(task.retries))}</span>
           )}
           {task.waitingFor && (
             <span
               className="flow-task-badge flow-badge-help"
-              title={task.waitingQuestion ?? "等待求助回复"}
+              title={task.waitingQuestion ?? S.waitingHelpHint}
             >
-              🆘 {task.waitingFor === "user" ? "向你求助" : `求助 @${task.waitingFor}`}
+              🆘 {task.waitingFor === "user" ? S.helpBadgeUser : S.helpBadgeMember.replace("%s", task.waitingFor)}
             </span>
           )}
           {hasDetail && (
@@ -2470,71 +2471,77 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
         {expanded && hasDetail && (
           <div className="flow-task-detail">
             {task.dependsOn.length > 0 && (
-              <div className="flow-task-meta">依赖: {task.dependsOn.join(", ")}</div>
+              <div className="flow-task-meta">{S.dependsOnLabel}{task.dependsOn.join(", ")}</div>
             )}
             {task.output && (
               <div className="flow-task-output">{task.output}</div>
             )}
             {(task.baseline || task.diff || task.reproSteps || task.verifyCommand) && (
               <details className="flow-task-deliverable">
-                <summary className="flow-task-meta">交付证据</summary>
-                {task.baseline && <pre className="flow-verify-output">baseline: {task.baseline}</pre>}
-                {task.diff && <pre className="flow-verify-output">diff: {task.diff}</pre>}
+                <summary className="flow-task-meta">{S.deliverableEvidence}</summary>
+                {task.baseline && <pre className="flow-verify-output">{S.evidenceBaselineLabel}{task.baseline}</pre>}
+                {task.diff && <pre className="flow-verify-output">{S.evidenceDiffLabel}{task.diff}</pre>}
                 {task.reproSteps && task.reproSteps.length > 0 && (
-                  <ol className="flow-verify-steps">
-                    {task.reproSteps.map((s, i) => (
-                      <li key={i}>{s}</li>
-                    ))}
-                  </ol>
+                  <>
+                    <div className="flow-verify-line">{S.evidenceReproStepsLabel}</div>
+                    <ol className="flow-verify-steps">
+                      {task.reproSteps.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ol>
+                  </>
                 )}
                 {task.verifyCommand && (
                   <div className="flow-verify-line">
-                    验证命令：{task.verifyCommand}
-                    {task.verifyExitCode !== undefined ? `（退出码：${task.verifyExitCode}）` : ""}
+                    {S.verificationCommandLabel}{task.verifyCommand}
+                    {task.verifyExitCode !== undefined ? S.verificationExitCodeSuffix.replace("%s", String(task.verifyExitCode)) : ""}
                   </div>
                 )}
-                {task.verifyStdout && <pre className="flow-verify-output">{task.verifyStdout}</pre>}
-                {task.verifyStderr && <pre className="flow-verify-output">stderr: {task.verifyStderr}</pre>}
+                {task.verifyStdout && <pre className="flow-verify-output">{`${S.evidenceStdoutLabel}\n${task.verifyStdout}`}</pre>}
+                {task.verifyStderr && <pre className="flow-verify-output">{S.evidenceStderrLabel}{task.verifyStderr}</pre>}
               </details>
             )}
             {task.waitingQuestion && (
               <div className="flow-task-help">
-                🆘 求助{task.waitingFor === "user" ? "你" : ` @${task.waitingFor}`}：{task.waitingQuestion}
+                {task.waitingFor === "user" ? S.helpRequestUser : S.helpRequestMember.replace("%s", task.waitingFor ?? "")}{task.waitingQuestion}
               </div>
             )}
             {task.verifications?.map((v, i) => (
               <details key={i} className="flow-task-verify">
                 <summary className="flow-task-meta">
-                  验证 @{v.by}：<span className="flow-verdict">{v.verdict}</span>
+                  {S.verificationBy.replace("%s", v.by)}<span className="flow-verdict">{v.verdict}</span>
                   {v.evidence ? <span className="flow-verify-summary"> — {v.evidence}</span> : null}
                 </summary>
                 {v.evidenceDetail && (
                   <div className="flow-verify-detail">
-                    {v.evidenceDetail.summary && <div className="flow-verify-line">结论：{v.evidenceDetail.summary}</div>}
+                    {v.evidenceDetail.summary && <div className="flow-verify-line">{S.evidenceSummaryLabel}{v.evidenceDetail.summary}</div>}
                     {v.evidenceDetail.command && (
-                      <div className="flow-verify-line">命令：{v.evidenceDetail.command}</div>
+                      <div className="flow-verify-line">{S.evidenceCommandLabel}{v.evidenceDetail.command}</div>
                     )}
                     {v.evidenceDetail.exitCode !== undefined && (
-                      <div className="flow-verify-line">退出码：{v.evidenceDetail.exitCode}</div>
+                      <div className="flow-verify-line">{S.evidenceExitCodeLabel}{v.evidenceDetail.exitCode}</div>
                     )}
                     {v.evidenceDetail.stdout && (
-                      <pre className="flow-verify-output">{v.evidenceDetail.stdout}</pre>
+                      <pre className="flow-verify-output">{`${S.evidenceStdoutLabel}\n${v.evidenceDetail.stdout}`}</pre>
                     )}
                     {v.evidenceDetail.stderr && (
-                      <pre className="flow-verify-output">stderr: {v.evidenceDetail.stderr}</pre>
+                      <pre className="flow-verify-output">{S.evidenceStderrLabel}{v.evidenceDetail.stderr}</pre>
                     )}
                     {v.evidenceDetail.baseline && (
-                      <pre className="flow-verify-output">baseline: {v.evidenceDetail.baseline}</pre>
+                      <pre className="flow-verify-output">{S.evidenceBaselineLabel}{v.evidenceDetail.baseline}</pre>
                     )}
                     {v.evidenceDetail.diff && (
-                      <pre className="flow-verify-output">diff: {v.evidenceDetail.diff}</pre>
+                      <pre className="flow-verify-output">{S.evidenceDiffLabel}{v.evidenceDetail.diff}</pre>
                     )}
                     {v.evidenceDetail.reproSteps && v.evidenceDetail.reproSteps.length > 0 && (
-                      <ol className="flow-verify-steps">
-                        {v.evidenceDetail.reproSteps.map((s, j) => (
-                          <li key={j}>{s}</li>
-                        ))}
-                      </ol>
+                      <>
+                        <div className="flow-verify-line">{S.evidenceReproStepsLabel}</div>
+                        <ol className="flow-verify-steps">
+                          {v.evidenceDetail.reproSteps.map((s, j) => (
+                            <li key={j}>{s}</li>
+                          ))}
+                        </ol>
+                      </>
                     )}
                   </div>
                 )}
@@ -2547,7 +2554,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
         )}
         {showRetryBtn && (
           <button className="flow-task-retry-btn" onClick={handleRetry}>
-            <RotateCcw size={11} /> 重试
+            <RotateCcw size={11} /> {S.retryAction}
           </button>
         )}
         {task.artifacts.length > 0 && (
@@ -2557,7 +2564,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                 key={i}
                 className="flow-artifact"
                 onClick={() => copyArtifact(a)}
-                title={a.path ? `点击复制路径：${a.path}` : "点击复制摘要"}
+                title={a.path ? S.copyPathHint.replace("%s", a.path) : S.copySummaryHint}
               >
                 [{a.type}] {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)}
               </button>

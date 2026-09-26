@@ -200,6 +200,23 @@ interface Strings {
     val contextMax: String
     val quotaDaily: String
     val quotaWeekly: String
+    val verificationBy: String
+    val deliverableEvidence: String
+    val evidenceSummaryLabel: String
+    val evidenceCommandLabel: String
+    val evidenceExitCodeLabel: String
+    val verificationCommandLabel: String
+    val verificationExitCodeSuffix: String
+    val evidenceBaselineLabel: String
+    val evidenceDiffLabel: String
+    val evidenceStdoutLabel: String
+    val evidenceStderrLabel: String
+    val evidenceReproStepsLabel: String
+    val dependsOnLabel: String
+    val retryBadge: String
+    val retryAction: String
+    val waitingReply: String
+    val you: String
 }
 
 object ZhStrings : Strings {
@@ -400,6 +417,23 @@ object ZhStrings : Strings {
     override val contextMax = "上限"
     override val quotaDaily = "日已用 %d%%"
     override val quotaWeekly = "周已用 %d%%"
+    override val verificationBy = "验证 @%s："
+    override val deliverableEvidence = "交付证据"
+    override val evidenceSummaryLabel = "结论："
+    override val evidenceCommandLabel = "命令："
+    override val evidenceExitCodeLabel = "退出码："
+    override val verificationCommandLabel = "验证命令："
+    override val verificationExitCodeSuffix = "（退出码：%d）"
+    override val evidenceBaselineLabel = "修改前："
+    override val evidenceDiffLabel = "差异："
+    override val evidenceStdoutLabel = "标准输出："
+    override val evidenceStderrLabel = "错误输出："
+    override val evidenceReproStepsLabel = "复现步骤："
+    override val dependsOnLabel = "依赖："
+    override val retryBadge = "重试 %d"
+    override val retryAction = "重试"
+    override val waitingReply = "⏳ 等待 %s 回复："
+    override val you = "你"
 }
 
 object EnStrings : Strings {
@@ -600,6 +634,23 @@ object EnStrings : Strings {
     override val contextMax = "max"
     override val quotaDaily = "Day %d%% used"
     override val quotaWeekly = "Week %d%% used"
+    override val verificationBy = "Verified by @%s: "
+    override val deliverableEvidence = "Delivery evidence"
+    override val evidenceSummaryLabel = "Summary: "
+    override val evidenceCommandLabel = "Command: "
+    override val evidenceExitCodeLabel = "Exit code: "
+    override val verificationCommandLabel = "Verification command: "
+    override val verificationExitCodeSuffix = " (exit code: %d)"
+    override val evidenceBaselineLabel = "Baseline: "
+    override val evidenceDiffLabel = "Diff: "
+    override val evidenceStdoutLabel = "Stdout: "
+    override val evidenceStderrLabel = "Stderr: "
+    override val evidenceReproStepsLabel = "Reproduction steps: "
+    override val dependsOnLabel = "Depends on: "
+    override val retryBadge = "Retry %d"
+    override val retryAction = "Retry"
+    override val waitingReply = "⏳ Waiting for %s to reply: "
+    override val you = "you"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }
