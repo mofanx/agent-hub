@@ -365,6 +365,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     onTurnEnd,
     onFileWrite,
     onToolCall,
+    connection.agent === "devin",
   );
 
   agents.set(connection.id, a);

@@ -645,6 +645,173 @@ describe("collab-e2e", () => {
     assert.ok(!JSON.stringify(restored).includes("supersecret"));
   });
 
+  it("Devin 真实形态：首条 tool_call 无 status 可登记，缺退出码不计匹配", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "实现并验证", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证a","dependsOn":["t1"]},{"id":"t3","to":"tester","task":"验证b","dependsOn":["t2"]},{"id":"t4","to":"tester","task":"验证c","dependsOn":["t3"]},{"id":"t5","to":"tester","task":"验证d","dependsOn":["t4"]},{"id":"t6","to":"tester","task":"验证e","dependsOn":["t5"]},{"id":"t7","to":"tester","task":"验证f","dependsOn":["t6"]}]}\n```',
+    );
+    await tick();
+    const devinCall = (sid: string, id: string, command: string) =>
+      h.manager.observeToolUpdate(sid, {
+        sessionUpdate: "tool_call",
+        toolCallId: id,
+        kind: "execute",
+        rawInput: { command },
+      });
+    const upd = (sid: string, id: string, patch: Record<string, unknown>) =>
+      h.manager.observeToolUpdate(sid, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: id,
+        ...patch,
+      });
+    devinCall("s2", "tcFull", "npm test");
+    upd("s2", "tcFull", { status: "in_progress" });
+    upd("s2", "tcFull", {
+      status: "completed",
+      rawOutput: { exitCode: 0, stdout: "8 passing", stderr: "warning" },
+    });
+    await h.done(
+      "s2",
+      '```json\n{"text":"完成","verifyCommand":"npm test","verifyExitCode":0,"verifyStdout":"8 passing","verifyStderr":"warning"}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcDev", "npm run e2e");
+    upd("s3", "tcDev", { status: "in_progress" });
+    upd("s3", "tcDev", { status: "completed" });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run e2e","verifyExitCode":0}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcFail", "npm run build");
+    upd("s3", "tcFail", { status: "failed", rawOutput: { exitCode: 0 } });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run build","verifyExitCode":0}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcOut", "npm run other");
+    upd("s3", "tcOut", {
+      status: "completed",
+      rawOutput: { exitCode: 0, stdout: "x", stderr: "supersecret_backend" },
+    });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run other","verifyExitCode":0,"verifyStdout":"different","verifyStderr":"mismatch"}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcQuiet", "npm run quiet");
+    upd("s3", "tcQuiet", { status: "completed", rawOutput: { exitCode: 0 } });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run quiet","verifyExitCode":0,"verifyStdout":"anything","verifyStderr":"anything"}\n```',
+    );
+    await tick();
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run ghost","verifyExitCode":0}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcWrong", "npm run real");
+    upd("s3", "tcWrong", { status: "completed", rawOutput: { exitCode: 0 } });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run ghost","verifyExitCode":0}\n```',
+    );
+    await tick();
+    const task = (id: string) => h.flow()!.tasks.find((t) => t.id === id)!;
+    const run = (taskId: string, callId: string) =>
+      task(taskId).backendRuns!.find((r) => r.toolCallId === callId)!;
+    assert.equal(task("t1").backendClaimMatch, true, "命令+退出码+stdout 全一致应匹配");
+    assert.equal(run("t1", "tcFull").status, "completed");
+    assert.equal(run("t1", "tcFull").exitCode, 0);
+    const dev = run("t2", "tcDev");
+    assert.equal(dev.status, "completed");
+    assert.equal(dev.exitCode, undefined, "无 rawOutput 时退出码保持未知");
+    assert.equal(task("t2").backendClaimMatch, false, "后端退出码未知时成员自报 0 不得匹配");
+    assert.equal(task("t3").backendClaimMatch, false, "failed 运行不得匹配");
+    assert.equal(
+      task("t4").backendClaimMatch,
+      false,
+      "stdout/stderr hash 不一致不得匹配",
+    );
+    assert.equal(task("t5").backendClaimMatch, false, "后端缺 stdout/stderr 字段不得匹配");
+    assert.equal(task("t6").backendClaimMatch, false, "无后端运行仅自报不得匹配");
+    assert.equal(
+      task("t7").backendClaimMatch,
+      false,
+      "后端有运行但命令 hash 不一致不得匹配",
+    );
+    assert.equal(
+      run("t7", "tcWrong").status,
+      "completed",
+      "t7 应记录后端运行但不得匹配",
+    );
+    assert.ok(
+      !JSON.stringify(h.flow()!).includes("supersecret_backend"),
+      "flow 视图不得泄漏后端原始输出",
+    );
+    const exported = h.manager.exportRuntime();
+    assert.ok(
+      !JSON.stringify(exported).includes("supersecret_backend"),
+      "导出状态不得泄漏后端原始输出",
+    );
+    const exportedDev = (
+      (exported.conductor as {
+        flows: {
+          roomId: string;
+          tasks: {
+            id: string;
+            backendRuns?: { toolCallId: string; commandHash?: string; exitCode?: number }[];
+          }[];
+        }[];
+      }).flows
+    )
+      .find((f) => f.roomId === h.room.roomId)!
+      .tasks.find((t) => t.id === "t2")!
+      .backendRuns?.find((r) => r.toolCallId === "tcDev")!;
+    assert.ok(exportedDev.commandHash, "导出应保留命令 hash");
+    assert.equal(exportedDev.exitCode, undefined);
+    const h2prompts: Prompt[] = [];
+    const busy2 = new Set<string>();
+    const manager2 = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          h2prompts.push({ sessionId, text: String(content) });
+          busy2.add(sessionId);
+        },
+        isBusy: (sid) => busy2.has(sid),
+        cancel: async (sid) => {
+          busy2.delete(sid);
+        },
+      },
+      h.rooms,
+      () => {},
+      0,
+    );
+    await manager2.importRuntime(exported);
+    await tick();
+    const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
+    const rt1 = restored!.tasks.find((t) => t.id === "t1")!;
+    const rt2 = restored!.tasks.find((t) => t.id === "t2")!;
+    assert.equal(rt1.backendClaimMatch, true, "恢复后重新计算字段匹配");
+    assert.equal(
+      rt2.backendRuns?.find((r) => r.toolCallId === "tcDev")?.exitCode,
+      undefined,
+      "恢复后未知退出码不得伪造",
+    );
+    assert.ok(!JSON.stringify(restored).includes("supersecret_backend"));
+  });
+
   it("仅有成员自报验证命令时，review prompt 仍声明 Hub 未自动执行", async () => {
     const h = makeHarness(
       [

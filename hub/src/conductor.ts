@@ -240,8 +240,15 @@ function backendClaimMatch(task: FlowTask, result: TaskResult | undefined): bool
   const exitCode = result?.verifyExitCode;
   if (!command || exitCode === undefined) return false;
   const commandHash = sha256Hex(command);
+  const stdoutHash = result?.verifyStdout ? sha256Hex(result.verifyStdout) : undefined;
+  const stderrHash = result?.verifyStderr ? sha256Hex(result.verifyStderr) : undefined;
   return (task.backendRuns ?? []).some(
-    (r) => r.status === "completed" && r.commandHash === commandHash && r.exitCode === exitCode,
+    (r) =>
+      r.status === "completed" &&
+      r.commandHash === commandHash &&
+      r.exitCode === exitCode &&
+      (stdoutHash === undefined || r.stdoutHash === stdoutHash) &&
+      (stderrHash === undefined || r.stderrHash === stderrHash),
   );
 }
 
@@ -339,7 +346,7 @@ export class ConductorOrchestrator {
     const map = this.pendingToolCalls.get(sessionId);
     const existing = map?.get(toolCallId);
     if (!existing) {
-      if (status !== "pending" && status !== "in_progress") return;
+      if (status !== "" && status !== "pending" && status !== "in_progress") return;
       if (kind !== "execute") return;
       const active = this.activeWorkerTask(sessionId);
       if (!active) return;

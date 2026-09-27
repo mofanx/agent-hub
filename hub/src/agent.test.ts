@@ -178,6 +178,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
     initializeError?: unknown;
     loadAuthGated?: boolean;
     loadStayGated?: boolean;
+    localDevinAuth?: boolean;
   }) {
     const c2a = memPipe();
     const a2c = memPipe();
@@ -290,7 +291,17 @@ describe("AcpAgent integration (in-memory stream)", () => {
       })
       .connect(agentStream);
     const events: HubEvent[] = [];
-    const hub = new AcpAgent("test", clientStream, (e) => events.push(e));
+    const hub = new AcpAgent(
+      "test",
+      clientStream,
+      (e) => events.push(e),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      options?.localDevinAuth ?? false,
+    );
     return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, resumeCalls, loadCalls, setConfigCalls, order, deferredResolvers, seenClientCapabilities };
   }
 
@@ -661,6 +672,71 @@ describe("AcpAgent integration (in-memory stream)", () => {
     assert.deepEqual(seq, ["starting", "ready", "authenticating", "ready"]);
     hub.close();
     agentConn.close();
+  });
+
+  it("DEVIN_API_KEY 仅本地 devin 注入 _meta，ACP_API_KEY 对所有 agent 生效", async () => {
+    const savedDevin = process.env.DEVIN_API_KEY;
+    const savedAcp = process.env.ACP_API_KEY;
+    process.env.DEVIN_API_KEY = "FAKE_TEST_DEVIN_KEY";
+    delete process.env.ACP_API_KEY;
+    const metaOf = (calls: acp.AuthenticateRequest[]) =>
+      (calls[0] as { _meta?: { api_key?: unknown } } | undefined)?._meta?.api_key;
+    try {
+      const local = setup({
+        authGated: true,
+        localDevinAuth: true,
+        authMethods: [
+          { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+        ],
+      });
+      await local.hub.createSession("/tmp", "s");
+      assert.equal(local.authCalls.length, 1);
+      assert.equal(
+        metaOf(local.authCalls) === process.env.DEVIN_API_KEY,
+        true,
+        "本地 devin 应注入 DEVIN_API_KEY",
+      );
+      local.hub.close();
+      local.agentConn.close();
+
+      const remote = setup({
+        authGated: true,
+        authMethods: [
+          { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+        ],
+      });
+      await remote.hub.createSession("/tmp", "s");
+      assert.equal(remote.authCalls.length, 1);
+      assert.equal(
+        metaOf(remote.authCalls),
+        undefined,
+        "非本地 devin 不得注入 DEVIN_API_KEY",
+      );
+      remote.hub.close();
+      remote.agentConn.close();
+
+      process.env.ACP_API_KEY = "FAKE_TEST_ACP_KEY";
+      const remote2 = setup({
+        authGated: true,
+        authMethods: [
+          { id: "devin-browser", name: "login", type: "agent" } as acp.AuthMethod,
+        ],
+      });
+      await remote2.hub.createSession("/tmp", "s");
+      assert.equal(remote2.authCalls.length, 1);
+      assert.equal(
+        metaOf(remote2.authCalls) === process.env.ACP_API_KEY,
+        true,
+        "ACP_API_KEY 对任意 agent 生效",
+      );
+      remote2.hub.close();
+      remote2.agentConn.close();
+    } finally {
+      if (savedDevin !== undefined) process.env.DEVIN_API_KEY = savedDevin;
+      else delete process.env.DEVIN_API_KEY;
+      if (savedAcp !== undefined) process.env.ACP_API_KEY = savedAcp;
+      else delete process.env.ACP_API_KEY;
+    }
   });
 
   it("initialize 失败后 ensureStarted fail fast 且不重复建立连接", async () => {

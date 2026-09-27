@@ -257,6 +257,7 @@ export class AcpAgent {
     private readonly onTurnEnd?: (sessionId: string, text: string) => void,
     private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
     private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
+    private readonly localDevinAuth = false,
   ) {}
 
   get isReady(): boolean {
@@ -424,7 +425,9 @@ export class AcpAgent {
       method: "agent.status",
       params: { status: "authenticating", detail: method.name },
     });
-    const apiKey = process.env.DEVIN_API_KEY ?? process.env.ACP_API_KEY;
+    const apiKey =
+      (this.localDevinAuth ? process.env.DEVIN_API_KEY : undefined) ??
+      process.env.ACP_API_KEY;
     try {
       await this.ctx!.request(acp.methods.agent.authenticate, {
         methodId: method.id,
