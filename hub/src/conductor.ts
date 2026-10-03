@@ -1423,6 +1423,7 @@ export class ConductorOrchestrator {
     }
     const tasks = plan.tasks;
     if (plan.questions.length > 0 && !flow.clarificationAsked) {
+      flow.planFormatRetries = 0;
       flow.clarificationAsked = true;
       flow.phase = "awaiting-input";
       flow.clarification = { id: randomUUID().slice(0, 8), questions: plan.questions };

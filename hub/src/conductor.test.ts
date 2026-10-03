@@ -574,6 +574,142 @@ describe("conductor", () => {
     );
   });
 
+  it("格式修复后的提问计划重置重试计数，答复后的重规划是新的重试回合", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "retry-clar-reset",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(r, "写个口号");
+    await orchestrator.onPromptDone("conductor", "坏输出");
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 2);
+    assert.ok(prompts[1]!.content.includes(PLAN_FIX_PROMPT));
+    assert.equal(
+      (orchestrator.export().flows as Record<string, unknown>[])[0]!.planFormatRetries,
+      1,
+    );
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[],"questions":["什么主题？"]}\n```',
+    );
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "awaiting-input",
+    );
+    assert.equal(
+      (orchestrator.export().flows as Record<string, unknown>[])[0]!.planFormatRetries,
+      0,
+      "有效提问计划解析成功后必须清零重试计数",
+    );
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 0);
+
+    assert.equal(orchestrator.answerClarification(r.roomId, "MoonTeaClub"), true);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 3);
+    assert.ok(prompts[2]!.content.includes("MoonTeaClub"), "重规划 prompt 必须带答复");
+    assert.ok(
+      !prompts[2]!.content.includes(PLAN_FIX_PROMPT),
+      "新规划回合不得残留上轮修复提示",
+    );
+
+    await orchestrator.onPromptDone("conductor", "重规划输出坏格式");
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "planning",
+      "新回合首次失败必须重试而非直接终止",
+    );
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 4);
+    assert.ok(
+      prompts[3]!.content.includes(PLAN_FIX_PROMPT),
+      "新回合的修复 prompt 必须含固定提示",
+    );
+    assert.ok(prompts[3]!.content.includes("MoonTeaClub"));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 0);
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"写口号"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 1);
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "working",
+    );
+  });
+
+  it("答复后的新重试回合连续两次失败仍安全终止", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "retry-clar-term",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(r, "写个口号");
+    await orchestrator.onPromptDone("conductor", "坏输出");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[],"questions":["什么主题？"]}\n```',
+    );
+    assert.equal(orchestrator.answerClarification(r.roomId, "MoonTeaClub"), true);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 3);
+
+    await orchestrator.onPromptDone("conductor", "新回合坏输出一");
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 4);
+    await orchestrator.onPromptDone("conductor", "新回合坏输出二");
+    assert.equal(
+      orchestrator.getFlow(r.roomId),
+      undefined,
+      "新回合第二次失败后必须清理 flow",
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      4,
+      "不得发出第五次规划 prompt",
+    );
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 0);
+    assert.ok(
+      notices.some(
+        (m) => m === "指挥家输出无法解析为任务计划，重试一次仍失败；本轮未派工，请重试",
+      ),
+    );
+  });
+
   it("子任务派发失败后自动重试，失败依赖不解锁下游任务", async () => {
     const rooms = new RoomManager();
     const failRoom = rooms.create(
