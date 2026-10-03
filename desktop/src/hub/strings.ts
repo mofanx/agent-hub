@@ -64,6 +64,21 @@ export interface Strings {
   backendExitUnknown: string;
   backendClaimMatchLabel: string;
   backendVerificationCall: string;
+  snapshotCurrentTrue: string;
+  snapshotCurrentFalse: string;
+  presetCheckRequested: string;
+  checkUnapproved: string;
+  checkCommandMismatch: string;
+  backendStatusMissingCommand: string;
+  backendStatusMissingExit: string;
+  backendStatusNoRun: string;
+  backendStatusUnknownExit: string;
+  backendStatusMismatch: string;
+  flowAwaitingInput: string;
+  clarificationPending: string;
+  clarificationReply: string;
+  clarificationReplying: string;
+  clarificationSupplementHint: string;
   deliverableEvidence: string;
   evidenceSummaryLabel: string;
   evidenceCommandLabel: string;
@@ -153,6 +168,21 @@ const zh: Strings = {
   backendExitUnknown: "退出码未知",
   backendClaimMatchLabel: "命令/退出码与成员报告匹配",
   backendVerificationCall: "后端调用：%s（仅命令/退出码/可用输出字段匹配）",
+  snapshotCurrentTrue: "与当前工作区快照一致",
+  snapshotCurrentFalse: "仅对应历史快照：当前工作区已变化或无法核对，不能证明当前版本通过",
+  presetCheckRequested: "请求的预设检查 ID：%s",
+  checkUnapproved: "未配置或未批准此检查 ID",
+  checkCommandMismatch: "成员命令与预设检查不一致",
+  backendStatusMissingCommand: "成员未提供验证命令",
+  backendStatusMissingExit: "成员未提供退出码",
+  backendStatusNoRun: "没有完成的后端工具记录",
+  backendStatusUnknownExit: "后端未提供结构化退出码",
+  backendStatusMismatch: "后端命令、退出码或输出与成员报告不一致",
+  flowAwaitingInput: "待确认",
+  clarificationPending: "指挥家需要你确认以下问题后再派工（点「答复」可自由填写其他方案）：",
+  clarificationReply: "答复",
+  clarificationReplying: "答复指挥家的确认问题",
+  clarificationSupplementHint: "直接发送并入补充",
   deliverableEvidence: "交付证据",
   evidenceSummaryLabel: "结论：",
   evidenceCommandLabel: "命令：",
@@ -242,6 +272,21 @@ const en: Strings = {
   backendExitUnknown: "exit code unknown",
   backendClaimMatchLabel: "Command/exit code matches member report",
   backendVerificationCall: "Backend call: %s (command/exit code/available output fields match only)",
+  snapshotCurrentTrue: "Matches the current workspace snapshot",
+  snapshotCurrentFalse: "Historical snapshot only: the workspace changed or cannot be checked; the current version is not verified",
+  presetCheckRequested: "Requested preset check ID: %s",
+  checkUnapproved: "Check ID is not configured or approved",
+  checkCommandMismatch: "Member command differs from the preset check",
+  backendStatusMissingCommand: "Member did not provide a verification command",
+  backendStatusMissingExit: "Member did not provide an exit code",
+  backendStatusNoRun: "No completed backend tool run",
+  backendStatusUnknownExit: "Backend did not provide a structured exit code",
+  backendStatusMismatch: "Backend command, exit code or output differs from the member report",
+  flowAwaitingInput: "Awaiting input",
+  clarificationPending: "The conductor needs your answers before dispatching (tap Answer to write any custom plan):",
+  clarificationReply: "Answer",
+  clarificationReplying: "Answering the conductor's questions",
+  clarificationSupplementHint: "Send normally to add as a supplement",
   deliverableEvidence: "Delivery evidence",
   evidenceSummaryLabel: "Summary: ",
   evidenceCommandLabel: "Command: ",

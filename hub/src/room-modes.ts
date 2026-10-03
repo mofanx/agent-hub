@@ -194,8 +194,9 @@ export class RoomModeManager {
     private readonly rooms: RoomManager,
     private readonly broadcast: (method: string, params: Record<string, unknown>) => void,
     promptRetryMs?: number,
+    isolatedChecks?: Readonly<Record<string, string>>,
   ) {
-    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs);
+    this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs, isolatedChecks);
   }
 
   exportRuntime(): Record<string, unknown> {
@@ -234,6 +235,14 @@ export class RoomModeManager {
   /** 重试失败的子任务 */
   retryFailedTasks(roomId: string, taskIds?: string[]): boolean {
     return this.conductor.retryFailedTasks(roomId, taskIds);
+  }
+
+  pendingClarification(roomId: string): { id: string; questions: string[] } | undefined {
+    return this.conductor.pendingClarification(roomId);
+  }
+
+  answerClarification(roomId: string, text: string, id?: string): boolean {
+    return this.conductor.answerClarification(roomId, text, id);
   }
 
   /** 向指定房间广播 room.notice 消息 */
@@ -291,7 +300,9 @@ export class RoomModeManager {
   }
 
   getFlow(roomId: string): Record<string, unknown> | undefined {
-    return this.conductor.getFlow(roomId) ?? this.parallelFlowView(roomId) ?? this.pipelineFlowView(roomId) ?? this.debateFlowView(roomId);
+    const conductorFlow = this.conductor.getFlow(roomId);
+    if (conductorFlow && conductorFlow.phase !== "done") return conductorFlow;
+    return this.parallelFlowView(roomId) ?? this.pipelineFlowView(roomId) ?? this.debateFlowView(roomId) ?? conductorFlow;
   }
 
   observeToolUpdate(sessionId: string, update: unknown): void {
@@ -458,6 +469,37 @@ export class RoomModeManager {
   ): string[] | undefined {
     const roomId = room.roomId;
 
+    const pendingClar = this.conductor.pendingClarification(roomId);
+    if (pendingClar) {
+      const intent = helpAnswerIntent(text, options?.params);
+      if (intent) {
+        const targeted = intent.helpId === undefined || intent.helpId === pendingClar.id;
+        if (targeted && !intent.text.trim()) {
+          this.notice({
+            roomId,
+            message: "答复不能为空，请补充内容后重新答复",
+          });
+          return [];
+        }
+        if (targeted && this.conductor.answerClarification(roomId, intent.text, intent.helpId)) {
+          this.notice({
+            roomId,
+            message: "已收到你的答复，指挥家继续规划中…",
+          });
+          return [];
+        }
+      }
+      this.conductor.addSupplement(roomId, text);
+      this.notice({
+        roomId,
+        message: `📝 已并入当前流程的补充：${text.slice(0, 80)}。仍在等待答复的问题：${pendingClar.questions
+          .map((q, i) => `${i + 1}. ${q}`)
+          .join("；")
+          .slice(0, 200)}（回复「答：内容」即可答复）`,
+      });
+      return [];
+    }
+
     // 1. 指向用户的定向求助待答复：仅显式答复（replyTo/answer 参数或「答：」前缀）消费为答案；
     //    追问、补充等普通消息不再默认当作答案，而是并入流程并提醒仍在等待答复
     const pendingUser = this.conductor.pendingUserHelps(roomId);
@@ -548,7 +590,7 @@ export class RoomModeManager {
 
     // 活跃流程中的新消息默认视为补充/答复，不再取消编排；显式取消词或 /stop 除外
     if (this.hasActiveFlow(room.roomId)) {
-      if (CANCEL_TEXT.test(text.trim())) {
+      if (CANCEL_TEXT.test(text.trim()) && !helpAnswerIntent(text, options?.params)) {
         await this.cancelActive(room.roomId, "用户取消当前流程");
         this.emitFlowUpdate(room.roomId);
         return { sent: [], mentioned: [], skipped: [] };
@@ -560,6 +602,8 @@ export class RoomModeManager {
       }
       await this.cancelActive(room.roomId, "收到新消息，当前流程已取消");
     }
+
+    this.conductor.clearCompleted(room.roomId);
 
     if (room.mode === "auto") {
       const result = await this.handleAuto(room, text, mergedOptions);

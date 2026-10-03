@@ -138,7 +138,7 @@ describe("room-modes", () => {
     assert.ok(text?.includes("a1"));
   });
 
-  it("conductor 流程结束时通过 flowUpdate 清除进度面板", async () => {
+  it("conductor 流程结束时 flowUpdate 广播 done 视图", async () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [
       { sessionId: "s1", name: "coder" },
@@ -169,7 +169,8 @@ describe("room-modes", () => {
     assert.equal(manager.isHiddenSession("s1"), false);
 
     await manager.onPromptDone("s1", "最终总结");
-    assert.equal(lastFlow(), undefined);
+    assert.equal(lastFlow()?.phase, "done");
+    assert.equal(manager.hasActiveFlow(room.roomId), false);
   });
 
   it("mention 和 roundrobin 使用完整输出提取前部 artifact", async () => {

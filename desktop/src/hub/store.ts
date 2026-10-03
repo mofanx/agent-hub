@@ -1521,19 +1521,29 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     answerPermission: (requestId, optionId, optionName) => {
-      const idx = findLastIndex(
-        get().chatItems,
-        (it) => it.kind === "permission" && it.requestId === requestId,
-      );
-      if (idx >= 0) {
-        const items = [...get().chatItems];
-        const p = items[idx];
-        if (p.kind === "permission") {
-          items[idx] = { ...p, answered: optionName };
-          set({ chatItems: items });
-        }
-      }
-      getOrCall("permission.respond", { requestId, optionId }).catch(() => {});
+      getOrCall("permission.respond", { requestId, optionId })
+        .then(() => {
+          const idx = findLastIndex(
+            get().chatItems,
+            (it) => it.kind === "permission" && it.requestId === requestId,
+          );
+          if (idx >= 0) {
+            const items = [...get().chatItems];
+            const p = items[idx];
+            if (p.kind === "permission") {
+              items[idx] = { ...p, answered: optionName };
+              set({ chatItems: items });
+            }
+          }
+        })
+        .catch((e) => {
+          set({
+            chatItems: [
+              ...get().chatItems,
+              { kind: "error", at: Date.now(), text: String(e), author: "" },
+            ],
+          });
+        });
     },
 
     answerElicitation: (requestId, action, content) => {

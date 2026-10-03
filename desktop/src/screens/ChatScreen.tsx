@@ -669,6 +669,10 @@ export function ChatScreen() {
       replyHelp &&
       !store.flow?.tasks.some(
         (t) => t.waitingFor === "user" && t.waitingHelpId === replyHelp.helpId,
+      ) &&
+      !(
+        store.flow?.phase === "awaiting-input" &&
+        store.flow.clarificationId === replyHelp.helpId
       )
     ) {
       setReplyHelp(null);
@@ -849,10 +853,40 @@ export function ChatScreen() {
                 </button>
               </div>
             ))}
+            {store.flow?.phase === "awaiting-input" &&
+              store.flow.clarificationId &&
+              (store.flow.clarificationQuestions?.length ?? 0) > 0 && (
+                <div className="help-banner">
+                  <LifeBuoy size={13} />
+                  <div className="clarification-banner-text">
+                    <div>{S.clarificationPending}</div>
+                    {store.flow.clarificationQuestions!.map((q, i) => (
+                      <div key={i}>{`${i + 1}. ${q}`}</div>
+                    ))}
+                  </div>
+                  <span className="help-banner-hint">{S.clarificationSupplementHint}</span>
+                  <button
+                    className="help-banner-btn"
+                    onClick={() => {
+                      setReplyHelp({
+                        helpId: store.flow!.clarificationId!,
+                        name: "",
+                        taskId: "",
+                        question: store.flow!.clarificationQuestions!.join("；"),
+                      });
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    {S.clarificationReply}
+                  </button>
+                </div>
+              )}
             {replyHelp && (
               <div className="quote-bar">
                 <span className="subtitle">
-                  答复 @{replyHelp.name} 的求助（任务 {replyHelp.taskId}）：
+                  {replyHelp.taskId
+                    ? `答复 @${replyHelp.name} 的求助（任务 ${replyHelp.taskId}）：`
+                    : `${S.clarificationReplying}：`}
                   {replyHelp.question.slice(0, 80)}
                 </span>
                 <button
@@ -1854,6 +1888,8 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
 }
 
 function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null; roomMode: string; minimal?: boolean }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("flowPanelCollapsed") === "1");
   useEffect(() => {
     localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
@@ -1864,6 +1900,7 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   const title = roomMode === "conductor" ? "指挥编排" : "编排进度";
   const phaseLabel: Record<string, string> = {
     planning: "规划中",
+    "awaiting-input": S.flowAwaitingInput,
     working: "执行中",
     reviewing: "验收中",
     summarizing: "汇总中",
@@ -2455,6 +2492,14 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
         ? S.verificationStatusMemberNonpass
         : S.verificationStatusUnverified;
   const ac = task.automaticCheck;
+  const blockedDetail =
+    ac?.reason === "check_unapproved"
+      ? S.checkUnapproved
+      : ac?.reason === "command_mismatch"
+        ? S.checkCommandMismatch
+        : ac?.reason && /^[a-z_]+$/.test(ac.reason)
+          ? ac.reason
+          : undefined;
   const automaticCheckText =
     ac?.status === "exited_zero"
       ? S.automaticCheckExitedZero
@@ -2463,8 +2508,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
           ? S.automaticCheckExitedNonzero.replace("%s", String(ac.exitCode))
           : S.automaticCheckBlocked
         : ac?.status === "blocked"
-          ? S.automaticCheckBlocked +
-            (ac.reason && /^[a-z_]+$/.test(ac.reason) ? `（${ac.reason}）` : "")
+          ? S.automaticCheckBlocked + (blockedDetail ? `（${blockedDetail}）` : "")
           : ac?.status === "timed_out"
             ? S.automaticCheckTimedOut
             : S.automaticCheckNotRun;
@@ -2472,10 +2516,25 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     ac?.snapshotHash && /^[0-9a-f]{64}$/.test(ac.snapshotHash)
       ? S.automaticCheckSnapshot.replace("%s", ac.snapshotHash.slice(0, 12))
       : null,
+    ac?.snapshotCurrent === true ? S.snapshotCurrentTrue : null,
     ac?.stdoutTruncated || ac?.stderrTruncated ? S.automaticCheckTruncated : null,
   ]
     .filter(Boolean)
     .join(" · ");
+  const backendStatusText =
+    task.backendClaimStatus === "matched"
+      ? S.backendClaimMatchLabel
+      : task.backendClaimStatus === "missing_member_command"
+        ? S.backendStatusMissingCommand
+        : task.backendClaimStatus === "missing_member_exit_code"
+          ? S.backendStatusMissingExit
+          : task.backendClaimStatus === "no_completed_backend_run"
+            ? S.backendStatusNoRun
+            : task.backendClaimStatus === "backend_exit_unknown"
+              ? S.backendStatusUnknownExit
+              : task.backendClaimStatus === "backend_mismatch"
+                ? S.backendStatusMismatch
+                : undefined;
   const handleRetry = async () => {
     const client = store.client;
     const roomId = store.currentRoom?.roomId;
@@ -2516,6 +2575,9 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                 {automaticCheckExtra && (
                   <div className="flow-task-meta">{automaticCheckExtra}</div>
                 )}
+                {ac?.snapshotCurrent === false && (
+                  <div className="flow-task-error">{S.snapshotCurrentFalse}</div>
+                )}
               </>
             )}
             {task.dependsOn.length > 0 && (
@@ -2524,7 +2586,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
             {task.output && (
               <div className="flow-task-output">{task.output}</div>
             )}
-            {(task.baseline || task.diff || task.reproSteps || task.verifyCommand) && (
+            {(task.baseline || task.diff || task.reproSteps || task.verifyCommand || task.verifyCheckId) && (
               <details className="flow-task-deliverable">
                 <summary className="flow-task-meta">{S.deliverableEvidence}</summary>
                 {task.baseline && <pre className="flow-verify-output">{S.evidenceBaselineLabel}{task.baseline}</pre>}
@@ -2550,6 +2612,9 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                 )}
                 {task.verifyStdout && <pre className="flow-verify-output">{`${S.evidenceStdoutLabel}\n${task.verifyStdout}`}</pre>}
                 {task.verifyStderr && <pre className="flow-verify-output">{S.evidenceStderrLabel}{task.verifyStderr}</pre>}
+                {task.verifyCheckId && (
+                  <div className="flow-verify-line">{S.presetCheckRequested.replace("%s", task.verifyCheckId)}</div>
+                )}
               </details>
             )}
             {task.waitingQuestion && (
@@ -2604,10 +2669,11 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                 )}
               </details>
             ))}
-            {(task.backendRuns?.length ?? 0) > 0 && (
+            {((task.backendRuns?.length ?? 0) > 0 ||
+              (task.verifyCommand !== undefined && backendStatusText !== undefined)) && (
               <div className="flow-verify-detail">
                 <div className="flow-task-meta">{S.backendRunsLabel}</div>
-                {task.backendRuns!.map((r, i) => (
+                {(task.backendRuns ?? []).map((r, i) => (
                   <div key={i} className="flow-verify-line">
                     {r.toolCallId} ·{" "}
                     {r.status === "completed" ? S.backendRunCompleted : r.status === "failed" ? S.backendRunFailed : r.status}
@@ -2615,8 +2681,12 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                     {r.exitCode !== undefined ? `${S.evidenceExitCodeLabel}${r.exitCode}` : S.backendExitUnknown}
                   </div>
                 ))}
-                {task.backendClaimMatch && (
-                  <div className="flow-verify-line">{S.backendClaimMatchLabel}</div>
+                {backendStatusText !== undefined ? (
+                  <div className="flow-verify-line">{backendStatusText}</div>
+                ) : (
+                  task.backendClaimMatch && (
+                    <div className="flow-verify-line">{S.backendClaimMatchLabel}</div>
+                  )
                 )}
               </div>
             )}

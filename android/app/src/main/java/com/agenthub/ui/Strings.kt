@@ -94,6 +94,9 @@ interface Strings {
     val helpReplying: String
     val helpReplyAction: String
     val exitHelpReply: String
+    val flowAwaitingInput: String
+    val clarificationPending: String
+    val clarificationReplying: String
     val send: String
     val thought: String
     val thoughtOf: String
@@ -220,6 +223,16 @@ interface Strings {
     val backendExitUnknown: String
     val backendClaimMatchLabel: String
     val backendVerificationCall: String
+    val snapshotCurrentTrue: String
+    val snapshotCurrentFalse: String
+    val presetCheckRequested: String
+    val checkUnapproved: String
+    val checkCommandMismatch: String
+    val backendStatusMissingCommand: String
+    val backendStatusMissingExit: String
+    val backendStatusNoRun: String
+    val backendStatusUnknownExit: String
+    val backendStatusMismatch: String
     val deliverableEvidence: String
     val evidenceSummaryLabel: String
     val evidenceCommandLabel: String
@@ -330,6 +343,9 @@ object ZhStrings : Strings {
     override val helpReplying = "答复"
     override val helpReplyAction = "答复"
     override val exitHelpReply = "退出答复"
+    override val flowAwaitingInput = "待确认"
+    override val clarificationPending = "指挥家需要你确认以下问题后再派工，点「答复」可自由填写其他方案"
+    override val clarificationReplying = "答复指挥家的确认问题"
     override val send = "发送"
     override val thought = "思考过程"
     override val thoughtOf = "%s 的思考"
@@ -456,6 +472,16 @@ object ZhStrings : Strings {
     override val backendExitUnknown = "退出码未知"
     override val backendClaimMatchLabel = "命令/退出码与成员报告匹配"
     override val backendVerificationCall = "后端调用：%s（仅命令/退出码/可用输出字段匹配）"
+    override val snapshotCurrentTrue = "与当前工作区快照一致"
+    override val snapshotCurrentFalse = "仅对应历史快照：当前工作区已变化或无法核对，不能证明当前版本通过"
+    override val presetCheckRequested = "请求的预设检查 ID：%s"
+    override val checkUnapproved = "未配置或未批准此检查 ID"
+    override val checkCommandMismatch = "成员命令与预设检查不一致"
+    override val backendStatusMissingCommand = "成员未提供验证命令"
+    override val backendStatusMissingExit = "成员未提供退出码"
+    override val backendStatusNoRun = "没有完成的后端工具记录"
+    override val backendStatusUnknownExit = "后端未提供结构化退出码"
+    override val backendStatusMismatch = "后端命令、退出码或输出与成员报告不一致"
     override val deliverableEvidence = "交付证据"
     override val evidenceSummaryLabel = "结论："
     override val evidenceCommandLabel = "命令："
@@ -566,6 +592,9 @@ object EnStrings : Strings {
     override val helpReplying = "Replying to"
     override val helpReplyAction = "Reply"
     override val exitHelpReply = "Exit reply"
+    override val flowAwaitingInput = "Awaiting input"
+    override val clarificationPending = "The conductor needs your answers before dispatching — tap Answer to write any custom plan"
+    override val clarificationReplying = "Answering the conductor's questions"
     override val send = "Send"
     override val thought = "Thinking"
     override val thoughtOf = "%s's thinking"
@@ -692,6 +721,16 @@ object EnStrings : Strings {
     override val backendExitUnknown = "exit code unknown"
     override val backendClaimMatchLabel = "Command/exit code matches member report"
     override val backendVerificationCall = "Backend call: %s (command/exit code/available output fields match only)"
+    override val snapshotCurrentTrue = "Matches the current workspace snapshot"
+    override val snapshotCurrentFalse = "Historical snapshot only: the workspace changed or cannot be checked; the current version is not verified"
+    override val presetCheckRequested = "Requested preset check ID: %s"
+    override val checkUnapproved = "Check ID is not configured or approved"
+    override val checkCommandMismatch = "Member command differs from the preset check"
+    override val backendStatusMissingCommand = "Member did not provide a verification command"
+    override val backendStatusMissingExit = "Member did not provide an exit code"
+    override val backendStatusNoRun = "No completed backend tool run"
+    override val backendStatusUnknownExit = "Backend did not provide a structured exit code"
+    override val backendStatusMismatch = "Backend command, exit code or output differs from the member report"
     override val deliverableEvidence = "Delivery evidence"
     override val evidenceSummaryLabel = "Summary: "
     override val evidenceCommandLabel = "Command: "

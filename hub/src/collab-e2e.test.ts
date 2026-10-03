@@ -1,8 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { RoomModeManager, type AgentOps } from "./room-modes.js";
 import { RoomManager } from "./room.js";
-import type { IsolatedCheckResult } from "./conductor.js";
+import { workspaceSnapshotHash, type IsolatedCheckResult } from "./conductor.js";
 
 type Prompt = { sessionId: string; text: string };
 type Broadcast = { method: string; params: Record<string, unknown> };
@@ -25,19 +29,24 @@ type FlowTaskView = {
   verifyCommand?: string;
   verifyExitCode?: number;
   verifyStdout?: string;
+  verifyCheckId?: string;
   backendRuns?: { toolCallId: string; status: string; exitCode?: number; at: number }[];
   backendClaimMatch?: boolean;
+  backendClaimStatus?: string;
 };
 
 type FlowView = {
   phase: string;
   supplements?: string[];
   tasks: FlowTaskView[];
+  clarificationId?: string;
+  clarificationQuestions?: string[];
 };
 
 function makeHarness(
   members: { sessionId: string; name: string }[],
   opts: Record<string, unknown> = {},
+  isolatedChecks?: Readonly<Record<string, string>>,
 ) {
   const rooms = new RoomManager();
   const room = rooms.create("e2e", members, "conductor", opts);
@@ -61,6 +70,7 @@ function makeHarness(
     rooms,
     (method, params) => broadcasts.push({ method, params }),
     0,
+    isolatedChecks,
   );
   const done = (sid: string, output: string) => {
     busy.delete(sid);
@@ -206,14 +216,56 @@ describe("collab-e2e", () => {
     const summaryPrompt = h.lastPrompt("s1")!;
     assert.match(summaryPrompt.text, /npm test 8\/8/);
     assert.match(summaryPrompt.text, /兼容 Windows/);
-    assert.match(summaryPrompt.text, /验证证据/);
+    assert.match(summaryPrompt.text, /先给结论.*待确认.*实际复核/);
     assert.match(summaryPrompt.text, /成员自报/);
     assert.match(summaryPrompt.text, /并未自动执行/);
 
-    // 9. 最终答复 → flow 清除，flowUpdate 广播空 flow
+    // 9. 最终答复 → flow 进入 done，证据仍可查看但不再是活跃流程
     await h.done("s1", "最终答复：已完成实现并通过独立验证");
     assert.equal(h.manager.hasActiveFlow(h.room.roomId), false);
-    assert.equal(h.lastFlowEvent(), undefined);
+    const doneFlow = h.flow()!;
+    assert.equal(doneFlow.phase, "done");
+    assert.equal(doneFlow.tasks.find((t) => t.id === "t1")?.verificationStatus, "member_pass");
+    assert.equal(
+      doneFlow.tasks.find((t) => t.id === "t1")?.automaticCheck?.status,
+      "not_run",
+      "成员复核不能伪装成 Hub 自动检查",
+    );
+    const doneEvent = h.lastFlowEvent()!;
+    assert.equal(doneEvent.phase, "done");
+    assert.equal(doneEvent.tasks.length, 2);
+
+    const state = h.manager.exportRuntime();
+    const prompts2: Prompt[] = [];
+    const manager2 = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts2.push({ sessionId, text: String(content) });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      h.rooms,
+      () => {},
+      0,
+    );
+    await manager2.importRuntime(state);
+    await tick();
+    const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
+    assert.equal(restored?.phase, "done", "done 证据应随导出导入保留");
+    assert.equal(restored?.tasks.length, 2);
+    assert.equal(prompts2.length, 0, "done 恢复不得重派任何 prompt");
+    manager2.resumeFlows();
+    await tick();
+    assert.equal(prompts2.length, 0, "resumeFlows 不得调度已完成流程");
+
+    h.manager.onPromptError("s1");
+    assert.equal(h.flow()?.phase, "done", "晚到的 conductor 错误不得抹掉已完成证据");
+    assert.equal(h.flow()?.tasks.length, 2);
+
+    await h.manager.handle(h.room, "新的任务", {});
+    assert.equal(h.flow()?.phase, "planning", "新消息应开启新一轮而非残留旧 done");
+    assert.equal(h.flow()?.tasks.length, 0);
   });
 
   it("成员间求助：派发 → 回复唤醒；显式取消词终止流程", async () => {
@@ -657,7 +709,7 @@ describe("collab-e2e", () => {
     await h.manager.handle(h.room, "实现并验证", {});
     await h.done(
       "s1",
-      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证a","dependsOn":["t1"]},{"id":"t3","to":"tester","task":"验证b","dependsOn":["t2"]},{"id":"t4","to":"tester","task":"验证c","dependsOn":["t3"]},{"id":"t5","to":"tester","task":"验证d","dependsOn":["t4"]},{"id":"t6","to":"tester","task":"验证e","dependsOn":["t5"]},{"id":"t7","to":"tester","task":"验证f","dependsOn":["t6"]}]}\n```',
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证a","dependsOn":["t1"]},{"id":"t3","to":"tester","task":"验证b","dependsOn":["t2"]},{"id":"t4","to":"tester","task":"验证c","dependsOn":["t3"]},{"id":"t5","to":"tester","task":"验证d","dependsOn":["t4"]},{"id":"t6","to":"tester","task":"验证e","dependsOn":["t5"]},{"id":"t7","to":"tester","task":"验证f","dependsOn":["t6"]},{"id":"t8","to":"tester","task":"验证g","dependsOn":["t7"]},{"id":"t9","to":"tester","task":"验证h","dependsOn":["t8"]},{"id":"t10","to":"tester","task":"验证i","dependsOn":["t9"]},{"id":"t11","to":"tester","task":"验证j","dependsOn":["t10"]}]}\n```',
     );
     await tick();
     const devinCall = (sid: string, id: string, command: string) =>
@@ -728,10 +780,67 @@ describe("collab-e2e", () => {
       '```json\n{"text":"done","verifyCommand":"npm run ghost","verifyExitCode":0}\n```',
     );
     await tick();
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyExitCode":0,"artifacts":[]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run noexit"}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcOutOk", "npm run stdout");
+    upd("s3", "tcOutOk", {
+      status: "completed",
+      rawOutput: { stdout: "8 passing" },
+    });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run stdout","verifyExitCode":0,"verifyStdout":"8 passing"}\n```',
+    );
+    await tick();
+    devinCall("s3", "tcOutBad", "npm run out2");
+    upd("s3", "tcOutBad", {
+      status: "completed",
+      rawOutput: { stdout: "actual" },
+    });
+    await h.done(
+      "s3",
+      '```json\n{"text":"done","verifyCommand":"npm run out2","verifyExitCode":0,"verifyStdout":"wrong"}\n```',
+    );
+    await tick();
     const task = (id: string) => h.flow()!.tasks.find((t) => t.id === id)!;
     const run = (taskId: string, callId: string) =>
       task(taskId).backendRuns!.find((r) => r.toolCallId === callId)!;
     assert.equal(task("t1").backendClaimMatch, true, "命令+退出码+stdout 全一致应匹配");
+    assert.equal(task("t1").backendClaimStatus, "matched");
+    assert.equal(
+      task("t2").backendClaimStatus,
+      "backend_exit_unknown",
+      "成员自报 0 但后端缺 exitCode",
+    );
+    assert.equal(
+      task("t3").backendClaimStatus,
+      "no_completed_backend_run",
+      "仅 failed 运行无 completed",
+    );
+    assert.equal(task("t4").backendClaimStatus, "backend_mismatch");
+    assert.equal(task("t5").backendClaimStatus, "backend_mismatch");
+    assert.equal(task("t6").backendClaimStatus, "no_completed_backend_run");
+    assert.equal(task("t7").backendClaimStatus, "backend_mismatch");
+    assert.equal(task("t8").backendClaimStatus, "missing_member_command");
+    assert.equal(task("t9").backendClaimStatus, "missing_member_exit_code");
+    assert.equal(
+      task("t10").backendClaimStatus,
+      "backend_exit_unknown",
+      "同命令后端缺退出码但输出一致时仍为 exit_unknown",
+    );
+    assert.equal(
+      task("t11").backendClaimStatus,
+      "backend_mismatch",
+      "退出码未知且声称输出不一致时不得遮蔽为 exit_unknown",
+    );
     assert.equal(run("t1", "tcFull").status, "completed");
     assert.equal(run("t1", "tcFull").exitCode, 0);
     const dev = run("t2", "tcDev");
@@ -804,6 +913,12 @@ describe("collab-e2e", () => {
     const rt1 = restored!.tasks.find((t) => t.id === "t1")!;
     const rt2 = restored!.tasks.find((t) => t.id === "t2")!;
     assert.equal(rt1.backendClaimMatch, true, "恢复后重新计算字段匹配");
+    assert.equal(rt1.backendClaimStatus, "matched", "恢复后枚举一致");
+    assert.equal(
+      restored!.tasks.find((t) => t.id === "t2")!.backendClaimStatus,
+      "backend_exit_unknown",
+      "恢复后枚举一致",
+    );
     assert.equal(
       rt2.backendRuns?.find((r) => r.toolCallId === "tcDev")?.exitCode,
       undefined,
@@ -848,6 +963,7 @@ describe("collab-e2e", () => {
         { sessionId: "s3", name: "tester" },
       ],
       { conductorId: "s1" },
+      { unit: "npm test" },
     );
     const calls: { cwd: string; command: string }[] = [];
     let release: () => void = () => {};
@@ -875,12 +991,12 @@ describe("collab-e2e", () => {
     await tick();
     const donePromise = h.done(
       "s2",
-      '```json\n{"text":"实现完成","verifyCommand":"npm test","verifyExitCode":0,"artifacts":[{"type":"file","path":"src/sort.ts","summary":"实现"}],"automaticCheck":{"status":"blocked"}}\n```',
+      '```json\n{"text":"实现完成","verifyCommand":"npm test","verifyCheckId":"unit","verifyExitCode":0,"artifacts":[{"type":"file","path":"src/sort.ts","summary":"实现"}],"automaticCheck":{"status":"blocked"}}\n```',
     );
     await tick(5);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]!.cwd, "/repo/ws");
-    assert.equal(calls[0]!.command, "npm test");
+    assert.equal(calls[0]!.command, "npm test", "必须执行预设命令而非成员字符串");
     assert.equal(
       h.prompts.filter((p) => p.sessionId === "s3").length,
       0,
@@ -891,6 +1007,7 @@ describe("collab-e2e", () => {
     await tick();
     const t1 = h.flow()!.tasks.find((t) => t.id === "t1")!;
     assert.equal(t1.status, "done");
+    assert.equal(t1.verifyCheckId, "unit", "getFlow 应输出成员报告的 check ID");
     assert.equal(
       t1.automaticCheck?.status,
       "exited_zero",
@@ -914,6 +1031,15 @@ describe("collab-e2e", () => {
     assert.match(reviewPrompt.text, /隔离检查：exited_zero,exitCode=0,snapshotHash=bbbbbbbbbbbb/);
     assert.match(reviewPrompt.text, /成员自报字段不等于隔离检查/);
     const state = h.manager.exportRuntime();
+    const expT1 = (
+      (state.conductor as {
+        flows: {
+          roomId: string;
+          results: Record<string, { verifyCheckId?: string }>;
+        }[];
+      }).flows
+    ).find((f) => f.roomId === h.room.roomId)!.results["t1"]!;
+    assert.equal(expT1.verifyCheckId, "unit", "导出应保留成员报告的 check ID");
     const h2prompts: Prompt[] = [];
     const busy2 = new Set<string>();
     const manager2 = new RoomModeManager(
@@ -934,9 +1060,33 @@ describe("collab-e2e", () => {
     await manager2.importRuntime(state);
     const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
     const rt1 = restored!.tasks.find((t) => t.id === "t1")!;
+    assert.equal(rt1.verifyCheckId, "unit", "恢复后应保留合法 check ID");
     assert.equal(rt1.automaticCheck?.status, "exited_zero", "隔离检查结果应随状态恢复");
     assert.equal(rt1.automaticCheck?.exitCode, 0);
     assert.equal(rt1.automaticCheck?.snapshotHash, "b".repeat(64));
+    assert.equal(
+      rt1.backendClaimMatch,
+      t1.backendClaimMatch,
+      "恢复后匹配结果不变",
+    );
+    expT1.verifyCheckId = "INVALID ID!";
+    const manager3 = new RoomModeManager(
+      {
+        prompt: async () => {},
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      h.rooms,
+      () => {},
+      0,
+    );
+    await manager3.importRuntime(state);
+    const restored3 = manager3.getFlow(h.room.roomId) as FlowView | undefined;
+    assert.equal(
+      restored3!.tasks.find((t) => t.id === "t1")!.verifyCheckId,
+      undefined,
+      "非法 check ID 导入时必须被清洗",
+    );
     await h.done("s1", '```json\n{"decision":"complete","reason":"通过"}\n```');
     await tick(20);
     const summaryPrompt = h.lastPrompt("s1")!;
@@ -954,6 +1104,7 @@ describe("collab-e2e", () => {
         { sessionId: "s5", name: "extra" },
       ],
       { conductorId: "s1" },
+      { unit: "npm test" },
     );
     const calls: string[] = [];
     h.agent.cwd = (sid) => (sid === "s3" ? undefined : "/repo");
@@ -969,11 +1120,11 @@ describe("collab-e2e", () => {
     await tick();
     await h.done(
       "s2",
-      '```json\n{"text":"A","verifyCommand":"npm test","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+      '```json\n{"text":"A","verifyCommand":"npm test","verifyCheckId":"unit","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
     );
     await h.done(
       "s3",
-      '```json\n{"text":"B","verifyCommand":"npm test","artifacts":[{"type":"file","path":"b.ts","summary":"x"}]}\n```',
+      '```json\n{"text":"B","verifyCommand":"npm test","verifyCheckId":"unit","artifacts":[{"type":"file","path":"b.ts","summary":"x"}]}\n```',
     );
     await h.done("s4", '```json\n{"text":"C","verifyCommand":"npm test"}\n```');
     await h.done(
@@ -993,6 +1144,185 @@ describe("collab-e2e", () => {
     assert.deepEqual(calls, ["npm test"], "只有完整候选才调用 runner 且仅一次");
   });
 
+  it("隔离检查门控：缺 ID/未知 ID/命令不一致一律 blocked 且不调 runner", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "w1" },
+        { sessionId: "s3", name: "w2" },
+        { sessionId: "s4", name: "w3" },
+        { sessionId: "s5", name: "w4" },
+        { sessionId: "s6", name: "w5" },
+        { sessionId: "s7", name: "w6" },
+      ],
+      { conductorId: "s1" },
+      { unit: "npm test" },
+    );
+    const calls: string[] = [];
+    h.agent.cwd = () => "/repo";
+    h.agent.runIsolatedCheck = async (_cwd, command): Promise<IsolatedCheckResult> => {
+      calls.push(command);
+      return {
+        status: "exited_zero",
+        runner: "bubblewrap",
+        commandHash: "a".repeat(64),
+        startedAt: 1,
+        finishedAt: 2,
+      };
+    };
+    await h.manager.handle(h.room, "任务", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"},{"id":"t2","to":"w2","task":"B"},{"id":"t3","to":"w3","task":"C"},{"id":"t4","to":"w4","task":"D"},{"id":"t5","to":"w5","task":"E"},{"id":"t6","to":"w6","task":"F"}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s2",
+      '```json\n{"text":"A","verifyCommand":"npm test","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+    );
+    await h.done(
+      "s3",
+      '```json\n{"text":"B","verifyCommand":"npm test","verifyCheckId":"nope","artifacts":[{"type":"file","path":"b.ts","summary":"x"}]}\n```',
+    );
+    await h.done(
+      "s4",
+      '```json\n{"text":"C","verifyCommand":"npm run lint","verifyCheckId":"unit","artifacts":[{"type":"file","path":"c.ts","summary":"x"}]}\n```',
+    );
+    await h.done(
+      "s5",
+      '```json\n{"text":"D","verifyCommand":"npm test","verifyCheckId":"unit"}\n```',
+    );
+    await h.done(
+      "s6",
+      '```json\n{"text":"E","verifyCommand":"npm test","verifyCheckId":"nope"}\n```',
+    );
+    await h.done("s7", '```json\n{"text":"F","verifyCommand":"npm test"}\n```');
+    await tick(20);
+    const tasks = h.flow()!.tasks;
+    const t1 = tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.automaticCheck?.status, "blocked");
+    assert.equal(t1.automaticCheck?.reason, "check_unapproved", "缺 verifyCheckId 不得执行");
+    const t2 = tasks.find((t) => t.id === "t2")!;
+    assert.equal(t2.automaticCheck?.status, "blocked");
+    assert.equal(t2.automaticCheck?.reason, "check_unapproved", "未知 ID 不得执行");
+    const t3 = tasks.find((t) => t.id === "t3")!;
+    assert.equal(t3.automaticCheck?.status, "blocked");
+    assert.equal(t3.automaticCheck?.reason, "command_mismatch", "命令与预设不一致不得执行");
+    assert.equal(t3.verifyCheckId, "unit", "成员报告的 ID 仍应透传给 UI");
+    assert.ok(!("snapshotCurrent" in t1.automaticCheck!), "blocked 检查不输出 snapshotCurrent");
+    const t4 = tasks.find((t) => t.id === "t4")!;
+    assert.equal(
+      t4.automaticCheck?.status,
+      "exited_zero",
+      "合法预设 ID 无需文件 artifact 即可执行",
+    );
+    const t5 = tasks.find((t) => t.id === "t5")!;
+    assert.equal(t5.automaticCheck?.status, "blocked");
+    assert.equal(
+      t5.automaticCheck?.reason,
+      "check_unapproved",
+      "无 artifact 的未知 ID 同样 blocked",
+    );
+    assert.equal(
+      tasks.find((t) => t.id === "t6")!.automaticCheck?.status,
+      "not_run",
+      "无 ID 且无 artifact 保持 not_run",
+    );
+    assert.deepEqual(calls, ["npm test"], "只有合法预设 ID 才调用 runner 且仅一次");
+  });
+
+  it("隔离检查门控：原型键与非法 ID 不穿透，合法自有键 constructor 可执行", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "w1" },
+        { sessionId: "s3", name: "w2" },
+        { sessionId: "s4", name: "w3" },
+      ],
+      { conductorId: "s1" },
+    );
+    const calls: string[] = [];
+    h.agent.cwd = () => "/repo";
+    h.agent.runIsolatedCheck = async (_cwd, command): Promise<IsolatedCheckResult> => {
+      calls.push(command);
+      return {
+        status: "exited_zero",
+        runner: "bubblewrap",
+        commandHash: "a".repeat(64),
+        startedAt: 1,
+        finishedAt: 2,
+      };
+    };
+    await h.manager.handle(h.room, "任务", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"},{"id":"t2","to":"w2","task":"B"},{"id":"t3","to":"w3","task":"C"}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s2",
+      '```json\n{"text":"A","verifyCommand":"npm test","verifyCheckId":"constructor","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+    );
+    await h.done(
+      "s3",
+      '```json\n{"text":"B","verifyCommand":"npm test","verifyCheckId":"toString","artifacts":[{"type":"file","path":"b.ts","summary":"x"}]}\n```',
+    );
+    await h.done(
+      "s4",
+      '```json\n{"text":"C","verifyCommand":"npm test","verifyCheckId":"INVALID ID!","artifacts":[{"type":"file","path":"c.ts","summary":"x"}]}\n```',
+    );
+    await tick(20);
+    const tasks = h.flow()!.tasks;
+    const t1 = tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.automaticCheck?.status, "blocked");
+    assert.equal(t1.automaticCheck?.reason, "check_unapproved", "空配置下原型键不得命中");
+    const t2 = tasks.find((t) => t.id === "t2")!;
+    assert.equal(t2.automaticCheck?.reason, "check_unapproved", "空配置下 toString 不得命中");
+    const t3 = tasks.find((t) => t.id === "t3")!;
+    assert.equal(t3.automaticCheck?.reason, "check_unapproved", "非法 ID 解析时即剔除");
+    assert.equal(t3.verifyCheckId, undefined, "非法 ID 不得透出 getFlow");
+    assert.deepEqual(calls, [], "空配置下任何 ID 都不得调用 runner");
+    const state = h.manager.exportRuntime();
+    assert.ok(!JSON.stringify(state).includes("INVALID ID!"), "非法 ID 不得进入导出");
+
+    const h2 = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "w1" },
+      ],
+      { conductorId: "s1" },
+      { constructor: "npm test" },
+    );
+    const calls2: string[] = [];
+    h2.agent.cwd = () => "/repo";
+    h2.agent.runIsolatedCheck = async (_cwd, command): Promise<IsolatedCheckResult> => {
+      calls2.push(command);
+      return {
+        status: "exited_zero",
+        runner: "bubblewrap",
+        commandHash: "a".repeat(64),
+        startedAt: 1,
+        finishedAt: 2,
+      };
+    };
+    await h2.manager.handle(h2.room, "任务", {});
+    await h2.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"}]}\n```',
+    );
+    await tick();
+    await h2.done(
+      "s2",
+      '```json\n{"text":"A","verifyCommand":"npm test","verifyCheckId":"constructor","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+    );
+    await tick(20);
+    assert.deepEqual(calls2, ["npm test"], "显式自有键 constructor 应执行预设命令");
+    assert.equal(
+      h2.flow()!.tasks[0]!.automaticCheck?.status,
+      "exited_zero",
+    );
+  });
+
   it("隔离检查等待期间 flow 取消或替换时丢弃旧收尾", async () => {
     const h = makeHarness(
       [
@@ -1001,6 +1331,7 @@ describe("collab-e2e", () => {
         { sessionId: "s3", name: "tester" },
       ],
       { conductorId: "s1" },
+      { unit: "npm test" },
     );
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));
@@ -1025,7 +1356,7 @@ describe("collab-e2e", () => {
     await tick();
     const donePromise = h.done(
       "s2",
-      '```json\n{"text":"A","verifyCommand":"npm test","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+      '```json\n{"text":"A","verifyCommand":"npm test","verifyCheckId":"unit","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
     );
     await tick(5);
     await h.manager.handle(h.room, "停止", {});
@@ -1049,6 +1380,231 @@ describe("collab-e2e", () => {
       "被丢弃的检查不得写孤儿 test 事件",
     );
     assert.equal(h.flow()?.phase, "planning", "替换的新 flow 应处于规划阶段");
+  });
+
+  it("快照失效：工作区变化后 snapshotCurrent 转 false 且验收提示历史快照", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-e2e-snap-"));
+    const git = (args: string[]) =>
+      execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
+    try {
+      git(["init", "--quiet"]);
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v1");
+      git(["add", "marker.txt"]);
+      const h = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+        { unit: "npm test" },
+      );
+      h.agent.cwd = (sid) => (sid === "s2" ? dir : "/repo");
+      h.agent.runIsolatedCheck = async (): Promise<IsolatedCheckResult> => ({
+        status: "exited_zero",
+        runner: "bubblewrap",
+        commandHash: "a".repeat(64),
+        snapshotHash: workspaceSnapshotHash(dir)!,
+        exitCode: 0,
+        startedAt: 1,
+        finishedAt: 2,
+      });
+      await h.manager.handle(h.room, "任务", {});
+      await h.done(
+        "s1",
+        '```json\n{"tasks":[{"id":"t1","to":"coder","task":"A"}]}\n```',
+      );
+      await tick();
+      await h.done(
+        "s2",
+        '```json\n{"text":"A","verifyCommand":"npm test","verifyCheckId":"unit","artifacts":[{"type":"file","path":"marker.txt","summary":"x"}]}\n```',
+      );
+      await tick(20);
+      const t1 = h.flow()!.tasks.find((t) => t.id === "t1")!;
+      assert.equal(t1.automaticCheck?.status, "exited_zero");
+      assert.equal(
+        (t1.automaticCheck as { snapshotCurrent?: boolean }).snapshotCurrent,
+        true,
+        "工作区未变时应为 true",
+      );
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v2");
+      const t1b = h.flow()!.tasks.find((t) => t.id === "t1")!;
+      assert.equal(
+        (t1b.automaticCheck as { snapshotCurrent?: boolean }).snapshotCurrent,
+        false,
+        "工作区变化后应为 false",
+      );
+      assert.equal(t1b.automaticCheck?.status, "exited_zero", "原始检查结果不得改写");
+      h.agent.cwd = (sid) => (sid === "s2" ? path.join(dir, "gone") : "/repo");
+      const t1c = h.flow()!.tasks.find((t) => t.id === "t1")!;
+      assert.equal(
+        (t1c.automaticCheck as { snapshotCurrent?: boolean }).snapshotCurrent,
+        false,
+        "不可访问的 cwd 应为 false",
+      );
+      h.agent.cwd = (sid) => (sid === "s2" ? dir : "/repo");
+      await h.done("s1", '```json\n{"decision":"complete","reason":"达标"}\n```');
+      const summaryPrompt = h.prompts.filter((p) => p.sessionId === "s1").at(-1)!;
+      assert.ok(
+        summaryPrompt.text.includes(
+          "当前工作区已变化或无法核对，旧隔离检查仅对应历史快照，不得据此宣称当前版本通过。",
+        ),
+        "汇总 prompt 应附历史快照提醒",
+      );
+      const state = h.manager.exportRuntime();
+      assert.ok(
+        !JSON.stringify(state).includes("snapshotCurrent"),
+        "派生字段不得持久化",
+      );
+      const manager2 = new RoomModeManager(
+        {
+          prompt: async () => {},
+          isBusy: () => false,
+          cancel: async () => {},
+          cwd: () => dir,
+        },
+        h.rooms,
+        () => {},
+        0,
+        { unit: "npm test" },
+      );
+      await manager2.importRuntime(state);
+      const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
+      const rt1 = restored!.tasks.find((t) => t.id === "t1")!;
+      assert.equal(rt1.automaticCheck?.status, "exited_zero", "原始结果恢复后不改写");
+      assert.equal(
+        (rt1.automaticCheck as { snapshotCurrent?: boolean }).snapshotCurrent,
+        false,
+        "恢复后应重新计算而非持久化",
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("恢复闭环：求助挂起 → 导入 → 答复 → 预设检查 → 成员复核 → 验收汇总", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+      ],
+      { conductorId: "s1" },
+      { unit: "npm test" },
+    );
+    const calls: { cwd: string; command: string }[] = [];
+    const cwd = (sid: string) => (sid === "s2" ? "/repo/ws" : "/repo");
+    const runIsolatedCheck = async (
+      c: string,
+      command: string,
+    ): Promise<IsolatedCheckResult> => {
+      calls.push({ cwd: c, command });
+      return {
+        status: "exited_zero",
+        runner: "bubblewrap",
+        commandHash: "a".repeat(64),
+        snapshotHash: "b".repeat(64),
+        exitCode: 0,
+        startedAt: 1,
+        finishedAt: 2,
+      };
+    };
+    h.agent.cwd = cwd;
+    h.agent.runIsolatedCheck = runIsolatedCheck;
+    await h.manager.handle(h.room, "实现排序", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"独立验证 t1","dependsOn":["t1"]}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s2",
+      '需要澄清\n```json\n{"help":{"to":"user","question":"用哪种算法？"}}\n```',
+    );
+    assert.equal(h.flow()!.tasks[0]!.waitingFor, "user");
+    const state = h.manager.exportRuntime();
+    const prompts2: Prompt[] = [];
+    const busy2 = new Set<string>();
+    const manager2 = new RoomModeManager(
+      {
+        prompt: async (sid, content) => {
+          prompts2.push({ sessionId: sid, text: String(content) });
+          busy2.add(sid);
+        },
+        isBusy: (sid) => busy2.has(sid),
+        cancel: async (sid) => {
+          busy2.delete(sid);
+        },
+        cwd,
+        runIsolatedCheck,
+      },
+      h.rooms,
+      () => {},
+      0,
+      { unit: "npm test" },
+    );
+    await manager2.importRuntime(state);
+    await tick(5);
+    assert.equal(
+      prompts2.filter((p) => p.sessionId === "s2").length,
+      0,
+      "恢复不得重发挂起中的 worker prompt",
+    );
+    assert.equal(prompts2.filter((p) => p.sessionId === "s3").length, 0);
+    const waiting = (manager2.getFlow(h.room.roomId) as FlowView)!.tasks.find(
+      (t) => t.id === "t1",
+    )!;
+    assert.equal(waiting.waitingFor, "user");
+    assert.ok(waiting.waitingHelpId);
+    const res = await manager2.handle(h.room, "快速排序", {
+      params: { intent: "answer", replyTo: waiting.waitingHelpId },
+    });
+    assert.deepEqual(res.sent, ["s2"], "定向答复只唤醒求助的 worker");
+    await tick(5);
+    const woke = prompts2.filter((p) => p.sessionId === "s2").at(-1)!;
+    assert.match(woke.text, /快速排序/);
+    await manager2.onPromptDone(
+      "s2",
+      '```json\n{"text":"实现完成","verifyCommand":"npm test","verifyCheckId":"unit","verifyExitCode":0,"artifacts":[{"type":"file","path":"src/sort.ts","summary":"快排"}]}\n```',
+    );
+    await tick(20);
+    assert.deepEqual(
+      calls.map((c) => c.command),
+      ["npm test"],
+      "预设检查恰好执行一次",
+    );
+    const t1 = (manager2.getFlow(h.room.roomId) as FlowView)!.tasks.find(
+      (t) => t.id === "t1",
+    )!;
+    assert.equal(t1.automaticCheck?.status, "exited_zero");
+    assert.equal(t1.verificationStatus, "unverified", "Hub 检查通过不等于成员复核");
+    const t2p = prompts2.filter((p) => p.sessionId === "s3").at(-1)!;
+    assert.match(t2p.text, /独立验证 t1/);
+    await manager2.onPromptDone(
+      "s3",
+      '验证通过\n```json\n{"text":"验证完毕","verify":[{"task":"t1","verdict":"pass","evidence":{"summary":"npm test 8/8"}}]}\n```',
+    );
+    await tick(10);
+    const t1v = (manager2.getFlow(h.room.roomId) as FlowView)!.tasks.find(
+      (t) => t.id === "t1",
+    )!;
+    assert.equal(t1v.verificationStatus, "member_pass");
+    assert.equal(
+      t1v.backendClaimMatch,
+      false,
+      "成员 pass 不得当作后端/隔离复核通过",
+    );
+    assert.equal((manager2.getFlow(h.room.roomId) as FlowView)!.phase, "reviewing");
+    const reviewPrompt = prompts2.filter((p) => p.sessionId === "s1").at(-1)!;
+    assert.match(reviewPrompt.text, /独立验证/);
+    await manager2.onPromptDone(
+      "s1",
+      '```json\n{"decision":"complete","reason":"达标"}\n```',
+    );
+    await tick(10);
+    const summaryPrompt = prompts2.filter((p) => p.sessionId === "s1").at(-1)!;
+    assert.match(summaryPrompt.text, /隔离检查/);
+    await manager2.onPromptDone("s1", "最终答复：完成");
+    assert.equal(manager2.hasActiveFlow(h.room.roomId), false);
   });
 
   it("parallel/pipeline/debate 流程的补充信息应体现在 flow 视图中", async () => {
@@ -1083,5 +1639,525 @@ describe("collab-e2e", () => {
         `${mode} 模式的补充应在 flow 视图中可见`,
       );
     }
+  });
+
+  it("规划前澄清：questions 暂停派工，显式答复后恰重规划一次", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "帮我搭一个页面", {});
+    await tick();
+    assert.match(h.lastPrompt("s1")!.text, /questions/);
+
+    await h.done(
+      "s1",
+      '```json\n{"goal":"搭建页面","acceptanceCriteria":["页面可访问"],"tasks":[],"questions":["用哪个框架？","目标平台是什么？"]}\n```',
+    );
+    await tick();
+    const paused = h.flow()!;
+    assert.equal(paused.phase, "awaiting-input", "澄清应暂停在任何派工之前");
+    assert.equal(paused.tasks.length, 0);
+    assert.ok(paused.clarificationId);
+    assert.deepEqual(paused.clarificationQuestions, ["用哪个框架？", "目标平台是什么？"]);
+    assert.ok(h.notices().some((m) => m.includes("用哪个框架？") && m.includes("目标平台")));
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s2").length,
+      0,
+      "澄清期间不得派发 worker",
+    );
+
+    const sup = await h.manager.handle(h.room, "随便聊聊", {});
+    assert.deepEqual(sup.sent, []);
+    assert.equal(h.flow()?.phase, "awaiting-input");
+    assert.deepEqual(h.flow()?.supplements, ["随便聊聊"]);
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s1").length,
+      1,
+      "普通补充不得触发重新规划",
+    );
+
+    const empty = await h.manager.handle(h.room, "   ", {
+      params: { intent: "answer", replyTo: paused.clarificationId },
+    });
+    assert.deepEqual(empty.sent, []);
+    assert.equal(h.flow()?.phase, "awaiting-input", "空白答复不得消费澄清");
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s1").length, 1);
+    assert.ok(
+      !h.flow()!.supplements?.some((s) => !s.trim()),
+      "空白答复不得落入 supplements",
+    );
+    assert.ok(h.notices().some((m) => m.includes("答复不能为空")));
+
+    const ans = await h.manager.handle(h.room, "用 React，部署到 Web", {
+      params: { intent: "answer", replyTo: paused.clarificationId },
+    });
+    assert.deepEqual(ans.sent, []);
+    assert.equal(h.flow()?.phase, "planning");
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s1").length, 2);
+    const replan = h.lastPrompt("s1")!;
+    assert.match(replan.text, /帮我搭一个页面/);
+    assert.match(replan.text, /用哪个框架？/);
+    assert.match(replan.text, /用 React，部署到 Web/);
+    assert.match(replan.text, /随便聊聊/, "等待期间的补充必须进入重规划 prompt");
+    assert.match(replan.text, /不要再输出 questions/);
+
+    const dup = await h.manager.handle(h.room, "再答一次", {
+      params: { intent: "answer", replyTo: paused.clarificationId },
+    });
+    assert.deepEqual(dup.sent, []);
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s1").length, 2);
+
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"}],"questions":["还想问点别的"]}\n```',
+    );
+    await tick();
+    assert.equal(h.flow(), undefined, "第二批问题不得再次暂停或派工");
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s2").length,
+      0,
+      "重复提问时不得派发 worker",
+    );
+    assert.ok(
+      h.notices().some((m) => m.includes("仍缺必要信息")),
+      "必须如实告知信息仍缺、未派工",
+    );
+    assert.ok(!h.notices().some((m) => m.includes("无需派工")));
+  });
+
+  it("规划同时输出 questions 与 tasks 时仍先暂停澄清", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "帮我搭一个页面", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现页面"}],"questions":["用哪个框架？"]}\n```',
+    );
+    await tick();
+    const paused = h.flow()!;
+    assert.equal(paused.phase, "awaiting-input", "混合输出也必须先澄清");
+    assert.equal(paused.tasks.length, 0);
+    assert.deepEqual(paused.clarificationQuestions, ["用哪个框架？"]);
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s2").length,
+      0,
+      "混合输出不得绕过澄清直接派工",
+    );
+
+    await h.manager.handle(h.room, "其他：自建组件库，不用现成框架", {
+      params: { intent: "answer", replyTo: paused.clarificationId },
+    });
+    assert.equal(h.flow()?.phase, "planning", "自定义答复恢复规划");
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s1").length, 2);
+    const replan = h.lastPrompt("s1")!;
+    assert.match(
+      replan.text,
+      /其他：自建组件库，不用现成框架/,
+      "自定义答复原文必须进入重规划 prompt",
+    );
+    assert.deepEqual(
+      h.flow()?.supplements ?? [],
+      [],
+      "自定义答复不得落入 supplements",
+    );
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现页面"}]}\n```',
+    );
+    await tick();
+    assert.equal(h.flow()?.phase, "working");
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s2").length, 1);
+  });
+
+  it("待澄清流程中定向答复「取消」按原文进入重规划而不取消流程", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "帮我搭一个页面", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[],"questions":["用现成框架还是取消这个需求？"]}\n```',
+    );
+    await tick();
+    const paused = h.flow()!;
+    assert.equal(paused.phase, "awaiting-input");
+
+    await h.manager.handle(h.room, "取消", {
+      params: { intent: "answer", replyTo: paused.clarificationId },
+    });
+    assert.equal(
+      h.flow()?.phase,
+      "planning",
+      "定向答复「取消」不得取消流程，应恢复规划",
+    );
+    assert.equal(h.cancelled.length, 0, "不得取消任何会话");
+    const replan = h.lastPrompt("s1")!;
+    assert.match(replan.text, /用户答复：取消/, "答复原文必须进入重规划 prompt");
+
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现页面"}]}\n```',
+    );
+    await tick();
+    assert.equal(h.flow()?.phase, "working", "流程应正常继续而非被取消");
+  });
+
+  it("待澄清流程重启后保持暂停，答复后继续规划", async () => {
+    const members = [
+      { sessionId: "s1", name: "leader" },
+      { sessionId: "s2", name: "coder" },
+    ];
+    const h = makeHarness(members, { conductorId: "s1" });
+    await h.manager.handle(h.room, "任务", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[],"questions":["确认范围？"]}\n```',
+    );
+    await tick();
+    const paused = h.flow()!;
+    assert.equal(paused.phase, "awaiting-input");
+    const clarId = paused.clarificationId!;
+    const state = h.manager.exportRuntime();
+
+    const prompts2: Prompt[] = [];
+    const busy2 = new Set<string>();
+    const manager2 = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts2.push({ sessionId, text: String(content) });
+          busy2.add(sessionId);
+        },
+        isBusy: (sid) => busy2.has(sid),
+        cancel: async (sid) => {
+          busy2.delete(sid);
+        },
+      },
+      h.rooms,
+      () => {},
+      0,
+    );
+    await manager2.importRuntime(state);
+    await tick();
+    const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
+    assert.equal(restored?.phase, "awaiting-input", "恢复后必须保持待确认暂停");
+    assert.equal(restored?.clarificationId, clarId);
+    assert.deepEqual(restored?.clarificationQuestions, ["确认范围？"]);
+    assert.equal(prompts2.length, 0, "导入不得发送任何 prompt");
+
+    manager2.resumeFlows();
+    await tick();
+    assert.equal(prompts2.length, 0, "resumeFlows 不得对待确认流程重发 prompt");
+
+    const res = await manager2.handle(h.room, "答：全量范围", {});
+    assert.deepEqual(res.sent, []);
+    assert.equal(
+      (manager2.getFlow(h.room.roomId) as FlowView | undefined)?.phase,
+      "planning",
+    );
+    assert.equal(prompts2.filter((p) => p.sessionId === "s1").length, 1);
+    const replan = prompts2.filter((p) => p.sessionId === "s1").at(-1)!;
+    assert.match(replan.text, /任务/);
+    assert.match(replan.text, /确认范围？/);
+    assert.match(replan.text, /全量范围/);
+
+    busy2.delete("s1");
+    await manager2.onPromptDone(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"}]}\n```',
+    );
+    await tick();
+    assert.equal(
+      (manager2.getFlow(h.room.roomId) as FlowView | undefined)?.phase,
+      "working",
+    );
+    assert.match(prompts2.filter((p) => p.sessionId === "s2").at(-1)!.text, /实现/);
+  });
+
+  it("全部任务完成且无成员复核时，闲置成员收到一次质疑性复核任务", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "skeptic" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "实现排序", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现排序"}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s2",
+      '```json\n{"text":"实现完成","verifyCommand":"npm test","verifyExitCode":0,"artifacts":[{"type":"file","path":"sort.ts","summary":"实现"}]}\n```',
+    );
+    await tick(20);
+    const running = h.flow()!;
+    assert.equal(running.phase, "working", "复核任务未完成前不得进入验收");
+    const injected = running.tasks.find((t) => t.id.startsWith("peer-review"))!;
+    assert.ok(injected);
+    assert.equal(injected.name, "skeptic");
+    const reviewPrompt = h.lastPrompt("s3")!;
+    assert.match(reviewPrompt.text, /质疑/);
+    assert.match(reviewPrompt.text, /verify/);
+    assert.match(reviewPrompt.text, /t1/);
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s3").length, 1, "复核任务只派发一次");
+
+    await h.done("s3", '```json\n{"text":"看了一遍"}\n```');
+    await tick();
+    assert.equal(h.flow()?.phase, "reviewing");
+    const conductorReview = h.lastPrompt("s1")!;
+    assert.match(conductorReview.text, /没有任何独立成员复核记录（t1）/);
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s3").length,
+      1,
+      "复核成员不得收到第二个注入任务",
+    );
+
+    await h.done("s1", '```json\n{"decision":"complete","reason":"达标"}\n```');
+    await tick();
+    const sumPrompt = h.lastPrompt("s1")!;
+    assert.match(sumPrompt.text, /没有任何独立成员复核记录（t1）/);
+  });
+
+  it("已有复核记录但无闲置成员时不注入复核任务", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "任务", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证","dependsOn":["t1"]}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s2",
+      '```json\n{"text":"完成","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s3",
+      '```json\n{"text":"验证完毕","verify":[{"task":"t1","verdict":"pass","evidence":{"summary":"ok"}}]}\n```',
+    );
+    await tick(20);
+    assert.equal(h.flow()?.phase, "reviewing");
+    assert.ok(
+      !h.flow()!.tasks.some((t) => t.id.startsWith("peer-review")),
+      "没有闲置成员时不得注入复核任务",
+    );
+    assert.match(
+      h.lastPrompt("s1")!.text,
+      /没有任何独立成员复核记录（t2）/,
+      "已复核的 t1 不应掩盖 t2 缺少独立复核",
+    );
+
+    const h2 = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h2.manager.handle(h2.room, "任务", {});
+    await h2.done("s1", '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"}]}\n```');
+    await tick();
+    await h2.done("s2", '```json\n{"text":"完成"}\n```');
+    await tick();
+    assert.equal(h2.flow()?.phase, "reviewing");
+    assert.match(h2.lastPrompt("s1")!.text, /没有任何独立成员复核记录（t1）/);
+  });
+
+  it("部分任务已有复核时，注入的质疑复核只覆盖未复核任务", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+        { sessionId: "s4", name: "skeptic" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "任务", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证","dependsOn":["t1"]}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s2",
+      '```json\n{"text":"完成","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+    );
+    await tick();
+    await h.done(
+      "s3",
+      '```json\n{"text":"验证完毕","verify":[{"task":"t1","verdict":"pass","evidence":{"summary":"ok"}}]}\n```',
+    );
+    await tick(20);
+    const running = h.flow()!;
+    assert.equal(running.phase, "working", "t2 未复核时应注入复核而非直接验收");
+    const injected = running.tasks.find((t) => t.id.startsWith("peer-review"))!;
+    assert.equal(injected.name, "skeptic");
+    const reviewPrompt = h.lastPrompt("s4")!;
+    assert.match(reviewPrompt.text, /t2/);
+    assert.ok(
+      !reviewPrompt.text.includes("t1、"),
+      "已复核的 t1 不应列入复核目标",
+    );
+
+    await h.done("s4", '```json\n{"text":"复核 t2 通过","verify":[{"task":"t2","verdict":"pass","evidence":{"summary":"ok"}}]}\n```');
+    await tick();
+    assert.equal(h.flow()?.phase, "reviewing");
+    assert.ok(!h.lastPrompt("s1")!.text.includes("没有任何独立成员复核记录"));
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s4").length,
+      1,
+      "每个 flow 至多注入一次复核任务",
+    );
+  });
+
+  it("预检答复贯穿 worker/验收/汇总 prompt，导出导入后仍保留", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "做个页面", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[],"questions":["用什么技术栈？"]}\n```',
+    );
+    await tick();
+    const clarId = h.flow()!.clarificationId!;
+
+    const state = h.manager.exportRuntime();
+    const prompts2: Prompt[] = [];
+    const busy2 = new Set<string>();
+    const manager2 = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts2.push({ sessionId, text: String(content) });
+          busy2.add(sessionId);
+        },
+        isBusy: (sid) => busy2.has(sid),
+        cancel: async (sid) => {
+          busy2.delete(sid);
+        },
+      },
+      h.rooms,
+      () => {},
+      0,
+    );
+    await manager2.importRuntime(state);
+    await tick();
+    const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
+    assert.equal(restored?.phase, "awaiting-input");
+    assert.equal(restored?.clarificationId, clarId);
+
+    await manager2.handle(h.room, "必须用 React", {
+      params: { intent: "answer", replyTo: clarId },
+    });
+    assert.equal(prompts2.filter((p) => p.sessionId === "s1").length, 1);
+    busy2.delete("s1");
+    await manager2.onPromptDone(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现页面"}]}\n```',
+    );
+    await tick();
+    const workerPrompt = prompts2.filter((p) => p.sessionId === "s2").at(-1)!;
+    assert.match(workerPrompt.text, /用什么技术栈？/);
+    assert.match(
+      workerPrompt.text,
+      /必须用 React/,
+      "重规划任务描述缺漏时，用户答复仍须抵达 worker prompt",
+    );
+
+    busy2.delete("s2");
+    await manager2.onPromptDone("s2", '```json\n{"text":"完成"}\n```');
+    await tick();
+    const reviewPrompt = prompts2.filter((p) => p.sessionId === "s1").at(-1)!;
+    assert.match(reviewPrompt.text, /用什么技术栈？/);
+    assert.match(reviewPrompt.text, /必须用 React/);
+
+    busy2.delete("s1");
+    await manager2.onPromptDone(
+      "s1",
+      '```json\n{"decision":"complete","reason":"达标"}\n```',
+    );
+    await tick();
+    const summaryPrompt = prompts2.filter((p) => p.sessionId === "s1").at(-1)!;
+    assert.match(summaryPrompt.text, /用什么技术栈？/);
+    assert.match(summaryPrompt.text, /必须用 React/);
+  });
+
+  it("非字符串 questions 被忽略，不误暂停", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "做个页面", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现页面"}],"questions":[{"q":"x"},42,null,""]}\n```',
+    );
+    await tick();
+    assert.equal(h.flow()?.phase, "working", "非法 questions 不得误暂停");
+    assert.equal(h.prompts.filter((p) => p.sessionId === "s2").length, 1);
+
+    const h2 = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h2.manager.handle(h2.room, "问题", {});
+    await h2.done(
+      "s1",
+      '```json\n{"tasks":[],"questions":[{"q":"x"},{}]}\n```',
+    );
+    await tick();
+    assert.equal(h2.flow()?.phase, "done", "全部非法时按无 questions 直接收尾");
+    assert.equal(h2.manager.hasActiveFlow(h2.room.roomId), false);
+    assert.ok(h2.notices().some((m) => m.includes("无需派工")));
+
+    const h3 = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h3.manager.handle(h3.room, "问题", {});
+    await h3.done(
+      "s1",
+      '```json\n{"tasks":[],"questions":["",{"q":"x"},"  ","还剩一个问题？"]}\n```',
+    );
+    await tick();
+    assert.equal(h3.flow()?.phase, "awaiting-input");
+    assert.deepEqual(h3.flow()?.clarificationQuestions, ["还剩一个问题？"]);
   });
 });

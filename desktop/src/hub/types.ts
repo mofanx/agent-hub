@@ -139,12 +139,21 @@ export interface FlowTask {
     status?: string;
     exitCode?: number;
     snapshotHash?: string;
+    snapshotCurrent?: boolean;
     reason?: string;
     stdoutTruncated?: boolean;
     stderrTruncated?: boolean;
   };
   backendRuns?: BackendToolRun[];
   backendClaimMatch?: boolean;
+  backendClaimStatus?:
+    | "matched"
+    | "missing_member_command"
+    | "missing_member_exit_code"
+    | "no_completed_backend_run"
+    | "backend_exit_unknown"
+    | "backend_mismatch";
+  verifyCheckId?: string;
   /** 实现者为可复核交付提交的证据 */
   baseline?: string;
   diff?: string;
@@ -176,6 +185,8 @@ export interface FlowInfo {
   tasks: FlowTask[];
   /** 流程进行中用户补充并已并入的信息 */
   supplements?: string[];
+  clarificationId?: string;
+  clarificationQuestions?: string[];
 }
 
 export interface RoomInfo {

@@ -21,7 +21,7 @@ import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
-import { extractTaskResult, runIsolatedCheck } from "./conductor.js";
+import { extractTaskResult, parseIsolatedChecks, runIsolatedCheck } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
@@ -128,7 +128,11 @@ function roomLostReplyNote(roomId: string): string | undefined {
 }
 
 function repairHistoryAtStartup(): void {
+  const interrupted = new Set(
+    store.interruptReplyDrafts().map((s) => `${s.scope}:${s.id}`),
+  );
   for (const [sessionId, meta] of sessionMetas) {
+    if (interrupted.has(`session:${sessionId}`)) continue;
     const entries = store.read("session", sessionId);
     const last = entries[entries.length - 1];
     if (last && last.kind === "user") {
@@ -155,6 +159,7 @@ function repairHistoryAtStartup(): void {
   );
   for (const room of rooms.list()) {
     if (liveFlowRooms.has(room.roomId)) continue;
+    if (interrupted.has(`room:${room.roomId}`)) continue;
     const entries = store.read("room", room.roomId);
     const last = entries[entries.length - 1];
     if (last && last.kind === "user") {
@@ -366,6 +371,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     onFileWrite,
     onToolCall,
     connection.agent === "devin",
+    onTurnProgress,
   );
 
   agents.set(connection.id, a);
@@ -458,6 +464,8 @@ const roomModeManager = new RoomModeManager(
   agentOps,
   rooms,
   (method, params) => broadcast({ method, params } as HubEvent),
+  undefined,
+  parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS),
 );
 
 // 恢复运行时编排状态（必须在 roomModeManager 创建后，但 agents 可能尚未连接）
@@ -563,27 +571,97 @@ function listAllSessions(): {
   return [...online, ...offline];
 }
 
-function onTurnEnd(sessionId: string, text: string): void {
+const turnDrafts = new Map<string, { sessionDraftId?: number; roomDraftId?: number }>();
+
+function displayNameFor(sessionId: string): string {
   const meta = sessionMetas.get(sessionId);
   const baseName = meta?.name ?? sessionId;
   const origin = originFor(meta);
-  const displayName = origin ? `${baseName} (${origin})` : baseName;
-  if (text.trim()) {
-    store.append("session", sessionId, {
+  return origin ? `${baseName} (${origin})` : baseName;
+}
+
+function onTurnProgress(sessionId: string, fullText: string): void {
+  if (!fullText.trim()) return;
+  const displayName = displayNameFor(sessionId);
+  let draft = turnDrafts.get(sessionId);
+  if (!draft) {
+    draft = {};
+    turnDrafts.set(sessionId, draft);
+  }
+  if (draft.sessionDraftId === undefined) {
+    const id = store.beginReplyDraft("session", sessionId, {
       at: Date.now(),
       kind: "assistant",
       author: displayName,
-      text,
+      text: fullText,
     });
-    // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
-    const roomId = roomModeManager.roomIdForTurn(sessionId);
-    if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
-      store.append("room", roomId, {
+    if (id > 0) draft.sessionDraftId = id;
+  } else {
+    store.updateReplyDraft(draft.sessionDraftId, fullText);
+  }
+  const roomId = roomModeManager.roomIdForTurn(sessionId);
+  if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
+    if (draft.roomDraftId === undefined) {
+      const id = store.beginReplyDraft("room", roomId, {
+        at: Date.now(),
+        kind: "assistant",
+        author: displayName,
+        text: fullText,
+      });
+      if (id > 0) draft.roomDraftId = id;
+    } else {
+      store.updateReplyDraft(draft.roomDraftId, fullText);
+    }
+  }
+}
+
+function interruptTurnDrafts(sessionId: string): void {
+  const draft = turnDrafts.get(sessionId);
+  if (!draft) return;
+  turnDrafts.delete(sessionId);
+  if (draft.sessionDraftId !== undefined) {
+    store.interruptReplyDraft(draft.sessionDraftId);
+  }
+  if (draft.roomDraftId !== undefined) {
+    store.interruptReplyDraft(draft.roomDraftId);
+  }
+}
+
+function onTurnEnd(sessionId: string, text: string): void {
+  const displayName = displayNameFor(sessionId);
+  const draft = turnDrafts.get(sessionId);
+  turnDrafts.delete(sessionId);
+  if (text.trim()) {
+    if (draft?.sessionDraftId !== undefined) {
+      store.completeReplyDraft(draft.sessionDraftId, text);
+    } else {
+      store.append("session", sessionId, {
         at: Date.now(),
         kind: "assistant",
         author: displayName,
         text,
       });
+    }
+    // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
+    const roomId = roomModeManager.roomIdForTurn(sessionId);
+    if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
+      if (draft?.roomDraftId !== undefined) {
+        store.completeReplyDraft(draft.roomDraftId, text);
+      } else {
+        store.append("room", roomId, {
+          at: Date.now(),
+          kind: "assistant",
+          author: displayName,
+          text,
+        });
+      }
+    }
+  } else {
+    if (draft?.sessionDraftId !== undefined) {
+      store.interruptReplyDraft(draft.sessionDraftId);
+    }
+    if (draft?.roomDraftId !== undefined) {
+      store.interruptReplyDraft(draft.roomDraftId);
     }
   }
 }
@@ -684,6 +762,7 @@ function onAgentEvent(event: HubEvent): void {
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
+      interruptTurnDrafts(sessionId);
       roomModeManager.onPromptError(sessionId);
       persistState();
     }
@@ -1831,7 +1910,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const ok = [...agents.values()].some((a) =>
         a.respondPermission(requestId, optionId),
       );
-      if (!ok) throw new Error("unknown or expired permission request");
+      if (!ok) throw new Error("unknown, expired, or invalid option for permission request");
       return { responded: true };
     }
     case "elicitation.respond": {
@@ -2052,7 +2131,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   }
   console.log(`[hub] worker connected for ${connection.name} (${connectionId})`);
   const stream = webSocketStream(ws);
-  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall);
+  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall, false, onTurnProgress);
   agents.set(connectionId, a);
   a.ensureStarted().then(() => {
     roomModeManager.resumeFlows();
@@ -2163,6 +2242,8 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
         onTurnEnd,
         onFileWrite,
         onToolCall,
+        false,
+        onTurnProgress,
       );
       agents.set(virtualId, a);
       virtualAgents.set(ch.id, a);

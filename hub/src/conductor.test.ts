@@ -10,11 +10,66 @@ import {
   extractTaskResult,
   extractHelpRequest,
   runIsolatedCheck,
+  parseIsolatedChecks,
+  workspaceSnapshotHash,
 } from "./conductor.js";
 import { createPromptDoneParams, promptDoneInternalOutput, toPublicHubEvent } from "./agent.js";
 import { RoomManager, type Room } from "./room.js";
 
 describe("conductor", () => {
+  it("parseIsolatedChecks 边界：非法输入整体 fail closed，合法配置规范存储", () => {
+    assert.deepEqual(parseIsolatedChecks(undefined), {});
+    assert.deepEqual(parseIsolatedChecks(""), {});
+    assert.deepEqual(parseIsolatedChecks("   "), {});
+    assert.deepEqual(parseIsolatedChecks("not json"), {});
+    assert.deepEqual(parseIsolatedChecks('["npm test"]'), {});
+    assert.deepEqual(parseIsolatedChecks('"npm test"'), {});
+    assert.deepEqual(parseIsolatedChecks("null"), {});
+    assert.deepEqual(
+      parseIsolatedChecks('{"unit":"npm test","lint":"npm run lint"}'),
+      { unit: "npm test", lint: "npm run lint" },
+    );
+    assert.deepEqual(parseIsolatedChecks('{"u":"  npm test  "}'), { u: "npm test" });
+    assert.deepEqual(
+      parseIsolatedChecks('{"Bad":"x","ok":"y"}'),
+      {},
+      "任一非法键必须整份拒绝",
+    );
+    assert.deepEqual(parseIsolatedChecks('{"1bad":"x"}'), {});
+    assert.deepEqual(parseIsolatedChecks('{"a b":"x"}'), {});
+    assert.deepEqual(parseIsolatedChecks(`{"${"a".repeat(65)}":"x"}`), {});
+    assert.deepEqual(
+      parseIsolatedChecks('{"u":"echo a\\necho b"}'),
+      {},
+      "命令含换行必须整份拒绝",
+    );
+    assert.deepEqual(parseIsolatedChecks(`{"u":"${"x".repeat(257)}"}`), {});
+    assert.deepEqual(parseIsolatedChecks('{"u":"   "}'), {});
+    assert.deepEqual(
+      parseIsolatedChecks('{"u":123,"v":"npm test"}'),
+      {},
+      "任一非法值必须整份拒绝",
+    );
+    const many = Object.fromEntries(
+      Array.from({ length: 33 }, (_, i) => [`k${i}`, "npm test"]),
+    );
+    assert.deepEqual(
+      parseIsolatedChecks(JSON.stringify(many)),
+      {},
+      "超过 32 项必须整份拒绝",
+    );
+    const proto = parseIsolatedChecks('{"__proto__":{"p":1},"u":"npm test"}');
+    assert.deepEqual(proto, {}, "原型键必须整份拒绝");
+    assert.equal(
+      ({} as Record<string, unknown>).p,
+      undefined,
+      "解析不得造成原型污染",
+    );
+    const own = parseIsolatedChecks('{"constructor":"npm test"}');
+    assert.equal(own["constructor"], "npm test", "合法自有键应正常存储");
+    assert.ok(Object.hasOwn(own, "constructor"));
+  });
+
   const room: Room = {
     roomId: "room1",
     name: "test",
@@ -418,14 +473,16 @@ describe("conductor", () => {
 
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1));
-      if (!orchestrator.getFlow(qRoom.roomId)) break;
+      if ((orchestrator.getFlow(qRoom.roomId) as { phase?: string } | undefined)?.phase === "done") break;
     }
 
     assert.ok(
       notices.some((m) => m.includes("所有子任务均失败")),
       "should notify all-failed",
     );
-    assert.equal(orchestrator.getFlow(qRoom.roomId), undefined, "flow should be cleaned up");
+    const terminal = orchestrator.getFlow(qRoom.roomId) as { phase: string } | undefined;
+    assert.equal(terminal?.phase, "done", "all-failed flow should stay as done evidence");
+    assert.equal(orchestrator.hasActiveFlow(qRoom.roomId), false);
     assert.ok(
       !conductorPrompts.some((p) => p.includes("汇总")),
       "should not summarize when all tasks failed",
@@ -720,7 +777,8 @@ describe("conductor", () => {
     assert.ok(reviewPrompt.content.includes("decision"));
   });
 
-  it("review complete 后进入 summarizing，最终答复后 flow 删除", async () => {
+  it("review complete 后进入 summarizing，最终答复后保留 flow", async () => {
+    const prompts: string[] = [];
     const rooms = new RoomManager();
     const r = rooms.create(
       "review-complete",
@@ -732,7 +790,7 @@ describe("conductor", () => {
       { conductorId: "conductor" },
     );
     const orchestrator = new ConductorOrchestrator(
-      { prompt: async () => {}, isBusy: () => false },
+      { prompt: async (_sessionId, content) => { if (typeof content === "string") prompts.push(content); }, isBusy: () => false },
       rooms,
       () => {},
     );
@@ -749,6 +807,8 @@ describe("conductor", () => {
       '```json\n{"decision":"complete","reason":"已满足"}\n```',
     );
     assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "summarizing");
+    assert.match(prompts.at(-1)!, /先给结论.*待确认.*实际复核/);
+    assert.match(prompts.at(-1)!, /未运行或受阻的检查如实说明/);
 
     await orchestrator.onPromptDone("conductor", "最终答复");
     assert.equal(orchestrator.hasActiveFlow(r.roomId), false);
@@ -783,6 +843,11 @@ describe("conductor", () => {
       '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"做"}]}\n```',
     );
     await orchestrator.onPromptDone("worker1", "done");
+    const injected = (
+      orchestrator.getFlow(r.roomId)!.tasks as { id: string; status: string }[]
+    ).find((t) => t.id.startsWith("peer-review"));
+    assert.ok(injected, "存在未参与成员时应先注入一次独立复核");
+    await orchestrator.onPromptDone("worker2", "复核完成");
     assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "reviewing");
 
     await orchestrator.onPromptDone(
@@ -953,6 +1018,553 @@ describe("conductor", () => {
     assert.ok(
       prompts.some((p) => p.sessionId === "conductor" && p.content.includes("汇总") || p.sessionId === "conductor" && p.content.includes("原始目标")),
       "imported summarizing flow should re-send summarize prompt",
+    );
+  });
+
+  it("import 恢复：中断的 running 任务标 failed 暂停，仅显式重试才派发", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-unknown",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+        { sessionId: "w2", name: "w2" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const mk = () =>
+      new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content: String(content) });
+          },
+          isBusy: () => false,
+        },
+        rooms,
+        (n) => notices.push(n.message),
+      );
+    const orchestrator = mk();
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"},{"id":"t2","to":"w2","task":"B","dependsOn":["t1"]}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    const w1Before = prompts.filter((p) => p.sessionId === "w1").length;
+    assert.equal(w1Before, 1, "t1 应已派发一次");
+    orchestrator.observeToolUpdate("w1", {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc1",
+      kind: "execute",
+      rawInput: { command: "npm test" },
+    });
+    orchestrator.observeToolUpdate("w1", {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc1",
+      status: "completed",
+      rawOutput: { exitCode: 0 },
+    });
+    const state = orchestrator.export();
+    const orchestrator2 = mk();
+    await orchestrator2.import(state);
+    const flow = orchestrator2.getFlow(r.roomId) as {
+      phase: string;
+      tasks: { id: string; status: string; failureMessage?: string }[];
+    };
+    assert.equal(flow.phase, "awaiting-retry", "中断运行应暂停整个 flow");
+    const t1 = flow.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.status, "failed");
+    assert.equal(t1.failureMessage, "Hub 重启时执行状态未知，请检查工作区后重试");
+    assert.equal(
+      flow.tasks.find((t) => t.id === "t2")!.status,
+      "pending",
+      "下游任务保持 pending 而非误标失败",
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      w1Before,
+      "恢复不得重复派发 worker",
+    );
+    assert.ok(
+      notices.some(
+        (m) =>
+          m ===
+          "Hub 重启时任务执行状态未知：任务 t1 已暂停，检查工作区后发送“重试”再派发；未自动重复执行。",
+      ),
+      "应发出精确的暂停通知",
+    );
+    orchestrator2.resumeFlows();
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      w1Before,
+      "resumeFlows 不得派发 awaiting-retry flow",
+    );
+    assert.equal(orchestrator2.retryFailedTasks(r.roomId, ["t1"]), true);
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      w1Before + 1,
+      "显式重试恰好重派一次",
+    );
+    const t1b = (
+      orchestrator2.getFlow(r.roomId) as {
+        tasks: {
+          id: string;
+          status: string;
+          backendRuns?: unknown[];
+          automaticCheck?: { status: string };
+        }[];
+      }
+    ).tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1b.status, "running");
+    assert.equal(t1b.backendRuns, undefined, "重派应清除旧 backendRuns");
+    assert.equal(t1b.automaticCheck?.status, "not_run", "重派应清除旧 automaticCheck");
+    await orchestrator2.onPromptDone(
+      "w1",
+      '```json\n{"text":"done","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w2").length,
+      1,
+      "worker 完成后触发下游派发",
+    );
+    orchestrator2.resumeFlows();
+    orchestrator2.resumeFlows();
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w2").length,
+      1,
+      "反复 resume 不得额外派发",
+    );
+  });
+
+  it("import 恢复：等待用户求助的任务不失败不重派，定向答复唤醒一次", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-help",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+        { sessionId: "w2", name: "w2" },
+        { sessionId: "w3", name: "w3" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.import({
+      flows: [
+        {
+          roomId: r.roomId,
+          phase: "working",
+          tasks: [
+            { id: "t1", sessionId: "w1", task: "A", dependsOn: [], status: "done" },
+            { id: "t2", sessionId: "w2", task: "B", dependsOn: [], status: "running" },
+            { id: "t3", sessionId: "w3", task: "C", dependsOn: [], status: "running" },
+          ],
+          help: [
+            {
+              id: "h1",
+              taskId: "t2",
+              from: "w2",
+              to: "user",
+              question: "需要参数",
+              status: "pending",
+            },
+          ],
+          results: {
+            t1: {
+              text: "结果A",
+              artifacts: [{ type: "file", path: "a.ts", summary: "x" }],
+              verifyCommand: "npm test",
+              verifyExitCode: 0,
+            },
+          },
+        },
+      ],
+    });
+    const flow = orchestrator.getFlow(r.roomId) as {
+      phase: string;
+      tasks: {
+        id: string;
+        status: string;
+        failureMessage?: string;
+        waitingHelpId?: string;
+        verifyCommand?: string;
+        verifyExitCode?: number;
+      }[];
+    };
+    assert.equal(flow.phase, "working", "存在挂起求助时流程保持 working");
+    const t1 = flow.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.status, "done");
+    assert.equal(t1.verifyCommand, "npm test", "已完成任务证据保留");
+    assert.equal(t1.verifyExitCode, 0);
+    const t2 = flow.tasks.find((t) => t.id === "t2")!;
+    assert.equal(t2.status, "running", "等待用户答复的任务保持挂起");
+    assert.equal(t2.waitingHelpId, "h1");
+    const t3 = flow.tasks.find((t) => t.id === "t3")!;
+    assert.equal(t3.status, "failed", "无挂起求助的不确定 running 标 failed");
+    assert.equal(t3.failureMessage, "Hub 重启时执行状态未知，请检查工作区后重试");
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w2").length,
+      0,
+      "等待中的 worker 不得重复收到任务提示",
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w3").length,
+      0,
+      "中断任务不得自动重派",
+    );
+    assert.deepEqual(
+      orchestrator.pendingUserHelps(r.roomId).map((p) => p.id),
+      ["h1"],
+      "用户求助保持待答复",
+    );
+    assert.equal(
+      orchestrator.addSupplement(r.roomId, "随便聊聊"),
+      true,
+      "普通补充消息并入流程但不消费求助",
+    );
+    assert.equal(
+      orchestrator.pendingUserHelps(r.roomId).length,
+      1,
+      "补充消息不得消耗求助",
+    );
+    assert.deepEqual(orchestrator.answerUserHelp(r.roomId, "参数是 42", "h1"), ["w2"]);
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    const w2Prompts = prompts.filter((p) => p.sessionId === "w2");
+    assert.equal(w2Prompts.length, 1, "定向答复只唤醒一次");
+    assert.ok(w2Prompts[0]!.content.includes("参数是 42"), "答复内容注入唤醒 prompt");
+    assert.equal(orchestrator.pendingUserHelps(r.roomId).length, 0);
+    orchestrator.resumeFlows();
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w2").length,
+      1,
+      "resume 不得重复唤醒",
+    );
+  });
+
+  it("import 恢复：planning 流程仅由 resumeFlows 重发一次规划 prompt", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-plan",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (n) => notices.push(n.message),
+    );
+    await orchestrator.import({
+      flows: [{ roomId: r.roomId, phase: "planning", goal: "实现排序", tasks: [] }],
+    });
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      0,
+      "import 不得立即向未连接后端发规划 prompt",
+    );
+    assert.ok(
+      notices.some((m) => m === "已恢复待规划任务，连接指挥家后继续规划。"),
+      "应发出待规划恢复通知",
+    );
+    orchestrator.resumeFlows();
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      1,
+      "resumeFlows 重发一次规划 prompt",
+    );
+    assert.ok(
+      notices.some((m) => m === "指挥家拆解任务中…"),
+      "重发规划沿用现有进行通知",
+    );
+    assert.match(
+      prompts.filter((p) => p.sessionId === "conductor").at(-1)!.content,
+      /指挥家/,
+    );
+    orchestrator.resumeFlows();
+    orchestrator.resumeFlows();
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      1,
+      "in-flight 期间重复 resume 不得重发",
+    );
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      1,
+      "规划完成后派发 worker 恰好一次",
+    );
+    orchestrator.resumeFlows();
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      1,
+      "phase 离开 planning 后不再发规划 prompt",
+    );
+  });
+
+  it("planning 门控竞态：start 在途时 resumeFlows 不重复发，旧 flow 失败不拖新 flow", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "plan-race",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const deferred: { resolve: () => void; reject: (e: Error) => void }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+          await new Promise<void>((res, rej) =>
+            deferred.push({ resolve: res, reject: rej }),
+          );
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    const conductorPrompts = () =>
+      prompts.filter((p) => p.sessionId === "conductor").length;
+    const p1 = orchestrator.start(r, "任务A");
+    assert.equal(conductorPrompts(), 1, "start 发出一次规划 prompt");
+    orchestrator.resumeFlows();
+    orchestrator.resumeFlows();
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      conductorPrompts(),
+      1,
+      "原始规划在途时 resumeFlows 不得重复发送",
+    );
+    const p2 = orchestrator.start(r, "任务B");
+    assert.equal(conductorPrompts(), 2, "替换 flow 发出新规划 prompt");
+    deferred[0]!.reject(new Error("old stream died"));
+    await assert.rejects(p1, /old stream died/, "原 start 错误应传播");
+    orchestrator.resumeFlows();
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      conductorPrompts(),
+      2,
+      "旧 flow 的 prompt 失败不得解锁或重发新规划",
+    );
+    deferred[1]!.resolve();
+    await p2;
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      1,
+      "新规划完成后派发 worker 恰好一次",
+    );
+  });
+
+  it("import 恢复：awaiting-retry 流程再次恢复保持暂停且通知不误导", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-paused",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const mk = () =>
+      new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content: String(content) });
+          },
+          isBusy: () => false,
+        },
+        rooms,
+        (n) => notices.push(n.message),
+      );
+    const orchestrator = mk();
+    await orchestrator.import({
+      flows: [
+        {
+          roomId: r.roomId,
+          phase: "working",
+          tasks: [
+            { id: "t1", sessionId: "w1", task: "A", dependsOn: [], status: "running" },
+          ],
+        },
+      ],
+    });
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase: string }).phase,
+      "awaiting-retry",
+    );
+    const state = orchestrator.export();
+    const orchestrator2 = mk();
+    await orchestrator2.import(state);
+    assert.equal(
+      (orchestrator2.getFlow(r.roomId) as { phase: string }).phase,
+      "awaiting-retry",
+      "连续 export/import 后仍保持暂停",
+    );
+    assert.ok(
+      notices.some(
+        (m) =>
+          m === "已恢复暂停中的流程：存在待重试任务，检查工作区后发送“重试”再派发。",
+      ),
+      "已暂停流程的恢复不得宣称继续执行",
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      0,
+      "awaiting-retry 恢复不得派发 worker",
+    );
+    orchestrator2.resumeFlows();
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(prompts.filter((p) => p.sessionId === "w1").length, 0);
+    assert.equal(orchestrator2.retryFailedTasks(r.roomId), true);
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      1,
+      "显式重试恰好派发一次",
+    );
+  });
+
+  it("import 恢复：blocked 与过期快照的历史检查回执保留且不升级", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-receipt",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.import({
+      flows: [
+        {
+          roomId: r.roomId,
+          phase: "reviewing",
+          tasks: [
+            {
+              id: "t1",
+              sessionId: "w1",
+              task: "A",
+              dependsOn: [],
+              status: "done",
+              automaticCheck: {
+                status: "blocked",
+                runner: "bubblewrap",
+                reason: "check_unapproved",
+                startedAt: 1,
+                finishedAt: 2,
+              },
+            },
+            {
+              id: "t2",
+              sessionId: "w1",
+              task: "B",
+              dependsOn: [],
+              status: "done",
+              automaticCheck: {
+                status: "exited_zero",
+                runner: "bubblewrap",
+                commandHash: "a".repeat(64),
+                snapshotHash: "c".repeat(64),
+                exitCode: 0,
+                startedAt: 1,
+                finishedAt: 2,
+              },
+            },
+          ],
+          results: {
+            t1: { text: "r1", artifacts: [] },
+            t2: { text: "r2", artifacts: [] },
+          },
+        },
+      ],
+    });
+    const flow = orchestrator.getFlow(r.roomId) as {
+      tasks: {
+        id: string;
+        status: string;
+        verificationStatus?: string;
+        automaticCheck?: { status: string; reason?: string; snapshotCurrent?: boolean };
+      }[];
+    };
+    const t1 = flow.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.automaticCheck?.status, "blocked", "blocked 回执原样保留");
+    assert.equal(t1.automaticCheck?.reason, "check_unapproved");
+    assert.equal(
+      t1.automaticCheck?.snapshotCurrent,
+      undefined,
+      "blocked 无 snapshotCurrent",
+    );
+    const t2 = flow.tasks.find((t) => t.id === "t2")!;
+    assert.equal(t2.automaticCheck?.status, "exited_zero", "原始历史结果不改写");
+    assert.equal(
+      t2.automaticCheck?.snapshotCurrent,
+      false,
+      "cwd 不可访问时应标记为无法核对",
+    );
+    assert.equal(t1.verificationStatus, "unverified");
+    assert.equal(t2.verificationStatus, "unverified");
+    const reviewPrompt = prompts.filter((p) => p.sessionId === "conductor").at(-1)!;
+    assert.ok(
+      reviewPrompt.content.includes(
+        "当前工作区已变化或无法核对，旧隔离检查仅对应历史快照",
+      ),
+      "恢复的过期快照应在验收 prompt 附提醒",
     );
   });
 
@@ -1195,8 +1807,17 @@ describe("conductor", () => {
     // worker1 继续并完成任务
     await orchestrator.onPromptDone("worker1", "done");
     const flow2 = orchestrator.getFlow(r.roomId)!;
-    assert.equal((flow2 as { phase: string }).phase, "reviewing");
-    assert.equal((flow2.tasks as { id: string; status: string }[])[0]!.status, "done");
+    const injected = (flow2.tasks as { id: string; status: string }[]).find((t) =>
+      t.id.startsWith("peer-review"),
+    );
+    assert.ok(injected, "未参与成员应收到一次质疑性复核任务");
+    await orchestrator.onPromptDone("worker2", "复核完成");
+    const flow3 = orchestrator.getFlow(r.roomId)!;
+    assert.equal((flow3 as { phase: string }).phase, "reviewing");
+    assert.equal(
+      (flow3.tasks as { id: string; status: string }[]).find((t) => t.id === "t1")!.status,
+      "done",
+    );
   });
 
   it("worker 向用户求助：answerUserHelp 用下一条消息唤醒", async () => {
@@ -1567,6 +2188,51 @@ describe("conductor", () => {
     assert.equal(runs.length, 1, "歧义解除后应归属唯一运行中任务");
     assert.equal(runs[0]!.toolCallId, "tcB");
     assert.equal(runs[0]!.exitCode, 0);
+  });
+
+  it("workspaceSnapshotHash：跟踪/未跟踪/删除/恢复均反映真实字节", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-iso-hash-"));
+    const git = (args: string[]) =>
+      execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
+    try {
+      assert.equal(
+        workspaceSnapshotHash(dir),
+        undefined,
+        "非 Git 工作区必须返回 undefined",
+      );
+      git(["init", "--quiet"]);
+      fs.writeFileSync(path.join(dir, ".gitignore"), "data/\n");
+      fs.mkdirSync(path.join(dir, "data"));
+      fs.writeFileSync(path.join(dir, "data", "big.bin"), Buffer.alloc(6 * 1024 * 1024));
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v1");
+      git(["add", ".gitignore", "marker.txt"]);
+      const h1 = workspaceSnapshotHash(dir);
+      assert.ok(h1 && /^[0-9a-f]{64}$/.test(h1));
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v2");
+      const h2 = workspaceSnapshotHash(dir);
+      assert.notEqual(h2, h1, "修改已跟踪文件应改变 hash");
+      fs.writeFileSync(path.join(dir, "untracked.txt"), "u");
+      const h3 = workspaceSnapshotHash(dir);
+      assert.notEqual(h3, h2, "未跟踪未忽略文件应计入 hash");
+      fs.rmSync(path.join(dir, "marker.txt"));
+      const h4 = workspaceSnapshotHash(dir);
+      assert.notEqual(h4, h3, "删除已跟踪文件应改变 hash");
+      fs.rmSync(path.join(dir, "untracked.txt"));
+      fs.writeFileSync(path.join(dir, "marker.txt"), "v1");
+      assert.equal(
+        workspaceSnapshotHash(dir),
+        h1,
+        "恢复原始内容后 hash 必须一致",
+      );
+      fs.rmSync(dir, { recursive: true, force: true });
+      assert.equal(
+        workspaceSnapshotHash(dir),
+        undefined,
+        "不可访问的 cwd 必须返回 undefined",
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("隔离检查器：命令校验、快照哈希、沙箱隔离与 fail-closed", async () => {

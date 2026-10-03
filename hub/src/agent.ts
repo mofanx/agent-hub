@@ -227,7 +227,10 @@ export class AcpAgent {
     const usage = this.contextUsage.get(sessionId);
     return usage ? { ...usage, ...(usage.cost ? { cost: { ...usage.cost } } : {}) } : undefined;
   }
-  private pendingPermissions = new Map<string, (optionId: string) => void>();
+  private pendingPermissions = new Map<
+    string,
+    { optionIds: Set<string>; respond: (optionId: string) => void }
+  >();
   private pendingElicitations = new Map<string, (resp: acp.CreateElicitationResponse) => void>();
   private starting: Promise<void> | null = null;
   private ready = false;
@@ -258,6 +261,7 @@ export class AcpAgent {
     private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
     private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
     private readonly localDevinAuth = false,
+    private readonly onTurnProgress?: (sessionId: string, fullText: string) => void,
   ) {}
 
   get isReady(): boolean {
@@ -475,8 +479,8 @@ export class AcpAgent {
       resolve({ action: "cancel" });
     }
     this.pendingElicitations.clear();
-    for (const respond of this.pendingPermissions.values()) {
-      respond("");
+    for (const pending of this.pendingPermissions.values()) {
+      pending.respond("");
     }
     this.pendingPermissions.clear();
     if (!wasReady && this.onClose) {
@@ -517,8 +521,10 @@ export class AcpAgent {
       }
     } else if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
       entry.turnText += u.content.text ?? "";
+      this.onTurnProgress?.(params.sessionId, entry.turnText);
     } else if (u.sessionUpdate === "agent_message" && u.content?.type === "text") {
       entry.turnText = u.content.text ?? "";
+      this.onTurnProgress?.(params.sessionId, entry.turnText);
     } else if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
       this.handleToolCall(params.sessionId, u as Record<string, unknown>);
     }
@@ -605,18 +611,21 @@ export class AcpAgent {
         logWarn("agent", `permission ${requestId} timed out -> ${fallback.optionId}`);
         resolve({ outcome: { outcome: "selected", optionId: fallback.optionId } });
       }, PERMISSION_TIMEOUT_MS);
-      this.pendingPermissions.set(requestId, (optionId) => {
-        clearTimeout(timer);
-        this.pendingPermissions.delete(requestId);
-        resolve({ outcome: { outcome: "selected", optionId } });
+      this.pendingPermissions.set(requestId, {
+        optionIds: new Set(params.options.map((o) => o.optionId)),
+        respond: (optionId) => {
+          clearTimeout(timer);
+          this.pendingPermissions.delete(requestId);
+          resolve({ outcome: { outcome: "selected", optionId } });
+        },
       });
     });
   }
 
   respondPermission(requestId: string, optionId: string): boolean {
-    const resolve = this.pendingPermissions.get(requestId);
-    if (!resolve) return false;
-    resolve(optionId);
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending || !optionId.trim() || !pending.optionIds.has(optionId)) return false;
+    pending.respond(optionId);
     return true;
   }
 

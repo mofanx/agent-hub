@@ -2039,6 +2039,15 @@
   color: var(--fg);
 }
 
+.clarification-banner-text {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-y: auto;
+  max-height: 120px;
+  color: var(--fg);
+}
+
 .help-banner-hint {
   color: var(--muted);
   font-size: 0.68rem;

@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
-import { logError } from "./logger.js";
+import { logError, logWarn } from "./logger.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -50,14 +50,20 @@ type TaskResult = {
   verifyExitCode?: number;
   verifyStdout?: string;
   verifyStderr?: string;
+  verifyCheckId?: string;
   /** 对其他任务的独立验证声明（verify 字段） */
   verifications?: { taskId: string; verdict: string; evidence: VerificationEvidence }[];
 };
 
-type FlowPhase = "planning" | "working" | "reviewing" | "summarizing" | "awaiting-retry" | "done";
+type FlowPhase = "planning" | "awaiting-input" | "working" | "reviewing" | "summarizing" | "awaiting-retry" | "done";
 
 type ParsedTask = { id?: string; to: string; task: string; dependsOn?: string[] };
-type ConductorPlan = { goal?: string | undefined; acceptanceCriteria: string[]; tasks: ParsedTask[] };
+type ConductorPlan = {
+  goal?: string | undefined;
+  acceptanceCriteria: string[];
+  tasks: ParsedTask[];
+  questions: string[];
+};
 type ReviewDecision =
   | { decision: "complete"; reason: string }
   | { decision: "continue"; reason: string; tasks: ParsedTask[] };
@@ -156,6 +162,11 @@ type Flow = {
   help: Map<string, HelpExchange>;
   /** 是否已有求助派发重试定时器在跑 */
   helpRetrying?: boolean;
+  clarification?: { id: string; questions: string[] };
+  clarificationAsked?: boolean;
+  clarificationAnswer?: string;
+  challengeScheduled?: boolean;
+  challengeTaskId?: string;
 };
 
 export type ConductorNotice = { roomId: string; message: string };
@@ -173,6 +184,39 @@ const TOOL_COMMAND_MAX = 8192;
 const TOOL_OUTPUT_MAX = 262144;
 const MAX_BACKEND_RUNS = 20;
 const MAX_PENDING_TOOL_CALLS = 20;
+const ISOLATED_CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const ISOLATED_CHECK_MAX = 32;
+
+export function parseIsolatedChecks(
+  raw: string | undefined,
+): Readonly<Record<string, string>> {
+  if (raw === undefined || raw.trim() === "") return {};
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    logWarn("hub", "HUB_ISOLATED_CHECKS is not valid JSON; isolated checks disabled");
+    return {};
+  }
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+    logWarn("hub", "HUB_ISOLATED_CHECKS must be a JSON object; isolated checks disabled");
+    return {};
+  }
+  const entries = Object.entries(obj);
+  const invalid = (): Record<string, string> => {
+    logWarn("hub", "HUB_ISOLATED_CHECKS has invalid entries; isolated checks disabled");
+    return {};
+  };
+  if (entries.length > ISOLATED_CHECK_MAX) return invalid();
+  const out: Record<string, string> = {};
+  for (const [key, value] of entries) {
+    if (!ISOLATED_CHECK_ID_RE.test(key) || typeof value !== "string") return invalid();
+    const cmd = value.trim();
+    if (!cmd || cmd.length > 256 || /[\r\n]/.test(cmd)) return invalid();
+    out[key] = cmd;
+  }
+  return out;
+}
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
@@ -229,27 +273,54 @@ function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
   };
 }
 
-function describeAutomaticCheck(c: AutomaticCheck): string {
+function describeAutomaticCheck(c: AutomaticCheck, snapshotCurrent?: boolean): string {
   const exitCode = "exitCode" in c ? c.exitCode : undefined;
   const snapshot = "snapshotHash" in c ? c.snapshotHash : undefined;
-  return `隔离检查：${c.status},exitCode=${exitCode ?? "unknown"},snapshotHash=${snapshot?.slice(0, 12) ?? "none"}`;
+  return `隔离检查：${c.status},exitCode=${exitCode ?? "unknown"},snapshotHash=${snapshot?.slice(0, 12) ?? "none"}${snapshotCurrent === false ? "，当前工作区已变化或无法核对，旧隔离检查仅对应历史快照，不得据此宣称当前版本通过。" : ""}`;
 }
 
-function backendClaimMatch(task: FlowTask, result: TaskResult | undefined): boolean {
+type BackendClaimStatus =
+  | "matched"
+  | "missing_member_command"
+  | "missing_member_exit_code"
+  | "no_completed_backend_run"
+  | "backend_exit_unknown"
+  | "backend_mismatch";
+
+function backendClaimStatus(task: FlowTask, result: TaskResult | undefined): BackendClaimStatus {
   const command = result?.verifyCommand?.trim();
+  if (!command) return "missing_member_command";
   const exitCode = result?.verifyExitCode;
-  if (!command || exitCode === undefined) return false;
+  if (exitCode === undefined) return "missing_member_exit_code";
   const commandHash = sha256Hex(command);
   const stdoutHash = result?.verifyStdout ? sha256Hex(result.verifyStdout) : undefined;
   const stderrHash = result?.verifyStderr ? sha256Hex(result.verifyStderr) : undefined;
-  return (task.backendRuns ?? []).some(
-    (r) =>
-      r.status === "completed" &&
-      r.commandHash === commandHash &&
-      r.exitCode === exitCode &&
-      (stdoutHash === undefined || r.stdoutHash === stdoutHash) &&
-      (stderrHash === undefined || r.stderrHash === stderrHash),
-  );
+  const completed = (task.backendRuns ?? []).filter((r) => r.status === "completed");
+  if (completed.length === 0) return "no_completed_backend_run";
+  if (
+    completed.some(
+      (r) =>
+        r.commandHash === commandHash &&
+        r.exitCode === exitCode &&
+        (stdoutHash === undefined || r.stdoutHash === stdoutHash) &&
+        (stderrHash === undefined || r.stderrHash === stderrHash),
+    )
+  ) {
+    return "matched";
+  }
+  const sameCommand = completed.filter((r) => r.commandHash === commandHash);
+  if (
+    sameCommand.length > 0 &&
+    sameCommand.every((r) => r.exitCode === undefined) &&
+    sameCommand.some(
+      (r) =>
+        (stdoutHash === undefined || r.stdoutHash === stdoutHash) &&
+        (stderrHash === undefined || r.stderrHash === stderrHash),
+    )
+  ) {
+    return "backend_exit_unknown";
+  }
+  return "backend_mismatch";
 }
 
 function normalizeEvidence(raw: unknown): VerificationEvidence {
@@ -308,19 +379,28 @@ export class ConductorOrchestrator {
     private readonly notice: (n: ConductorNotice) => void,
     emitFlow?: (roomId: string) => void,
     promptRetryMs?: number,
+    private readonly isolatedChecks: Readonly<Record<string, string>> = {},
   ) {
     this.emitFlow = emitFlow;
     this.promptRetryMs = promptRetryMs ?? PROMPT_RETRY_MS;
   }
 
   hasActiveFlow(roomId: string): boolean {
-    return this.flows.has(roomId);
+    const flow = this.flows.get(roomId);
+    return flow !== undefined && flow.phase !== "done";
+  }
+
+  clearCompleted(roomId: string): void {
+    const flow = this.flows.get(roomId);
+    if (flow?.phase !== "done") return;
+    this.flows.delete(roomId);
+    this.emitFlow?.(roomId);
   }
 
   /** 强制中断某个房间的指挥编排 */
   cancel(roomId: string, reason?: string): string[] {
     const flow = this.flows.get(roomId);
-    if (!flow) return [];
+    if (!flow || flow.phase === "done") return [];
     const touched = new Set<string>();
     for (const t of flow.tasks.values()) {
       if (t.status === "pending" || t.status === "running") {
@@ -328,6 +408,7 @@ export class ConductorOrchestrator {
       }
     }
     this.flows.delete(roomId);
+    this.planningInFlight.delete(roomId);
     for (const sid of touched) this.pendingToolCalls.delete(sid);
     this.emitFlow?.(roomId);
     if (reason) this.notice({ roomId, message: reason });
@@ -446,29 +527,32 @@ export class ConductorOrchestrator {
     if (!runner || task.automaticCheck !== undefined) return;
     const command = result.verifyCommand?.trim();
     if (!command) return;
-    if (!result.artifacts.some((a) => a.type === "file")) return;
+    if (!result.artifacts.some((a) => a.type === "file") && !result.verifyCheckId) return;
     const cwd = this.agent.cwd?.(sessionId);
     const startedAt = Date.now();
+    const staticBlocked = (reason: string): AutomaticCheck => ({
+      status: "blocked",
+      runner: "bubblewrap",
+      reason,
+      startedAt,
+      finishedAt: Date.now(),
+    });
+    const preset =
+      result.verifyCheckId && Object.hasOwn(this.isolatedChecks, result.verifyCheckId)
+        ? this.isolatedChecks[result.verifyCheckId]
+        : undefined;
     let check: AutomaticCheck;
-    if (!cwd) {
-      check = {
-        status: "blocked",
-        runner: "bubblewrap",
-        reason: "cwd_missing",
-        startedAt,
-        finishedAt: Date.now(),
-      };
+    if (!preset) {
+      check = staticBlocked("check_unapproved");
+    } else if (preset.trim() !== command) {
+      check = staticBlocked("command_mismatch");
+    } else if (!cwd) {
+      check = staticBlocked("cwd_missing");
     } else {
       try {
-        check = await runner(cwd, command);
+        check = await runner(cwd, preset.trim());
       } catch {
-        check = {
-          status: "blocked",
-          runner: "bubblewrap",
-          reason: "start_failed",
-          startedAt,
-          finishedAt: Date.now(),
-        };
+        check = staticBlocked("start_failed");
       }
     }
     if (
@@ -504,14 +588,31 @@ export class ConductorOrchestrator {
   }
 
   /** 获取可用于前端展示的 flow 状态 */
+  private snapshotCurrentFor(
+    task: FlowTask,
+    cache: Map<string, string | undefined>,
+  ): boolean | undefined {
+    const c = task.automaticCheck;
+    if (!c || c.status === "blocked") return undefined;
+    const snap = "snapshotHash" in c ? c.snapshotHash : undefined;
+    if (typeof snap !== "string" || !/^[0-9a-f]{64}$/.test(snap)) return undefined;
+    const cwd = this.agent.cwd?.(task.sessionId);
+    if (!cwd) return false;
+    if (!cache.has(cwd)) cache.set(cwd, workspaceSnapshotHash(cwd));
+    const cur = cache.get(cwd);
+    return cur !== undefined && cur === snap;
+  }
+
   getFlow(roomId: string): Record<string, unknown> | undefined {
     const flow = this.flows.get(roomId);
     if (!flow) return undefined;
     const room = this.rooms.get(roomId);
+    const hashCache = new Map<string, string | undefined>();
     const tasks = [...flow.tasks.values()].map((t) => {
       const result = flow.results.get(t.id);
       const waiting = t.waitingForHelp ? flow.help.get(t.waitingForHelp) : undefined;
       const verdicts = (t.verifications ?? []).map((v) => v.verdict.trim().toLowerCase());
+      const claimStatus = backendClaimStatus(t, result);
       const verificationStatus =
         verdicts.length === 0
           ? "unverified"
@@ -527,7 +628,11 @@ export class ConductorOrchestrator {
         dependsOn: t.dependsOn,
         iteration: t.iteration,
         verificationStatus,
-        automaticCheck: t.automaticCheck ?? { status: "not_run" },
+        automaticCheck: (() => {
+          const ac = t.automaticCheck ?? { status: "not_run" };
+          const sc = this.snapshotCurrentFor(t, hashCache);
+          return sc === undefined ? ac : { ...ac, snapshotCurrent: sc };
+        })(),
         artifacts: result?.artifacts ?? [],
         ...(waiting
           ? {
@@ -560,7 +665,8 @@ export class ConductorOrchestrator {
               })),
             }
           : {}),
-        backendClaimMatch: backendClaimMatch(t, result),
+        backendClaimStatus: claimStatus,
+        backendClaimMatch: claimStatus === "matched",
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(result?.text ? { output: result.text.slice(0, 2000) } : {}),
         ...(result?.baseline ? { baseline: result.baseline.slice(0, 2000) } : {}),
@@ -574,6 +680,7 @@ export class ConductorOrchestrator {
               ...(result.verifyStderr ? { verifyStderr: result.verifyStderr.slice(0, 1000) } : {}),
             }
           : {}),
+        ...(result?.verifyCheckId ? { verifyCheckId: result.verifyCheckId } : {}),
         ...(t.retries !== undefined && t.retries > 0 ? { retries: t.retries } : {}),
       };
     });
@@ -590,6 +697,12 @@ export class ConductorOrchestrator {
       maxIterations: flow.maxIterations,
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
+      ...(flow.phase === "awaiting-input" && flow.clarification
+        ? {
+            clarificationId: flow.clarification.id,
+            clarificationQuestions: flow.clarification.questions,
+          }
+        : {}),
       ...(flow.supplements.length > 0
         ? { supplements: flow.supplements.map((s) => s.text.slice(0, 300)) }
         : {}),
@@ -600,7 +713,7 @@ export class ConductorOrchestrator {
   isConductorSession(sessionId: string): boolean {
     for (const flow of this.flows.values()) {
       const room = this.rooms.get(flow.roomId);
-      if (room && room.conductorId === sessionId) return true;
+      if (room && room.conductorId === sessionId && flow.phase !== "done") return true;
     }
     return false;
   }
@@ -613,7 +726,7 @@ export class ConductorOrchestrator {
     | undefined {
     for (const flow of this.flows.values()) {
       const room = this.rooms.get(flow.roomId);
-      if (!room) continue;
+      if (!room || flow.phase === "done") continue;
       if (room.conductorId === sessionId) {
         return { roomId: flow.roomId, role: "conductor", phase: flow.phase };
       }
@@ -638,8 +751,10 @@ export class ConductorOrchestrator {
         this.flows.delete(roomId);
         continue;
       }
+      if (flow.phase === "done") continue;
       if (sessionId === room.conductorId) {
         this.flows.delete(roomId);
+        this.planningInFlight.delete(roomId);
         this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
         return roomId;
       }
@@ -711,20 +826,14 @@ export class ConductorOrchestrator {
     };
   }
 
-  async start(
+  private planningInFlight = new Set<string>();
+
+  private buildPlanningPrompt(
     room: Room,
     text: string,
-    initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[],
     artifactContext?: { refs?: string[] },
-  ): Promise<void> {
-    if (!room.conductorId) throw new Error("room has no conductor");
-    if (initialTasks && initialTasks.length > 0) {
-      // 由 auto 模式推荐的初始派工单，直接 dispatch
-      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
-      const flow = this.flows.get(room.roomId)!;
-      await this.dispatchFromTasks(flow, room, initialTasks, text);
-      return;
-    }
+    qa?: { questions: string[]; answer: string; criteria: string[]; supplements: string[] },
+  ): string {
     const example = this.buildExample(room);
     const prompt = [
       `你是群聊「${room.name}」的指挥家（Conductor）。`,
@@ -744,6 +853,7 @@ export class ConductorOrchestrator {
       "6. 如果任务有依赖关系，请用 `dependsOn` 指定前置任务 `id`。",
       "7. `acceptanceCriteria` 每条都必须是可验证的标准，用于任务完成后验收是否达标。",
       "8. 如果任务简单、无需分工，tasks 输出 `[]`；tasks 为空时允许在 code block 之前直接写出你的最终回答。",
+      "9. 仅当缺少必须由用户决定的关键信息、完全无法给出合理计划时，可同时输出 `questions` 数组（1-4 条、每条不超过 200 字、只问不可或缺的问题），此时 `tasks` 必须为 `[]`；Hub 会把问题转给用户，答复后会再请你规划一次，届时不得再次提问。可自主判断的细节不要提问，也不要请求用户批准执行任意命令。",
       "",
       "正确示例（请用实际成员 ID 替换）：",
       "```json",
@@ -755,6 +865,26 @@ export class ConductorOrchestrator {
       '- task: "处理一下"（不够具体）',
       '- 输出多个 code block 或在 JSON 外加解释文字',
     ];
+    if (qa) {
+      prompt.push(
+        "",
+        "你此前就本任务向用户提问，答复如下：",
+        ...qa.questions.map((q, i) => `${i + 1}. ${q}`),
+        `用户答复：${qa.answer.slice(0, 2000)}`,
+        ...(qa.criteria.length > 0
+          ? ["", "验收标准：", ...qa.criteria.map((c, i) => `${i + 1}. ${c}`)]
+          : []),
+        ...(qa.supplements.length > 0
+          ? [
+              "",
+              "用户在等待答复期间补充的要求（请一并纳入拆解与验收）：",
+              ...qa.supplements.map((s) => `- ${s.slice(0, 400)}`),
+            ]
+          : []),
+        "",
+        "已收集所需信息：请直接输出最终计划（tasks）或最终回答，不要再输出 questions。",
+      );
+    }
     if (artifactContext?.refs?.length) {
       const artifacts = this.rooms.getArtifactsForPrompt(room.roomId, room.conductorId!, artifactContext);
       if (artifacts.length > 0) {
@@ -767,10 +897,68 @@ export class ConductorOrchestrator {
         }
       }
     }
-    const promptText = prompt.join("\n");
-    this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
+    return prompt.join("\n");
+  }
+
+  private sendPlanningPrompt(flow: Flow, room: Room): void {
+    if (flow.phase !== "planning" || !room.conductorId) {
+      this.planningInFlight.delete(flow.roomId);
+      return;
+    }
+    if (this.planningInFlight.has(flow.roomId)) return;
+    this.planningInFlight.add(flow.roomId);
+    this.notice({ roomId: flow.roomId, message: "指挥家拆解任务中…" });
+    const qa =
+      flow.clarification && flow.clarificationAnswer !== undefined
+        ? {
+            questions: flow.clarification.questions,
+            answer: flow.clarificationAnswer,
+            criteria: flow.acceptanceCriteria,
+            supplements: flow.supplements.map((s) => s.text),
+          }
+        : undefined;
+    const promptText = this.buildPlanningPrompt(room, flow.goal, flow.artifactContext, qa);
+    this.agent.prompt(room.conductorId, promptText).catch((err: unknown) => {
+      logError("conductor planning prompt", err);
+      const cur = this.flows.get(flow.roomId);
+      if (cur !== flow || cur.phase !== "planning") return;
+      this.planningInFlight.delete(flow.roomId);
+      setTimeout(() => {
+        const f = this.flows.get(flow.roomId);
+        if (f !== flow || f.phase !== "planning") return;
+        this.sendPlanningPrompt(f, room);
+      }, this.promptRetryMs);
+    });
+  }
+
+  async start(
+    room: Room,
+    text: string,
+    initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[],
+    artifactContext?: { refs?: string[] },
+  ): Promise<void> {
+    if (!room.conductorId) throw new Error("room has no conductor");
+    this.planningInFlight.delete(room.roomId);
+    if (initialTasks && initialTasks.length > 0) {
+      // 由 auto 模式推荐的初始派工单，直接 dispatch
+      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
+      const flow = this.flows.get(room.roomId)!;
+      await this.dispatchFromTasks(flow, room, initialTasks, text);
+      return;
+    }
+    const promptText = this.buildPlanningPrompt(room, text, artifactContext);
+    const flow = this.newFlow(room.roomId, text, artifactContext);
+    this.flows.set(room.roomId, flow);
+    this.planningInFlight.add(room.roomId);
     this.notice({ roomId: room.roomId, message: "指挥家拆解任务中…" });
-    await this.agent.prompt(room.conductorId, promptText);
+    try {
+      await this.agent.prompt(room.conductorId, promptText);
+    } catch (err) {
+      if (this.flows.get(room.roomId) === flow) {
+        this.planningInFlight.delete(room.roomId);
+      }
+      throw err;
+    }
   }
 
   /** 每轮 prompt.done 时调用；返回 flow roomId 表示该事件属于某个编排流 */
@@ -782,7 +970,9 @@ export class ConductorOrchestrator {
         this.flows.delete(flow.roomId);
         continue;
       }
+      if (flow.phase === "done") continue;
       if (sessionId === room.conductorId) {
+        this.planningInFlight.delete(flow.roomId);
         if (flow.phase === "planning") {
           await this.dispatch(flow, room, output);
           return flow.roomId;
@@ -811,7 +1001,6 @@ export class ConductorOrchestrator {
           } else {
             flow.phase = "done";
             this.emitFlow?.(roomId);
-            this.flows.delete(roomId);
           }
           return roomId;
         }
@@ -909,6 +1098,39 @@ export class ConductorOrchestrator {
     if (!flow || flow.phase === "awaiting-retry" || flow.phase === "done") return false;
     flow.supplements.push({ text, at: Date.now() });
     this.emitFlow?.(roomId);
+    return true;
+  }
+
+  private clarificationQaLines(flow: Flow): string[] {
+    if (!flow.clarification || flow.clarificationAnswer === undefined) return [];
+    return [
+      "",
+      "派工前向用户确认的问题与答复（务必遵循）：",
+      ...flow.clarification.questions.map((q, i) => `${i + 1}. ${q}`),
+      `用户答复：${flow.clarificationAnswer.slice(0, 2000)}`,
+    ];
+  }
+
+  pendingClarification(
+    roomId: string,
+  ): { id: string; questions: string[] } | undefined {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase !== "awaiting-input" || !flow.clarification) return undefined;
+    return { id: flow.clarification.id, questions: [...flow.clarification.questions] };
+  }
+
+  answerClarification(roomId: string, text: string, id?: string): boolean {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase !== "awaiting-input" || !flow.clarification) return false;
+    if (id !== undefined && id !== flow.clarification.id) return false;
+    const answer = text.trim().slice(0, 2000);
+    if (!answer) return false;
+    const room = this.rooms.get(roomId);
+    if (!room) return false;
+    flow.clarificationAnswer = answer;
+    flow.phase = "planning";
+    this.emitFlow?.(roomId);
+    this.sendPlanningPrompt(flow, room);
     return true;
   }
 
@@ -1177,15 +1399,38 @@ export class ConductorOrchestrator {
       });
       return;
     }
+    const tasks = plan.tasks;
+    if (plan.questions.length > 0 && !flow.clarificationAsked) {
+      flow.clarificationAsked = true;
+      flow.phase = "awaiting-input";
+      flow.clarification = { id: randomUUID().slice(0, 8), questions: plan.questions };
+      this.emitFlow?.(flow.roomId);
+      this.notice({
+        roomId: flow.roomId,
+        message: `指挥家需要先向你确认 ${plan.questions.length} 个问题再派工：\n${plan.questions
+          .map((q, i) => `${i + 1}. ${q}`)
+          .join("\n")}\n（回复「答：内容」或定向答复即可；其他消息将作为补充并入）`,
+      });
+      return;
+    }
+    if (plan.questions.length > 0) {
+      this.flows.delete(flow.roomId);
+      this.emitFlow?.(flow.roomId);
+      this.notice({
+        roomId: flow.roomId,
+        message: "仍缺必要信息，未派工/未交付，请补充要求后重新发起",
+      });
+      return;
+    }
     if (typeof plan.goal === "string" && plan.goal.trim()) {
       flow.goal = plan.goal.trim();
     }
     if (plan.acceptanceCriteria.length > 0) {
       flow.acceptanceCriteria = plan.acceptanceCriteria;
     }
-    const tasks = plan.tasks;
     if (tasks.length === 0) {
-      this.flows.delete(flow.roomId);
+      flow.phase = "done";
+      this.emitFlow?.(flow.roomId);
       const answer = conductorOutput.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
       this.notice({
         roomId: flow.roomId,
@@ -1346,6 +1591,10 @@ export class ConductorOrchestrator {
       const failedCount = values.filter((t) => t.status === "failed").length;
       if (doneCount > 0) {
         if (failedCount === 0) {
+          if (this.maybeInjectPeerReview(flow, room)) {
+            await this.scheduleTasks(flow, room);
+            return;
+          }
           await this.review(flow, room);
         } else {
           await this.summarize(flow, room);
@@ -1359,7 +1608,6 @@ export class ConductorOrchestrator {
         });
         flow.phase = "done";
         this.emitFlow?.(flow.roomId);
-        this.flows.delete(flow.roomId);
       }
       return;
     }
@@ -1424,6 +1672,7 @@ export class ConductorOrchestrator {
             ]
           : []),
         `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
+        ...this.clarificationQaLines(flow),
         ...(flow.supplements.length > 0
           ? [
               "",
@@ -1450,6 +1699,7 @@ export class ConductorOrchestrator {
         '```',
         "",
         "若子任务涉及代码修改，强烈建议在 JSON 中附加可验证字段：baseline（修改前代码/状态）、diff（实际修改）、reproSteps（复现步骤）、verifyCommand（验证命令）。这些会直接进入验收证据，供其他成员或用户复查。",
+        "若管理员已预设隔离检查 ID，请在报告 JSON 中附加 verifyCheckId 与其对应的 verifyCommand；缺少预设 ID 时仅记录成员自报，不触发 Hub 运行任意命令。",
         "如果没有 artifact，可以只输出文本，不必输出 JSON。",
       ].join("\n");
       const prompt = this.rooms.buildPrompt(
@@ -1531,6 +1781,53 @@ export class ConductorOrchestrator {
     return added;
   }
 
+  private maybeInjectPeerReview(flow: Flow, room: Room): boolean {
+    if (flow.challengeScheduled) return false;
+    const all = [...flow.tasks.values()];
+    const unverified = all.filter(
+      (t) =>
+        t.status === "done" &&
+        t.id !== flow.challengeTaskId &&
+        (t.verifications?.length ?? 0) === 0,
+    );
+    if (unverified.length === 0) return false;
+    const executors = new Set(all.map((t) => t.sessionId));
+    const reviewer = room.members.find(
+      (m) => m.sessionId !== room.conductorId && !executors.has(m.sessionId),
+    );
+    if (!reviewer) return false;
+    const doneIds = unverified.map((t) => t.id);
+    let taskId = "peer-review";
+    while (flow.tasks.has(taskId)) taskId += "x";
+    flow.tasks.set(taskId, {
+      id: taskId,
+      sessionId: reviewer.sessionId,
+      task: `独立复核（质疑性验证）：请逐项审查已完成任务 ${doneIds.join("、")} 的交付内容与自报验证证据，主动挑战其假设、寻找遗漏的边界与负面用例；对每个被复核任务在报告 JSON 中输出结构化 verify 条目，evidence 必须基于该任务提交的 baseline/diff/verifyCommand 实际复核，仅当你确实运行过命令且有工具输出反馈时才填写 command/exitCode/stdout，不得编造执行记录或正向结论。`,
+      dependsOn: doneIds,
+      status: "pending",
+      iteration: flow.iteration,
+    });
+    flow.challengeScheduled = true;
+    flow.challengeTaskId = taskId;
+    this.emitFlow?.(flow.roomId);
+    this.notice({
+      roomId: flow.roomId,
+      message: `新增独立复核任务 ${taskId}：@${reviewer.name} 对已完成交付做质疑性验证`,
+    });
+    return true;
+  }
+
+  private unverifiedDoneIds(flow: Flow): string[] {
+    return [...flow.tasks.values()]
+      .filter(
+        (t) =>
+          t.status === "done" &&
+          t.id !== flow.challengeTaskId &&
+          (t.verifications?.length ?? 0) === 0,
+      )
+      .map((t) => t.id);
+  }
+
   private async review(flow: Flow, room: Room): Promise<void> {
     if (flow.phase !== "working" && flow.phase !== "reviewing") return;
     if (flow.phase === "reviewing" && this.agent.isBusy(room.conductorId!)) return;
@@ -1541,6 +1838,7 @@ export class ConductorOrchestrator {
       message: `第 ${flow.iteration}/${flow.maxIterations} 轮任务完成，指挥家验收中…`,
     });
     const lines: string[] = [];
+    const hashCache = new Map<string, string | undefined>();
     for (const t of flow.tasks.values()) {
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       const result = flow.results.get(t.id);
@@ -1563,10 +1861,13 @@ export class ConductorOrchestrator {
         `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
         ...(verifs ? ["  独立验证:", verifs] : []),
-        ...(t.automaticCheck ? [`  ${describeAutomaticCheck(t.automaticCheck)}`] : []),
+        ...(t.automaticCheck
+          ? [`  ${describeAutomaticCheck(t.automaticCheck, this.snapshotCurrentFor(t, hashCache))}`]
+          : []),
       ].join("\n"));
     }
     const hasChecks = [...flow.tasks.values()].some((t) => t.automaticCheck);
+    const unverifiedDone = this.unverifiedDoneIds(flow);
     const criteria = flow.acceptanceCriteria.length > 0
       ? flow.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
       : "（未提供，按用户目标自行判断）";
@@ -1580,6 +1881,7 @@ export class ConductorOrchestrator {
       "",
       `第 ${flow.iteration}/${flow.maxIterations} 轮子任务已全部完成，结果如下：`,
       ...lines,
+      ...this.clarificationQaLines(flow),
       ...(flow.supplements.length > 0
         ? [
             "",
@@ -1591,6 +1893,11 @@ export class ConductorOrchestrator {
       hasChecks
         ? "注意：成员自报字段不等于隔离检查；退出码0只表示进程退出0，不代表全部验收标准满足；依赖/运行时未包含在源码快照哈希内，请结合证据自行评估可信度。"
         : "注意：以上结果中的命令、退出码、输出与「独立验证」条目均为成员自报，Hub 并未自动执行任何检查，不可称为自动检查通过，请结合证据自行评估可信度。",
+      ...(unverifiedDone.length > 0
+        ? [
+            `注意：以下任务没有任何独立成员复核记录（${unverifiedDone.join("、")}），其结果均来自任务执行者自报，不得声称已经过独立验证。`,
+          ]
+        : []),
       "",
       "请对照验收标准逐条核查以上结果是否已满足目标。",
       "不要调用任何工具，只输出一个 JSON code block，二选一：",
@@ -1663,6 +1970,7 @@ export class ConductorOrchestrator {
     const hasFailures = failedTasks.length > 0;
     // 按照 task 在 tasks Map 中的创建顺序（即指挥家给出的顺序）生成汇总
     const lines: string[] = [];
+    const hashCache = new Map<string, string | undefined>();
     for (const t of flow.tasks.values()) {
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       if (t.status === "failed") {
@@ -1689,10 +1997,13 @@ export class ConductorOrchestrator {
         `- [${t.id}] @${name}: ${result.text.slice(0, PLAN_RESULT_LEN)}`,
         ...(result.artifacts.length > 0 ? ["  artifacts:", artifacts] : []),
         ...(verifs ? ["  独立验证:", verifs] : []),
-        ...(t.automaticCheck ? [`  ${describeAutomaticCheck(t.automaticCheck)}`] : []),
+        ...(t.automaticCheck
+          ? [`  ${describeAutomaticCheck(t.automaticCheck, this.snapshotCurrentFor(t, hashCache))}`]
+          : []),
       ].join("\n"));
     }
     const hasChecks = [...flow.tasks.values()].some((t) => t.automaticCheck);
+    const unverifiedDone = this.unverifiedDoneIds(flow);
     const promptLines: string[] = [
       `你是群聊「${room.name}」的指挥家。`,
       `原始目标：${flow.goal || "（未记录）"}`,
@@ -1702,6 +2013,7 @@ export class ConductorOrchestrator {
         ? `你之前派发的子任务部分完成、部分失败，结果如下：`
         : `你之前派发的子任务已全部完成，结果如下：`,
       ...lines,
+      ...this.clarificationQaLines(flow),
       ...(flow.supplements.length > 0
         ? [
             "",
@@ -1712,6 +2024,11 @@ export class ConductorOrchestrator {
       hasChecks
         ? "注意：成员自报字段不等于隔离检查；退出码0只表示进程退出0，不代表全部验收标准满足；依赖/运行时未包含在源码快照哈希内，汇总时不要称为自动检查通过。"
         : "注意：以上结果中的命令、退出码、输出与「独立验证」条目均为成员自报，Hub 并未自动执行任何检查，汇总时不要称为自动检查通过。",
+      ...(unverifiedDone.length > 0
+        ? [
+            `注意：以下任务没有任何独立成员复核记录（${unverifiedDone.join("、")}），其结果均来自任务执行者自报，汇总时不得声称已经过独立验证。`,
+          ]
+        : []),
       "",
     ];
     if (hasFailures) {
@@ -1728,7 +2045,7 @@ export class ConductorOrchestrator {
       );
     }
     promptLines.push(
-      "请根据各成员返回的结果和 artifact 汇总，向用户给出最终答复：明确说明完成了什么、有哪些验证证据、以及尚未满足的验收缺口。如果涉及文件修改，请引用文件路径。",
+      "请用简短答复交付：先给结论（完成了什么、是否满足目标），再列未解决或待确认事项（没有则写「无」），最后说明实际复核情况；逐项区分成员判断与 Hub 隔离检查，对未运行或受阻的检查如实说明，不因一项任务通过就称其他任务已验证。技术细节和完整输出留在可展开的任务证据中；若修改文件，请引用相关路径。",
     );
     const prompt = promptLines.join("\n");
     this.notice({
@@ -1759,6 +2076,8 @@ export class ConductorOrchestrator {
         this.review(flow, room).catch((e) => logError("conductor resume review", e));
       } else if (flow.phase === "working") {
         this.scheduleTasks(flow, room).catch((e) => logError("conductor resume schedule", e));
+      } else if (flow.phase === "planning") {
+        this.sendPlanningPrompt(flow, room);
       }
     }
   }
@@ -1822,6 +2141,13 @@ export class ConductorOrchestrator {
         })),
         supplements: flow.supplements,
         help: [...flow.help.values()],
+        ...(flow.clarification ? { clarification: flow.clarification } : {}),
+        ...(flow.clarificationAsked ? { clarificationAsked: true } : {}),
+        ...(flow.clarificationAnswer !== undefined
+          ? { clarificationAnswer: flow.clarificationAnswer }
+          : {}),
+        ...(flow.challengeScheduled ? { challengeScheduled: true } : {}),
+        ...(flow.challengeTaskId ? { challengeTaskId: flow.challengeTaskId } : {}),
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [
             id,
@@ -1835,6 +2161,7 @@ export class ConductorOrchestrator {
               ...(r.verifyExitCode !== undefined ? { verifyExitCode: r.verifyExitCode } : {}),
               ...(r.verifyStdout !== undefined ? { verifyStdout: r.verifyStdout } : {}),
               ...(r.verifyStderr !== undefined ? { verifyStderr: r.verifyStderr } : {}),
+              ...(r.verifyCheckId !== undefined ? { verifyCheckId: r.verifyCheckId } : {}),
             },
           ]),
         ),
@@ -1879,7 +2206,26 @@ export class ConductorOrchestrator {
           : [],
         help: new Map(),
         ...(typeof f.reviewReason === "string" ? { reviewReason: f.reviewReason } : {}),
+        ...(typeof f.clarificationAsked === "boolean" ? { clarificationAsked: f.clarificationAsked } : {}),
+        ...(typeof f.clarificationAnswer === "string" && f.clarificationAnswer
+          ? { clarificationAnswer: f.clarificationAnswer.slice(0, 2000) }
+          : {}),
+        ...(typeof f.challengeScheduled === "boolean" ? { challengeScheduled: f.challengeScheduled } : {}),
+        ...(typeof f.challengeTaskId === "string" && f.challengeTaskId
+          ? { challengeTaskId: f.challengeTaskId }
+          : {}),
       };
+      const rawClar = f.clarification as Record<string, unknown> | undefined;
+      if (rawClar && typeof rawClar === "object") {
+        const cid = String(rawClar.id ?? "").trim();
+        const qs = Array.isArray(rawClar.questions)
+          ? rawClar.questions
+              .map((q) => String(q).trim())
+              .filter((q) => q.length > 0 && q.length <= 200)
+              .slice(0, 4)
+          : [];
+        if (cid && qs.length > 0) flow.clarification = { id: cid, questions: qs };
+      }
       for (const t of (f.tasks as unknown[]) ?? []) {
         const o = t as Record<string, unknown>;
         const taskId = String(o.id ?? "");
@@ -1888,7 +2234,9 @@ export class ConductorOrchestrator {
         if (!room.members.some((m) => m.sessionId === sessionId)) continue;
         const rawStatus = String(o.status ?? "pending");
         const status: FlowTask["status"] =
-          rawStatus === "done" || rawStatus === "failed" ? rawStatus : "pending";
+          rawStatus === "done" || rawStatus === "failed" || rawStatus === "running"
+            ? rawStatus
+            : "pending";
         flow.tasks.set(taskId, {
           id: taskId,
           sessionId,
@@ -1976,7 +2324,12 @@ export class ConductorOrchestrator {
         });
         // 等待中的任务恢复为 running 挂起，避免被重新派发丢失求助上下文
         const waitingTask = flow.tasks.get(taskId);
-        if (status === "pending" && waitingTask && waitingTask.status === "pending" && waitingTask.sessionId === from) {
+        if (
+          status === "pending" &&
+          waitingTask &&
+          (waitingTask.status === "pending" || waitingTask.status === "running") &&
+          waitingTask.sessionId === from
+        ) {
           waitingTask.status = "running";
           waitingTask.waitingForHelp = id;
         }
@@ -2011,16 +2364,54 @@ export class ConductorOrchestrator {
             ...(typeof r.verifyExitCode === "number" ? { verifyExitCode: r.verifyExitCode } : {}),
             ...(typeof r.verifyStdout === "string" ? { verifyStdout: r.verifyStdout } : {}),
             ...(typeof r.verifyStderr === "string" ? { verifyStderr: r.verifyStderr } : {}),
+            ...(typeof r.verifyCheckId === "string" && ISOLATED_CHECK_ID_RE.test(r.verifyCheckId)
+              ? { verifyCheckId: r.verifyCheckId }
+              : {}),
           });
         }
       }
+      if (flow.phase === "awaiting-input" && !flow.clarification) {
+        flow.phase = "planning";
+      }
+      const interrupted: string[] = [];
+      if (flow.phase === "working") {
+        for (const t of flow.tasks.values()) {
+          if (t.status === "running" && !t.waitingForHelp) {
+            t.status = "failed";
+            t.failureMessage = "Hub 重启时执行状态未知，请检查工作区后重试";
+            delete t.automaticCheck;
+            flow.results.delete(t.id);
+            interrupted.push(t.id);
+          }
+        }
+        const hasPendingHelp = [...flow.help.values()].some((h) => h.status === "pending");
+        if (interrupted.length > 0 && !hasPendingHelp) {
+          flow.phase = "awaiting-retry";
+        }
+      }
       this.flows.set(roomId, flow);
-      this.notice({ roomId, message: "🔄 已恢复指挥编排，继续执行待派发任务" });
+      if (flow.phase === "done") {
+        this.emitFlow?.(roomId);
+        continue;
+      }
+      this.notice({
+        roomId,
+        message:
+          flow.phase === "awaiting-retry"
+            ? interrupted.length > 0
+              ? `Hub 重启时任务执行状态未知：任务 ${interrupted.join(", ")} 已暂停，检查工作区后发送“重试”再派发；未自动重复执行。`
+              : "已恢复暂停中的流程：存在待重试任务，检查工作区后发送“重试”再派发。"
+            : flow.phase === "planning"
+              ? "已恢复待规划任务，连接指挥家后继续规划。"
+              : flow.phase === "awaiting-input"
+                ? `已恢复待确认的流程：指挥家正等待你答复 ${flow.clarification?.questions.length ?? 0} 个问题后继续规划。`
+                : "🔄 已恢复指挥编排，继续执行待派发任务",
+      });
       if (flow.phase === "reviewing") {
         await this.review(flow, room).catch((err) => logError("conductor import review", err));
       } else if (flow.phase === "summarizing") {
         await this.summarize(flow, room).catch((err) => logError("conductor import summarize", err));
-      } else {
+      } else if (flow.phase === "working") {
         await this.scheduleTasks(flow, room).catch((err) => {
           logError("conductor import schedule", err);
         });
@@ -2097,6 +2488,10 @@ function extractTaskResult(output: string): TaskResult {
         if (verifyStdout) result.verifyStdout = verifyStdout;
         const verifyStderr = typeof obj.verifyStderr === "string" ? obj.verifyStderr.trim() : undefined;
         if (verifyStderr) result.verifyStderr = verifyStderr;
+        const verifyCheckId = typeof obj.verifyCheckId === "string" ? obj.verifyCheckId.trim() : undefined;
+        if (verifyCheckId && ISOLATED_CHECK_ID_RE.test(verifyCheckId)) {
+          result.verifyCheckId = verifyCheckId;
+        }
         return result;
       }
     } catch {
@@ -2232,7 +2627,14 @@ function parsePlan(output: string, room: Room): ConductorPlan | null {
             .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
             .map((s) => s.trim())
         : [];
-      return { goal, acceptanceCriteria, tasks };
+      const questions = Array.isArray(obj.questions)
+        ? obj.questions
+            .filter((q): q is string => typeof q === "string")
+            .map((q) => q.trim())
+            .filter((q) => q.length > 0 && q.length <= 200)
+            .slice(0, 4)
+        : [];
+      return { goal, acceptanceCriteria, tasks, questions };
     } catch {
       // 继续尝试下一个候选
     }
@@ -2399,7 +2801,7 @@ function gitLsFiles(realCwd: string): string[] {
   }
 }
 
-function snapshotWorkspace(srcRoot: string, dstRoot: string): string {
+function snapshotWorkspace(srcRoot: string, dstRoot?: string): string {
   const seen = new Set<string>();
   const rels: string[] = [];
   for (const raw of gitLsFiles(srcRoot)) {
@@ -2443,15 +2845,25 @@ function snapshotWorkspace(srcRoot: string, dstRoot: string): string {
     const bytes = readSnapshotFile(full);
     total += bytes.length;
     if (total > ISO_MAX_TOTAL_BYTES) throw new IsoAbort("snapshot_limit");
-    const dst = path.join(dstRoot, rel);
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.writeFileSync(dst, bytes);
+    if (dstRoot !== undefined) {
+      const dst = path.join(dstRoot, rel);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.writeFileSync(dst, bytes);
+    }
     hash.update(Buffer.from(rel, "utf8"));
     hash.update(Buffer.from([0]));
     hash.update(bytes);
     hash.update(Buffer.from([0]));
   }
   return hash.digest("hex");
+}
+
+export function workspaceSnapshotHash(realCwd: string): string | undefined {
+  try {
+    return snapshotWorkspace(realCwd);
+  } catch {
+    return undefined;
+  }
 }
 
 function gitRepoLayout(realCwd: string): { repoName: string; relCwd: string } {

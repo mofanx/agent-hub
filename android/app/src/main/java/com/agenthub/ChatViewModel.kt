@@ -352,8 +352,10 @@ data class FlowTask(
     val automaticCheckSnapshot: String? = null,
     val automaticCheckReason: String? = null,
     val automaticCheckTruncated: Boolean = false,
+    val automaticCheckSnapshotCurrent: Boolean? = null,
     val backendRuns: List<BackendToolRun> = emptyList(),
     val backendClaimMatch: Boolean = false,
+    val backendClaimStatus: String? = null,
     val baseline: String? = null,
     val diff: String? = null,
     val reproSteps: List<String> = emptyList(),
@@ -361,6 +363,7 @@ data class FlowTask(
     val verifyExitCode: Int? = null,
     val verifyStdout: String? = null,
     val verifyStderr: String? = null,
+    val verifyCheckId: String? = null,
 )
 
 data class FlowProgress(
@@ -381,6 +384,8 @@ data class FlowInfo(
     val iteration: Int = 0,
     val maxIterations: Int = 0,
     val supplements: List<String> = emptyList(),
+    val clarificationId: String? = null,
+    val clarificationQuestions: List<String> = emptyList(),
 )
 
 
@@ -2220,6 +2225,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             iteration = obj["iteration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             maxIterations = obj["maxIterations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             supplements = obj["supplements"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+            clarificationId = obj["clarificationId"]?.jsonPrimitive?.contentOrNull,
+            clarificationQuestions = obj["clarificationQuestions"]?.jsonArray
+                ?.map { it.jsonPrimitive.content } ?: emptyList(),
         )
     }
 
@@ -2261,6 +2269,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
             } ?: emptyList(),
             backendClaimMatch = obj["backendClaimMatch"]?.jsonPrimitive?.contentOrNull == "true",
+            backendClaimStatus = obj["backendClaimStatus"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf {
+                    it == "matched" || it == "missing_member_command" ||
+                        it == "missing_member_exit_code" || it == "no_completed_backend_run" ||
+                        it == "backend_exit_unknown" || it == "backend_mismatch"
+                },
             verificationStatus = obj["verificationStatus"]?.jsonPrimitive?.contentOrNull,
             automaticCheckStatus = (obj["automaticCheck"] as? JsonObject)
                 ?.get("status")?.jsonPrimitive?.contentOrNull
@@ -2281,6 +2295,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     it["stdoutTruncated"]?.jsonPrimitive?.contentOrNull == "true" ||
                         it["stderrTruncated"]?.jsonPrimitive?.contentOrNull == "true"
                 } ?: false,
+            automaticCheckSnapshotCurrent = (obj["automaticCheck"] as? JsonObject)
+                ?.get("snapshotCurrent")?.jsonPrimitive?.booleanOrNull,
             baseline = obj["baseline"]?.jsonPrimitive?.contentOrNull,
             diff = obj["diff"]?.jsonPrimitive?.contentOrNull,
             reproSteps = obj["reproSteps"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
@@ -2288,6 +2304,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             verifyExitCode = obj["verifyExitCode"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
             verifyStdout = obj["verifyStdout"]?.jsonPrimitive?.contentOrNull,
             verifyStderr = obj["verifyStderr"]?.jsonPrimitive?.contentOrNull,
+            verifyCheckId = obj["verifyCheckId"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.matches(Regex("[a-z][a-z0-9_-]{0,63}")) },
         )
     }
 
@@ -3488,18 +3506,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun answerPermission(requestId: String, optionId: String, optionName: String) {
-        val idx = chatItems.indexOfLast { it is ChatItem.Permission && it.requestId == requestId }
-        if (idx >= 0) {
-            val p = chatItems[idx] as ChatItem.Permission
-            chatItems[idx] = p.copy(answered = optionName)
-        }
         viewModelScope.launch {
             try {
                 hub.call("permission.respond", buildJsonObject {
                     put("requestId", requestId)
                     put("optionId", optionId)
                 })
-            } catch (_: Exception) {
+                val idx = chatItems.indexOfLast { it is ChatItem.Permission && it.requestId == requestId }
+                if (idx >= 0) {
+                    val p = chatItems[idx] as ChatItem.Permission
+                    chatItems[idx] = p.copy(answered = optionName)
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "permission respond failed"))
             }
         }
     }

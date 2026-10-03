@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import * as acp from "@agentclientprotocol/sdk";
 import {
   AcpAgent,
+  getPermissionBypass,
   normalizeElicitationFields,
+  setPermissionBypass,
   sliceTextFile,
   type HubEvent,
 } from "./agent.js";
@@ -179,6 +181,8 @@ describe("AcpAgent integration (in-memory stream)", () => {
     loadAuthGated?: boolean;
     loadStayGated?: boolean;
     localDevinAuth?: boolean;
+    onTurnEnd?: (sessionId: string, text: string) => void;
+    onTurnProgress?: (sessionId: string, fullText: string) => void;
   }) {
     const c2a = memPipe();
     const a2c = memPipe();
@@ -297,10 +301,11 @@ describe("AcpAgent integration (in-memory stream)", () => {
       (e) => events.push(e),
       undefined,
       undefined,
-      undefined,
+      options?.onTurnEnd,
       undefined,
       undefined,
       options?.localDevinAuth ?? false,
+      options?.onTurnProgress,
     );
     return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, resumeCalls, loadCalls, setConfigCalls, order, deferredResolvers, seenClientCapabilities };
   }
@@ -390,6 +395,154 @@ describe("AcpAgent integration (in-memory stream)", () => {
     await pipes.a2c.writable.close();
     await firstRejects;
     await assert.rejects(hub.promptOnce("s1", "after"));
+  });
+
+  it("agent_message_chunk 触发进度回调且传累计文本，thought/tool 不触发", async () => {
+    const progress: { sessionId: string; text: string; eventsSeen: number }[] = [];
+    const turnEnds: { sessionId: string; text: string }[] = [];
+    let finish!: (r: acp.PromptResponse) => void;
+    const { agentConn, hub, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { finish = r; }),
+      onTurnProgress: (sessionId, fullText) =>
+        progress.push({ sessionId, text: fullText, eventsSeen: events.length }),
+      onTurnEnd: (sessionId, text) => turnEnds.push({ sessionId, text }),
+    });
+    await hub.createSession("/tmp", "s");
+    const done = hub.promptOnce("s1", "测试", 0);
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "你好" } },
+    });
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "，世界" } },
+    });
+    (hub as unknown as {
+      routeUpdate: (p: { sessionId: string; update: unknown }) => void;
+    }).routeUpdate({
+      sessionId: "s1",
+      update: { sessionUpdate: "agent_message", content: { type: "text", text: "最终全文" } },
+    });
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "内部思考" } },
+    });
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "tool_call", toolCallId: "tc1", kind: "read", title: "read", status: "in_progress" },
+    });
+    await agentConn.client.notify("session/update", {
+      sessionId: "s1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc1", status: "completed" },
+    });
+    assert.deepEqual(
+      progress.map((p) => p.text),
+      ["你好", "你好，世界", "最终全文"],
+      "agent_message 覆盖旧累计值",
+    );
+    assert.ok(progress.every((p) => p.sessionId === "s1"));
+    for (const p of progress) {
+      const next = events[p.eventsSeen];
+      assert.equal(next?.method, "session.update", "进度回调先于事件广播");
+    }
+    assert.equal(turnEnds.length, 0, "未 finishTurn 不得触发 onTurnEnd");
+    finish({ stopReason: "end_turn" });
+    const result = await done;
+    assert.equal(result.output, "最终全文");
+    assert.deepEqual(turnEnds, [{ sessionId: "s1", text: "最终全文" }]);
+    hub.close();
+    agentConn.close();
+  });
+
+  it("permission 仅接受后端提供的 optionId，非法选项不消耗请求", async () => {
+    const prevBypass = getPermissionBypass();
+    setPermissionBypass(false);
+    const { agentConn, hub, events } = setup();
+    try {
+      await hub.createSession("/tmp", "s");
+      const respPromise = agentConn.client.request(
+        acp.methods.client.session.requestPermission,
+        {
+          sessionId: "s1",
+          toolCall: { toolCallId: "tc1", title: "bash" },
+          options: [
+            { optionId: "allow_once", name: "允许一次", kind: "allow_once" },
+            { optionId: "reject_once", name: "拒绝", kind: "reject_once" },
+          ],
+        },
+      );
+      const reqEvent = await waitFor(
+        () => events.find((e) => e.method === "permission.request"),
+      );
+      const requestId = (reqEvent.params as { requestId: string }).requestId;
+
+      assert.equal(hub.respondPermission(requestId, ""), false);
+      assert.equal(hub.respondPermission(requestId, "自定义任意命令"), false);
+      assert.equal(
+        hub.respondPermission("nonexistent-request", "allow_once"),
+        false,
+      );
+      assert.equal(
+        hub.respondPermission(requestId, "allow_once"),
+        true,
+        "合法 optionId 正常应答",
+      );
+      const resp = await respPromise;
+      assert.equal(
+        (resp.outcome as { optionId: string }).optionId,
+        "allow_once",
+      );
+      assert.equal(
+        hub.respondPermission(requestId, "allow_once"),
+        false,
+        "已应答请求不可重复消费",
+      );
+      assert.equal(
+        hub.respondPermission(requestId, "reject_once"),
+        false,
+        "过期请求不再接受任何选项",
+      );
+
+      const respPromise2 = agentConn.client.request(
+        acp.methods.client.session.requestPermission,
+        {
+          sessionId: "s1",
+          toolCall: { toolCallId: "tc2", title: "bash" },
+          options: [
+            { optionId: "", name: "自定义", kind: "allow_once" },
+            { optionId: "ok2", name: "允许", kind: "allow_once" },
+          ],
+        },
+      );
+      const reqEvent2 = await waitFor(
+        () =>
+          events.find(
+            (e) =>
+              e.method === "permission.request" &&
+              (e.params as { requestId: string }).requestId !== requestId,
+          ),
+      );
+      const requestId2 = (reqEvent2.params as { requestId: string }).requestId;
+      assert.equal(
+        hub.respondPermission(requestId2, ""),
+        false,
+        "后端提供空 optionId 也不允许空白批准",
+      );
+      assert.equal(
+        hub.respondPermission(requestId2, "ok2"),
+        true,
+        "合法选项仍可应答",
+      );
+      const resp2 = await respPromise2;
+      assert.equal(
+        (resp2.outcome as { optionId: string }).optionId,
+        "ok2",
+      );
+    } finally {
+      setPermissionBypass(prevBypass);
+      hub.close();
+      agentConn.close();
+    }
   });
 
   it("advertised agent auth 不触发预登录：已认证 agent 两次 session/new 零 authenticate", async () => {

@@ -1,9 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { RoomManager, type Room } from "./room.js";
-import { lostReplyAction } from "./store.js";
+import { lostReplyAction, Store } from "./store.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
 const WORKSPACE_ROOT = path.resolve(PROJECT_ROOT, "..");
@@ -592,5 +594,195 @@ describe("lostReplyAction", () => {
       undefined,
     );
     assert.equal(lostReplyAction(undefined, PLACEHOLDER, false), undefined);
+  });
+
+  it("回复草稿在重启中断后保留为片段且幂等", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const marker = "[Hub 重启中断了此回复；以上为已保存片段，未自动重试]";
+    const genericMarker = "[回复中断；以上为已保存片段，未自动重试]";
+    const stores: Store[] = [];
+    try {
+      const s1 = new Store(dir);
+      stores.push(s1);
+      const sessionDraft = s1.beginReplyDraft("session", "sess1", {
+        at: 1,
+        kind: "assistant",
+        author: "bot",
+        text: "片段一",
+      });
+      const roomDraft = s1.beginReplyDraft("room", "room1", {
+        at: 1,
+        kind: "assistant",
+        author: "bot",
+        text: "片段一",
+      });
+      const emptyDraft = s1.beginReplyDraft("room", "room2", {
+        at: 1,
+        kind: "assistant",
+        author: "bot",
+        text: "",
+      });
+      const errorDraft = s1.beginReplyDraft("session", "sessErr", {
+        at: 1,
+        kind: "assistant",
+        author: "bot",
+        text: "错误前片段",
+      });
+      s1.updateReplyDraft(sessionDraft, "片段一片段二");
+      s1.updateReplyDraft(roomDraft, "片段一片段二");
+      s1.close();
+      stores.length = 0;
+
+      const s2 = new Store(dir);
+      stores.push(s2);
+      const affected = s2.interruptReplyDrafts();
+      assert.deepEqual(
+        [...affected].sort((a, b) => `${a.scope}:${a.id}`.localeCompare(`${b.scope}:${b.id}`)),
+        [
+          { scope: "room", id: "room1" },
+          { scope: "room", id: "room2" },
+          { scope: "session", id: "sess1" },
+          { scope: "session", id: "sessErr" },
+        ],
+      );
+
+      const sess = s2.read("session", "sess1");
+      assert.equal(sess.length, 1, "每个 scope 只保留一条片段历史");
+      assert.equal(sess[0]!.id, sessionDraft, "片段复用草稿行 id");
+      assert.equal(sess[0]!.text, `片段一片段二\n\n${marker}`);
+      const room1 = s2.read("room", "room1");
+      assert.equal(room1.length, 1);
+      assert.equal(room1[0]!.text, `片段一片段二\n\n${marker}`);
+      const room2 = s2.read("room", "room2");
+      assert.equal(room2[0]!.text, marker, "空正文草稿只留中断标记");
+      const sessErr = s2.read("session", "sessErr");
+      assert.equal(sessErr[0]!.text, `错误前片段\n\n${marker}`);
+
+      assert.deepEqual(s2.interruptReplyDrafts(), [], "重复中断不得重复追加");
+      assert.equal(s2.read("session", "sess1")[0]!.text, `片段一片段二\n\n${marker}`);
+
+      const doneDraft = s2.beginReplyDraft("session", "sess2", {
+        at: 2,
+        kind: "assistant",
+        author: "bot",
+        text: "中间片段",
+      });
+      s2.updateReplyDraft(doneDraft, "中间片段更多");
+      s2.completeReplyDraft(doneDraft, "最终结果");
+      s2.close();
+      stores.length = 0;
+
+      const s3 = new Store(dir);
+      stores.push(s3);
+      assert.deepEqual(s3.interruptReplyDrafts(), [], "已完成草稿不再标记中断");
+      const final = s3.read("session", "sess2");
+      assert.equal(final.length, 1);
+      assert.equal(final[0]!.id, doneDraft, "完成后仍是同一行 id");
+      assert.equal(final[0]!.text, "最终结果");
+
+      const errDraft = s3.beginReplyDraft("session", "sess3", {
+        at: 3,
+        kind: "assistant",
+        author: "bot",
+        text: "断连前片段",
+      });
+      const errEmpty = s3.beginReplyDraft("session", "sess4", {
+        at: 3,
+        kind: "assistant",
+        author: "bot",
+        text: "",
+      });
+      s3.interruptReplyDraft(errDraft);
+      s3.interruptReplyDraft(errEmpty);
+      assert.equal(
+        s3.read("session", "sess3")[0]!.text,
+        `断连前片段\n\n${genericMarker}`,
+        "运行期中断用通用标记并保留片段",
+      );
+      assert.equal(s3.read("session", "sess4")[0]!.text, genericMarker);
+      s3.interruptReplyDraft(errDraft);
+      assert.equal(
+        s3.read("session", "sess3")[0]!.text,
+        `断连前片段\n\n${genericMarker}`,
+        "通用中断重复调用不追加两次",
+      );
+      s3.close();
+      stores.length = 0;
+
+      const closed = new Store(dir);
+      closed.close();
+      assert.equal(
+        closed.beginReplyDraft("session", "x", { at: 0, kind: "assistant", author: "b", text: "t" }),
+        -1,
+        "关闭的 Store 上 begin 返回 -1",
+      );
+      assert.equal(
+        closed.beginReplyDraft("session", "y", { at: 0, kind: "assistant", author: "b", text: "t" }),
+        -1,
+      );
+    } finally {
+      for (const s of stores) {
+        try {
+          s.close();
+        } catch {}
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("既有无 draft 列的 history 库经迁移后支持草稿且不丢旧记录", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const marker = "[Hub 重启中断了此回复；以上为已保存片段，未自动重试]";
+    const stores: Store[] = [];
+    try {
+      const legacy = new Database(path.join(dir, "hub.db"));
+      legacy.exec(
+        `CREATE TABLE history(id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, scope_id TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL)`,
+      );
+      legacy
+        .prepare(
+          `INSERT INTO history(scope,scope_id,at,kind,author,text) VALUES ('session','legacy',1,'user','我','旧消息')`,
+        )
+        .run();
+      legacy.close();
+
+      const s1 = new Store(dir);
+      stores.push(s1);
+      const draftId = s1.beginReplyDraft("session", "legacy", {
+        at: 2,
+        kind: "assistant",
+        author: "bot",
+        text: "新片段",
+      });
+      assert.ok(draftId > 0);
+      s1.close();
+      stores.length = 0;
+
+      const s2 = new Store(dir);
+      stores.push(s2);
+      const affected = s2.interruptReplyDrafts();
+      assert.deepEqual(affected, [{ scope: "session", id: "legacy" }]);
+      const entries = s2.read("session", "legacy");
+      assert.equal(entries.length, 2);
+      assert.equal(entries[0]!.kind, "user");
+      assert.equal(entries[0]!.text, "旧消息");
+      assert.equal(entries[0]!.id, 1);
+      assert.equal(entries[1]!.id, draftId);
+      assert.equal(entries[1]!.text, `新片段\n\n${marker}`);
+      assert.equal(
+        lostReplyAction(entries[1]!, PLACEHOLDER, false),
+        undefined,
+        "已有中断片段不再追加 LOST_REPLY_PLACEHOLDER",
+      );
+      s2.close();
+      stores.length = 0;
+    } finally {
+      for (const s of stores) {
+        try {
+          s.close();
+        } catch {}
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

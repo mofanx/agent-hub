@@ -112,6 +112,8 @@ const BUILTIN_ROLES: Role[] = [
 type State = { sessions: SessionMeta[]; rooms: Room[]; runtime?: Record<string, unknown> | undefined };
 
 const HISTORY_LIMIT = 200;
+const RESTART_INTERRUPTED_MARKER = "[Hub 重启中断了此回复；以上为已保存片段，未自动重试]";
+const INTERRUPTED_REPLY_MARKER = "[回复中断；以上为已保存片段，未自动重试]";
 
 export class Store {
   readonly dir: string;
@@ -141,7 +143,8 @@ export class Store {
         at INTEGER NOT NULL,
         kind TEXT NOT NULL,
         author TEXT NOT NULL,
-        text TEXT NOT NULL
+        text TEXT NOT NULL,
+        draft INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_history_scope
         ON history(scope, scope_id, at);
@@ -182,6 +185,7 @@ export class Store {
       { table: "roles", column: "cwd", def: "TEXT" },
       { table: "roles", column: "persona", def: "TEXT NOT NULL DEFAULT ''" },
       { table: "roles", column: "builtin", def: "INTEGER NOT NULL DEFAULT 0" },
+      { table: "history", column: "draft", def: "INTEGER NOT NULL DEFAULT 0" },
     ];
     for (const { table, column, def } of columns) {
       try {
@@ -375,6 +379,79 @@ export class Store {
         .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
     } catch (err) {
       logWarn("store", `append failed: ${String(err)}`);
+    }
+  }
+
+  beginReplyDraft(scope: "session" | "room", id: string, entry: HistoryEntry): number {
+    try {
+      const r = this.db
+        .prepare(
+          "INSERT INTO history(scope, scope_id, at, kind, author, text, draft) VALUES (?, ?, ?, ?, ?, ?, 1)",
+        )
+        .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
+      return Number(r.lastInsertRowid);
+    } catch (err) {
+      logWarn("store", `beginReplyDraft failed: ${String(err)}`);
+      return -1;
+    }
+  }
+
+  updateReplyDraft(rowId: number, text: string): void {
+    try {
+      this.db
+        .prepare("UPDATE history SET text = ? WHERE id = ? AND draft = 1")
+        .run(text, rowId);
+    } catch (err) {
+      logWarn("store", `updateReplyDraft failed: ${String(err)}`);
+    }
+  }
+
+  completeReplyDraft(rowId: number, text: string): void {
+    try {
+      this.db
+        .prepare("UPDATE history SET text = ?, draft = 0 WHERE id = ? AND draft = 1")
+        .run(text, rowId);
+    } catch (err) {
+      logWarn("store", `completeReplyDraft failed: ${String(err)}`);
+    }
+  }
+
+  interruptReplyDraft(rowId: number): void {
+    try {
+      this.db
+        .prepare(
+          "UPDATE history SET text = CASE WHEN trim(text) = '' THEN ? ELSE text || ? END, draft = 0 WHERE id = ? AND draft = 1",
+        )
+        .run(INTERRUPTED_REPLY_MARKER, `\n\n${INTERRUPTED_REPLY_MARKER}`, rowId);
+    } catch (err) {
+      logWarn("store", `interruptReplyDraft failed: ${String(err)}`);
+    }
+  }
+
+  interruptReplyDrafts(): { scope: "session" | "room"; id: string }[] {
+    try {
+      return this.db.transaction(() => {
+        const rows = this.db
+          .prepare("SELECT id, scope, scope_id AS scopeId, text FROM history WHERE draft = 1")
+          .all() as { id: number; scope: "session" | "room"; scopeId: string; text: string }[];
+        const finalize = this.db.prepare(
+          "UPDATE history SET text = ?, draft = 0 WHERE id = ? AND draft = 1",
+        );
+        const affected = new Map<string, { scope: "session" | "room"; id: string }>();
+        for (const r of rows) {
+          finalize.run(
+            r.text.trim()
+              ? `${r.text}\n\n${RESTART_INTERRUPTED_MARKER}`
+              : RESTART_INTERRUPTED_MARKER,
+            r.id,
+          );
+          affected.set(`${r.scope}:${r.scopeId}`, { scope: r.scope, id: r.scopeId });
+        }
+        return [...affected.values()];
+      })();
+    } catch (err) {
+      logWarn("store", `interruptReplyDrafts failed: ${String(err)}`);
+      return [];
     }
   }
 

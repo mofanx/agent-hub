@@ -272,7 +272,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     var listBounds by remember { mutableStateOf<Rect?>(null) }
     val isRoom = vm.currentRoom != null
     val flowAbsorbing = isRoom &&
-        vm.flow?.phase in setOf("planning", "working", "reviewing", "summarizing")
+        vm.flow?.phase in setOf("planning", "awaiting-input", "working", "reviewing", "summarizing")
     val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.addAttachment(it) }
@@ -287,9 +287,10 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     LaunchedEffect(vm.flow, vm.helpReplyTo) {
         val target = vm.helpReplyTo ?: return@LaunchedEffect
-        if (vm.flow?.tasks?.any { it.waitingFor == "user" && it.waitingHelpId == target } != true) {
-            vm.cancelHelpReply()
-        }
+        val waiting = vm.flow
+        val alive = waiting?.tasks?.any { it.waitingFor == "user" && it.waitingHelpId == target } == true ||
+            (waiting?.phase == "awaiting-input" && waiting.clarificationId == target)
+        if (!alive) vm.cancelHelpReply()
     }
 
     LaunchedEffect(vm.jumpToHistoryId, matchPositions) {
@@ -621,6 +622,11 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             val helpTasks = if (isRoom) vm.flow?.tasks?.filter {
                 it.waitingFor == "user" && !it.waitingHelpId.isNullOrBlank()
             }.orEmpty() else emptyList()
+            val pendingClarification = if (isRoom &&
+                vm.flow?.phase == "awaiting-input" &&
+                !vm.flow?.clarificationId.isNullOrBlank() &&
+                vm.flow?.clarificationQuestions?.isNotEmpty() == true
+            ) vm.flow else null
             Column(
                 Modifier
                     .heightIn(max = 160.dp)
@@ -658,6 +664,52 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 onClick = {
                                     if (isReplyTarget) vm.cancelHelpReply()
                                     else helpTask.waitingHelpId?.let { vm.startHelpReply(it) }
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            ) {
+                                Text(
+                                    if (isReplyTarget) S.exitHelpReply else S.helpReplyAction,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                    }
+                }
+                pendingClarification?.let { clarFlow ->
+                    val clarId = clarFlow.clarificationId!!
+                    val isReplyTarget = vm.helpReplyTo == clarId
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.QuestionAnswer,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Spacer(Modifier.size(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    if (isReplyTarget) S.clarificationReplying
+                                    else S.clarificationPending,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                clarFlow.clarificationQuestions.forEachIndexed { i, q ->
+                                    Text(
+                                        "${i + 1}. ${q.take(200)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    if (isReplyTarget) vm.cancelHelpReply()
+                                    else vm.startHelpReply(clarId)
                                 },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                             ) {
@@ -762,7 +814,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             ) {
                                 if (input.isEmpty()) {
                                     Text(
-                                        if (vm.helpReplyTo != null) S.inputHelpReply
+                                        if (vm.helpReplyTo != null && vm.helpReplyTo == vm.flow?.clarificationId) S.clarificationReplying
+                                        else if (vm.helpReplyTo != null) S.inputHelpReply
                                         else if (flowAbsorbing) S.inputFlowActive
                                         else if (isRoom) S.inputRoom else S.inputSingle,
                                         style = MaterialTheme.typography.bodyLarge,
@@ -1917,12 +1970,14 @@ private fun RawChatBubble(
 
 @Composable
 private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
+    val S = LocalStrings.current
     if (flow == null || flow.tasks.isEmpty()) return
     var collapsed by remember { mutableStateOf(false) }
     val progress = flow.progress
     val title = if (roomMode == "conductor") "指挥编排" else "编排进度"
     val phaseLabel = when (flow.phase) {
         "planning" -> "规划中"
+        "awaiting-input" -> S.flowAwaitingInput
         "working" -> "执行中"
         "reviewing" -> "验收中"
         "summarizing" -> "汇总中"
@@ -2121,7 +2176,11 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             ?.let { S.automaticCheckExitedNonzero.format(it) }
                             ?: S.automaticCheckBlocked
                         "blocked" -> S.automaticCheckBlocked +
-                            (task.automaticCheckReason?.let { "（$it）" } ?: "")
+                            ((when (task.automaticCheckReason) {
+                                "check_unapproved" -> S.checkUnapproved
+                                "command_mismatch" -> S.checkCommandMismatch
+                                else -> task.automaticCheckReason
+                            })?.let { "（$it）" } ?: "")
                         "timed_out" -> S.automaticCheckTimedOut
                         else -> S.automaticCheckNotRun
                     }
@@ -2132,6 +2191,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                     )
                     val acExtra = listOfNotNull(
                         task.automaticCheckSnapshot?.take(12)?.let { S.automaticCheckSnapshot.format(it) },
+                        if (task.automaticCheckSnapshotCurrent == true) S.snapshotCurrentTrue else null,
                         if (task.automaticCheckTruncated) S.automaticCheckTruncated else null,
                     ).joinToString(" · ")
                     if (acExtra.isNotEmpty()) {
@@ -2139,6 +2199,13 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             acExtra,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (task.automaticCheckSnapshotCurrent == false) {
+                        Text(
+                            S.snapshotCurrentFalse,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
@@ -2239,7 +2306,16 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                         }
                     }
                 }
-                if (task.backendRuns.isNotEmpty()) {
+                val backendStatusText = when (task.backendClaimStatus) {
+                    "matched" -> S.backendClaimMatchLabel
+                    "missing_member_command" -> S.backendStatusMissingCommand
+                    "missing_member_exit_code" -> S.backendStatusMissingExit
+                    "no_completed_backend_run" -> S.backendStatusNoRun
+                    "backend_exit_unknown" -> S.backendStatusUnknownExit
+                    "backend_mismatch" -> S.backendStatusMismatch
+                    else -> null
+                }
+                if (task.backendRuns.isNotEmpty() || (task.verifyCommand != null && backendStatusText != null)) {
                     Spacer(Modifier.height(2.dp))
                     Text(S.backendRunsLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                     task.backendRuns.forEach { r ->
@@ -2253,11 +2329,21 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
-                    if (task.backendClaimMatch) {
+                    if (backendStatusText != null) {
+                        Text(
+                            backendStatusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when (task.backendClaimStatus) {
+                                "matched" -> MaterialTheme.colorScheme.primary
+                                "backend_mismatch" -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    } else if (task.backendClaimMatch) {
                         Text(S.backendClaimMatchLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
-                if (task.baseline != null || task.diff != null || task.reproSteps.isNotEmpty() || task.verifyCommand != null) {
+                if (task.baseline != null || task.diff != null || task.reproSteps.isNotEmpty() || task.verifyCommand != null || task.verifyCheckId != null) {
                     var deliverableExpanded by remember(task.id) { mutableStateOf(false) }
                     Spacer(Modifier.height(2.dp))
                     Column(
@@ -2300,6 +2386,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                             }
                             task.verifyStdout?.let { Text("${S.evidenceStdoutLabel}\n$it", style = MaterialTheme.typography.bodySmall, maxLines = 10, overflow = TextOverflow.Ellipsis) }
                             task.verifyStderr?.let { Text("${S.evidenceStderrLabel}${it.take(500)}", style = MaterialTheme.typography.bodySmall, maxLines = 5, overflow = TextOverflow.Ellipsis) }
+                            task.verifyCheckId?.let { Text(S.presetCheckRequested.format(it), style = MaterialTheme.typography.bodySmall) }
                         }
                     }
                 }
