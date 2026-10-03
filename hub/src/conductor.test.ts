@@ -233,6 +233,9 @@ describe("conductor", () => {
     assert.ok(worker.content.includes("Fusion"));
   });
 
+  const PLAN_FIX_PROMPT =
+    "上一次规划无法解析为任务计划，尚未派工。请只输出一个 JSON code block，顶层包含 goal（字符串）、acceptanceCriteria（字符串数组）和 tasks（数组）；每项任务的 to 必须是现有成员且 task 非空。若确实需要用户先决定，请输出 questions（最多 4 条）并将 tasks 设为 []。不要解释或调用工具。";
+
   it("计划无法解析时通知用户而不是静默结束", async () => {
     const rooms = new RoomManager();
     const conductorRoom = rooms.create(
@@ -252,8 +255,323 @@ describe("conductor", () => {
     );
     await orchestrator.start(conductorRoom, "拆解任务");
     await orchestrator.onPromptDone("conductor", "不是合法任务计划");
+    assert.equal(
+      orchestrator.hasActiveFlow(conductorRoom.roomId),
+      true,
+      "首次解析失败保留 planning flow 等待重试",
+    );
+    assert.ok(notices.some((m) => /无法解析/.test(m)));
+    await orchestrator.onPromptDone("conductor", "依然不是合法计划");
     assert.equal(orchestrator.hasActiveFlow(conductorRoom.roomId), false);
     assert.match(notices.at(-1) ?? "", /无法解析/);
+  });
+
+  it("规划格式错误恰自动重试一次，修复 prompt 固定文案且无 worker 派工", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "retry-ok",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(r, "做东西");
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 1);
+
+    await orchestrator.onPromptDone("conductor", "不是合法任务计划");
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "planning",
+      "首次失败仍处 planning",
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      2,
+      "恰重发一次规划 prompt",
+    );
+    assert.ok(
+      prompts[1]!.content.includes(PLAN_FIX_PROMPT),
+      "第二次规划 prompt 必须含固定修复提示",
+    );
+    assert.ok(
+      !prompts[1]!.content.includes("不是合法任务计划"),
+      "修复 prompt 不得拼接上轮原文输出",
+    );
+    assert.ok(
+      notices.some((m) => m === "规划格式无法解析，正在自动纠正（1/1）；尚未派工"),
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "worker").length,
+      0,
+      "重试期间不得派发 worker",
+    );
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 1);
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "working",
+    );
+  });
+
+  it("计划连续两次无法解析时终止，不再发第三次 prompt", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "retry-fail",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(r, "做东西");
+    await orchestrator.onPromptDone("conductor", "坏输出一");
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 2);
+    await orchestrator.onPromptDone("conductor", "坏输出二");
+    assert.equal(
+      orchestrator.getFlow(r.roomId),
+      undefined,
+      "第二次失败后清理 flow",
+    );
+    assert.equal(orchestrator.hasActiveFlow(r.roomId), false);
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "conductor").length,
+      2,
+      "不得发出第三次规划 prompt",
+    );
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "worker").length,
+      0,
+      "失败路径不得派工",
+    );
+    assert.ok(
+      notices.some(
+        (m) => m === "指挥家输出无法解析为任务计划，重试一次仍失败；本轮未派工，请重试",
+      ),
+    );
+  });
+
+  it("tasks 只有未知成员时判为解析失败并重试，不误报无需派工", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "unknown-member",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(r, "做东西");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"to":"ghost","task":"x"},{"to":"phantom","task":"y"}]}\n```',
+    );
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "planning",
+      "未知成员任务不得按空计划直接答复",
+    );
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 2);
+    assert.ok(prompts[1]!.content.includes(PLAN_FIX_PROMPT));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 0);
+    assert.ok(!notices.some((m) => m.includes("无需派工")));
+    assert.ok(
+      notices.some((m) => m === "规划格式无法解析，正在自动纠正（1/1）；尚未派工"),
+    );
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "working",
+    );
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 1);
+  });
+
+  it("首次解析失败后 export/import 保留次数，恢复重发含修复提示并终止于下一次失败", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "retry-export",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices.push(notice.message),
+    );
+    await orchestrator.start(r, "做东西");
+    await orchestrator.onPromptDone("conductor", "坏输出");
+    const state = orchestrator.export();
+    const exported = (state.flows as Record<string, unknown>[])[0]!;
+    assert.equal(
+      exported.planFormatRetries,
+      1,
+      "导出必须保留已用重试次数",
+    );
+
+    const prompts2: { sessionId: string; content: string }[] = [];
+    const notices2: string[] = [];
+    const orchestrator2 = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts2.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (notice) => notices2.push(notice.message),
+    );
+    await orchestrator2.import(state);
+    orchestrator2.resumeFlows();
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(
+      prompts2.filter((p) => p.sessionId === "conductor").length,
+      1,
+      "恢复后应重发规划 prompt",
+    );
+    assert.ok(
+      prompts2[0]!.content.includes(PLAN_FIX_PROMPT),
+      "恢复重发的规划 prompt 必须含修复提示",
+    );
+
+    await orchestrator2.onPromptDone("conductor", "还是坏输出");
+    assert.equal(orchestrator2.getFlow(r.roomId), undefined, "不得再次重试");
+    assert.ok(
+      notices2.some(
+        (m) => m === "指挥家输出无法解析为任务计划，重试一次仍失败；本轮未派工，请重试",
+      ),
+    );
+    assert.equal(prompts2.filter((p) => p.sessionId === "conductor").length, 1);
+
+    const legacy = JSON.parse(JSON.stringify(state)) as Record<string, unknown>;
+    delete (legacy.flows as Record<string, unknown>[])[0]!.planFormatRetries;
+    const orch3 = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orch3.import(legacy);
+    const reExport = (orch3.export().flows as Record<string, unknown>[])[0]!;
+    assert.equal(reExport.planFormatRetries, 0, "legacy 缺字段按 0");
+  });
+
+  it("澄清答复后的重规划格式错误仍只重试一次且修复 prompt 保留原答复", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "retry-clar",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+    );
+    await orchestrator.start(r, "写个口号");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[],"questions":["什么主题？"]}\n```',
+    );
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "awaiting-input",
+    );
+    assert.equal(orchestrator.answerClarification(r.roomId, "MoonTeaClub"), true);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 2);
+    assert.ok(prompts[1]!.content.includes("MoonTeaClub"));
+
+    await orchestrator.onPromptDone("conductor", "重规划输出坏格式");
+    assert.equal(prompts.filter((p) => p.sessionId === "conductor").length, 3);
+    const fixPrompt = prompts[2]!.content;
+    assert.ok(fixPrompt.includes(PLAN_FIX_PROMPT));
+    assert.ok(fixPrompt.includes("MoonTeaClub"), "修复 prompt 仍带原答复");
+    assert.ok(fixPrompt.includes("交付结果满足用户目标"), "修复 prompt 仍带验收标准");
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 0);
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "planning",
+    );
+
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"写口号"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker").length, 1);
+    assert.equal(
+      (orchestrator.getFlow(r.roomId) as { phase?: string } | undefined)?.phase,
+      "working",
+    );
   });
 
   it("子任务派发失败后自动重试，失败依赖不解锁下游任务", async () => {

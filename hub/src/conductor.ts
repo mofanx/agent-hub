@@ -51,6 +51,7 @@ type TaskResult = {
   verifyStdout?: string;
   verifyStderr?: string;
   verifyCheckId?: string;
+  verifyCheckIdProvided?: boolean;
   /** 对其他任务的独立验证声明（verify 字段） */
   verifications?: { taskId: string; verdict: string; evidence: VerificationEvidence }[];
 };
@@ -167,6 +168,7 @@ type Flow = {
   clarificationAnswer?: string;
   challengeScheduled?: boolean;
   challengeTaskId?: string;
+  planFormatRetries: number;
 };
 
 export type ConductorNotice = { roomId: string; message: string };
@@ -186,6 +188,9 @@ const MAX_BACKEND_RUNS = 20;
 const MAX_PENDING_TOOL_CALLS = 20;
 const ISOLATED_CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const ISOLATED_CHECK_MAX = 32;
+const PLAN_FORMAT_RETRY_LIMIT = 1;
+const PLAN_FORMAT_FIX_PROMPT =
+  "上一次规划无法解析为任务计划，尚未派工。请只输出一个 JSON code block，顶层包含 goal（字符串）、acceptanceCriteria（字符串数组）和 tasks（数组）；每项任务的 to 必须是现有成员且 task 非空。若确实需要用户先决定，请输出 questions（最多 4 条）并将 tasks 设为 []。不要解释或调用工具。";
 
 export function parseIsolatedChecks(
   raw: string | undefined,
@@ -537,10 +542,14 @@ export class ConductorOrchestrator {
       startedAt,
       finishedAt: Date.now(),
     });
-    const preset =
-      result.verifyCheckId && Object.hasOwn(this.isolatedChecks, result.verifyCheckId)
+    const preset = result.verifyCheckIdProvided
+      ? result.verifyCheckId &&
+        Object.hasOwn(this.isolatedChecks, result.verifyCheckId)
         ? this.isolatedChecks[result.verifyCheckId]
-        : undefined;
+        : undefined
+      : Object.values(this.isolatedChecks).find(
+          (approved) => approved === command,
+        );
     let check: AutomaticCheck;
     if (!preset) {
       check = staticBlocked("check_unapproved");
@@ -823,6 +832,7 @@ export class ConductorOrchestrator {
       artifactContext,
       supplements: [],
       help: new Map(),
+      planFormatRetries: 0,
     };
   }
 
@@ -917,7 +927,9 @@ export class ConductorOrchestrator {
             supplements: flow.supplements.map((s) => s.text),
           }
         : undefined;
-    const promptText = this.buildPlanningPrompt(room, flow.goal, flow.artifactContext, qa);
+    const promptText =
+      this.buildPlanningPrompt(room, flow.goal, flow.artifactContext, qa) +
+      (flow.planFormatRetries > 0 ? `\n\n${PLAN_FORMAT_FIX_PROMPT}` : "");
     this.agent.prompt(room.conductorId, promptText).catch((err: unknown) => {
       logError("conductor planning prompt", err);
       const cur = this.flows.get(flow.roomId);
@@ -1392,10 +1404,20 @@ export class ConductorOrchestrator {
   private async dispatch(flow: Flow, room: Room, conductorOutput: string): Promise<void> {
     const plan = parsePlan(conductorOutput, room);
     if (plan === null) {
+      if (flow.planFormatRetries < PLAN_FORMAT_RETRY_LIMIT) {
+        flow.planFormatRetries = PLAN_FORMAT_RETRY_LIMIT;
+        this.notice({
+          roomId: flow.roomId,
+          message: "规划格式无法解析，正在自动纠正（1/1）；尚未派工",
+        });
+        this.sendPlanningPrompt(flow, room);
+        return;
+      }
       this.flows.delete(flow.roomId);
+      this.emitFlow?.(flow.roomId);
       this.notice({
         roomId: flow.roomId,
-        message: "指挥家输出无法解析为任务计划，本轮编排已取消，请重试",
+        message: "指挥家输出无法解析为任务计划，重试一次仍失败；本轮未派工，请重试",
       });
       return;
     }
@@ -1699,7 +1721,7 @@ export class ConductorOrchestrator {
         '```',
         "",
         "若子任务涉及代码修改，强烈建议在 JSON 中附加可验证字段：baseline（修改前代码/状态）、diff（实际修改）、reproSteps（复现步骤）、verifyCommand（验证命令）。这些会直接进入验收证据，供其他成员或用户复查。",
-        "若管理员已预设隔离检查 ID，请在报告 JSON 中附加 verifyCheckId 与其对应的 verifyCommand；缺少预设 ID 时仅记录成员自报，不触发 Hub 运行任意命令。",
+        "若报告 verifyCommand，Hub 只会在命令与管理员已预设的检查完全匹配时尝试隔离运行；未提供 verifyCheckId 时还需文件产物。若知道预设 ID，可附加 verifyCheckId；ID 未获批准或与命令不一致不会回退为自动匹配。未获批准的命令仅保留成员自报，绝不自动运行。",
         "如果没有 artifact，可以只输出文本，不必输出 JSON。",
       ].join("\n");
       const prompt = this.rooms.buildPrompt(
@@ -2148,6 +2170,7 @@ export class ConductorOrchestrator {
           : {}),
         ...(flow.challengeScheduled ? { challengeScheduled: true } : {}),
         ...(flow.challengeTaskId ? { challengeTaskId: flow.challengeTaskId } : {}),
+        planFormatRetries: flow.planFormatRetries,
         results: Object.fromEntries(
           [...flow.results.entries()].map(([id, r]) => [
             id,
@@ -2214,6 +2237,10 @@ export class ConductorOrchestrator {
         ...(typeof f.challengeTaskId === "string" && f.challengeTaskId
           ? { challengeTaskId: f.challengeTaskId }
           : {}),
+        planFormatRetries:
+          f.planFormatRetries === 0 || f.planFormatRetries === 1
+            ? f.planFormatRetries
+            : 0,
       };
       const rawClar = f.clarification as Record<string, unknown> | undefined;
       if (rawClar && typeof rawClar === "object") {
@@ -2488,6 +2515,7 @@ function extractTaskResult(output: string): TaskResult {
         if (verifyStdout) result.verifyStdout = verifyStdout;
         const verifyStderr = typeof obj.verifyStderr === "string" ? obj.verifyStderr.trim() : undefined;
         if (verifyStderr) result.verifyStderr = verifyStderr;
+        if (Object.hasOwn(obj, "verifyCheckId")) result.verifyCheckIdProvided = true;
         const verifyCheckId = typeof obj.verifyCheckId === "string" ? obj.verifyCheckId.trim() : undefined;
         if (verifyCheckId && ISOLATED_CHECK_ID_RE.test(verifyCheckId)) {
           result.verifyCheckId = verifyCheckId;
@@ -2621,6 +2649,7 @@ function parsePlan(output: string, room: Room): ConductorPlan | null {
       const obj = JSON.parse(raw) as Record<string, unknown>;
       const tasks = resolveParsedTasks(obj.tasks, room);
       if (tasks === null) continue;
+      if (Array.isArray(obj.tasks) && tasks.length !== obj.tasks.length) continue;
       const goal = typeof obj.goal === "string" ? obj.goal : undefined;
       const acceptanceCriteria = Array.isArray(obj.acceptanceCriteria)
         ? obj.acceptanceCriteria

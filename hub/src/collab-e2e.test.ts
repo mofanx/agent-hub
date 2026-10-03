@@ -1144,7 +1144,7 @@ describe("collab-e2e", () => {
     assert.deepEqual(calls, ["npm test"], "只有完整候选才调用 runner 且仅一次");
   });
 
-  it("隔离检查门控：缺 ID/未知 ID/命令不一致一律 blocked 且不调 runner", async () => {
+  it("隔离检查门控：无 ID 需 file+精确匹配批准命令，非法/未知 ID 一律 blocked", async () => {
     const h = makeHarness(
       [
         { sessionId: "s1", name: "leader" },
@@ -1154,6 +1154,8 @@ describe("collab-e2e", () => {
         { sessionId: "s5", name: "w4" },
         { sessionId: "s6", name: "w5" },
         { sessionId: "s7", name: "w6" },
+        { sessionId: "s8", name: "w7" },
+        { sessionId: "s9", name: "w8" },
       ],
       { conductorId: "s1" },
       { unit: "npm test" },
@@ -1173,7 +1175,7 @@ describe("collab-e2e", () => {
     await h.manager.handle(h.room, "任务", {});
     await h.done(
       "s1",
-      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"},{"id":"t2","to":"w2","task":"B"},{"id":"t3","to":"w3","task":"C"},{"id":"t4","to":"w4","task":"D"},{"id":"t5","to":"w5","task":"E"},{"id":"t6","to":"w6","task":"F"}]}\n```',
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"},{"id":"t2","to":"w2","task":"B"},{"id":"t3","to":"w3","task":"C"},{"id":"t4","to":"w4","task":"D"},{"id":"t5","to":"w5","task":"E"},{"id":"t6","to":"w6","task":"F"},{"id":"t7","to":"w7","task":"G"},{"id":"t8","to":"w8","task":"H"}]}\n```',
     );
     await tick();
     await h.done(
@@ -1197,19 +1199,29 @@ describe("collab-e2e", () => {
       '```json\n{"text":"E","verifyCommand":"npm test","verifyCheckId":"nope"}\n```',
     );
     await h.done("s7", '```json\n{"text":"F","verifyCommand":"npm test"}\n```');
+    await h.done(
+      "s8",
+      '```json\n{"text":"G","verifyCommand":"npm run lint","artifacts":[{"type":"file","path":"g.ts","summary":"x"}]}\n```',
+    );
+    await h.done(
+      "s9",
+      '```json\n{"text":"H","verifyCommand":"npm test","verifyCheckId":"INVALID ID!","artifacts":[{"type":"file","path":"h.ts","summary":"x"}]}\n```',
+    );
     await tick(20);
     const tasks = h.flow()!.tasks;
     const t1 = tasks.find((t) => t.id === "t1")!;
-    assert.equal(t1.automaticCheck?.status, "blocked");
-    assert.equal(t1.automaticCheck?.reason, "check_unapproved", "缺 verifyCheckId 不得执行");
+    assert.equal(
+      t1.automaticCheck?.status,
+      "exited_zero",
+      "无 ID + file + 精确匹配批准命令应执行",
+    );
     const t2 = tasks.find((t) => t.id === "t2")!;
     assert.equal(t2.automaticCheck?.status, "blocked");
-    assert.equal(t2.automaticCheck?.reason, "check_unapproved", "未知 ID 不得执行");
+    assert.equal(t2.automaticCheck?.reason, "check_unapproved", "未知 ID 不得执行且不回退匹配");
     const t3 = tasks.find((t) => t.id === "t3")!;
     assert.equal(t3.automaticCheck?.status, "blocked");
     assert.equal(t3.automaticCheck?.reason, "command_mismatch", "命令与预设不一致不得执行");
     assert.equal(t3.verifyCheckId, "unit", "成员报告的 ID 仍应透传给 UI");
-    assert.ok(!("snapshotCurrent" in t1.automaticCheck!), "blocked 检查不输出 snapshotCurrent");
     const t4 = tasks.find((t) => t.id === "t4")!;
     assert.equal(
       t4.automaticCheck?.status,
@@ -1228,7 +1240,26 @@ describe("collab-e2e", () => {
       "not_run",
       "无 ID 且无 artifact 保持 not_run",
     );
-    assert.deepEqual(calls, ["npm test"], "只有合法预设 ID 才调用 runner 且仅一次");
+    const t7 = tasks.find((t) => t.id === "t7")!;
+    assert.equal(t7.automaticCheck?.status, "blocked");
+    assert.equal(
+      t7.automaticCheck?.reason,
+      "check_unapproved",
+      "无 ID 且命令未获批准不得执行",
+    );
+    const t8 = tasks.find((t) => t.id === "t8")!;
+    assert.equal(t8.automaticCheck?.status, "blocked");
+    assert.equal(
+      t8.automaticCheck?.reason,
+      "check_unapproved",
+      "显式非法 ID 不得回退为命令匹配",
+    );
+    assert.equal(t8.verifyCheckId, undefined, "非法 ID 不得透出 getFlow");
+    assert.deepEqual(
+      calls.sort(),
+      ["npm test", "npm test"],
+      "runner 恰调用两次且都用预设批准命令",
+    );
   });
 
   it("隔离检查门控：原型键与非法 ID 不穿透，合法自有键 constructor 可执行", async () => {
