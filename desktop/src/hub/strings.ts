@@ -75,6 +75,8 @@ export interface Strings {
   backendStatusUnknownExit: string;
   backendStatusMismatch: string;
   flowAwaitingInput: string;
+  flowAcceptanceTitle: string;
+  flowAcceptanceCaution: string;
   clarificationPending: string;
   clarificationReply: string;
   clarificationReplying: string;
@@ -179,6 +181,8 @@ const zh: Strings = {
   backendStatusUnknownExit: "后端未提供结构化退出码",
   backendStatusMismatch: "后端命令、退出码或输出与成员报告不一致",
   flowAwaitingInput: "待确认",
+  flowAcceptanceTitle: "验收标准",
+  flowAcceptanceCaution: "任务完成数不代表验收通过；请核对下方证据。",
   clarificationPending: "指挥家需要你确认以下问题后再派工（点「答复」可自由填写其他方案）：",
   clarificationReply: "答复",
   clarificationReplying: "答复指挥家的确认问题",
@@ -283,6 +287,8 @@ const en: Strings = {
   backendStatusUnknownExit: "Backend did not provide a structured exit code",
   backendStatusMismatch: "Backend command, exit code or output differs from the member report",
   flowAwaitingInput: "Awaiting input",
+  flowAcceptanceTitle: "Acceptance criteria",
+  flowAcceptanceCaution: "Completed tasks do not mean these criteria passed; review the evidence below.",
   clarificationPending: "The conductor needs your answers before dispatching (tap Answer to write any custom plan):",
   clarificationReply: "Answer",
   clarificationReplying: "Answering the conductor's questions",

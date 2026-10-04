@@ -1911,6 +1911,17 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   const showRetry = phase === "awaiting-retry";
   const content = (
     <>
+      {flow.acceptanceCriteria && flow.acceptanceCriteria.length > 0 && (
+        <div className="flow-acceptance">
+          <div className="flow-acceptance-title">{S.flowAcceptanceTitle}</div>
+          <div className="flow-acceptance-caution">{S.flowAcceptanceCaution}</div>
+          <ol className="flow-acceptance-list">
+            {flow.acceptanceCriteria.map((c, i) => (
+              <li key={i}>{c}</li>
+            ))}
+          </ol>
+        </div>
+      )}
       <div className="flow-tasks">
         {tasks.map((t) => (
           <FlowTaskItem key={t.id} task={t} showRetry={showRetry} />

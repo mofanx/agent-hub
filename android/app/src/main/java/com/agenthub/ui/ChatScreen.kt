@@ -2052,6 +2052,26 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                 }
             }
             if (!collapsed) {
+                if (flow.acceptanceCriteria.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        S.flowAcceptanceTitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        S.flowAcceptanceCaution,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    flow.acceptanceCriteria.forEachIndexed { i, c ->
+                        Text(
+                            "${i + 1}. $c",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->
                     FlowTaskRow(task, showRetry, vm) { vm.retryTask(task.id) }

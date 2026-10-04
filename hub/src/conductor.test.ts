@@ -1263,6 +1263,10 @@ describe("conductor", () => {
     assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "summarizing");
     assert.match(prompts.at(-1)!, /先给结论.*待确认.*实际复核/);
     assert.match(prompts.at(-1)!, /未运行或受阻的检查如实说明/);
+    assert.ok(prompts.at(-1)!.includes("对应任务 id"));
+    assert.ok(prompts.at(-1)!.includes("未覆盖"));
+    assert.ok(prompts.at(-1)!.includes("不得用任务完成数代替验收结论"));
+    assert.ok(prompts.at(-1)!.includes("退出码0"));
 
     await orchestrator.onPromptDone("conductor", "最终答复");
     assert.equal(orchestrator.hasActiveFlow(r.roomId), false);

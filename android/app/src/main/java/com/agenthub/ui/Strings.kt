@@ -95,6 +95,8 @@ interface Strings {
     val helpReplyAction: String
     val exitHelpReply: String
     val flowAwaitingInput: String
+    val flowAcceptanceTitle: String
+    val flowAcceptanceCaution: String
     val clarificationPending: String
     val clarificationReplying: String
     val send: String
@@ -344,6 +346,8 @@ object ZhStrings : Strings {
     override val helpReplyAction = "答复"
     override val exitHelpReply = "退出答复"
     override val flowAwaitingInput = "待确认"
+    override val flowAcceptanceTitle = "验收标准"
+    override val flowAcceptanceCaution = "任务完成数不代表验收通过；请核对下方证据。"
     override val clarificationPending = "指挥家需要你确认以下问题后再派工，点「答复」可自由填写其他方案"
     override val clarificationReplying = "答复指挥家的确认问题"
     override val send = "发送"
@@ -593,6 +597,8 @@ object EnStrings : Strings {
     override val helpReplyAction = "Reply"
     override val exitHelpReply = "Exit reply"
     override val flowAwaitingInput = "Awaiting input"
+    override val flowAcceptanceTitle = "Acceptance criteria"
+    override val flowAcceptanceCaution = "Completed tasks do not mean these criteria passed; review the evidence below."
     override val clarificationPending = "The conductor needs your answers before dispatching — tap Answer to write any custom plan"
     override val clarificationReplying = "Answering the conductor's questions"
     override val send = "Send"

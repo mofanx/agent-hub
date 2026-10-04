@@ -111,7 +111,7 @@ describe("collab-e2e", () => {
 
     await h.done(
       "s1",
-      '```json\n{"goal":"交付排序模块","acceptanceCriteria":["实现完成且经独立验证"],"tasks":[{"id":"t1","to":"coder","task":"实现排序模块"},{"id":"t2","to":"tester","task":"独立验证 t1","dependsOn":["t1"]}]}\n```',
+      '```json\n{"goal":"交付排序模块","acceptanceCriteria":["实现完成且经独立验证","成员报告中记录命令和退出码","真实设备上完成端到端操作"],"tasks":[{"id":"t1","to":"coder","task":"实现排序模块"},{"id":"t2","to":"tester","task":"独立验证 t1","dependsOn":["t1"]}]}\n```',
     );
     await tick();
     assert.equal(h.flow()?.phase, "working");
@@ -205,6 +205,7 @@ describe("collab-e2e", () => {
     assert.equal(h.flow()?.phase, "reviewing");
     const reviewPrompt = h.lastPrompt("s1")!;
     assert.match(reviewPrompt.text, /独立验证/);
+    assert.match(reviewPrompt.text, /3\. 真实设备上完成端到端操作/);
     assert.match(reviewPrompt.text, /npm test 8\/8/);
     assert.match(reviewPrompt.text, /兼容 Windows/);
     assert.match(reviewPrompt.text, /成员自报/);
@@ -217,6 +218,10 @@ describe("collab-e2e", () => {
     assert.match(summaryPrompt.text, /npm test 8\/8/);
     assert.match(summaryPrompt.text, /兼容 Windows/);
     assert.match(summaryPrompt.text, /先给结论.*待确认.*实际复核/);
+    assert.match(summaryPrompt.text, /验收标准：实现完成且经独立验证；成员报告中记录命令和退出码；真实设备上完成端到端操作/);
+    assert.match(summaryPrompt.text, /对应任务 id 及证据来源/);
+    assert.match(summaryPrompt.text, /没有明确对应证据时写「未覆盖」/);
+    assert.match(summaryPrompt.text, /退出码0只说明该检查进程退出0，不代表该标准或整体目标达标/);
     assert.match(summaryPrompt.text, /成员自报/);
     assert.match(summaryPrompt.text, /并未自动执行/);
 

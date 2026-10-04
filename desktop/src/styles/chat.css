@@ -1213,6 +1213,38 @@
 }
 
 /* ---- Flow 编排 ---- */
+.flow-acceptance {
+  margin-bottom: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+
+.flow-acceptance-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.flow-acceptance-caution {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.1rem;
+}
+
+.flow-acceptance-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.flow-acceptance-list li {
+  margin-top: 0.15rem;
+}
+
 .flow-tasks {
   display: flex;
   flex-direction: column;
