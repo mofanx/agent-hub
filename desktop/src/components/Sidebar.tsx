@@ -448,12 +448,6 @@ export function Sidebar() {
 
       {dialog?.type === "session" && <SessionDialog onClose={() => setDialog(null)} />}
       {dialog?.type === "room" && <RoomDialog onClose={() => setDialog(null)} />}
-      {store.editRoomTarget && (
-        <RoomDialog
-          onClose={() => store.closeEditRoomDialog()}
-          editingRoom={store.editRoomTarget}
-        />
-      )}
       {showFilter && (
         <FilterSheet
           sessionFilter={sessionFilter}

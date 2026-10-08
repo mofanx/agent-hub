@@ -1264,7 +1264,7 @@ private fun roomGroupName(groupBy: RoomGroupBy, S: Strings): String = when (grou
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RoomEditorDialog(
+internal fun RoomEditorDialog(
     room: RoomInfo?,
     vm: ChatViewModel,
     S: Strings,

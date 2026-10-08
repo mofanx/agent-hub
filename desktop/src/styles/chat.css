@@ -33,6 +33,20 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: baseline;
+}
+
+.chat-title-name {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-title-count {
+  flex: none;
 }
 
 .chat-subtitle {
@@ -50,6 +64,17 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.8rem;
+}
+
+.chat-meta > * {
+  flex: none;
+  max-width: 100%;
 }
 
 .chat-search-bar {

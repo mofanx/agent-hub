@@ -10,6 +10,7 @@ import {
   ChevronUp,
   Circle,
   Cpu,
+  Ellipsis,
   FileCode,
   FolderTree,
   ImagePlus,
@@ -189,20 +190,23 @@ export function ChatScreen() {
     ? { mention: "普通群", conductor: "指挥家", roundrobin: "轮询", parallel: "并行", pipeline: "流水线", debate: "辩论", auto: "自动" }[store.currentRoom.mode]
     : undefined;
   const subtitle = store.currentRoom
-    ? `${modeLabel ?? store.currentRoom.mode} · ${store.currentRoom.members.map((m) => `@${m[1]}`).join("  ")}`
+    ? (modeLabel ?? store.currentRoom.mode)
     : store.currentSession
       ? store.displayName(store.currentSession)
       : "";
   const activeSessionId = store.currentRoom?.activeSpeaker || store.currentSession?.sessionId || "";
   const contextUsage = activeSessionId ? store.sessionUsage[activeSessionId] : undefined;
   const quota = store.backendQuota;
-  const quotaSummary =
-    !isRoom && store.currentSession?.agent === "devin" && quota?.available
-      ? `Devin ${[
-          quota.daily ? S.quotaDaily.replace("%s", String(quota.daily.usedPercent)) : "",
-          quota.weekly ? S.quotaWeekly.replace("%s", String(quota.weekly.usedPercent)) : "",
-        ].filter(Boolean).join(" · ")}`
-      : "";
+  const hasDevinMember = store.currentRoom
+    ? store.currentRoom.members.some(([sid]) => store.roomMemberModels[sid]?.backend === "devin")
+    : store.currentSession?.agent === "devin";
+  const quotaParts = quota?.available
+    ? [
+        quota.daily ? S.quotaDaily.replace("%s", String(quota.daily.usedPercent)) : "",
+        quota.weekly ? S.quotaWeekly.replace("%s", String(quota.weekly.usedPercent)) : "",
+      ].filter(Boolean)
+    : [];
+  const quotaSummary = hasDevinMember && quotaParts.length > 0 ? `Devin ${quotaParts.join(" · ")}` : "";
 
   const searchQuery = inChatSearchQuery.trim();
   const matchPositions = useMemo(() => {
@@ -706,10 +710,25 @@ export function ChatScreen() {
       <div className="chat-header">
         {!searchOpen ? (
           <div className="title-block">
-            <div className="chat-title">{title}</div>
-            {subtitle && <div className="chat-subtitle">{subtitle}</div>}
-            {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage, S)}</div>}
-            {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
+            <div className="chat-title">
+              <span className="chat-title-name">{title}</span>
+              {isRoom && <span className="chat-title-count"> ({store.currentRoom?.members.length})</span>}
+            </div>
+            {isRoom ? (
+              <>
+                <div className="chat-meta">
+                  {subtitle && <div className="chat-subtitle">{subtitle}</div>}
+                  {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
+                </div>
+                {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage, S)}</div>}
+              </>
+            ) : (
+              <>
+                {subtitle && <div className="chat-subtitle">{subtitle}</div>}
+                {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage, S)}</div>}
+                {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
+              </>
+            )}
           </div>
         ) : (
           <div className="chat-search-bar">
@@ -779,6 +798,16 @@ export function ChatScreen() {
               <Cpu size={13} />
               <span>{isRoom ? "成员模型" : (store.modelCurrent || "模型")}</span>
             </button>
+            {store.currentRoom && (
+              <button
+                className="icon-btn"
+                title="编辑群聊"
+                aria-label="编辑群聊"
+                onClick={() => store.openEditRoomDialog(store.currentRoom!)}
+              >
+                <Ellipsis size={15} />
+              </button>
+            )}
           </>
         )}
       </div>

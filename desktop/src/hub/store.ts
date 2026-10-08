@@ -1200,8 +1200,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (config?.debateJudge) params.debateJudge = config.debateJudge;
         if (config?.debateRounds != null) params.debateRounds = config.debateRounds;
         if (memberRoles && Object.keys(memberRoles).length > 0) params.memberRoles = memberRoles;
-        await getOrCall("room.update", params);
+        const result = await getOrCall<Record<string, unknown>>("room.update", params);
+        const updated = parseRoom((result.room as Record<string, unknown>) ?? {});
+        if (updated.roomId) {
+          set({ rooms: get().rooms.map((r) => (r.roomId === updated.roomId ? updated : r)) });
+        }
         await get().refreshAll();
+        if (updated.roomId && get().currentRoom?.roomId === updated.roomId) {
+          set({ currentRoom: updated });
+          void get().refreshRoomMemberModels();
+        }
       } catch (e) {
         set({ connectError: String(e) });
       }
@@ -1268,6 +1276,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().refreshFlow(updatedRoom.roomId);
       get().refreshArtifacts({ roomId: updatedRoom.roomId });
       if (updatedRoom.activeSpeaker) void get().refreshSessionUsage(updatedRoom.activeSpeaker);
+      void get().refreshRoomMemberModels();
     },
 
     clearJumpToAt: () => {
@@ -2309,7 +2318,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const firstSid = Object.keys(first)[0] ?? null;
         set({ showModelPicker: true, selectedMemberSession: firstSid });
         if (firstSid) await get().refreshModelListForMember(firstSid);
-        void get().refreshBackendQuota();
       } else {
         await get().refreshModelList();
         set({ showModelPicker: true, selectedMemberSession: null });
@@ -2367,10 +2375,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!room) { set({ roomMemberModels: {} }); return; }
       try {
         const result = await getOrCall<Record<string, unknown>>("room.memberModels", { roomId: room.roomId });
+        if (get().currentRoom?.roomId !== room.roomId) return;
         const members = (result.members as Array<{ sessionId: string; name: string; backend: string; model: string }>) ?? [];
         const map: Record<string, { name: string; backend: string; model: string }> = {};
         for (const m of members) map[m.sessionId] = { name: m.name, backend: m.backend, model: m.model };
         set({ roomMemberModels: map });
+        if (Object.values(map).some((m) => m.backend === "devin")) void get().refreshBackendQuota();
       } catch (e) {
         set({ connectError: String(e) });
       }

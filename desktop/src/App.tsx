@@ -7,6 +7,7 @@ import { ChatScreen } from "./screens/ChatScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { ScheduleScreen } from "./screens/ScheduleScreen";
 import { Sidebar } from "./components/Sidebar";
+import { RoomDialog } from "./screens/dialogs/RoomDialog";
 
 function App() {
   const store = useHubStore();
@@ -62,6 +63,12 @@ function App() {
           </div>
         </main>
       </div>
+      {store.editRoomTarget && (
+        <RoomDialog
+          onClose={() => store.closeEditRoomDialog()}
+          editingRoom={store.editRoomTarget}
+        />
+      )}
     </div>
   );
 }

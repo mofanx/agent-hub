@@ -21,6 +21,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.ClipEntry
@@ -74,6 +76,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Visibility
@@ -211,7 +214,7 @@ private fun ContextUsage.format(S: Strings): String = buildString {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
@@ -344,12 +347,19 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         vm.refreshBusy()
     }
 
-    BackHandler {
+    var editingRoom by remember(sessionKey) { mutableStateOf(false) }
+
+    BackHandler(enabled = !editingRoom) {
         if (vm.multiSelectMode) vm.exitMultiSelect()
         else vm.backToList()
     }
 
     ModelPickerDialog(vm)
+    if (editingRoom) {
+        vm.currentRoom?.let {
+            RoomEditorDialog(it, vm, S) { editingRoom = false }
+        }
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
@@ -374,59 +384,18 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             } else {
             TopAppBar(
                 title = {
-                    Column {
+                    if (isRoom) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                title,
+                                modifier = Modifier.weight(1f, fill = false),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(" (${vm.currentRoom?.members?.size ?: 0})")
+                        }
+                    } else {
                         Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (isRoom) {
-                            val room = vm.currentRoom!!
-                            val modeLabel = when (room.mode) {
-                                "mention" -> S.modeMention
-                                "conductor" -> S.modeConductor
-                                "roundrobin" -> S.modeRoundRobin
-                                "parallel" -> S.modeParallel
-                                "pipeline" -> S.modePipeline
-                                "debate" -> S.modeDebate
-                                "auto" -> S.modeAuto
-                                else -> room.mode
-                            }
-                            Text(
-                                "${modeLabel}${room.subMode?.let { " · $it" } ?: ""} | ${room.members.joinToString("  ") { "@${it.second}" }}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        if (contextUsage != null) {
-                            Text(
-                                contextUsage!!.format(S),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        if (vm.modelCurrent.isNotBlank()) {
-                            val modelLabel = if (isRoom) {
-                                val count = vm.currentRoom?.members?.size ?: 0
-                                "成员模型 · ${count}人"
-                            } else {
-                                val quota = vm.backendQuota
-                                val quotaText = if (quota?.available == true) {
-                                    listOfNotNull(
-                                        quota.daily?.let { S.quotaDaily.format(it.usedPercent) },
-                                        quota.weekly?.let { S.quotaWeekly.format(it.usedPercent) },
-                                    ).joinToString(" · ")
-                                } else ""
-                                if (quotaText.isNotEmpty()) "${vm.modelCurrent} · $quotaText" else vm.modelCurrent
-                            }
-                            Text(
-                                modelLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
                     }
                 },
                 navigationIcon = {
@@ -461,8 +430,14 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             Text("文件", style = MaterialTheme.typography.labelMedium)
                         }
                     }
-                    IconButton(onClick = { vm.backToList() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
+                    if (isRoom) {
+                        IconButton(onClick = { editingRoom = true }) {
+                            Icon(Icons.Filled.MoreHoriz, contentDescription = S.editRoom)
+                        }
+                    } else {
+                        IconButton(onClick = { vm.backToList() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
+                        }
                     }
                 },
             )
@@ -481,6 +456,76 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         WindowInsets.ime.exclude(WindowInsets.navigationBars),
                     ),
             ) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                    val quota = vm.backendQuota
+                    val hasDevinMember = if (isRoom) {
+                        vm.currentRoom?.members?.any {
+                            vm.roomMemberModels[it.first]?.second == "devin"
+                        } == true
+                    } else {
+                        vm.currentSession?.agent == "devin"
+                    }
+                    val quotaText = if (quota?.available == true && hasDevinMember) {
+                        listOfNotNull(
+                            quota.daily?.let { S.quotaDaily.format(it.usedPercent) },
+                            quota.weekly?.let { S.quotaWeekly.format(it.usedPercent) },
+                        ).joinToString(" · ")
+                    } else ""
+                    if (isRoom) {
+                        val room = vm.currentRoom!!
+                        val modeLabel = when (room.mode) {
+                            "mention" -> S.modeMention
+                            "conductor" -> S.modeConductor
+                            "roundrobin" -> S.modeRoundRobin
+                            "parallel" -> S.modeParallel
+                            "pipeline" -> S.modePipeline
+                            "debate" -> S.modeDebate
+                            "auto" -> S.modeAuto
+                            else -> room.mode
+                        }
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                modeLabel,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (quotaText.isNotEmpty()) {
+                                Text(
+                                    quotaText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                )
+                            }
+                        }
+                    }
+                    if (contextUsage != null) {
+                        Text(
+                            contextUsage.format(S),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (!isRoom && vm.modelCurrent.isNotBlank()) {
+                        Text(
+                            vm.modelCurrent,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (!isRoom && quotaText.isNotEmpty()) {
+                        Text(
+                            quotaText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                }
                 if (isRoom || vm.currentSession != null) {
                     var expandedTop by remember(sessionKey) { mutableStateOf<String?>(null) }
                     ChatTopCapsules(vm, expandedTop, showRoomExtras = isRoom) { expandedTop = it }
