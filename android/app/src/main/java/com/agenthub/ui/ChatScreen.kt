@@ -1825,13 +1825,12 @@ private fun RawChatBubble(
                                 color = answeredColor,
                             )
                         } else {
-                            Row {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 item.options.forEach { (id, name) ->
                                     OutlinedButton(
                                         onClick = { vm.answerPermission(item.requestId, id, name) },
-                                        modifier = Modifier.padding(end = 8.dp),
                                         shape = RoundedCornerShape(12.dp),
-                                    ) { Text(name) }
+                                    ) { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                                 }
                             }
                         }
