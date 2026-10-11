@@ -124,12 +124,16 @@ export function startServer(options: {
       hubs.set(hubId, state);
       console.log(`[gateway] hub registered: ${hubId}`);
 
+      const proto = String(req.headers['x-forwarded-proto'] || 'https');
+      const host = req.headers.host || 'gateway.example.com';
+      const scheme = proto === 'https' ? 'wss' : 'ws';
+      const publicUrl = `${scheme}://${host}/hub/${hubId}`;
       ws.send(
         JSON.stringify({
           type: 'registered',
           hubId,
           publicToken,
-          publicUrl: `wss://gateway.example.com/hub/${hubId}`,
+          publicUrl,
         }),
       );
 
