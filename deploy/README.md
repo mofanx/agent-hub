@@ -7,6 +7,7 @@ Hub 是纯 WebSocket 服务（无 TLS），远程接入的本质都是「给 878
 | **cloudflared 快速隧道** | 无 | 零配置，`HUB_TUNNEL=1` 即可 | 地址每次重启变化、无 SLA |
 | **自建 VPS + 域名** | VPS、域名 | 固定地址、完全自控 | 需维护 VPS |
 | **Tailscale** | PC/客户端装 Tailscale | 零暴露、端到端加密 | 客户端需装 Tailscale |
+| **hub-gateway 中继网关** | VPS、域名 | 外部用户零安装、hubId 管理 | 需部署 Gateway + Agent |
 
 ## 方式一：cloudflared 快速隧道
 
@@ -104,3 +105,84 @@ Android App 或 Desktop App 地址栏填 `wss://hub.你的域名`，Token 填 `H
 ## 方式三：Tailscale（最省心）
 
 PC 和客户端都装 Tailscale 并登录同一账号，Android App 或 Desktop App 直接填 PC 的 Tailscale IP（100.x.x.x）+ 端口 8787。流量端到端加密，Hub 无需任何改动。
+
+## 方式四：hub-gateway 中继网关
+
+架构：外部客户端 → `wss://gateway.你的域名/hub/<hubId>` → VPS (`hub-gateway server`) → 内网 Agent (`hub-gateway up <hubId>`) → 本地 Hub (`ws://127.0.0.1:8787`)
+
+外部用户**无需安装任何软件**，只需要一个 URL 和 `HUB_TOKEN` 即可连接。
+
+### 1. 安装
+
+```bash
+cd deploy/gateway
+npm install
+npm run build
+npm i -g .
+```
+
+### 2. VPS 上启动 Gateway
+
+```bash
+hub-gateway server --token <GATEWAY_TOKEN>
+```
+
+常驻 systemd：
+
+```bash
+hub-gateway server --token <GATEWAY_TOKEN> --daemon
+```
+
+### 3. 内网机器上接入 Hub
+
+```bash
+hub-gateway up home-pc \
+  --to wss://gateway.yourdomain.com \
+  --token <GATEWAY_TOKEN> \
+  --daemon
+```
+
+`home-pc` 是任意 hubId，不同机器用不同 id。公网地址就是：
+
+```text
+wss://gateway.yourdomain.com/hub/home-pc
+```
+
+### 4. TLS 反向代理
+
+任选 Caddy 或 Nginx 一种：
+
+```bash
+# Caddy
+sudo cp deploy/gateway/Caddyfile /etc/caddy/Caddyfile
+# 把 gateway.yourdomain.com 换成你的域名
+sudo systemctl reload caddy
+
+# Nginx
+sudo cp deploy/gateway/nginx.conf /etc/nginx/sites-available/agent-hub-gateway
+# 编辑域名和证书路径
+sudo ln -s /etc/nginx/sites-available/agent-hub-gateway /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 5. 管理命令
+
+```bash
+# 查看在线 hub
+hub-gateway list --to wss://gateway.yourdomain.com --token <GATEWAY_TOKEN>
+
+# 停止某个 hub 接入
+hub-gateway down home-pc
+
+# 查看 systemd 状态
+hub-gateway status
+
+# 生成 PM2 配置（自动创建 .env 和 ecosystem.config.cjs）
+hub-gateway pm2
+```
+
+### 安全
+
+- `GATEWAY_TOKEN`：只有你能注册/管理 hubId，不要暴露。
+- `HUB_TOKEN`：外部用户连入 Hub 后仍需通过 Hub 自身鉴权，Gateway 不干预。
+- `.env` 和 `ecosystem.config.cjs` 已加入 `.gitignore`，不要提交到仓库。
