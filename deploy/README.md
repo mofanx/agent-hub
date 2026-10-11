@@ -106,11 +106,25 @@ Android App 或 Desktop App 地址栏填 `wss://hub.你的域名`，Token 填 `H
 
 PC 和客户端都装 Tailscale 并登录同一账号，Android App 或 Desktop App 直接填 PC 的 Tailscale IP（100.x.x.x）+ 端口 8787。流量端到端加密，Hub 无需任何改动。
 
-## 方式四：hub-gateway 中继网关
+## 方式四：hub-gateway 中继网关（生产安全版）
 
 架构：外部客户端 → `wss://gateway.你的域名/hub/<hubId>` → VPS (`hub-gateway server`) → 内网 Agent (`hub-gateway up <hubId>`) → 本地 Hub (`ws://127.0.0.1:8787`)
 
-外部用户**无需安装任何软件**，只需要一个 URL 和 `HUB_TOKEN` 即可连接。
+外部用户**无需安装任何软件**，但需要同时掌握 **URL + PUBLIC_TOKEN** 才能连接。`HUB_TOKEN` 只在 Agent 与本地 Hub 之间使用，不会暴露给公网客户端。
+
+### 安全模型
+
+| 凭证 | 作用 | 传递方式 | 泄露风险 |
+|---|---|---|---|
+| `GATEWAY_TOKEN` | Agent 注册 / 管理 | `Authorization: Bearer` Header | 不进 URL/日志 |
+| `PUBLIC_TOKEN` | 授权公网客户端接入 | `X-Public-Token: <token>` Header | 不进 URL/日志 |
+| `HUB_TOKEN` | Agent → 本地 Hub | systemd `EnvironmentFile` | 不在命令行 |
+| `ADMIN_TOKEN` | 管理 `list`/`DELETE` | `Authorization: Bearer` Header | 不默认暴露 |
+
+- Gateway 默认只监听 `127.0.0.1`，流量必须经 Nginx/Caddy TLS。
+- `hubId` 强制 `16~64` 位随机串（`a-zA-Z0-9_-`），禁止 `home-pc` 等人可读名字。
+- 每个 IP 有连接/失败次数限流。
+- 同一 hubId 有最大公网并发数限制（默认 5）。
 
 ### 1. 安装
 
@@ -123,30 +137,41 @@ npm i -g .
 
 ### 2. VPS 上启动 Gateway
 
+前台：
+
 ```bash
-hub-gateway server --token <GATEWAY_TOKEN>
+hub-gateway server --gateway-token <GATEWAY_TOKEN>
 ```
 
-常驻 systemd：
+常驻 systemd（自动生成 `/etc/hub-gateway/server.env`，权限 600）：
 
 ```bash
-hub-gateway server --token <GATEWAY_TOKEN> --daemon
+hub-gateway install server --gateway-token <GATEWAY_TOKEN>
 ```
 
 ### 3. 内网机器上接入 Hub
 
+`HUB_TOKEN` 从环境变量读取，不进入命令行：
+
 ```bash
-hub-gateway up home-pc \
+export HUB_TOKEN=<本地 Hub 的 HUB_TOKEN>
+export GATEWAY_TOKEN=<GATEWAY_TOKEN>
+
+hub-gateway up <random-hub-id> \
   --to wss://gateway.yourdomain.com \
-  --token <GATEWAY_TOKEN> \
   --daemon
 ```
 
-`home-pc` 是任意 hubId，不同机器用不同 id。公网地址就是：
+`hubId` 用随机串，例如 `openssl rand -hex 8`。
+
+接入成功后终端会打印：
 
 ```text
-wss://gateway.yourdomain.com/hub/home-pc
+[agent] public url: wss://gateway.yourdomain.com/hub/<hubId>
+[agent] public token: <PUBLIC_TOKEN>
 ```
+
+把 **URL + PUBLIC_TOKEN** 一起给授权用户。
 
 ### 4. TLS 反向代理
 
@@ -160,7 +185,7 @@ sudo systemctl reload caddy
 
 # Nginx
 sudo cp deploy/gateway/nginx.conf /etc/nginx/sites-available/agent-hub-gateway
-# 编辑域名和证书路径
+# 编辑域名、证书路径，以及 Gateway 端口（默认 8788）
 sudo ln -s /etc/nginx/sites-available/agent-hub-gateway /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
@@ -168,11 +193,16 @@ sudo nginx -t && sudo systemctl reload nginx
 ### 5. 管理命令
 
 ```bash
-# 查看在线 hub
-hub-gateway list --to wss://gateway.yourdomain.com --token <GATEWAY_TOKEN>
+# 查看在线 hub（含 PUBLIC_TOKEN）
+hub-gateway list --to wss://gateway.yourdomain.com --admin-token <GATEWAY_TOKEN>
 
-# 停止某个 hub 接入
-hub-gateway down home-pc
+# 强制断开某个 hub
+hub-gateway list 后拿到 hubId，再 curl：
+curl -H "Authorization: Bearer <GATEWAY_TOKEN>" \
+  https://gateway.yourdomain.com/admin/hubs/<hubId> -X DELETE
+
+# 停止本地 systemd 服务
+hub-gateway down <hubId>
 
 # 查看 systemd 状态
 hub-gateway status
@@ -181,8 +211,26 @@ hub-gateway status
 hub-gateway pm2
 ```
 
-### 安全
+### 6. 客户端连接
 
-- `GATEWAY_TOKEN`：只有你能注册/管理 hubId，不要暴露。
-- `HUB_TOKEN`：外部用户连入 Hub 后仍需通过 Hub 自身鉴权，Gateway 不干预。
-- `.env` 和 `ecosystem.config.cjs` 已加入 `.gitignore`，不要提交到仓库。
+桌面端或 Android 端连接地址：
+
+```text
+wss://gateway.yourdomain.com/hub/<hubId>
+```
+
+连接时必须带 Header：
+
+```http
+X-Public-Token: <PUBLIC_TOKEN>
+```
+
+> 如果客户端无法设置自定义 Header，可临时降级为 query `?public_token=<PUBLIC_TOKEN>`，但会被 Nginx/Cloudflare 日志记录，不建议生产使用。
+
+之后按正常 Hub 流程发送 `HUB_TOKEN` 鉴权消息。
+
+### 7. 安全提醒
+
+- `GATEWAY_TOKEN` 和 `PUBLIC_TOKEN` 不要写进命令行历史；生产部署用 systemd `EnvironmentFile` 或 PM2 `env`。
+- `.env`、`ecosystem.config.cjs`、systemd `.env` 文件已加入 `.gitignore`，权限设为 `600`。
+- 如需更高安全，可在 Nginx `/admin/` 上加 IP 白名单，或把 Gateway 管理端口拆分到独立内网接口。

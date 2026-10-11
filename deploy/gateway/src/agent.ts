@@ -1,57 +1,35 @@
 import WebSocket from 'ws';
+import { randomBytes } from 'node:crypto';
+
+const TOKEN_RE = /^[a-zA-Z0-9_-]{32,128}$/;
 
 export function startAgent(options: {
   hubId: string;
   gatewayUrl: string;
-  token: string;
+  gatewayToken: string;
+  publicToken?: string;
   localHubUrl: string;
+  hubToken: string;
 }) {
-  const { hubId, gatewayUrl, token, localHubUrl } = options;
+  const { hubId, gatewayUrl, gatewayToken, localHubUrl, hubToken } = options;
   const base = gatewayUrl.replace(/\/$/, '');
-  const controlUrl = `${base}/control/${encodeURIComponent(hubId)}?token=${encodeURIComponent(token)}`;
-  const publicUrl = `${base}/hub/${encodeURIComponent(hubId)}`;
+  const controlUrl = `${base}/control/${encodeURIComponent(hubId)}`;
+  const publicToken = options.publicToken && TOKEN_RE.test(options.publicToken) ? options.publicToken : generateToken();
 
   let remote: WebSocket | null = null;
   let local: WebSocket | null = null;
 
-  const connectRemote = () => {
-    remote = new WebSocket(controlUrl);
-
-    remote.on('open', () => {
-      console.log(`[agent] connected to gateway as ${hubId}`);
-      console.log(`[agent] public url: ${publicUrl}`);
-      connectLocal();
-    });
-
-    remote.on('message', (data) => {
-      if (local && local.readyState === WebSocket.OPEN) {
-        local.send(data);
-      }
-    });
-
-    remote.on('close', () => {
-      console.log('[agent] gateway disconnected');
-      if (local) local.close();
-      process.exit(0);
-    });
-
-    remote.on('error', (err) => {
-      console.error('[agent] gateway error:', err.message);
-      process.exit(1);
-    });
-  };
-
   const connectLocal = () => {
-    local = new WebSocket(localHubUrl);
+    const sep = localHubUrl.includes('?') ? '&' : '?';
+    const localUrl = `${localHubUrl}${sep}token=${encodeURIComponent(hubToken)}`;
+    local = new WebSocket(localUrl);
 
     local.on('open', () => {
-      console.log(`[agent] connected to local Hub ${localHubUrl}`);
+      console.log(`[agent] connected to local Hub`);
     });
 
     local.on('message', (data) => {
-      if (remote && remote.readyState === WebSocket.OPEN) {
-        remote.send(data);
-      }
+      if (remote && remote.readyState === WebSocket.OPEN) remote.send(data);
     });
 
     local.on('close', () => {
@@ -64,5 +42,45 @@ export function startAgent(options: {
     });
   };
 
-  connectRemote();
+  remote = new WebSocket(controlUrl, {
+    headers: {
+      Authorization: `Bearer ${gatewayToken}`,
+      'X-Public-Token': publicToken,
+    },
+  });
+
+  remote.on('open', () => {
+    console.log(`[agent] connected to gateway as ${hubId}`);
+    connectLocal();
+  });
+
+  remote.on('message', (data) => {
+    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
+    try {
+      const msg = JSON.parse(text);
+      if (msg.type === 'registered') {
+        console.log(`[agent] public url: ${msg.publicUrl}`);
+        console.log(`[agent] public token: ${msg.publicToken}`);
+        return;
+      }
+    } catch {
+      // not JSON, forward to local
+    }
+    if (local && local.readyState === WebSocket.OPEN) local.send(data);
+  });
+
+  remote.on('close', (code) => {
+    console.log(`[agent] gateway disconnected (code ${code})`);
+    if (local) local.close();
+    process.exit(code === 1000 ? 0 : 1);
+  });
+
+  remote.on('error', (err) => {
+    console.error('[agent] gateway error:', err.message);
+    process.exit(1);
+  });
+}
+
+function generateToken(): string {
+  return randomBytes(32).toString('hex');
 }

@@ -15,13 +15,34 @@ function getBinPath(): string {
 
 export function generatePm2() {
   const bin = getBinPath().replace(/\\/g, '\\\\');
-  const token = process.env.GATEWAY_TOKEN || randomBytes(24).toString('hex');
+  const gatewayToken = process.env.GATEWAY_TOKEN || randomBytes(32).toString('hex');
+  const publicToken = process.env.PUBLIC_TOKEN || randomBytes(32).toString('hex');
 
   if (!process.env.GATEWAY_TOKEN) {
-    console.log(`GATEWAY_TOKEN 未指定，已自动生成: ${token}`);
+    console.log(`GATEWAY_TOKEN 未指定，已自动生成: ${gatewayToken}`);
   }
 
-  const envContent = `GATEWAY_TOKEN=${token}\n`;
+  const envContent = `# Gateway 管理/Agent 注册 token（强随机串）
+GATEWAY_TOKEN=${gatewayToken}
+
+# 本地 Hub 的 HUB_TOKEN，请改成实际值
+HUB_TOKEN=CHANGE_ME
+
+# 网关公网地址
+GATEWAY_URL=wss://gateway.yourdomain.com
+
+# hubId，只接受 16~64 位 a-zA-Z0-9_- 随机串
+HUB_ID=CHANGE_ME
+
+# 每个 hubId 最大公网并发数
+MAX_CLIENTS=5
+
+# 公网客户端 token，默认已自动生成；分享给授权用户时同时给 URL 和这个 token
+PUBLIC_TOKEN=${publicToken}
+
+# 本地 Hub 地址
+LOCAL_HUB_URL=ws://127.0.0.1:8787
+`;
   writeFileSync('.env', envContent);
 
   const config = `const fs = require('fs');
@@ -39,14 +60,14 @@ module.exports = {
     {
       name: 'gateway-server',
       script: '${bin}',
-      args: 'server --port 8788',
+      args: 'server',
       env,
       autorestart: true,
     },
     {
-      name: 'gateway-agent-home-pc',
+      name: 'gateway-agent',
       script: '${bin}',
-      args: 'up home-pc --to wss://gateway.yourdomain.com --local ws://127.0.0.1:8787',
+      args: 'up',
       env,
       autorestart: true,
     },
@@ -56,6 +77,6 @@ module.exports = {
 
   writeFileSync('ecosystem.config.cjs', config);
   console.log('已生成 .env 和 ecosystem.config.cjs');
-  console.log('公网入口: wss://gateway.yourdomain.com/hub/<hubId>');
-  console.log('请妥善保存 .env 文件，不要提交到 Git。');
+  console.log('请先编辑 .env 中的 HUB_TOKEN、GATEWAY_URL、HUB_ID，再运行 pm2 start ecosystem.config.cjs');
+  console.log('.env 已加入 .gitignore，不要提交到仓库。');
 }
