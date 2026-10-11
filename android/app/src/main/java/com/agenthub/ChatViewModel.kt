@@ -514,6 +514,7 @@ data class ConnProfile(
     val name: String,
     val address: String,
     val token: String,
+    val publicToken: String = "",
 )
 
 fun migrateAddress(address: String, port: String): String {
@@ -523,8 +524,12 @@ fun migrateAddress(address: String, port: String): String {
 
 fun buildWsUrl(address: String, token: String): String {
     return if (address.startsWith("ws://") || address.startsWith("wss://")) {
-        val sep = if (address.contains("?")) "&" else "?"
-        "$address${sep}token=${Uri.encode(token)}"
+        if (address.contains("/hub/")) {
+            address
+        } else {
+            val sep = if (address.contains("?")) "&" else "?"
+            "$address${sep}token=${Uri.encode(token)}"
+        }
     } else {
         val host = if (address.contains(":")) address else "$address:8787"
         "ws://$host/?token=${Uri.encode(token)}"
@@ -667,18 +672,45 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessionConfigOptions = mutableStateListOf<SessionConfigOption>()
 
     init {
-        prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
-            val parts = line.split("\u0001")
-            when (parts.size) {
-                3 -> profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
-                4 -> {
-                    val (name, address, port, token) = parts
-                    val migrated = migrateAddress(address, port)
-                    profiles.add(ConnProfile(name, migrated, token))
+        val v2Profiles = prefs.getStringSet("profiles_v2", emptySet())!!
+        if (v2Profiles.isNotEmpty()) {
+            v2Profiles.forEach { line ->
+                val parts = line.split("\u0001")
+                if (parts.size >= 4) {
+                    profiles.add(ConnProfile(parts[0], parts[1], parts[2], parts[3]))
+                } else if (parts.size == 3) {
+                    profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
+                }
+            }
+        } else {
+            prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
+                val parts = line.split("\u0001")
+                when (parts.size) {
+                    3 -> profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
+                    4 -> {
+                        val (name, address, port, token) = parts
+                        val migrated = migrateAddress(address, port)
+                        profiles.add(ConnProfile(name, migrated, token))
+                    }
                 }
             }
         }
-        prefs.getString("last", null)?.let { line ->
+        prefs.getString("last_v2", null)?.let { line ->
+            val parts = line.split("\u0001")
+            if (parts.size >= 3) {
+                val address = parts[0]
+                val token = parts[1]
+                val publicToken = parts[2]
+                val profile = profiles.find { it.address == address }
+                    ?: ConnProfile(
+                        address.removePrefix("wss://").removePrefix("ws://")
+                            .substringBefore("/").substringBefore(":").substringBefore("?"),
+                        address, token, publicToken,
+                    )
+                currentProfile = profile
+                connect(address, token, publicToken, profile.name)
+            }
+        } ?: prefs.getString("last", null)?.let { line ->
             val parts = line.split("\u0001")
             val (address, token) = when (parts.size) {
                 2 -> parts[0] to parts[1]
@@ -692,14 +724,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     address, token,
                 )
             currentProfile = profile
-            connect(address, token, profile.name)
+            connect(address, token, "", profile.name)
         }
     }
 
     private fun persistProfiles() {
         prefs.edit().putStringSet(
-            "profiles",
-            profiles.map { "${it.name}\u0001${it.address}\u0001${it.token}" }.toSet(),
+            "profiles_v2",
+            profiles.map { "${it.name}\u0001${it.address}\u0001${it.token}\u0001${it.publicToken}" }.toSet(),
         ).apply()
     }
 
@@ -713,7 +745,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun switchProfile(p: ConnProfile) {
         if (currentProfile == p) return
-        connect(p.address, p.token, p.name)
+        connect(p.address, p.token, p.publicToken, p.name)
     }
 
     fun upsertProfile(
@@ -721,6 +753,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         name: String,
         address: String,
         token: String,
+        publicToken: String = "",
         connectNow: Boolean = false,
     ) {
         val newProfile = ConnProfile(
@@ -728,7 +761,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 address.removePrefix("wss://").removePrefix("ws://")
                     .substringBefore("/").substringBefore(":").substringBefore("?")
             },
-            address, token,
+            address, token, publicToken,
         )
         if (old != null) {
             profiles.remove(old)
@@ -742,20 +775,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         persistProfiles()
         if (connectNow) {
-            connect(address, token, newProfile.name)
+            connect(address, token, publicToken, newProfile.name)
         }
     }
 
-    private fun saveProfile(address: String, token: String, name: String? = null) {
+    private fun saveProfile(address: String, token: String, publicToken: String = "", name: String? = null) {
         val derived = address.removePrefix("wss://").removePrefix("ws://")
             .substringBefore("/").substringBefore(":").substringBefore("?")
         val profileName = name?.takeIf { it.isNotBlank() } ?: derived
         profiles.removeAll { it.address == address }
-        val profile = ConnProfile(profileName, address, token)
+        val profile = ConnProfile(profileName, address, token, publicToken)
         profiles.add(profile)
         currentProfile = profile
         persistProfiles()
-        prefs.edit().putString("last", "$address\u0001$token").apply()
+        prefs.edit().putString("last_v2", "$address\u0001$token\u0001$publicToken").apply()
         if (screen == Screen.Connect) screen = Screen.Sessions
     }
 
@@ -1293,18 +1326,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    fun connect(address: String, token: String, name: String? = null) {
+    fun connect(address: String, token: String, publicToken: String = "", name: String? = null) {
         disconnect()
         connecting = true
         connectError = null
         val url = buildWsUrl(address, token)
-        hub.connect(url,
+        hub.connect(url, publicToken,
             onOpen = {
                 viewModelScope.launch {
                     val firstConnect = connecting
                     connecting = false
                     connectError = null
-                    saveProfile(address, token, name)
+                    saveProfile(address, token, publicToken, name)
                     startHubService()
                     agentStatus = "已连接"
                     if (firstConnect) screen = Screen.Sessions

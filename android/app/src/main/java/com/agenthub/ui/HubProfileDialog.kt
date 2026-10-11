@@ -35,6 +35,7 @@ fun HubProfileDialog(
     var name by remember { mutableStateOf(profile?.name ?: "") }
     var host by remember { mutableStateOf(profile?.address ?: "") }
     var token by remember { mutableStateOf(profile?.token ?: "dev-token") }
+    var publicToken by remember { mutableStateOf(profile?.publicToken ?: "") }
 
     val isCurrent = profile != null && vm.currentProfile == profile
     val hostChanged = profile != null && profile.address != host.trim()
@@ -74,6 +75,15 @@ fun HubProfileDialog(
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
                 )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = publicToken,
+                    onValueChange = { publicToken = it },
+                    label = { Text(S.gatewayTokenLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    singleLine = true,
+                )
                 vm.connectError?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -95,6 +105,7 @@ fun HubProfileDialog(
                                 name.trim(),
                                 host.trim(),
                                 token.trim(),
+                                publicToken.trim(),
                                 connectNow = false,
                             )
                             onDismiss()
@@ -111,6 +122,7 @@ fun HubProfileDialog(
                             name.trim(),
                             host.trim(),
                             token.trim(),
+                            publicToken.trim(),
                             connectNow = true,
                         )
                         onDismiss()

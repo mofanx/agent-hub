@@ -42,6 +42,7 @@ class HubClient(private val scope: CoroutineScope) {
     var onEvent: ((String) -> Unit)? = null
 
     private var url: String? = null
+    private var publicToken: String? = null
     private var onOpenCallback: (() -> Unit)? = null
     private var onFailureCallback: ((String) -> Unit)? = null
     private var reconnectJob: Job? = null
@@ -51,8 +52,9 @@ class HubClient(private val scope: CoroutineScope) {
     private val maxReconnectDelayMs = 30000L
     private val maxReconnectAttempts = Int.MAX_VALUE
 
-    fun connect(url: String, onOpen: () -> Unit, onFailure: (String) -> Unit) {
+    fun connect(url: String, publicToken: String = "", onOpen: () -> Unit, onFailure: (String) -> Unit) {
         this.url = url
+        this.publicToken = publicToken
         this.onOpenCallback = onOpen
         this.onFailureCallback = onFailure
         shouldReconnect = true
@@ -66,7 +68,11 @@ class HubClient(private val scope: CoroutineScope) {
     private fun doConnect() {
         if (!shouldReconnect) return
         val url = this.url ?: return
-        val request = Request.Builder().url(url).build()
+        val request = Request.Builder().url(url).apply {
+            if (!publicToken.isNullOrBlank()) {
+                header("X-Public-Token", publicToken!!)
+            }
+        }.build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (webSocket != ws) return

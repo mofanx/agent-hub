@@ -116,18 +116,24 @@ class HubService : Service() {
 
     private fun connect() {
         val prefs = getSharedPreferences("agent-hub", MODE_PRIVATE)
-        val last = prefs.getString("last", null) ?: return
-        val parts = last.split("\u0001")
-        val (address, token) = when (parts.size) {
-            2 -> parts[0] to parts[1]
-            3 -> migrateAddress(parts[0], parts[1]) to parts[2]
-            else -> return
+        val lastV2 = prefs.getString("last_v2", null)
+        val (address, token, publicToken) = if (lastV2 != null) {
+            val parts = lastV2.split("\u0001")
+            if (parts.size >= 3) Triple(parts[0], parts[1], parts[2]) else return
+        } else {
+            val last = prefs.getString("last", null) ?: return
+            val parts = last.split("\u0001")
+            when (parts.size) {
+                2 -> Triple(parts[0], parts[1], "")
+                3 -> Triple(migrateAddress(parts[0], parts[1]), parts[2], "")
+                else -> return
+            }
         }
         val url = buildWsUrl(address, token)
         val client = hub ?: HubClient(scope).also { hub = it }
         client.onEvent = { raw -> handleEvent(raw) }
         client.onClosed = { onDisconnected() }
-        client.connect(url,
+        client.connect(url, publicToken,
             onOpen = {
                 isConnected = true
                 updateForegroundNotification()
