@@ -214,6 +214,11 @@ private fun ContextUsage.format(S: Strings): String = buildString {
     }
 }
 
+private fun ContextUsage.formatCompact(S: Strings): String {
+    val max = if (size > 0) " / ${formatNumber(size)}" else ""
+    return "${S.context} ${formatNumber(used)}$max"
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
@@ -500,30 +505,56 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             }
                         }
                     }
-                    if (contextUsage != null) {
-                        Text(
-                            contextUsage.format(S),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (!isRoom && vm.modelCurrent.isNotBlank()) {
-                        Text(
-                            vm.modelCurrent,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (!isRoom && quotaText.isNotEmpty()) {
-                        Text(
-                            quotaText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline,
-                        )
+                    if (!isRoom) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                if (vm.modelCurrent.isNotBlank()) {
+                                    Text(
+                                        vm.modelCurrent,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.outline,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                contextUsage?.let {
+                                    Text(
+                                        it.formatCompact(S),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.outline,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            if (quota?.available == true && vm.currentSession?.agent == "devin") {
+                                Column(horizontalAlignment = Alignment.End) {
+                                    quota.daily?.let {
+                                        Text(
+                                            S.quotaDaily.format(it.usedPercent),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.outline,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                    quota.weekly?.let {
+                                        val costText = contextUsage?.costAmount?.let { cost ->
+                                            "${contextUsage.costCurrency} ${String.format("%.4f", cost)} · "
+                                        } ?: ""
+                                        Text(
+                                            "$costText${S.quotaWeekly.format(it.usedPercent)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.outline,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 if (isRoom || vm.currentSession != null) {
