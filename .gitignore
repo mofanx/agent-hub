@@ -1,5 +1,10 @@
 # Node
 hub/node_modules/
+deploy/gateway/node_modules/
+deploy/gateway/dist/
+deploy/gateway/package-lock.json
+deploy/gateway/.env
+deploy/gateway/ecosystem.config.cjs
 hub/data/
 hub/data-sandbox/
 hub/package-lock.json
