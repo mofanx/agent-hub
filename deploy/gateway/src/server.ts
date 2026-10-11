@@ -138,8 +138,9 @@ export function startServer(options: {
       );
 
       ws.on('message', (data) => {
+        const text = toText(data);
         for (const client of state.clients) {
-          if (client.readyState === WebSocket.OPEN) client.send(data);
+          if (client.readyState === WebSocket.OPEN) client.send(text);
         }
       });
       ws.on('close', () => {
@@ -176,7 +177,7 @@ export function startServer(options: {
       console.log(`[gateway] public client connected to ${hubId}`);
 
       ws.on('message', (data) => {
-        if (state.agent.readyState === WebSocket.OPEN) state.agent.send(data);
+        if (state.agent.readyState === WebSocket.OPEN) state.agent.send(toText(data));
       });
       ws.on('close', () => state.clients.delete(ws));
       ws.on('error', () => {});
@@ -226,4 +227,11 @@ function checkRateLimit(ip: string, limits: Map<string, RateLimit>, failure: boo
 
 function generateToken(): string {
   return randomBytes(32).toString('hex');
+}
+
+function toText(data: WebSocket.Data): string {
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (typeof data === 'string') return data;
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+  return String(data);
 }

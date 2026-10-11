@@ -29,7 +29,7 @@ export function startAgent(options: {
     });
 
     local.on('message', (data) => {
-      if (remote && remote.readyState === WebSocket.OPEN) remote.send(data);
+      if (remote && remote.readyState === WebSocket.OPEN) remote.send(toText(data));
     });
 
     local.on('close', () => {
@@ -66,7 +66,7 @@ export function startAgent(options: {
     } catch {
       // not JSON, forward to local
     }
-    if (local && local.readyState === WebSocket.OPEN) local.send(data);
+    if (local && local.readyState === WebSocket.OPEN) local.send(toText(data));
   });
 
   remote.on('close', (code) => {
@@ -83,4 +83,11 @@ export function startAgent(options: {
 
 function generateToken(): string {
   return randomBytes(32).toString('hex');
+}
+
+function toText(data: WebSocket.Data): string {
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (typeof data === 'string') return data;
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+  return String(data);
 }
