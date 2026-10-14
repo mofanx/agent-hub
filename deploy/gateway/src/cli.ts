@@ -60,7 +60,7 @@ function printHelp() {
   GATEWAY_HOST       server 绑定地址（默认 127.0.0.1）
   LOCAL_HUB_URL      本地 Hub 地址（默认 ws://127.0.0.1:8787）
   MAX_CLIENTS        每个 hubId 最大公网并发数（默认 5）
-  PUBLIC_TOKEN       指定公网客户端 token（up 用）
+  PUBLIC_TOKEN       指定公网客户端 token（up 用；未指定时自动生成并持久化到 agent-<hubId>.token）
 `);
 }
 

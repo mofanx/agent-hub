@@ -145,6 +145,8 @@ export function startServer(options: {
       });
       ws.on('close', () => {
         for (const client of state.clients) client.close();
+        // 仅当槽位仍是本连接时删除并记日志，避免误删/误报重注册后的新 state
+        if (hubs.get(hubId) !== state) return;
         hubs.delete(hubId);
         console.log(`[gateway] hub disconnected: ${hubId}`);
       });
@@ -177,7 +179,13 @@ export function startServer(options: {
       console.log(`[gateway] public client connected to ${hubId}`);
 
       ws.on('message', (data) => {
-        if (state.agent.readyState === WebSocket.OPEN) state.agent.send(toText(data));
+        // agent 隧道不可用时不静默吞消息：断开客户端让其走重连/失败路径，
+        // 避免消息本地已显示但 Hub 从未收到导致历史缺漏
+        if (state.agent.readyState === WebSocket.OPEN) {
+          state.agent.send(toText(data));
+        } else {
+          ws.close(1013, 'Hub reconnecting');
+        }
       });
       ws.on('close', () => state.clients.delete(ws));
       ws.on('error', () => {});
