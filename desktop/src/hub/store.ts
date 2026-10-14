@@ -402,7 +402,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
   const isCoveredByHistory = (it: ChatItem, hist: ChatItem[]): boolean => {
     const near = hist.filter(
-      (h) => h.at == null || it.at == null || h.at >= it.at - 300_000,
+      (h) => h.at == null || it.at == null || Math.abs(h.at - it.at) <= 300_000,
     );
     switch (it.kind) {
       case "user":

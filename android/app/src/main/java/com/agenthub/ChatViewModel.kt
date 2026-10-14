@@ -2538,7 +2538,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
         fun sameWindow(h: ChatItem, t: ChatItem): Boolean =
-            h.at == 0L || t.at == 0L || h.at >= t.at - 300_000L
+            h.at == 0L || t.at == 0L || kotlin.math.abs(h.at - t.at) <= 300_000L
         // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
         fun sameAuthor(h: ChatItem, t: ChatItem): Boolean =
             h.author == t.author || h.author.startsWith("${t.author} (") || t.author.startsWith("${h.author} (")
