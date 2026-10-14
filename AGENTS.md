@@ -120,7 +120,10 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 - **群聊编排**：支持 mention、conductor、roundrobin、parallel、pipeline、debate、auto 七种模式。
 - **Auto 决策可拆分性**：`buildAutoPrompt` 在任务性质之外评估可拆分性——任务量大不是拆分理由；存在共享文件/类型定义/统一词汇表等收敛点时偏向 self/mention；不确定时保守降级并在 `reason` 中说明。
-- **Conductor**：指挥家拆解任务为 JSON 工单，Hub 自动派发；完成后汇总。各 worker 任务应文件级排他，避免并行写同一文件。
+- **Conductor**：指挥家拆解任务为 JSON 工单，Hub 自动派发；完成后汇总。各 worker 任务应文件级排他，避免并行写同一文件（可用 `files` 声明，Hub 会自动合并重叠任务）。
+- **协作约定**：
+  - 大任务的只读前置工作（全量扫描、清单、审计）可拆给子 agent/其他成员并行做，改动统一由主执行者落地——调研并行安全，写入串行。
+  - 大范围改造完成后，尽量由**非执行者**做独立漏网检查（扫描残留、review diff），避免自查盲区。
 - **Flow 状态**：`room.flow` API + `room.flowUpdate` 事件，前后端同步编排进度。
 - **Artifact 自动捕获**：从子任务输出中扫描 ````bash` 块、diff 块、文件路径和显式文件声明。
 - **ACP fs 能力**：Hub 声明 `fs.readTextFile` / `fs.writeTextFile`，直接感知 agent 文件写入并同步产物与事件。
