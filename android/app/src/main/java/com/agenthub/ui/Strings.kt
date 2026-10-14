@@ -71,6 +71,9 @@ interface Strings {
     val modePipeline: String
     val modeDebate: String
     val modeAuto: String
+    val modeSelf: String
+    val modeDeciding: String
+    val modeCurrent: String
     val conductorTag: String
     val summarizerTag: String
     val judgeTag: String
@@ -328,6 +331,9 @@ object ZhStrings : Strings {
     override val modePipeline = "流水线"
     override val modeDebate = "辩论"
     override val modeAuto = "自动"
+    override val modeSelf = "自己"
+    override val modeDeciding = "决策中"
+    override val modeCurrent = "当前：%s"
     override val conductorTag = "指挥家"
     override val summarizerTag = "汇总者"
     override val judgeTag = "裁判"
@@ -585,6 +591,9 @@ object EnStrings : Strings {
     override val modePipeline = "Pipeline"
     override val modeDebate = "Debate"
     override val modeAuto = "Auto"
+    override val modeSelf = "Self"
+    override val modeDeciding = "Deciding"
+    override val modeCurrent = "Now: %s"
     override val conductorTag = "Conductor"
     override val summarizerTag = "Summarizer"
     override val judgeTag = "Judge"

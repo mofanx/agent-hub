@@ -2045,8 +2045,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             conductorId = o["conductorId"]?.jsonPrimitive?.content,
             members = members,
             archived = o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-            subMode = o["subMode"]?.jsonPrimitive?.content,
-            activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.content,
+            subMode = o["subMode"]?.jsonPrimitive?.contentOrNull,
+            activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.contentOrNull,
             reason = o["reason"]?.jsonPrimitive?.content,
             memberRoles = o["memberRoles"]?.jsonObject?.let { obj ->
                 obj.entries.mapNotNull { (k, v) ->
@@ -3786,9 +3786,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val r = currentRoom
                 if (r != null && r.roomId == roomId) {
                     currentRoom = r.copy(
-                        subMode = p["mode"]?.jsonPrimitive?.content,
-                        activeSpeaker = p["activeSpeaker"]?.jsonPrimitive?.content,
-                        reason = p["reason"]?.jsonPrimitive?.content,
+                        subMode = p["mode"]?.jsonPrimitive?.contentOrNull,
+                        activeSpeaker = p["activeSpeaker"]?.jsonPrimitive?.contentOrNull,
+                        reason = p["reason"]?.jsonPrimitive?.contentOrNull,
                     )
                     val idx = rooms.indexOfFirst { it.roomId == roomId }
                     if (idx >= 0) rooms[idx] = currentRoom!!

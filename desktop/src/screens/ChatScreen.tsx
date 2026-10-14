@@ -186,9 +186,13 @@ export function ChatScreen() {
 
   const isRoom = !!store.currentRoom;
   const title = store.currentRoom?.name || store.currentSession?.name || "聊天";
-  const modeLabel = store.currentRoom
-    ? { mention: "普通群", conductor: "指挥家", roundrobin: "轮询", parallel: "并行", pipeline: "流水线", debate: "辩论", auto: "自动" }[store.currentRoom.mode]
-    : undefined;
+  const modeName = (m: string) =>
+    ({ mention: "普通群", conductor: "指挥家", roundrobin: "轮询", parallel: "并行", pipeline: "流水线", debate: "辩论", auto: "自动", self: "自己", deciding: "决策中" } as Record<string, string>)[m] ?? m;
+  const modeLabel = store.currentRoom ? modeName(store.currentRoom.mode) : undefined;
+  const subModeLabel =
+    store.currentRoom?.subMode && store.currentRoom.subMode !== store.currentRoom.mode
+      ? modeName(store.currentRoom.subMode)
+      : undefined;
   const subtitle = store.currentRoom
     ? (modeLabel ?? store.currentRoom.mode)
     : store.currentSession
@@ -661,9 +665,10 @@ export function ChatScreen() {
 
   const artifactCount = store.currentArtifacts?.length ?? 0;
   const eventCount = store.currentEvents?.length ?? 0;
-  const flowCount = store.flow?.tasks?.length ?? 0;
   const flowActive = isRoom && !!store.flow &&
     store.flow.phase !== "done" && store.flow.phase !== "awaiting-retry";
+  const flowTaskCount = store.flow?.tasks?.length ?? 0;
+  const flowCount = flowTaskCount > 0 ? flowTaskCount : (flowActive ? 1 : 0);
   const pendingUserHelps = flowActive
     ? (store.flow?.tasks.filter((t) => t.waitingFor === "user") ?? [])
     : [];
@@ -719,6 +724,11 @@ export function ChatScreen() {
                 <div className="chat-meta">
                   {subtitle && <div className="chat-subtitle">{subtitle}</div>}
                   {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
+                  {subModeLabel && (
+                    <div className="chat-usage chat-current-mode">
+                      {S.modeCurrent.replace("%s", subModeLabel)}
+                    </div>
+                  )}
                 </div>
                 {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage, S)}</div>}
               </>
@@ -1925,7 +1935,7 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   }, [collapsed]);
   if (!flow) return null;
   const { progress, tasks, phase } = flow;
-  if (tasks.length === 0) return null;
+  if (tasks.length === 0 && phase === "done") return null;
   const title = roomMode === "conductor" ? "指挥编排" : "编排进度";
   const phaseLabel: Record<string, string> = {
     planning: "规划中",
@@ -1989,10 +1999,12 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
           {collapsed ? "▸ " : "▾ "}{title}
           {phaseTag && <span className="flow-phase-tag">{phaseTag}</span>}
         </span>
-        <span className="flow-progress">
-          {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
-          {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
-        </span>
+        {tasks.length > 0 && (
+          <span className="flow-progress">
+            {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
+            {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
+          </span>
+        )}
         {phase !== "done" && phase !== "summarizing" && phase !== "reviewing" && (
           <button
             className="flow-cancel-btn"

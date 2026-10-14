@@ -34,6 +34,7 @@ export interface Strings {
   contextMax: string;
   quotaDaily: string;
   quotaWeekly: string;
+  modeCurrent: string;
   chatPlaceholder: string;
   roomPlaceholder: string;
   roomFlowPlaceholder: string;
@@ -145,6 +146,7 @@ const zh: Strings = {
   contextMax: "上限",
   quotaDaily: "日已用 %s%",
   quotaWeekly: "周已用 %s%",
+  modeCurrent: "当前：%s",
   chatPlaceholder: "给 AI 下指令…",
   roomPlaceholder: "群聊消息，@名字 指定成员",
   roomFlowPlaceholder: "流程进行中：发送并入补充；答复求助请点上方「答复」，输入“取消”中止",
@@ -255,6 +257,7 @@ const en: Strings = {
   context: "Context",
   contextMax: "max",
   quotaDaily: "Day %s% used",
+  modeCurrent: "Now: %s",
   quotaWeekly: "Week %s% used",
   chatPlaceholder: "Send an instruction…",
   roomPlaceholder: "Message, @name to mention",

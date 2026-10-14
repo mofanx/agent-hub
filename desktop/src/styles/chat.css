@@ -72,6 +72,11 @@
   gap: 0.3rem 0.8rem;
 }
 
+.chat-current-mode {
+  color: var(--accent, #4f8cff);
+  font-weight: 600;
+}
+
 .chat-meta > * {
   flex: none;
   max-width: 100%;

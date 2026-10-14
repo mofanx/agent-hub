@@ -488,6 +488,20 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             "auto" -> S.modeAuto
                             else -> room.mode
                         }
+                        val subModeLabel = room.subMode?.takeIf { it != room.mode }?.let { sub ->
+                            when (sub) {
+                                "mention" -> S.modeMention
+                                "conductor" -> S.modeConductor
+                                "roundrobin" -> S.modeRoundRobin
+                                "parallel" -> S.modeParallel
+                                "pipeline" -> S.modePipeline
+                                "debate" -> S.modeDebate
+                                "auto" -> S.modeAuto
+                                "self" -> S.modeSelf
+                                "deciding" -> S.modeDeciding
+                                else -> sub
+                            }
+                        }
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
                                 modeLabel,
@@ -501,6 +515,15 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     quotaText,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.outline,
+                                )
+                            }
+                            if (subModeLabel != null) {
+                                Text(
+                                    S.modeCurrent.format(subModeLabel),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -2102,7 +2125,7 @@ private fun RawChatBubble(
 @Composable
 private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
     val S = LocalStrings.current
-    if (flow == null || flow.tasks.isEmpty()) return
+    if (flow == null) return
     var collapsed by remember { mutableStateOf(false) }
     val progress = flow.progress
     val title = if (roomMode == "conductor") "指挥编排" else "编排进度"
@@ -2166,13 +2189,17 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                         }
                     }
                 }
-                Text(
-                    "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行" +
-                        if (progress.failed > 0) " · ${progress.failed} 失败" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
+                if (flow.tasks.isNotEmpty()) {
+                    Text(
+                        "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行" +
+                            if (progress.failed > 0) " · ${progress.failed} 失败" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
                 if (canCancel) {
                     OutlinedButton(
                         onClick = { vm.cancelFlow() },
@@ -3289,16 +3316,34 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
 
 @Composable
 private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras: Boolean = true, onExpand: (String?) -> Unit) {
+    val S = LocalStrings.current
     val flow = vm.flow
-    val flowCount = if (showRoomExtras) flow?.tasks?.size ?: 0 else 0
+    val flowActive = flow != null && flow.phase != "done"
+    val flowCount = if (showRoomExtras) {
+        val n = flow?.tasks?.size ?: 0
+        if (n == 0 && flowActive) 1 else n
+    } else 0
     val blackboardCount = if (showRoomExtras) vm.blackboard.size else 0
     val artifactCount = vm.currentArtifacts.size
     val eventCount = vm.currentEvents.size
     if (flowCount == 0 && blackboardCount == 0 && artifactCount == 0 && eventCount == 0) return
     val flowProgress = flow?.progress
-    val flowLabel = if (flowProgress != null) {
-        "编排 ${flowProgress.done}/${flowProgress.total}"
-    } else "编排"
+    val flowLabel = when {
+        flow != null && flow.tasks.isEmpty() -> {
+            val phase = when (flow.phase) {
+                "planning" -> "规划中"
+                "awaiting-input" -> S.flowAwaitingInput
+                "working" -> "执行中"
+                "reviewing" -> "验收中"
+                "summarizing" -> "汇总中"
+                "awaiting-retry" -> "等待重试"
+                else -> ""
+            }
+            if (phase.isEmpty()) "编排" else "编排 · $phase"
+        }
+        flowProgress != null -> "编排 ${flowProgress.done}/${flowProgress.total}"
+        else -> "编排"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
