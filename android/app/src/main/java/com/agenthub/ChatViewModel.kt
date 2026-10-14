@@ -2539,22 +2539,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
         fun sameWindow(h: ChatItem, t: ChatItem): Boolean =
             h.at == 0L || t.at == 0L || h.at >= t.at - 300_000L
+        // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
+        fun sameAuthor(h: ChatItem, t: ChatItem): Boolean =
+            h.author == t.author || h.author.startsWith("${t.author} (") || t.author.startsWith("${h.author} (")
         return tail.filter { t ->
             when (t) {
                 is ChatItem.User ->
-                    hist.none { it is ChatItem.User && sameWindow(it, t) && it.author == t.author && (it.text == t.text || it.text.endsWith(t.text)) }
+                    hist.none { it is ChatItem.User && sameWindow(it, t) && sameAuthor(it, t) && (it.text == t.text || it.text.endsWith(t.text)) }
                 is ChatItem.System ->
                     hist.none { it is ChatItem.System && sameWindow(it, t) && it.text == t.text }
                 is ChatItem.Assistant ->
-                    hist.none { it is ChatItem.Assistant && sameWindow(it, t) && it.author == t.author && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
+                    hist.none { it is ChatItem.Assistant && sameWindow(it, t) && sameAuthor(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Thought ->
-                    hist.none { it is ChatItem.Thought && sameWindow(it, t) && it.author == t.author && it.text.startsWith(t.text) }
+                    hist.none { it is ChatItem.Thought && sameWindow(it, t) && sameAuthor(it, t) && it.text.startsWith(t.text) }
                 is ChatItem.Tool ->
                     hist.none { it is ChatItem.Tool && sameWindow(it, t) && it.toolCallId == t.toolCallId }
                 is ChatItem.Plan ->
-                    hist.none { it is ChatItem.Plan && sameWindow(it, t) && it.author == t.author && it.entries == t.entries }
+                    hist.none { it is ChatItem.Plan && sameWindow(it, t) && sameAuthor(it, t) && it.entries == t.entries }
                 is ChatItem.Error ->
-                    hist.none { it is ChatItem.Error && sameWindow(it, t) && it.author == t.author && it.text == t.text }
+                    hist.none { it is ChatItem.Error && sameWindow(it, t) && sameAuthor(it, t) && it.text == t.text }
                 else -> true
             }
         }

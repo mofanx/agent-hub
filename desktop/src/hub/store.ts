@@ -394,6 +394,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
     }
   };
 
+  // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
+  const sameAuthor = (h: ChatItem, it: ChatItem): boolean =>
+    h.author === it.author ||
+    (h.author ?? "").startsWith(`${it.author} (`) ||
+    (it.author ?? "").startsWith(`${h.author} (`);
+
   const isCoveredByHistory = (it: ChatItem, hist: ChatItem[]): boolean => {
     const near = hist.filter(
       (h) => h.at == null || it.at == null || h.at >= it.at - 300_000,
@@ -409,14 +415,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
         return near.some(
           (h) =>
             h.kind === "assistant" &&
-            h.author === it.author &&
+            sameAuthor(h, it) &&
             (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
         );
       case "thought":
         return near.some(
           (h) =>
             h.kind === "thought" &&
-            h.author === it.author &&
+            sameAuthor(h, it) &&
             (h.text === it.text || h.text.startsWith(it.text)),
         );
       case "tool":
@@ -425,7 +431,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         return near.some(
           (h) =>
             h.kind === "plan" &&
-            h.author === it.author &&
+            sameAuthor(h, it) &&
             h.entries.join("\n") === it.entries.join("\n"),
         );
       case "error":
