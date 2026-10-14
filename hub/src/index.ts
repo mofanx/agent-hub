@@ -472,7 +472,14 @@ const agentOps: AgentOps = {
 const roomModeManager = new RoomModeManager(
   agentOps,
   rooms,
-  (method, params) => broadcast({ method, params } as HubEvent),
+  (method, params) => {
+    const p = params as Record<string, unknown>;
+    if (method === "room.notice") {
+      broadcastRoomNotice(String(p.roomId ?? ""), String(p.message ?? ""));
+      return;
+    }
+    broadcast({ method, params } as HubEvent);
+  },
   undefined,
   parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS),
 );
@@ -838,6 +845,21 @@ function onAgentEvent(event: HubEvent): void {
 }
 
 
+function broadcastRoomNotice(roomId: string, message: string): void {
+  if (!roomId || !message) return;
+  // 恢复 flow 会重放派工等通知；与最后一条历史相同时跳过写入，避免重启后重复
+  const last = store.read("room", roomId, 1).at(-1);
+  if (!(last && last.kind === "system" && last.text === message)) {
+    store.append("room", roomId, {
+      at: Date.now(),
+      kind: "system",
+      author: "",
+      text: message,
+    });
+  }
+  broadcast({ method: "room.notice", params: { roomId, message } });
+}
+
 function broadcast(event: HubEvent): void {
   const data = JSON.stringify(event);
   for (const ws of clients) {
@@ -954,7 +976,7 @@ async function handleRoomSlash(
     notice = "没有可停止的会话";
   }
 
-  broadcast({ method: "room.notice", params: { roomId: room.roomId, message: notice } });
+  broadcastRoomNotice(room.roomId, notice);
   return { stopped, skipped, errors, notice };
 }
 
@@ -1463,15 +1485,18 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const limit = Number(req.params?.limit ?? 200);
       const anchorAt = req.params?.anchorAt;
       const beforeAt = req.params?.before;
+      const beforeId = req.params?.beforeId;
+      const boundaryId =
+        typeof beforeId === "number" && Number.isFinite(beforeId) ? beforeId : undefined;
       let entries;
       if (typeof beforeAt === "number" && Number.isFinite(beforeAt)) {
-        entries = store.readBefore("session", sessionId, beforeAt, limit);
+        entries = store.readBefore("session", sessionId, beforeAt, limit, boundaryId);
       } else if (typeof anchorAt === "number" && Number.isFinite(anchorAt)) {
         entries = store.readAround("session", sessionId, anchorAt, limit);
       } else {
         entries = store.read("session", sessionId, limit);
       }
-      const hasMore = entries.length > 0 ? store.hasMoreBefore("session", sessionId, entries[0]!.at) : false;
+      const hasMore = entries.length > 0 ? store.hasMoreBefore("session", sessionId, entries[0]!.at, entries[0]!.id) : false;
       return { entries, hasMore };
     }
     case "room.history": {
@@ -1479,15 +1504,18 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const limit = Number(req.params?.limit ?? 200);
       const anchorAt = req.params?.anchorAt;
       const beforeAt = req.params?.before;
+      const beforeId = req.params?.beforeId;
+      const boundaryId =
+        typeof beforeId === "number" && Number.isFinite(beforeId) ? beforeId : undefined;
       let entries;
       if (typeof beforeAt === "number" && Number.isFinite(beforeAt)) {
-        entries = store.readBefore("room", roomId, beforeAt, limit);
+        entries = store.readBefore("room", roomId, beforeAt, limit, boundaryId);
       } else if (typeof anchorAt === "number" && Number.isFinite(anchorAt)) {
         entries = store.readAround("room", roomId, anchorAt, limit);
       } else {
         entries = store.read("room", roomId, limit);
       }
-      const hasMore = entries.length > 0 ? store.hasMoreBefore("room", roomId, entries[0]!.at) : false;
+      const hasMore = entries.length > 0 ? store.hasMoreBefore("room", roomId, entries[0]!.at, entries[0]!.id) : false;
       return { entries, hasMore };
     }
     case "room.create": {

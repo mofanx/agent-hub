@@ -395,38 +395,41 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   const isCoveredByHistory = (it: ChatItem, hist: ChatItem[]): boolean => {
+    const near = hist.filter(
+      (h) => h.at == null || it.at == null || h.at >= it.at - 300_000,
+    );
     switch (it.kind) {
       case "user":
-        return hist.some(
+        return near.some(
           (h) => h.kind === "user" && (h.text === it.text || h.text.endsWith(it.text)),
         );
       case "system":
-        return hist.some((h) => h.kind === "system" && h.text === it.text);
+        return near.some((h) => h.kind === "system" && h.text === it.text);
       case "assistant":
-        return hist.some(
+        return near.some(
           (h) =>
             h.kind === "assistant" &&
             h.author === it.author &&
             (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
         );
       case "thought":
-        return hist.some(
+        return near.some(
           (h) =>
             h.kind === "thought" &&
             h.author === it.author &&
             (h.text === it.text || h.text.startsWith(it.text)),
         );
       case "tool":
-        return hist.some((h) => h.kind === "tool" && h.toolCallId === it.toolCallId);
+        return near.some((h) => h.kind === "tool" && h.toolCallId === it.toolCallId);
       case "plan":
-        return hist.some(
+        return near.some(
           (h) =>
             h.kind === "plan" &&
             h.author === it.author &&
             h.entries.join("\n") === it.entries.join("\n"),
         );
       case "error":
-        return hist.some((h) => h.kind === "error" && h.text === it.text);
+        return near.some((h) => h.kind === "error" && h.text === it.text);
       default:
         return false;
     }
@@ -2074,11 +2077,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
     loadMoreHistory: async (method, idKey, id) => {
       if (get().historyLoading || !get().historyHasMore) return;
       const items = get().chatItems;
-      const oldestAt = items[0]?.at;
-      if (oldestAt == null) return;
+      const oldest = items.find((it) => it.historyId != null);
+      if (oldest?.at == null) return;
       set({ historyLoading: true });
       try {
-        const result = (await getOrCall(method, { [idKey]: id, before: oldestAt, limit: 50 })) as Record<string, unknown>;
+        const result = (await getOrCall(method, { [idKey]: id, before: oldest.at, beforeId: oldest.historyId, limit: 50 })) as Record<string, unknown>;
         const entries = ((result.entries as unknown[] | undefined) ?? []).map((it) => {
           const o = it as Record<string, unknown>;
           return {

@@ -310,11 +310,13 @@ export class RoomManager {
     if (!this.store) return;
     const events = this.store.getRoomEvents(room.roomId);
     if (events.length === 0) return;
-    room.blackboard = [];
-    room.artifacts = [];
-    room.events = [];
-    this.aliasSeqs.set(room.roomId, 0);
     for (const e of events) this.applyRoomEvent(room, e);
+    let maxAlias = 0;
+    for (const a of room.artifacts ?? []) {
+      const m = /^a(\d+)$/.exec(a.alias ?? "");
+      if (m) maxAlias = Math.max(maxAlias, Number(m[1]));
+    }
+    this.aliasSeqs.set(room.roomId, maxAlias);
   }
 
   private applyRoomEvent(
@@ -334,17 +336,30 @@ export class RoomManager {
       }
       const entry = p.entry as Record<string, unknown> | undefined;
       if (entry) {
+        const id = String(entry.id);
+        if (room.blackboard!.some((b) => b.id === id)) return;
         room.blackboard!.push({
-          id: String(entry.id),
+          id,
           from: String(entry.from),
           text: String(entry.text),
           detail: String(entry.detail),
           at: Number(entry.at),
         });
+        if (room.blackboard!.length > BLACKBOARD_LIMIT) room.blackboard!.shift();
       }
       return;
     }
     if (e.type === "event") {
+      if (p.op === "clear") {
+        const action = typeof p.action === "string" ? p.action : undefined;
+        room.events = action ? room.events!.filter((x) => x.action !== action) : [];
+        return;
+      }
+      if (p.op === "remove") {
+        const id = String(p.id ?? "");
+        room.events = room.events!.filter((x) => x.id !== id);
+        return;
+      }
       const ev = p.event as Record<string, unknown> | undefined;
       if (!ev) return;
       if (p.op === "update") {
@@ -358,7 +373,9 @@ export class RoomManager {
         }
         return;
       }
+      if (room.events!.some((x) => x.id === String(ev.id))) return;
       room.events!.push(this.deserializeRoomEvent(ev, e.at));
+      if (room.events!.length > EVENT_LIMIT) room.events!.shift();
       return;
     }
     if (e.type === "artifact") {
@@ -376,11 +393,13 @@ export class RoomManager {
       if (!artifact) return;
       const id = String(artifact.id);
       const existing = room.artifacts!.find((a) => a.id === id);
-      if (existing && p.op === "update") {
+      if (existing) {
         existing.author = String(artifact.author);
         existing.summary = String(artifact.summary);
         existing.at = Number(artifact.at);
         if (artifact.taskId) existing.taskId = String(artifact.taskId);
+        if (artifact.path) existing.path = String(artifact.path);
+        if (artifact.alias) existing.alias = String(artifact.alias);
         room.artifacts!.splice(room.artifacts!.indexOf(existing), 1);
         room.artifacts!.push(existing);
         return;
@@ -394,6 +413,7 @@ export class RoomManager {
         ...(artifact.path ? { path: String(artifact.path) } : {}),
         ...(artifact.taskId ? { taskId: String(artifact.taskId) } : {}),
       });
+      if (room.artifacts!.length > ARTIFACT_LIMIT) room.artifacts!.shift();
       return;
     }
   }
@@ -753,7 +773,11 @@ export class RoomManager {
     if (!room || !room.events) return false;
     const before = room.events.length;
     room.events = room.events.filter((e) => e.id !== eventId);
-    return room.events.length < before;
+    if (room.events.length < before) {
+      this.appendEvent(roomId, "event", { op: "remove", id: eventId });
+      return true;
+    }
+    return false;
   }
 
   /** 清空房间的事件时间轴；可指定 action 只清空某一类 */
@@ -763,11 +787,14 @@ export class RoomManager {
     if (!action) {
       const before = room.events.length;
       room.events = [];
+      if (before > 0) this.appendEvent(roomId, "event", { op: "clear" });
       return before;
     }
     const before = room.events.length;
     room.events = room.events.filter((e) => e.action !== action);
-    return before - room.events.length;
+    const removed = before - room.events.length;
+    if (removed > 0) this.appendEvent(roomId, "event", { op: "clear", action });
+    return removed;
   }
 
   private resolveAllowedRoots(roomId: string, author?: string): { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] {
@@ -913,6 +940,7 @@ export class RoomManager {
       existing.summary = summary ?? rel;
       existing.author = author ?? existing.author;
       existing.at = Date.now();
+      this.appendEvent(roomId, "artifact", { op: "update", artifact: this.serializeArtifact(existing) });
     }
     const artifact = existing ?? this.addFile(roomId, {
       author: author ?? "我",
@@ -1017,7 +1045,11 @@ export class RoomManager {
     if (!fs.existsSync(real)) throw new Error("file not found");
     fs.unlinkSync(real);
     const rel = normalizeRel(path.relative(root, real));
+    const removed = (room.artifacts ?? []).filter((a) => a.path === rel);
     room.artifacts = (room.artifacts ?? []).filter((a) => a.path !== rel);
+    for (const a of removed) {
+      this.appendEvent(roomId, "artifact", { op: "remove", artifactId: a.id });
+    }
     this.addEvent(roomId, {
       action: "delete",
       author: author ?? "系统",
@@ -1042,7 +1074,10 @@ export class RoomManager {
     const oldRel = normalizeRel(path.relative(fromRoot, fromReal));
     const newRel = normalizeRel(path.relative(toFound.root, toFound.real));
     for (const a of room.artifacts ?? []) {
-      if (a.path === oldRel) a.path = newRel;
+      if (a.path === oldRel) {
+        a.path = newRel;
+        this.appendEvent(roomId, "artifact", { op: "update", artifact: this.serializeArtifact(a) });
+      }
     }
     this.addEvent(roomId, {
       action: "rename",

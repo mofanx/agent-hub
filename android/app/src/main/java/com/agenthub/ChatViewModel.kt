@@ -115,23 +115,23 @@ sealed class ChatItem {
         override val author: String = "我",
         val quoteAuthor: String? = null,
         val quoteText: String? = null,
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem()
     data class System(
         override val id: Long,
         override val text: String,
         override val author: String = "",
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem()
-    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = 0) : ChatItem()
-    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = 0) : ChatItem()
+    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = java.lang.System.currentTimeMillis()) : ChatItem()
+    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = java.lang.System.currentTimeMillis()) : ChatItem()
     data class Tool(
         override val id: Long,
         val toolCallId: String,
         val title: String,
         val status: String,
         override val author: String,
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
         override val text: String get() = "[$title] $status"
     }
@@ -139,7 +139,7 @@ sealed class ChatItem {
         override val id: Long,
         val entries: List<String>,
         override val author: String,
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
         override val text: String get() = entries.joinToString("\n")
     }
@@ -147,7 +147,7 @@ sealed class ChatItem {
         override val id: Long,
         override val text: String,
         override val author: String = "",
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem()
     data class Permission(
         override val id: Long,
@@ -156,7 +156,7 @@ sealed class ChatItem {
         val options: List<Pair<String, String>>,
         val answered: String? = null,
         override val author: String,
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
         override val text: String get() = title
     }
@@ -167,7 +167,7 @@ sealed class ChatItem {
         val fields: List<ElicitationField>,
         val answered: String? = null,
         override val author: String,
-        override val at: Long = 0,
+        override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
         override val text: String get() = message
     }
@@ -2536,26 +2536,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> =
-        tail.filter { t ->
+    private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
+        fun sameWindow(h: ChatItem, t: ChatItem): Boolean =
+            h.at == 0L || t.at == 0L || h.at >= t.at - 300_000L
+        return tail.filter { t ->
             when (t) {
                 is ChatItem.User ->
-                    hist.none { it is ChatItem.User && it.author == t.author && (it.text == t.text || it.text.endsWith(t.text)) }
+                    hist.none { it is ChatItem.User && sameWindow(it, t) && it.author == t.author && (it.text == t.text || it.text.endsWith(t.text)) }
                 is ChatItem.System ->
-                    hist.none { it is ChatItem.System && it.text == t.text }
+                    hist.none { it is ChatItem.System && sameWindow(it, t) && it.text == t.text }
                 is ChatItem.Assistant ->
-                    hist.none { it is ChatItem.Assistant && it.author == t.author && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
+                    hist.none { it is ChatItem.Assistant && sameWindow(it, t) && it.author == t.author && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Thought ->
-                    hist.none { it is ChatItem.Thought && it.author == t.author && it.text.startsWith(t.text) }
+                    hist.none { it is ChatItem.Thought && sameWindow(it, t) && it.author == t.author && it.text.startsWith(t.text) }
                 is ChatItem.Tool ->
-                    hist.none { it is ChatItem.Tool && it.toolCallId == t.toolCallId }
+                    hist.none { it is ChatItem.Tool && sameWindow(it, t) && it.toolCallId == t.toolCallId }
                 is ChatItem.Plan ->
-                    hist.none { it is ChatItem.Plan && it.author == t.author && it.entries == t.entries }
+                    hist.none { it is ChatItem.Plan && sameWindow(it, t) && it.author == t.author && it.entries == t.entries }
                 is ChatItem.Error ->
-                    hist.none { it is ChatItem.Error && it.author == t.author && it.text == t.text }
+                    hist.none { it is ChatItem.Error && sameWindow(it, t) && it.author == t.author && it.text == t.text }
                 else -> true
             }
         }
+    }
 
     private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null) {
         viewModelScope.launch {
@@ -2591,8 +2594,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadMoreHistory() {
         if (historyLoading || !historyHasMore) return
-        val oldestAt = chatItems.firstOrNull()?.at
-        if (oldestAt == null || oldestAt == 0L) return
+        val oldest = chatItems.firstOrNull { it.id < 0 } ?: return
+        val oldestAt = oldest.at
+        if (oldestAt == 0L) return
         historyLoading = true
         viewModelScope.launch {
             try {
@@ -2604,6 +2608,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hub.call(method, buildJsonObject {
                     put(idKey, id)
                     put("before", JsonPrimitive(oldestAt))
+                    put("beforeId", JsonPrimitive(-oldest.id))
                     put("limit", 50)
                 })
                 val entries = result["entries"]?.jsonArray ?: return@launch

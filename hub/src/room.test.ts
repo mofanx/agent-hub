@@ -785,4 +785,30 @@ describe("lostReplyAction", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("readBefore 使用 (at,id) 元组边界，同毫秒条目不被截断丢失", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    try {
+      const at = 1000;
+      // 三条同一毫秒写入的条目
+      for (const text of ["a", "b", "c"]) {
+        store.append("room", "r1", { at, kind: "assistant", author: "bot", text });
+      }
+      store.append("room", "r1", { at: 999, kind: "user", author: "我", text: "old" });
+      // 窗口边界落在同毫秒簇中间：只取最新的 2 条（c、b）
+      const window = store.read("room", "r1", 2);
+      assert.deepEqual(window.map((e) => e.text), ["b", "c"]);
+      // 旧行为 at < 1000 会永远跳过 "a"；带 beforeId 的元组比较能取回
+      const page = store.readBefore("room", "r1", window[0]!.at, 50, window[0]!.id);
+      assert.deepEqual(page.map((e) => e.text), ["old", "a"]);
+      assert.equal(store.hasMoreBefore("room", "r1", window[0]!.at, window[0]!.id), true);
+      // "a" 之后只剩 "old"
+      assert.equal(store.hasMoreBefore("room", "r1", page[1]!.at, page[1]!.id), true);
+      assert.equal(store.hasMoreBefore("room", "r1", page[0]!.at, page[0]!.id), false);
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

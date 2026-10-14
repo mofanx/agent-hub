@@ -586,25 +586,26 @@ export class Store {
     id: string,
     at: number,
     limit = 50,
+    beforeId?: number,
   ): HistoryItem[] {
     const rows = this.db
       .prepare(
         `SELECT id, at, kind, author, text FROM history
-         WHERE scope = ? AND scope_id = ? AND at < ?
+         WHERE scope = ? AND scope_id = ? AND (at < ? OR (at = ? AND id < ?))
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(scope, id, at, limit) as HistoryItem[];
+      .all(scope, id, at, at, beforeId ?? -1, limit) as HistoryItem[];
     return rows.reverse();
   }
 
-  hasMoreBefore(scope: "session" | "room", id: string, at: number): boolean {
+  hasMoreBefore(scope: "session" | "room", id: string, at: number, beforeId?: number): boolean {
     const row = this.db
       .prepare(
         `SELECT 1 FROM history
-         WHERE scope = ? AND scope_id = ? AND at < ?
+         WHERE scope = ? AND scope_id = ? AND (at < ? OR (at = ? AND id < ?))
          LIMIT 1`,
       )
-      .get(scope, id, at);
+      .get(scope, id, at, at, beforeId ?? -1);
     return row != null;
   }
 
