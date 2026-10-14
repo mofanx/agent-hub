@@ -371,7 +371,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         topBar = {
             if (vm.multiSelectMode) {
                 TopAppBar(
-                    title = { Text("已选 ${vm.selectedMessageIds.size} 条") },
+                    title = { Text(S.selectedCount.format(vm.selectedMessageIds.size)) },
                     navigationIcon = {
                         IconButton(onClick = { vm.exitMultiSelect() }) {
                             Icon(Icons.Filled.Close, contentDescription = S.cancel)
@@ -432,7 +432,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                     if (isRoom || vm.currentSession != null) {
                         IconButton(onClick = { vm.screen = Screen.FileTree }) {
-                            Text("文件", style = MaterialTheme.typography.labelMedium)
+                            Text(S.fileLabel, style = MaterialTheme.typography.labelMedium)
                         }
                     }
                     if (isRoom) {
@@ -629,7 +629,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
-                                    "加载更多历史…",
+                                    S.loadMoreHistory,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -653,7 +653,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     ) {
                         Icon(
                             imageVector = Icons.Filled.KeyboardArrowDown,
-                            contentDescription = "跳转到最下方",
+                            contentDescription = S.jumpToBottom,
                             modifier = Modifier.size(22.dp),
                         )
                     }
@@ -990,7 +990,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             ) {
                                 if (localMatches.isNotEmpty()) {
                                     Text(
-                                        "命令",
+                                        S.eventCommand,
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -1100,7 +1100,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 IconButton(onClick = { pickImage.launch("image/*") }) {
                     Icon(
                         imageVector = Icons.Filled.Add,
-                        contentDescription = "上传图片",
+                        contentDescription = S.uploadImage,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -1189,6 +1189,7 @@ fun AttachmentPreviews(
     onRemove: (Attachment) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val S = LocalStrings.current
     LazyRow(modifier = modifier.fillMaxWidth().height(96.dp)) {
         items(attachments, key = { it.base64.hashCode() }) { a ->
             Box(Modifier.padding(4.dp).size(88.dp)) {
@@ -1208,7 +1209,7 @@ fun AttachmentPreviews(
                 ) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = "移除",
+                        contentDescription = S.removeAttachment,
                         modifier = Modifier.size(14.dp),
                     )
                 }
@@ -1219,7 +1220,8 @@ fun AttachmentPreviews(
 
 @Composable
 fun AuthorLabel(author: String) {
-    if (author.isNotBlank() && author != "我") {
+    val S = LocalStrings.current
+    if (author.isNotBlank() && author != S.authorMe && author != "我") {
         Text(
             author,
             style = MaterialTheme.typography.labelSmall,
@@ -1270,7 +1272,7 @@ private fun MessageBubbleBox(
             SelectionContainer(
                 modifier = Modifier.appendTextContextMenuComponents {
                     if (canSelect) {
-                        item(key = "multi_select", label = "多选") {
+                        item(key = "multi_select", label = S.multiSelect) {
                             vm.enterMultiSelect(itemId)
                             close()
                         }
@@ -1969,7 +1971,7 @@ private fun RawChatBubble(
                 ) {
                     Column(Modifier.padding(12.dp)) {
                         Text(
-                            "输入请求",
+                            S.elicitationTitle,
                             style = MaterialTheme.typography.titleSmall,
                             color = textColor,
                         )
@@ -1981,9 +1983,9 @@ private fun RawChatBubble(
                         if (item.answered != null) {
                             Text(
                                 when (item.answered) {
-                                    "accepted" -> "已提交"
-                                    "declined" -> "已拒绝"
-                                    else -> "已取消"
+                                    "accepted" -> S.outcomeAccepted
+                                    "declined" -> S.outcomeDeclined
+                                    else -> S.outcomeCancelled
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = answeredColor,
@@ -2059,7 +2061,7 @@ private fun RawChatBubble(
                                         onValueChange = { s ->
                                             values[f.name] = JsonArray(s.split(",").map { it.trim() }.filter { it.isNotEmpty() }.map { JsonPrimitive(it) })
                                         },
-                                        placeholder = { Text("逗号分隔多个值") },
+                                        placeholder = { Text(S.commaSeparatedHint) },
                                         modifier = Modifier.fillMaxWidth(),
                                         singleLine = true,
                                     )
@@ -2107,10 +2109,10 @@ private fun RawChatBubble(
                                         }
                                         vm.answerElicitation(item.requestId, "accept", content)
                                     },
-                                ) { Text("提交") }
+                                ) { Text(S.actionSubmit) }
                                 OutlinedButton(
                                     onClick = { vm.answerElicitation(item.requestId, "decline") },
-                                ) { Text("拒绝") }
+                                ) { Text(S.actionDecline) }
                             }
                         }
                     }
@@ -2128,15 +2130,15 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
     if (flow == null) return
     var collapsed by remember { mutableStateOf(false) }
     val progress = flow.progress
-    val title = if (roomMode == "conductor") "指挥编排" else "编排进度"
+    val title = if (roomMode == "conductor") S.flowTitleConductor else S.flowTitleRoom
     val phaseLabel = when (flow.phase) {
-        "planning" -> "规划中"
+        "planning" -> S.phasePlanning
         "awaiting-input" -> S.flowAwaitingInput
-        "working" -> "执行中"
-        "reviewing" -> "验收中"
-        "summarizing" -> "汇总中"
-        "awaiting-retry" -> "等待重试"
-        "done" -> "已完成"
+        "working" -> S.phaseWorking
+        "reviewing" -> S.phaseReviewing
+        "summarizing" -> S.phaseSummarizing
+        "awaiting-retry" -> S.phaseAwaitingRetry
+        "done" -> S.phaseDone
         else -> ""
     }
     val showRetry = flow.phase == "awaiting-retry"
@@ -2181,7 +2183,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                             shape = RoundedCornerShape(4.dp),
                         ) {
                             Text(
-                                "向你求助",
+                                S.helpWanted,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onErrorContainer,
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
@@ -2191,8 +2193,8 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                 }
                 if (flow.tasks.isNotEmpty()) {
                     Text(
-                        "${progress.done}/${progress.total} 完成 · ${progress.running} 进行中 · ${progress.pending} 待执行" +
-                            if (progress.failed > 0) " · ${progress.failed} 失败" else "",
+                        S.flowProgressFmt.format(progress.done, progress.total, progress.running, progress.pending) +
+                            if (progress.failed > 0) S.flowProgressFailed.format(progress.failed) else "",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
@@ -2205,7 +2207,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                         onClick = { vm.cancelFlow() },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     ) {
-                        Text("中断", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                        Text(S.interruptFlow, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -2274,7 +2276,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                 if (flow.supplements.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "用户补充 ${flow.supplements.size} 条",
+                        S.supplementCount.format(flow.supplements.size),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -2658,6 +2660,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
 @Composable
 private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     if (artifacts.isEmpty()) return
+    val S = LocalStrings.current
     val context = LocalContext.current
     var collapsed by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
@@ -2667,7 +2670,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     var confirmRemoveSelected by remember { mutableStateOf(false) }
     var selectedArtifact by remember { mutableStateOf<ArtifactInfo?>(null) }
     val groups = mapOf("file" to artifacts)
-    val kindLabel = { _: String -> "文件" }
+    val kindLabel = { _: String -> S.fileLabel }
     val fileColor = MaterialTheme.colorScheme.primary
     val scroll = rememberScrollState()
     Card(
@@ -2686,13 +2689,13 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "${if (collapsed) "▸" else "▾"} 产物",
+                    "${if (collapsed) "▸" else "▾"} ${S.artifactsTitle}",
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (managing) {
                         Text(
-                            "删除 ${selected.size}",
+                            S.deleteSelectedCount.format(selected.size),
                             style = MaterialTheme.typography.bodySmall,
                             color = if (selected.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                             modifier = Modifier
@@ -2700,7 +2703,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                         Text(
-                            "取消",
+                            S.actionCancel,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier
                                 .clickable { managing = false; selected.clear() }
@@ -2708,14 +2711,14 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                         )
                     } else {
                         Text(
-                            "清空",
+                            S.actionClear,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier
                                 .clickable { showClearConfirm = true }
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                         Text(
-                            "管理",
+                            S.actionManage,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier
                                 .clickable { managing = true; selectedArtifact = null }
@@ -2723,7 +2726,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                         )
                     }
                     Text(
-                        "${artifacts.size} 条",
+                        S.itemCount.format(artifacts.size),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 6.dp),
@@ -2753,13 +2756,13 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             IconButton(
                                 onClick = {
                                     vm.quoteArtifact(artifact)
-                                    Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, S.quotedToast, Toast.LENGTH_SHORT).show()
                                 },
                                 modifier = Modifier.size(28.dp),
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.FormatQuote,
-                                    contentDescription = "引用",
+                                    contentDescription = S.actionQuote,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -2769,7 +2772,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.Visibility,
-                                    contentDescription = "预览",
+                                    contentDescription = S.actionPreview,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -2779,7 +2782,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Download,
-                                    contentDescription = "下载",
+                                    contentDescription = S.actionDownload,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -2789,7 +2792,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Delete,
-                                    contentDescription = "删除",
+                                    contentDescription = S.actionDelete,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -2916,18 +2919,18 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     confirmRemove?.let { artifact ->
         AlertDialog(
             onDismissRequest = { confirmRemove = null },
-            title = { Text("删除产物") },
-            text = { Text("确定删除该产物？\n${artifact.summary}") },
+            title = { Text(S.deleteArtifactTitle) },
+            text = { Text(S.deleteArtifactMsg.format(artifact.summary)) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         vm.removeArtifact(artifact)
                         confirmRemove = null
                     },
-                ) { Text("删除") }
+                ) { Text(S.actionDelete) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmRemove = null }) { Text("取消") }
+                TextButton(onClick = { confirmRemove = null }) { Text(S.actionCancel) }
             },
         )
     }
@@ -2935,18 +2938,18 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     if (showClearConfirm) {
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
-            title = { Text("清空产物") },
-            text = { Text("确定清空全部产物？") },
+            title = { Text(S.clearArtifactsTitle) },
+            text = { Text(S.clearArtifactsMsg) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         vm.clearArtifacts()
                         showClearConfirm = false
                     },
-                ) { Text("清空") }
+                ) { Text(S.actionClear) }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+                TextButton(onClick = { showClearConfirm = false }) { Text(S.actionCancel) }
             },
         )
     }
@@ -2954,8 +2957,8 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
     if (confirmRemoveSelected) {
         AlertDialog(
             onDismissRequest = { confirmRemoveSelected = false },
-            title = { Text("删除选中产物") },
-            text = { Text("确定删除 ${selected.size} 条产物？") },
+            title = { Text(S.deleteSelectedArtifactsTitle) },
+            text = { Text(S.deleteSelectedArtifactsMsg.format(selected.size)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -2964,10 +2967,10 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
                         managing = false
                         confirmRemoveSelected = false
                     },
-                ) { Text("删除") }
+                ) { Text(S.actionDelete) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmRemoveSelected = false }) { Text("取消") }
+                TextButton(onClick = { confirmRemoveSelected = false }) { Text(S.actionCancel) }
             },
         )
     }
@@ -2976,6 +2979,7 @@ private fun ArtifactPanel(artifacts: List<ArtifactInfo>, vm: ChatViewModel) {
 @Composable
 private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     if (events.isEmpty()) return
+    val S = LocalStrings.current
     val context = LocalContext.current
     var collapsed by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
@@ -2989,13 +2993,13 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     val scroll = rememberScrollState()
     val actionLabel = { action: String? ->
         when (action) {
-            "add" -> "新增"
-            "modify" -> "修改"
-            "delete" -> "删除"
-            "rename" -> "重命名"
-            "command" -> "命令"
-            "test" -> "测试"
-            else -> "事件"
+            "add" -> S.eventAdd
+            "modify" -> S.eventModify
+            "delete" -> S.eventDelete
+            "rename" -> S.eventRename
+            "command" -> S.eventCommand
+            "test" -> S.eventTest
+            else -> S.eventOther
         }
     }
     val colorScheme = MaterialTheme.colorScheme
@@ -3025,13 +3029,13 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "${if (collapsed) "▸" else "▾"} 事件",
+                    "${if (collapsed) "▸" else "▾"} ${S.eventsTitle}",
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (managing) {
                         Text(
-                            "删除 ${selected.size}",
+                            S.deleteSelectedCount.format(selected.size),
                             style = MaterialTheme.typography.bodySmall,
                             color = if (selected.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                             modifier = Modifier
@@ -3039,7 +3043,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                         Text(
-                            "取消",
+                            S.actionCancel,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier
                                 .clickable { managing = false; selected.clear(); selectedEvent = null }
@@ -3048,7 +3052,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                     } else {
                         Box {
                             Text(
-                                "清空",
+                                S.actionClear,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier
                                     .clickable { showClearMenu = true }
@@ -3059,7 +3063,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                                 onDismissRequest = { showClearMenu = false },
                             ) {
                                 DropdownMenuItem(
-                                    text = { Text("清空全部") },
+                                    text = { Text(S.clearAll) },
                                     onClick = {
                                         showClearMenu = false
                                         clearAction = null
@@ -3068,7 +3072,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                                 )
                                 actionOptions.forEach { action ->
                                     DropdownMenuItem(
-                                        text = { Text("仅清空「${actionLabel(action)}」") },
+                                        text = { Text(S.clearActionOnly.format(actionLabel(action))) },
                                         onClick = {
                                             showClearMenu = false
                                             clearAction = action
@@ -3079,7 +3083,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                             }
                         }
                         Text(
-                            "管理",
+                            S.actionManage,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier
                                 .clickable { managing = true; selectedEvent = null }
@@ -3087,7 +3091,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                         )
                     }
                     Text(
-                        "${events.size} 条",
+                        S.itemCount.format(events.size),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 6.dp),
@@ -3117,13 +3121,13 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                             IconButton(
                                 onClick = {
                                     vm.quoteEvent(event)
-                                    Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, S.quotedToast, Toast.LENGTH_SHORT).show()
                                 },
                                 modifier = Modifier.size(28.dp),
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.FormatQuote,
-                                    contentDescription = "引用",
+                                    contentDescription = S.actionQuote,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -3133,7 +3137,7 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Delete,
-                                    contentDescription = "删除",
+                                    contentDescription = S.actionDelete,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -3227,13 +3231,13 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                                     IconButton(
                                         onClick = {
                                             vm.quoteEvent(event)
-                                            Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, S.quotedToast, Toast.LENGTH_SHORT).show()
                                         },
                                         modifier = Modifier.size(28.dp),
                                     ) {
                                         Icon(
                                             imageVector = Icons.Filled.FormatQuote,
-                                            contentDescription = "引用",
+                                            contentDescription = S.actionQuote,
                                             modifier = Modifier.size(18.dp),
                                         )
                                     }
@@ -3250,8 +3254,8 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     confirmRemove?.let { event ->
         AlertDialog(
             onDismissRequest = { confirmRemove = null },
-            title = { Text("删除事件") },
-            text = { Text("确定删除该事件？\n${event.summary}") },
+            title = { Text(S.deleteEventTitle) },
+            text = { Text(S.deleteEventMsg.format(event.summary)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -3259,10 +3263,10 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                         confirmRemove = null
                         selectedEvent = null
                     },
-                ) { Text("删除") }
+                ) { Text(S.actionDelete) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmRemove = null }) { Text("取消") }
+                TextButton(onClick = { confirmRemove = null }) { Text(S.actionCancel) }
             },
         )
     }
@@ -3270,11 +3274,11 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     if (showClearConfirm) {
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
-            title = { Text("清空事件") },
+            title = { Text(S.clearEventsTitle) },
             text = {
                 Text(
-                    if (clearAction == null) "确定清空全部事件？"
-                    else "确定清空全部「${actionLabel(clearAction)}」事件？"
+                    if (clearAction == null) S.clearEventsMsg
+                    else S.clearEventsActionMsg.format(actionLabel(clearAction))
                 )
             },
             confirmButton = {
@@ -3284,10 +3288,10 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                         showClearConfirm = false
                         clearAction = null
                     },
-                ) { Text("清空") }
+                ) { Text(S.actionClear) }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+                TextButton(onClick = { showClearConfirm = false }) { Text(S.actionCancel) }
             },
         )
     }
@@ -3295,8 +3299,8 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
     if (confirmRemoveSelected) {
         AlertDialog(
             onDismissRequest = { confirmRemoveSelected = false },
-            title = { Text("删除选中事件") },
-            text = { Text("确定删除 ${selected.size} 条事件？") },
+            title = { Text(S.deleteSelectedEventsTitle) },
+            text = { Text(S.deleteSelectedEventsMsg.format(selected.size)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -3305,10 +3309,10 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                         managing = false
                         confirmRemoveSelected = false
                     },
-                ) { Text("删除") }
+                ) { Text(S.actionDelete) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmRemoveSelected = false }) { Text("取消") }
+                TextButton(onClick = { confirmRemoveSelected = false }) { Text(S.actionCancel) }
             },
         )
     }
@@ -3331,18 +3335,18 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
     val flowLabel = when {
         flow != null && flow.tasks.isEmpty() -> {
             val phase = when (flow.phase) {
-                "planning" -> "规划中"
+                "planning" -> S.phasePlanning
                 "awaiting-input" -> S.flowAwaitingInput
-                "working" -> "执行中"
-                "reviewing" -> "验收中"
-                "summarizing" -> "汇总中"
-                "awaiting-retry" -> "等待重试"
+                "working" -> S.phaseWorking
+                "reviewing" -> S.phaseReviewing
+                "summarizing" -> S.phaseSummarizing
+                "awaiting-retry" -> S.phaseAwaitingRetry
                 else -> ""
             }
-            if (phase.isEmpty()) "编排" else "编排 · $phase"
+            if (phase.isEmpty()) S.capsuleFlow else S.capsuleFlowPhase.format(phase)
         }
-        flowProgress != null -> "编排 ${flowProgress.done}/${flowProgress.total}"
-        else -> "编排"
+        flowProgress != null -> S.capsuleFlowProgress.format(flowProgress.done, flowProgress.total)
+        else -> S.capsuleFlow
     }
     Row(
         modifier = Modifier
@@ -3365,7 +3369,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
         }
         if (blackboardCount > 0) {
             CapsuleWithBadge(
-                label = "黑板 $blackboardCount",
+                label = S.capsuleBlackboard.format(blackboardCount),
                 badgeCount = vm.newBlackboardCount,
                 expanded = expanded == "blackboard",
                 onClick = {
@@ -3377,7 +3381,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
         }
         if (artifactCount > 0) {
             CapsuleWithBadge(
-                label = "产物 $artifactCount",
+                label = S.capsuleArtifact.format(artifactCount),
                 badgeCount = vm.newArtifactCount,
                 expanded = expanded == "artifact",
                 onClick = {
@@ -3389,7 +3393,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
         }
         if (eventCount > 0) {
             CapsuleWithBadge(
-                label = "事件 $eventCount",
+                label = S.capsuleEvent.format(eventCount),
                 badgeCount = vm.newEventCount,
                 expanded = expanded == "event",
                 onClick = {
@@ -3426,6 +3430,7 @@ private fun CapsuleWithBadge(label: String, badgeCount: Int, expanded: Boolean, 
 
 @Composable
 private fun BlackboardPanel(vm: ChatViewModel) {
+    val S = LocalStrings.current
     val entries = vm.blackboard
     if (entries.isEmpty()) return
     var collapsed by remember { mutableStateOf(false) }
@@ -3451,19 +3456,19 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "${if (collapsed) "▸" else "▾"} 共享黑板",
+                    "${if (collapsed) "▸" else "▾"} ${S.sharedBlackboard}",
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "清空",
+                        S.actionClear,
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier
                             .clickable { showClearConfirm = true }
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                     )
                     Text(
-                        "${entries.size} 条",
+                        S.itemCount.format(entries.size),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 6.dp),
@@ -3520,7 +3525,7 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                             style = MaterialTheme.typography.titleSmall,
                         )
                         IconButton(onClick = { detailEntry = null }) {
-                            Icon(Icons.Default.Close, contentDescription = "关闭")
+                            Icon(Icons.Default.Close, contentDescription = S.actionClose)
                         }
                     }
                     Spacer(Modifier.height(8.dp))
@@ -3540,28 +3545,28 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                     ) {
-                        TextButton(onClick = { detailEntry = null }) { Text("关闭") }
+                        TextButton(onClick = { detailEntry = null }) { Text(S.actionClose) }
                         OutlinedButton(
                             onClick = {
                                 vm.quoteBlackboard(entry)
                                 detailEntry = null
-                                Toast.makeText(context, "已引用到输入框", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, S.quotedToast, Toast.LENGTH_SHORT).show()
                             },
-                        ) { Text("引用") }
+                        ) { Text(S.actionQuote) }
                         OutlinedButton(
                             onClick = {
                                 scope.launch {
                                     clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(null, entry.detail.ifBlank { entry.text })))
                                 }
-                                Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, S.copiedToast, Toast.LENGTH_SHORT).show()
                             },
-                        ) { Text("复制") }
+                        ) { Text(S.actionCopy) }
                         TextButton(
                             onClick = {
                                 vm.removeBlackboardEntry(entry)
                                 detailEntry = null
                             },
-                        ) { Text("删除") }
+                        ) { Text(S.actionDelete) }
                     }
                 }
             }
@@ -3571,18 +3576,18 @@ private fun BlackboardPanel(vm: ChatViewModel) {
     if (showClearConfirm) {
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
-            title = { Text("清空黑板") },
-            text = { Text("确定清空全部 ${entries.size} 条黑板摘要？") },
+            title = { Text(S.clearBlackboardTitle) },
+            text = { Text(S.clearBlackboardMsg.format(entries.size)) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         vm.clearBlackboard()
                         showClearConfirm = false
                     },
-                ) { Text("清空") }
+                ) { Text(S.actionClear) }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+                TextButton(onClick = { showClearConfirm = false }) { Text(S.actionCancel) }
             },
         )
     }

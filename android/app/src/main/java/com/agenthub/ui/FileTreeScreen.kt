@@ -69,6 +69,7 @@ import java.io.File
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileTreeScreen(vm: ChatViewModel, onBack: () -> Unit) {
+    val S = LocalStrings.current
     LaunchedEffect(Unit) {
         vm.refreshFileTree(null)
     }
@@ -98,14 +99,14 @@ fun FileTreeScreen(vm: ChatViewModel, onBack: () -> Unit) {
             TopAppBar(
                 title = {
                     Text(
-                        vm.fileTreeRootName ?: "项目文件",
+                        vm.fileTreeRootName ?: S.projectFiles,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onUpOrBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.back)
                     }
                 },
                 actions = {
@@ -116,7 +117,7 @@ fun FileTreeScreen(vm: ChatViewModel, onBack: () -> Unit) {
                             )
                         },
                     ) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新")
+                        Icon(Icons.Default.Refresh, contentDescription = S.refresh)
                     }
                 },
             )
@@ -145,7 +146,7 @@ fun FileTreeScreen(vm: ChatViewModel, onBack: () -> Unit) {
                         .padding(12.dp),
                 ) {
                     Text(
-                        "↑ 返回上级",
+                        S.upOneLevel,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -220,6 +221,7 @@ private fun RootItem(root: FileTreeRoot, vm: ChatViewModel, onBack: () -> Unit, 
 
 @Composable
 private fun FileTreeItem(node: FileTreeNode, vm: ChatViewModel, onBack: () -> Unit) {
+    val S = LocalStrings.current
     var showRename by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val canQuote = vm.currentRoom != null || vm.currentSession != null
@@ -299,18 +301,18 @@ private fun FileTreeItem(node: FileTreeNode, vm: ChatViewModel, onBack: () -> Un
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("删除文件") },
-            text = { Text("确认删除 ${node.name}？") },
+            title = { Text(S.deleteFileTitle) },
+            text = { Text(S.deleteFileMsg.format(node.name)) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         vm.deleteProjectFile(node.path)
                         showDeleteConfirm = false
                     },
-                ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                ) { Text(S.delete, color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+                TextButton(onClick = { showDeleteConfirm = false }) { Text(S.cancel) }
             },
         )
     }
@@ -329,10 +331,11 @@ private fun FileTreeMenu(
     onRename: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
 ) {
+    val S = LocalStrings.current
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
-            Icon(Icons.Filled.MoreVert, contentDescription = "更多")
+            Icon(Icons.Filled.MoreVert, contentDescription = S.more)
         }
         DropdownMenu(
             expanded = expanded,
@@ -357,36 +360,36 @@ private fun FileTreeMenu(
             }
             HorizontalDivider()
             DropdownMenuItem(
-                text = { Text(if (isFile) "打开" else "进入") },
+                text = { Text(if (isFile) S.openLabel else S.enterLabel) },
                 onClick = { expanded = false; onOpen() },
             )
             if (onPreview != null) {
                 DropdownMenuItem(
-                    text = { Text("预览") },
+                    text = { Text(S.actionPreview) },
                     onClick = { expanded = false; onPreview() },
                 )
             }
             if (onDownload != null) {
                 DropdownMenuItem(
-                    text = { Text("下载") },
+                    text = { Text(S.actionDownload) },
                     onClick = { expanded = false; onDownload() },
                 )
             }
             if (canQuote && onQuote != null) {
                 DropdownMenuItem(
-                    text = { Text("引用到输入框", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    text = { Text(S.quoteToInput, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     onClick = { expanded = false; onQuote() },
                 )
             }
             if (onRename != null) {
                 DropdownMenuItem(
-                    text = { Text("重命名") },
+                    text = { Text(S.rename) },
                     onClick = { expanded = false; onRename() },
                 )
             }
             if (onDelete != null) {
                 DropdownMenuItem(
-                    text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                    text = { Text(S.delete, color = MaterialTheme.colorScheme.error) },
                     onClick = { expanded = false; onDelete() },
                 )
             }
@@ -400,15 +403,16 @@ private fun FileRenameDialog(
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val S = LocalStrings.current
     var name by remember { mutableStateOf(currentName) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("重命名") },
+        title = { Text(S.rename) },
         text = {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("新名称") },
+                label = { Text(S.newNameLabel) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -420,10 +424,10 @@ private fun FileRenameDialog(
                     if (trimmed.isNotBlank() && trimmed != currentName) onConfirm(trimmed)
                     onDismiss()
                 },
-            ) { Text("确认") }
+            ) { Text(S.ok) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(S.cancel) }
         },
     )
 }
@@ -433,6 +437,7 @@ internal fun FilePreviewDialog(
     preview: com.agenthub.FilePreview,
     onDismiss: () -> Unit,
 ) {
+    val S = LocalStrings.current
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -471,7 +476,7 @@ internal fun FilePreviewDialog(
                     when {
                         preview.text != null -> TextContent(preview.text)
                         preview.data != null && preview.mime.startsWith("image/") -> ImageContent(preview.data)
-                        preview.data != null -> Text("二进制文件，无法直接预览", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        preview.data != null -> Text(S.binaryNoPreview, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         else -> CircularProgressIndicator()
                     }
                 }
@@ -480,7 +485,7 @@ internal fun FilePreviewDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
                 ) {
-                    TextButton(onClick = onDismiss) { Text("关闭") }
+                    TextButton(onClick = onDismiss) { Text(S.actionClose) }
                 }
             }
         }
@@ -503,6 +508,7 @@ private fun TextContent(text: String) {
 
 @Composable
 private fun ImageContent(data: ByteArray) {
+    val S = LocalStrings.current
     val bitmap = remember(data) {
         BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap()
     }
@@ -516,7 +522,7 @@ private fun ImageContent(data: ByteArray) {
             contentScale = ContentScale.Fit,
         )
     } else {
-        Text("无法解析图片", color = MaterialTheme.colorScheme.error)
+        Text(S.cannotParseImage, color = MaterialTheme.colorScheme.error)
     }
 }
 

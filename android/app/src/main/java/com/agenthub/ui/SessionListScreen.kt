@@ -172,12 +172,12 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             vm.sessions.any { it.sessionId != s.sessionId && it.name == name.trim() }
         AlertDialog(
             onDismissRequest = { renameTarget = null },
-            title = { Text("重命名会话") },
+            title = { Text(S.renameSessionTitle) },
             text = {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("新名称") },
+                    label = { Text(S.newNameLabel) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
@@ -494,22 +494,21 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         strokeWidth = 2.dp,
                                     )
                                     Spacer(Modifier.height(12.dp))
-                                    Text("正在连接 Hub…", style = MaterialTheme.typography.bodyMedium)
+                                    Text(S.connectingHub, style = MaterialTheme.typography.bodyMedium)
                                 } else {
                                     Text(
-                                        "当前未连接到 Hub",
+                                        S.notConnectedHub,
                                         style = MaterialTheme.typography.titleSmall,
                                     )
                                     Spacer(Modifier.height(4.dp))
                                     Text(
-                                        if (vm.profiles.isEmpty()) "还没有保存的 Hub，点击下方按钮添加"
-                                        else "点击下方按钮选择或添加 Hub",
+                                        if (vm.profiles.isEmpty()) S.noSavedHubs else S.pickOrAddHubHint,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                     Spacer(Modifier.height(12.dp))
                                     Button(onClick = onMenuClick) {
-                                        Text("添加 / 选择 Hub")
+                                        Text(S.addOrPickHub)
                                     }
                                 }
                             }
@@ -680,7 +679,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     TextButton(
                                         onClick = { vm.roomListFilter = vm.roomListFilter.copy(showArchived = !vm.roomListFilter.showArchived) },
                                     ) {
-                                        Text(if (vm.roomListFilter.showArchived) "隐藏归档" else "归档 ($archivedCount)")
+                                        Text(if (vm.roomListFilter.showArchived) S.hideArchived else S.archiveCountFmt.format(archivedCount))
                                     }
                                 }
                                 IconButton(
@@ -1395,13 +1394,13 @@ internal fun RoomEditorDialog(
         else -> m
     }
     fun modeDescription(m: String) = when (m) {
-        "mention" -> "成员自由发言，@某个成员时该成员单独回答。适合闲聊、快速提问。"
-        "conductor" -> "指挥家自动拆解任务，派发给不同成员并行执行，最后汇总结果。适合复杂任务。"
-        "roundrobin" -> "每个问题按顺序由一个成员回答，可设置起始发言人。适合多角色依次表态。"
-        "parallel" -> "所有成员同时回答同一个问题，最后由汇总者综合出一致结论。适合头脑风暴。"
-        "pipeline" -> "成员按指定顺序串行处理，后一个成员基于前一个的结果继续。适合多步骤流程。"
-        "debate" -> "正方与反方交替辩论若干轮，最后由裁判给出公正总结。适合观点碰撞。"
-        "auto" -> "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。"
+        "mention" -> S.modeDescMention
+        "conductor" -> S.modeDescConductor
+        "roundrobin" -> S.modeDescRoundRobin
+        "parallel" -> S.modeDescParallel
+        "pipeline" -> S.modeDescPipeline
+        "debate" -> S.modeDescDebate
+        "auto" -> S.modeDescAuto
         else -> ""
     }
 
@@ -1552,12 +1551,12 @@ internal fun RoomEditorDialog(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(start = 48.dp, end = 4.dp, bottom = 4.dp),
                                 ) {
-                                    Text("角色：", style = MaterialTheme.typography.bodySmall)
+                                    Text(S.roleFieldLabel, style = MaterialTheme.typography.bodySmall)
                                     Box {
                                         TextButton(onClick = { roleExpanded.value = true }) {
                                             Text(
                                                 vm.roles.find { it.id == currentRole }?.name
-                                                    ?: "默认（无角色卡）",
+                                                    ?: S.defaultRole,
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
                                         }
@@ -1566,7 +1565,7 @@ internal fun RoomEditorDialog(
                                             onDismissRequest = { roleExpanded.value = false },
                                         ) {
                                             DropdownMenuItem(
-                                                text = { Text("默认（无角色卡）") },
+                                                text = { Text(S.defaultRole) },
                                                 onClick = {
                                                     memberRoles = memberRoles - s.sessionId
                                                     roleExpanded.value = false
@@ -1592,7 +1591,7 @@ internal fun RoomEditorDialog(
                 if (mode == "debate") {
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("${S.modeDebate} 轮数：")
+                        Text(S.debateRoundsFmt.format(S.modeDebate))
                         IconButton(onClick = { if (debateRounds > 1) debateRounds-- }) {
                             Text("−")
                         }
@@ -1865,7 +1864,7 @@ private fun RoomCard(
                             onClick = { onClone(); showMenu.value = false },
                         )
                         DropdownMenuItem(
-                            text = { Text(if (r.archived) "取消归档" else "归档") },
+                            text = { Text(if (r.archived) S.unarchive else S.archive) },
                             onClick = { onArchive(); showMenu.value = false },
                         )
                         DropdownMenuItem(
@@ -1905,6 +1904,7 @@ private fun searchExcerpt(
 
 @Composable
 private fun SearchGroupCard(group: SearchGroup, vm: ChatViewModel) {
+    val S = LocalStrings.current
     val name by remember(group, vm.sessions.size, vm.rooms.size) {
         derivedStateOf {
             if (group.scope == "room") {
@@ -1951,7 +1951,7 @@ private fun SearchGroupCard(group: SearchGroup, vm: ChatViewModel) {
                 }
             }
             Text(
-                "共 ${group.count} 条",
+                S.totalCountFmt.format(group.count),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 8.dp),

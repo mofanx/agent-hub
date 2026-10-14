@@ -40,7 +40,7 @@ fun HubProfileDialog(
     val isCurrent = profile != null && vm.currentProfile == profile
     val hostChanged = profile != null && profile.address != host.trim()
 
-    val title = if (profile == null) "添加 Hub" else "编辑 Hub"
+    val title = if (profile == null) S.addHub else S.editHub
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -52,7 +52,7 @@ fun HubProfileDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("名称（如 本机 / 公网 VPS）") },
+                    label = { Text(S.nameExampleLabel) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
@@ -111,7 +111,7 @@ fun HubProfileDialog(
                             onDismiss()
                         },
                     ) {
-                        Text("保存")
+                        Text(S.save)
                     }
                     Spacer(Modifier.size(8.dp))
                 }
@@ -130,10 +130,10 @@ fun HubProfileDialog(
                     enabled = !vm.connecting && host.isNotBlank(),
                 ) {
                     val label = when {
-                        isCurrent && hostChanged -> "保存并切换"
-                        isCurrent -> "保存并连接"
-                        profile == null -> "添加并连接"
-                        else -> "保存并连接"
+                        isCurrent && hostChanged -> S.saveAndSwitch
+                        isCurrent -> S.saveAndConnect
+                        profile == null -> S.addAndConnect
+                        else -> S.saveAndConnect
                     }
                     Text(label)
                 }

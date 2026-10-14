@@ -548,7 +548,7 @@ fun buildWsUrl(address: String, token: String): String {
 }
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
-    private val hub = HubClient(viewModelScope)
+    private val hub = HubClient(viewModelScope) { stringsFor(lang) }
     private val prefs = app.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
     suspend fun hubCall(method: String, params: JsonObject): JsonObject = hub.call(method, params)
 
@@ -595,11 +595,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString("commands", customCommands.joinToString("\u0001")).apply()
     }
 
-    val defaultCommands = listOf(
-        "继续",
-        "总结目前的进展，列出下一步计划",
-        "运行项目的测试并修复所有失败",
-    )
+    val defaultCommands
+        get() = stringsFor(lang).let { listOf(it.cmdContinue, it.cmdSummarize, it.cmdRunTests) }
 
     companion object {
         @Volatile
@@ -614,7 +611,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var roomListFilter by mutableStateOf(RoomListFilter())
     var connecting by mutableStateOf(false)
     var connectError by mutableStateOf<String?>(null)
-    var agentStatus by mutableStateOf("未连接")
+    var agentStatus by mutableStateOf("offline")
     var currentProfile by mutableStateOf<ConnProfile?>(null)
 
     val sessions = mutableStateListOf<SessionInfo>()
@@ -1068,14 +1065,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         // 群聊模式：需要 @成员名 前缀
                         val mentionMatch = Regex("^@(\\S+)\\s+(.+)$").find(arg)
                         if (mentionMatch == null) {
-                            chatItems.add(ChatItem.Error(++itemSeq, "群聊中切换模型请指定成员：/model @成员名 模型名"))
+                            chatItems.add(ChatItem.Error(++itemSeq, S.roomModelHint))
                             return@launch
                         }
                         val memberName = mentionMatch.groupValues[1]
                         val modelName = mentionMatch.groupValues[2]
                         val member = room.members.find { it.second == memberName }
                         if (member == null) {
-                            chatItems.add(ChatItem.Error(++itemSeq, "未找到成员 @$memberName"))
+                            chatItems.add(ChatItem.Error(++itemSeq, S.memberNotFoundFmt.format(memberName)))
                             return@launch
                         }
                         val result = hub.call("model.set", buildJsonObject {
@@ -1086,7 +1083,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         if (model != null) {
                             val uid = model["uid"]?.jsonPrimitive?.content ?: modelName
                             val label = model["label"]?.jsonPrimitive?.content ?: ""
-                            chatItems.add(ChatItem.System(++itemSeq, "@$memberName 模型已切换为 ${label.ifBlank { uid }}"))
+                            chatItems.add(ChatItem.System(++itemSeq, S.modelSwitchedForFmt.format(memberName, label.ifBlank { uid })))
                             refreshCurrentModel()
                         } else {
                             chatItems.add(ChatItem.Error(++itemSeq, S.modelUnknown.format(modelName)))
@@ -1249,7 +1246,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     roomMemberModels[selectedMember] = Triple(memberName, roomMemberModels[selectedMember]?.second ?: "devin", uid)
                     modelCurrent = uid
                     modelList.forEachIndexed { i, item -> modelList[i] = item.copy(isCurrent = item.uid == uid) }
-                    chatItems.add(ChatItem.System(++itemSeq, "@$memberName 模型已切换为 ${model.label.ifBlank { model.uid }}"))
+                    chatItems.add(ChatItem.System(++itemSeq, stringsFor(lang).modelSwitchedForFmt.format(memberName, model.label.ifBlank { model.uid })))
                 } else {
                     // 单聊模式
                     val sid = currentSession?.sessionId
@@ -1318,7 +1315,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 SlashCommand("stop", S.slashHelpStop),
                 SlashCommand("bypass", S.slashHelpBypass),
                 SlashCommand("model", S.slashHelpModel),
-                SlashCommand("fusion", "/fusion - 选择 Fusion 模型"),
+                SlashCommand("fusion", S.fusionDesc),
             )
             val skillCmds = skills.map { SlashCommand(it.name, it.description) }
             return local + skillCmds
@@ -1365,7 +1362,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     connectError = null
                     saveProfile(address, token, publicToken, name)
                     startHubService()
-                    agentStatus = "已连接"
+                    agentStatus = "connected"
                     if (firstConnect) screen = Screen.Sessions
                     syncRefreshAll()
                     restoreCurrentScreen()
@@ -1376,15 +1373,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     connecting = false
                     connectError = msg
                 } else {
-                    agentStatus = "连接已断开，正在重连…"
+                    agentStatus = "reconnecting"
                 }
             })
         hub.onClosed = {
             if (connecting) {
                 connecting = false
-                connectError = "连接已断开"
+                connectError = stringsFor(lang).statusDisconnected
             } else {
-                agentStatus = "连接已断开，正在重连…"
+                agentStatus = "reconnecting"
             }
         }
         eventJob = viewModelScope.launch {
@@ -1422,7 +1419,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         panelsCache.clear()
         connecting = false
         connectError = null
-        agentStatus = "未连接"
+        agentStatus = "offline"
         currentProfile = null
         screen = Screen.Sessions
     }
@@ -2473,7 +2470,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (updated != null && autoOpen) {
                     openChat(updated)
                 } else if (updated == null) {
-                    connectError = "恢复失败：agent 不支持或会话已失效"
+                    connectError = stringsFor(lang).resumeFailed
                 }
             } catch (e: Exception) {
                 connectError = e.message
@@ -2526,7 +2523,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return when (kind) {
             "user" -> ChatItem.User(itemId, text, at = at)
             "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
-                ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失", at = at)
+                ChatItem.System(itemId, stringsFor(lang).lostReply, at = at)
             } else {
                 ChatItem.Assistant(itemId, text, author, at = at)
             }
@@ -2924,7 +2921,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         )
         quote = null
         pendingAttachments.clear()
-        val fullText = if (q != null) "（引用 ${q.first} 的消息：\"${q.second.take(300)}\"）\n$text" else text
+        val fullText = if (q != null) "${stringsFor(lang).quoteHeaderFmt.format(q.first, q.second.take(300))}\n$text" else text
         busyIds.add(session.sessionId)
         viewModelScope.launch {
             try {
@@ -2963,7 +2960,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("taskIds", taskIds)
                 })
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, "重试失败: ${e.message}"))
+                chatItems.add(ChatItem.Error(++itemSeq, stringsFor(lang).retryFailedFmt.format(e.message)))
             }
         }
     }
@@ -2976,7 +2973,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 flow = null
                 flowCache[room.roomId] = null
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, "取消编排失败: ${e.message}"))
+                chatItems.add(ChatItem.Error(++itemSeq, stringsFor(lang).cancelFlowFailedFmt.format(e.message)))
             }
         }
     }
@@ -3092,7 +3089,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>().applicationContext
             val clipboard = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
             clipboard.setPrimaryClip(android.content.ClipData.newPlainText(null, text))
-            android.widget.Toast.makeText(ctx, "已复制 ${byOriginal.size} 条消息", android.widget.Toast.LENGTH_SHORT).show()
+            android.widget.Toast.makeText(ctx, stringsFor(lang).copiedMessagesFmt.format(byOriginal.size), android.widget.Toast.LENGTH_SHORT).show()
         }
         exitMultiSelect()
     }
@@ -3253,10 +3250,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val sessionId = currentSession?.sessionId
         if (roomId == null && sessionId == null) return
         if (artifact.path.isNullOrBlank()) {
-            Toast.makeText(getApplication(), "该产物没有可下载文件", Toast.LENGTH_SHORT).show()
+            Toast.makeText(getApplication(), stringsFor(lang).noDownloadableFile, Toast.LENGTH_SHORT).show()
             return
         }
         viewModelScope.launch {
+            val S = stringsFor(lang)
             try {
                 val result = withContext(Dispatchers.IO) {
                     hub.call("file.get", buildJsonObject {
@@ -3273,9 +3271,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 pendingDownload = DownloadRequest(name, text, data, mime)
             } catch (e: Exception) {
                 val msg = when {
-                    e.message?.contains("not readable", true) == true -> "文件不存在或无法读取"
-                    e.message?.contains("not found", true) == true -> "文件不存在"
-                    else -> e.message ?: "下载失败"
+                    e.message?.contains("not readable", true) == true -> S.fileNotReadable
+                    e.message?.contains("not found", true) == true -> S.fileNotFound
+                    else -> e.message ?: S.downloadFailed
                 }
                 Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
             }
@@ -3307,7 +3305,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     FilePreview(name, filePath, null, null, mime)
                 }
             } catch (e: Exception) {
-                filePreview = FilePreview(name = File(filePath).name, path = filePath, text = "加载失败: ${e.message}")
+                filePreview = FilePreview(name = File(filePath).name, path = filePath, text = stringsFor(lang).loadFailedFmt.format(e.message))
             }
         }
     }
@@ -3347,7 +3345,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     FilePreview(fileName, artifact.path ?: "", null, null, mime)
                 }
             } catch (e: Exception) {
-                filePreview = FilePreview(name = name, path = artifact.path ?: "", text = "加载失败: ${e.message}")
+                filePreview = FilePreview(name = name, path = artifact.path ?: "", text = stringsFor(lang).loadFailedFmt.format(e.message))
             }
         }
     }
@@ -3555,10 +3553,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     app.startActivity(intent)
                 }
             } catch (e: Exception) {
+                val S = stringsFor(lang)
                 val msg = when {
-                    e.message?.contains("not readable", true) == true -> "文件不存在或无法读取"
-                    e.message?.contains("not found", true) == true -> "文件不存在"
-                    else -> e.message ?: "打开失败"
+                    e.message?.contains("not readable", true) == true -> S.fileNotReadable
+                    e.message?.contains("not found", true) == true -> S.fileNotFound
+                    else -> e.message ?: S.openFailed
                 }
                 Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
             }
@@ -3585,10 +3584,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (text == null && data == null) throw Exception("empty file")
                 pendingDownload = DownloadRequest(name, text, data, mime)
             } catch (e: Exception) {
+                val S = stringsFor(lang)
                 val msg = when {
-                    e.message?.contains("not readable", true) == true -> "文件不存在或无法读取"
-                    e.message?.contains("not found", true) == true -> "文件不存在"
-                    else -> e.message ?: "下载失败"
+                    e.message?.contains("not readable", true) == true -> S.fileNotReadable
+                    e.message?.contains("not found", true) == true -> S.fileNotFound
+                    else -> e.message ?: S.downloadFailed
                 }
                 Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
             }
@@ -3597,21 +3597,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveDownloadToUri(uri: Uri, request: DownloadRequest) {
         viewModelScope.launch {
+            val S = stringsFor(lang)
             try {
                 withContext(Dispatchers.IO) {
                     getApplication<Application>().contentResolver.openOutputStream(uri)?.use { os ->
                         if (request.text != null) os.write(request.text.toByteArray(Charsets.UTF_8)) else os.write(Base64.decode(request.data, Base64.NO_WRAP))
-                    } ?: throw Exception("无法打开输出流")
+                    } ?: throw Exception(S.cannotOpenStream)
                 }
-                Toast.makeText(getApplication(), "已保存到：${request.name}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(getApplication(), S.savedToFmt.format(request.name), Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(getApplication(), e.message ?: "保存失败", Toast.LENGTH_SHORT).show()
+                Toast.makeText(getApplication(), e.message ?: S.saveFailed, Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     fun sendProjectFileMessage(filePath: String) {
-        val text = "继续处理这个文件：$filePath"
+        val text = stringsFor(lang).continueFilePrompt.format(filePath)
         if (currentRoom != null) sendRoomMessage(text) else if (currentSession != null) sendPrompt(text)
     }
 
@@ -3839,7 +3840,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (!inScope(sid)) return
                 if (!busyIds.contains(sid)) busyIds.add(sid)
                 val tool = p["toolCall"]!!.jsonObject
-                val title = tool["title"]?.jsonPrimitive?.content ?: "工具调用"
+                val title = tool["title"]?.jsonPrimitive?.content ?: stringsFor(lang).toolCallLabel
                 val options = p["options"]!!.jsonArray.map {
                     val o = it.jsonObject
                     o["optionId"]!!.jsonPrimitive.content to o["name"]!!.jsonPrimitive.content

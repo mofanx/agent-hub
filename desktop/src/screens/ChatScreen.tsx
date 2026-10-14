@@ -10,7 +10,9 @@ import {
   ChevronUp,
   Circle,
   Cpu,
+  Download,
   Ellipsis,
+  Eye,
   FileCode,
   FolderTree,
   ImagePlus,
@@ -21,6 +23,7 @@ import {
   Package,
   Pencil,
   Plus,
+  Quote,
   RotateCcw,
   Search,
   ShieldAlert,
@@ -37,6 +40,7 @@ import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, Elicitat
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
+import { modeLabel } from "./session-shared";
 
 type SidePanelKind = "files" | "flow" | "blackboard" | "artifact" | "event" | null;
 
@@ -185,16 +189,14 @@ export function ChatScreen() {
   const initialScrolledRef = useRef(false);
 
   const isRoom = !!store.currentRoom;
-  const title = store.currentRoom?.name || store.currentSession?.name || "聊天";
-  const modeName = (m: string) =>
-    ({ mention: "普通群", conductor: "指挥家", roundrobin: "轮询", parallel: "并行", pipeline: "流水线", debate: "辩论", auto: "自动", self: "自己", deciding: "决策中" } as Record<string, string>)[m] ?? m;
-  const modeLabel = store.currentRoom ? modeName(store.currentRoom.mode) : undefined;
+  const title = store.currentRoom?.name || store.currentSession?.name || S.chatFallback;
+  const roomModeLabel = store.currentRoom ? modeLabel(S, store.currentRoom.mode) : undefined;
   const subModeLabel =
     store.currentRoom?.subMode && store.currentRoom.subMode !== store.currentRoom.mode
-      ? modeName(store.currentRoom.subMode)
+      ? modeLabel(S, store.currentRoom.subMode)
       : undefined;
   const subtitle = store.currentRoom
-    ? (modeLabel ?? store.currentRoom.mode)
+    ? (roomModeLabel ?? store.currentRoom.mode)
     : store.currentSession
       ? store.displayName(store.currentSession)
       : "";
@@ -765,10 +767,10 @@ export function ChatScreen() {
             <span className="chat-search-count">
               {chatSearchMatchCount > 0 ? `${chatSearchMatchIndex + 1} / ${chatSearchMatchCount}` : "0"}
             </span>
-            <button className="icon-btn" onClick={prevMatch} disabled={chatSearchMatchCount === 0} title="上一个 (Shift+Enter)">
+            <button className="icon-btn" onClick={prevMatch} disabled={chatSearchMatchCount === 0} title={S.prevMatchTitle}>
               <ChevronUp size={14} />
             </button>
-            <button className="icon-btn" onClick={nextMatch} disabled={chatSearchMatchCount === 0} title="下一个 (Enter)">
+            <button className="icon-btn" onClick={nextMatch} disabled={chatSearchMatchCount === 0} title={S.nextMatchTitle}>
               <ChevronDown size={14} />
             </button>
             <button
@@ -778,7 +780,7 @@ export function ChatScreen() {
                 setInChatSearchQuery("");
                 setChatSearchMatchIndex(-1);
               }}
-              title="关闭 (Esc)"
+              title={S.closeEscTitle}
             >
               <X size={14} />
             </button>
@@ -786,33 +788,33 @@ export function ChatScreen() {
         )}
         {!searchOpen && (
           <>
-            <button className="icon-btn" onClick={() => setSearchOpen(true)} title="搜索聊天内容 (Ctrl+F)">
+            <button className="icon-btn" onClick={() => setSearchOpen(true)} title={S.searchChatTitle}>
               <Search size={15} />
             </button>
             <button
               className={`icon-btn ${sidePanel === "files" ? "active" : ""}`}
               onClick={() => setSidePanel(sidePanel === "files" ? null : "files")}
-              title="项目文件 (Ctrl+Shift+F)"
+              title={S.filesPanelTitle}
             >
               <FolderTree size={15} />
             </button>
             <button
               className={`icon-btn ${isContextPanel ? "active" : ""}`}
               onClick={openContextPanel}
-              title="任务 / 产物 / 事件面板"
+              title={S.contextPanelTitle}
             >
               <Activity size={15} />
               {newTotal > 0 && !isContextPanel && <span className="new-badge">{newTotal > 99 ? "99+" : newTotal}</span>}
             </button>
-            <button className="secondary model-btn" onClick={() => void store.showModelPickerDialog()} title="切换模型">
+            <button className="secondary model-btn" onClick={() => void store.showModelPickerDialog()} title={S.switchModelTitle}>
               <Cpu size={13} />
-              <span>{isRoom ? "成员模型" : (store.modelCurrent || "模型")}</span>
+              <span>{isRoom ? S.memberModelsLabel : (store.modelCurrent || S.modelFallback)}</span>
             </button>
             {store.currentRoom && (
               <button
                 className="icon-btn"
-                title="编辑群聊"
-                aria-label="编辑群聊"
+                title={S.editRoomTitle}
+                aria-label={S.editRoomTitle}
                 onClick={() => store.openEditRoomDialog(store.currentRoom!)}
               >
                 <Ellipsis size={15} />
@@ -827,11 +829,11 @@ export function ChatScreen() {
           <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
             <div className="chat-column">
               {store.historyLoading && (
-                <div className="history-loading">加载更多历史…</div>
+                <div className="history-loading">{S.loadMoreHistory}</div>
               )}
               {store.chatItems.map((item, i) => {
                 const isQuoted = store.quote
-                  ? store.quote[0] === (item.author || "我") &&
+                  ? (store.quote[0] === (item.author || S.meLabel) || store.quote[0] === "我") &&
                     "text" in item &&
                     item.text.startsWith(store.quote[1])
                   : false;
@@ -858,7 +860,7 @@ export function ChatScreen() {
               <button
                 className="scroll-to-bottom"
                 onClick={scrollToBottom}
-                title="回到底部"
+                title={S.backToBottom}
                 type="button"
               >
                 <ArrowDown size={15} />
@@ -871,10 +873,10 @@ export function ChatScreen() {
               <div key={t.id} className="help-banner">
                 <LifeBuoy size={13} />
                 <span className="help-banner-text">
-                  @{t.name} 在任务 {t.id} 向你求助：
-                  {t.waitingQuestion ?? "需要你的回复"}
+                  {S.helpAskFmt.replace("%s", t.name).replace("%s", t.id)}
+                  {t.waitingQuestion ?? S.helpNeededFallback}
                 </span>
-                <span className="help-banner-hint">直接发送并入补充</span>
+                <span className="help-banner-hint">{S.helpBannerHint}</span>
                 <button
                   className="help-banner-btn"
                   onClick={() => {
@@ -888,7 +890,7 @@ export function ChatScreen() {
                     inputRef.current?.focus();
                   }}
                 >
-                  答复
+                  {S.answerLabel}
                 </button>
               </div>
             ))}
@@ -924,14 +926,14 @@ export function ChatScreen() {
               <div className="quote-bar">
                 <span className="subtitle">
                   {replyHelp.taskId
-                    ? `答复 @${replyHelp.name} 的求助（任务 ${replyHelp.taskId}）：`
+                    ? S.replyHelpFmt.replace("%s", replyHelp.name).replace("%s", replyHelp.taskId)
                     : `${S.clarificationReplying}：`}
                   {replyHelp.question.slice(0, 80)}
                 </span>
                 <button
                   className="icon-btn"
                   onClick={() => setReplyHelp(null)}
-                  title="取消答复，消息将作为补充发送"
+                  title={S.cancelReplyTitle}
                 >
                   <X size={13} />
                 </button>
@@ -940,9 +942,9 @@ export function ChatScreen() {
             {store.quote && (
               <div className="quote-bar">
                 <span className="subtitle">
-                  引用 @{store.quote[0]}: {store.quote[1].slice(0, 80)}
+                  {S.quoteLineFmt.replace("%s", store.quote[0]).replace("%s", store.quote[1].slice(0, 80))}
                 </span>
-                <button className="icon-btn" onClick={() => store.setQuote(null)} title="取消引用">
+                <button className="icon-btn" onClick={() => store.setQuote(null)} title={S.cancelQuoteTitle}>
                   <X size={13} />
                 </button>
               </div>
@@ -1016,7 +1018,7 @@ export function ChatScreen() {
                     <>
                       {local.length > 0 && (
                         <>
-                          <div className="slash-group">命令</div>
+                          <div className="slash-group">{S.commandsGroupLabel}</div>
                           {local.map((c) => {
                             const i = idx++;
                             return (
@@ -1062,7 +1064,7 @@ export function ChatScreen() {
 
             {suggestOpen && fileRef && fileRef.candidates.length > 0 && (
               <div className="suggest-popup file-ref-popup">
-                {fileRef.loading && <div className="suggest-loading">加载中…</div>}
+                {fileRef.loading && <div className="suggest-loading">{S.loadingDots}</div>}
                 {fileRef.candidates.map((c, i) => {
                   const isDir = (c as FileTreeNode).kind === "dir";
                   return (
@@ -1089,7 +1091,7 @@ export function ChatScreen() {
                       className="send-btn"
                       onClick={send}
                       disabled={!input.trim() && !store.pendingAttachments.length}
-                      title={`发送 (${store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter"}) — 并入当前流程`}
+                      title={S.sendMergeTitleFmt.replace("%s", store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter")}
                     >
                       <ArrowUp size={16} />
                     </button>
@@ -1097,7 +1099,7 @@ export function ChatScreen() {
                   <button
                     className="send-btn danger"
                     onClick={store.stopCurrent}
-                    title="停止生成"
+                    title={S.stopGenerateTitle}
                   >
                     <Square size={14} />
                   </button>
@@ -1107,7 +1109,7 @@ export function ChatScreen() {
                   className="send-btn"
                   onClick={send}
                   disabled={!input.trim() && !store.pendingAttachments.length}
-                  title={`发送 (${store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter"})`}
+                  title={S.sendTitleFmt.replace("%s", store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter")}
                 >
                   <ArrowUp size={16} />
                 </button>
@@ -1145,19 +1147,19 @@ export function ChatScreen() {
                       }
                     }}
                   >
-                    <Plus size={12} style={{ color: "var(--muted)" }} /> 保存当前输入为指令
+                    <Plus size={12} style={{ color: "var(--muted)" }} /> {S.saveAsCommand}
                   </div>
                 </div>
               )}
 
               <div className="compose-toolbar">
-                <button className={`icon-btn ${cmdOpen ? "active" : ""}`} onClick={() => setCmdOpen(!cmdOpen)} title="快捷指令">
+                <button className={`icon-btn ${cmdOpen ? "active" : ""}`} onClick={() => setCmdOpen(!cmdOpen)} title={S.quickCommandsTitle}>
                   <SlashSquare size={14} />
                 </button>
-                <button className="icon-btn" onClick={() => setFilePickerOpen(true)} title="选择文件引用 (#)">
+                <button className="icon-btn" onClick={() => setFilePickerOpen(true)} title={S.pickFileRefTitle}>
                   <FileCode size={14} />
                 </button>
-                <button className="icon-btn" onClick={onPickImage} title="添加图片">
+                <button className="icon-btn" onClick={onPickImage} title={S.addImageTitle}>
                   <ImagePlus size={14} />
                 </button>
                 <input
@@ -1179,7 +1181,7 @@ export function ChatScreen() {
             <div className="chat-side-tabs">
               <button
                 className={`icon-btn ${sidePanel === "files" ? "active" : ""}`}
-                title="项目文件"
+                title={S.projectFiles}
                 onClick={() => setSidePanel("files")}
               >
                 <FolderTree size={14} />
@@ -1188,7 +1190,7 @@ export function ChatScreen() {
                 <>
                   <button
                     className={`icon-btn ${sidePanel === "flow" ? "active" : ""}`}
-                    title={`任务编排 · ${flowCount} 项`}
+                    title={S.flowCountFmt.replace("%s", String(flowCount))}
                     disabled={flowCount === 0 && sidePanel !== "flow"}
                     onClick={() => setSidePanel("flow")}
                   >
@@ -1196,7 +1198,7 @@ export function ChatScreen() {
                   </button>
                   <button
                     className={`icon-btn ${sidePanel === "blackboard" ? "active" : ""}`}
-                    title={`共享黑板 · ${blackboardCount} 条`}
+                    title={S.blackboardCountFmt.replace("%s", String(blackboardCount))}
                     disabled={blackboardCount === 0 && sidePanel !== "blackboard"}
                     onClick={() => {
                       store.clearNewCounts("blackboard");
@@ -1212,7 +1214,7 @@ export function ChatScreen() {
               )}
               <button
                 className={`icon-btn ${sidePanel === "artifact" ? "active" : ""}`}
-                title={`产物 · ${artifactCount} 条`}
+                title={S.artifactCountFmt.replace("%s", String(artifactCount))}
                 disabled={artifactCount === 0 && sidePanel !== "artifact"}
                 onClick={() => {
                   store.clearNewCounts("artifact");
@@ -1226,7 +1228,7 @@ export function ChatScreen() {
               </button>
               <button
                 className={`icon-btn ${sidePanel === "event" ? "active" : ""}`}
-                title={`事件 · ${eventCount} 条`}
+                title={S.eventCountFmt.replace("%s", String(eventCount))}
                 disabled={eventCount === 0 && sidePanel !== "event"}
                 onClick={() => {
                   store.clearNewCounts("event");
@@ -1239,7 +1241,7 @@ export function ChatScreen() {
                 )}
               </button>
               <span className="spacer" />
-              <button className="icon-btn" onClick={() => setSidePanel(null)} title="关闭面板 (Esc)">
+              <button className="icon-btn" onClick={() => setSidePanel(null)} title={S.closePanelTitle}>
                 <X size={14} />
               </button>
             </div>
@@ -1296,12 +1298,12 @@ export function ChatScreen() {
                 style={{ maxWidth: "100%", maxHeight: "60vh", objectFit: "contain" }}
               />
             ) : (
-              <div className="subtitle">二进制文件</div>
+              <div className="subtitle">{S.binaryFileLabel}</div>
             )}
             <div className="form-row" style={{ justifyContent: "flex-end" }}>
-              <button onClick={() => setFilePreview(null)}>关闭</button>
+              <button onClick={() => setFilePreview(null)}>{S.close}</button>
               {filePreview.text != null && (
-                <button onClick={() => navigator.clipboard.writeText(filePreview.text ?? "").catch(() => {})}>复制</button>
+                <button onClick={() => navigator.clipboard.writeText(filePreview.text ?? "").catch(() => {})}>{S.copy}</button>
               )}
               <button
                 onClick={() => {
@@ -1318,7 +1320,7 @@ export function ChatScreen() {
                   }
                 }}
               >
-                保存
+                {S.saveLabel}
               </button>
             </div>
           </div>
@@ -1399,7 +1401,7 @@ function ChatMessage({
   };
 
   const doQuote = () => {
-    if (canQuote) store.setQuote([item.author || "我", getItemText(item, S)]);
+    if (canQuote) store.setQuote([item.author || S.meLabel, getItemText(item, S)]);
     setMenu(null);
   };
 
@@ -1467,7 +1469,7 @@ function ChatMessage({
     }
   };
 
-  const markdownHtml = (text: string) => (highlight ? highlightHtml(renderMarkdown(text), highlight) : renderMarkdown(text));
+  const markdownHtml = (text: string) => (highlight ? highlightHtml(renderMarkdown(text, S), highlight) : renderMarkdown(text, S));
 
   switch (item.kind) {
     case "system":
@@ -1485,7 +1487,7 @@ function ChatMessage({
           <div className="text">
             {item.quoteAuthor && (
               <div className="quote-preview">
-                引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+                {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
             <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
@@ -1504,7 +1506,7 @@ function ChatMessage({
             {item.author && <div className="author">{item.author}</div>}
             {item.quoteAuthor && (
               <div className="quote-preview">
-                引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+                {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
             <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
@@ -1522,7 +1524,7 @@ function ChatMessage({
             {showAuthor && item.author && <div className="author">{item.author}</div>}
             {item.quoteAuthor && (
               <div className="quote-preview">
-                引用 @{item.quoteAuthor}: {item.quoteText?.slice(0, 80)}
+                {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
             <button className="thought-toggle" onClick={onToggleThought}>
@@ -1593,13 +1595,13 @@ function ChatMessage({
           <div className="msg-body">
             <div className="permission-head">
               <ShieldAlert size={14} />
-              {showAuthor && item.author ? `${item.author} · ` : ""}审批请求
+              {showAuthor && item.author ? `${item.author} · ` : ""}{S.permissionRequestLabel}
             </div>
             <div className="text">
               {highlight ? highlightText(item.title, highlight) : item.title}
             </div>
             {item.answered ? (
-              <div className="subtitle">已选择: {item.answered}</div>
+              <div className="subtitle">{S.answeredFmt.replace("%s", item.answered)}</div>
             ) : (
               <div className="permission-actions">
                 {item.options.map(([id, name]) => (
@@ -1651,6 +1653,7 @@ function ElicitationCard({
   currentMatchClass: string;
 }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [values, setValues] = useState<Record<string, ElicitationValue>>(() => {
     const init: Record<string, ElicitationValue> = {};
     for (const f of item.fields) {
@@ -1735,7 +1738,7 @@ function ElicitationCard({
           <input
             style={inputStyle}
             value={selected.join(",")}
-            placeholder="逗号分隔多个值"
+            placeholder={S.multiValuePlaceholder}
             onChange={(e) => setValue(f.name, e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
           />
         );
@@ -1780,7 +1783,7 @@ function ElicitationCard({
           value={typeof v === "string" ? v : ""}
           onChange={(e) => setValue(f.name, e.target.value)}
         >
-          <option value="">（请选择）</option>
+          <option value="">{S.selectOptionParen}</option>
           {f.options.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
@@ -1803,12 +1806,12 @@ function ElicitationCard({
       <div className="msg-body">
         <div className="permission-head">
           <NotebookText size={14} />
-          {showAuthor && item.author ? `${item.author} · ` : ""}输入请求
+          {showAuthor && item.author ? `${item.author} · ` : ""}{S.elicitationRequestLabel}
         </div>
         <div className="text">{item.message}</div>
         {resolved ? (
           <div className="subtitle">
-            {item.answered === "accepted" ? "已提交" : item.answered === "declined" ? "已拒绝" : "已取消"}
+            {item.answered === "accepted" ? S.submittedLabel : item.answered === "declined" ? S.declinedStatus : S.cancelledStatus}
           </div>
         ) : (
           <>
@@ -1832,14 +1835,14 @@ function ElicitationCard({
             </div>
             <div className="permission-actions" style={{ marginTop: 8 }}>
               <button disabled={submitting || !canSubmit} onClick={() => void submit()}>
-                {submitting ? "提交中…" : "提交"}
+                {submitting ? S.submittingLabel : S.submitLabel}
               </button>
               <button
                 className="secondary"
                 disabled={submitting}
                 onClick={() => store.answerElicitation(item.requestId, "decline")}
               >
-                拒绝
+                {S.declineLabel}
               </button>
             </div>
           </>
@@ -1853,28 +1856,29 @@ function ElicitationCard({
 
 function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const roomId = store.currentRoom?.roomId;
   const [detail, setDetail] = useState<BlackboardInfo | null>(null);
   const [copied, setCopied] = useState(false);
   if (!blackboard || blackboard.length === 0) {
-    return <div className="context-empty">暂无黑板摘要</div>;
+    return <div className="context-empty">{S.noBoardEntries}</div>;
   }
   const onClear = async () => {
     if (!roomId) return;
-    if (!window.confirm("确认清空全部黑板摘要？")) return;
+    if (!window.confirm(S.confirmClearBoard)) return;
     await store.clearBlackboard(roomId);
   };
   const onRemove = async () => {
     if (!roomId || !detail) return;
-    if (!window.confirm("确认删除这条黑板摘要？")) return;
+    if (!window.confirm(S.confirmDeleteBoard)) return;
     await store.removeBlackboard(roomId, detail.id);
     setDetail(null);
   };
   return (
     <div className="context-content blackboard-list">
       <div className="context-content-header">
-        <span className="context-content-title">黑板</span>
-        <button className="context-action danger" onClick={onClear}>清空</button>
+        <span className="context-content-title">{S.blackboardLabel}</span>
+        <button className="context-action danger" onClick={onClear}>{S.clearLabel}</button>
       </div>
       {blackboard
         .slice()
@@ -1892,7 +1896,7 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
       {detail && (
         <div className="dialog-backdrop" onClick={() => setDetail(null)}>
           <div className="dialog blackboard-detail" onClick={(ev) => ev.stopPropagation()}>
-            <h4>黑板摘要</h4>
+            <h4>{S.boardSummaryTitle}</h4>
             <div className="blackboard-line">
               <span className="blackboard-from">@{store.sessionName(detail.from)}</span>
               <span className="blackboard-time">{formatArtifactTime(detail.at)}</span>
@@ -1905,7 +1909,7 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
                   setDetail(null);
                 }}
               >
-                引用
+                {S.quoteLabel}
               </button>
               <button
                 onClick={() => {
@@ -1914,10 +1918,10 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
                   setTimeout(() => setCopied(false), 1500);
                 }}
               >
-                {copied ? "已复制" : "复制"}
+                {copied ? S.copied : S.copy}
               </button>
-              <button onClick={() => setDetail(null)}>关闭</button>
-              <button className="danger" onClick={onRemove}>删除</button>
+              <button onClick={() => setDetail(null)}>{S.close}</button>
+              <button className="danger" onClick={onRemove}>{S.deleteLabel}</button>
             </div>
           </div>
         </div>
@@ -1936,15 +1940,15 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   if (!flow) return null;
   const { progress, tasks, phase } = flow;
   if (tasks.length === 0 && phase === "done") return null;
-  const title = roomMode === "conductor" ? "指挥编排" : "编排进度";
+  const title = roomMode === "conductor" ? S.flowTitleConductor : S.flowTitleDefault;
   const phaseLabel: Record<string, string> = {
-    planning: "规划中",
+    planning: S.phasePlanning,
     "awaiting-input": S.flowAwaitingInput,
-    working: "执行中",
-    reviewing: "验收中",
-    summarizing: "汇总中",
-    "awaiting-retry": "等待重试",
-    done: "已完成",
+    working: S.phaseWorking,
+    reviewing: S.phaseReviewing,
+    summarizing: S.phaseSummarizing,
+    "awaiting-retry": S.phaseAwaitingRetry,
+    done: S.phaseDone,
   };
   const phaseTag = phaseLabel[phase] ?? "";
   const showRetry = phase === "awaiting-retry";
@@ -1982,7 +1986,7 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
         <div className="flow-supplements">
           {flow.supplements.map((s, i) => (
             <div key={i} className="flow-supplement" title={s}>
-              📝 补充: {s}
+              📝 {S.supplementLabel}: {s}
             </div>
           ))}
         </div>
@@ -1994,29 +1998,29 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
   }
   return (
     <div className="flow-panel">
-      <div className="flow-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
+      <div className="flow-header" onClick={() => setCollapsed(!collapsed)} title={S.collapseToggleTitle}>
         <span className="flow-title">
           {collapsed ? "▸ " : "▾ "}{title}
           {phaseTag && <span className="flow-phase-tag">{phaseTag}</span>}
         </span>
         {tasks.length > 0 && (
           <span className="flow-progress">
-            {progress.done}/{progress.total} 完成 · {progress.running} 进行中 · {progress.pending} 待执行
-            {progress.failed > 0 ? ` · ${progress.failed} 失败` : ""}
+            {S.progressFmt.replace("%s", String(progress.done)).replace("%s", String(progress.total)).replace("%s", String(progress.running)).replace("%s", String(progress.pending))}
+            {progress.failed > 0 ? S.failedSuffixFmt.replace("%s", String(progress.failed)) : ""}
           </span>
         )}
         {phase !== "done" && phase !== "summarizing" && phase !== "reviewing" && (
           <button
             className="flow-cancel-btn"
-            title="中断当前编排"
+            title={S.abortFlowTitle}
             onClick={(e) => {
               e.stopPropagation();
-              if (confirm("确认中断当前编排？所有进行中的任务将被取消。")) {
+              if (confirm(S.confirmAbortFlow)) {
                 void useHubStore.getState().cancelFlow();
               }
             }}
           >
-            <X size={12} /> 中断
+            <X size={12} /> {S.abortLabel}
           </button>
         )}
       </div>
@@ -2034,6 +2038,7 @@ type FileGetResult = {
 
 function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo[]; minimal?: boolean }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const roomId = store.currentRoom?.roomId;
   const sessionId = store.currentSession?.sessionId;
   const contextId = roomId ?? sessionId;
@@ -2076,7 +2081,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
       if (!res) return;
       setPreview({ ...res, name: String(res.name ?? a.path ?? "preview") });
     } catch (e) {
-      alert(`预览失败：${e}`);
+      alert(S.previewFailedFmt.replace("%s", String(e)));
     }
   };
 
@@ -2093,7 +2098,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
         saveBlob(name, blob);
       }
     } catch (e) {
-      alert(`下载失败：${e}`);
+      alert(S.downloadFailedFmt.replace("%s", String(e)));
     }
   };
 
@@ -2115,7 +2120,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
         return a ? (a.alias ?? a.id) : id;
       })
       .join(", ");
-    if (!window.confirm(`确认删除选中的 ${list.length} 个产物？\n${names}`)) return;
+    if (!window.confirm(S.confirmDeleteArtifactsFmt.replace("%s", String(list.length)).replace("%s", names))) return;
     await Promise.all(list.map((id) => store.removeArtifact(contextId, id)));
     setSelected(new Set());
     setManaging(false);
@@ -2123,7 +2128,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
 
   const onClearAll = async () => {
     if (!contextId) return;
-    if (!window.confirm("确认清空全部产物？")) return;
+    if (!window.confirm(S.confirmClearArtifacts)) return;
     await store.clearArtifacts(contextId);
     setSelected(new Set());
     setManaging(false);
@@ -2132,7 +2137,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
 
   const onRemoveActive = async () => {
     if (!contextId || !active) return;
-    if (!window.confirm(`确认删除产物 ${active.path ?? active.alias ?? active.id}？`)) return;
+    if (!window.confirm(S.confirmDeleteArtifactFmt.replace("%s", active.path ?? active.alias ?? active.id))) return;
     await store.removeArtifact(contextId, active.id);
     setActiveId(null);
   };
@@ -2144,12 +2149,12 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
   const manageActions = (
     <div className="artifact-header-actions" onClick={(e) => e.stopPropagation()}>
       {!managing ? (
-        <button className="context-action" onClick={() => { setManaging(true); setActiveId(null); }}>管理</button>
+        <button className="context-action" onClick={() => { setManaging(true); setActiveId(null); }}>{S.manageLabel}</button>
       ) : (
         <>
-          <button className="context-action danger" onClick={onClearAll}>清空</button>
+          <button className="context-action danger" onClick={onClearAll}>{S.clearLabel}</button>
           <button className="context-action danger" onClick={onDeleteSelected} disabled={selected.size === 0}>
-            删除选中{selected.size > 0 ? ` (${selected.size})` : ""}
+            {S.deleteSelected}{selected.size > 0 ? ` (${selected.size})` : ""}
           </button>
           <button
             className="context-action"
@@ -2158,7 +2163,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
               setSelected(new Set());
             }}
           >
-            完成
+            {S.doneLabel}
           </button>
         </>
       )}
@@ -2170,10 +2175,10 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
       <span className="artifact-active-name" title={active.summary}>
         {active.path ?? active.alias ?? active.id}
       </span>
-      <button className="artifact-action" title="引用" onClick={onQuote}>引</button>
-      <button className="artifact-action" title="预览" onClick={onPreview}>看</button>
-      <button className="artifact-action" title="下载" onClick={onDownload}>↓</button>
-      <button className="artifact-action danger" title="删除" onClick={onRemoveActive}>删</button>
+      <button className="artifact-action" title={S.quoteLabel} onClick={onQuote}><Quote size={12} /></button>
+      <button className="artifact-action" title={S.previewLabel} onClick={onPreview}><Eye size={12} /></button>
+      <button className="artifact-action" title={S.downloadLabel} onClick={onDownload}><Download size={12} /></button>
+      <button className="artifact-action danger" title={S.deleteLabel} onClick={onRemoveActive}><Trash2 size={12} /></button>
     </div>
   ) : null;
 
@@ -2215,15 +2220,15 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
     </div>
   );
 
-  const countText = `${artifacts.length} 条`;
-  const listContent = artifacts.length > 0 ? list : <div className="context-empty">没有产物</div>;
+  const countText = S.itemsCountFmt.replace("%s", String(artifacts.length));
+  const listContent = artifacts.length > 0 ? list : <div className="context-empty">{S.noArtifacts}</div>;
 
   return (
     <>
       {minimal ? (
         <div className="context-content">
           <div className="context-content-header">
-            <span className="context-content-title">产物</span>
+            <span className="context-content-title">{S.artifactsLabel}</span>
             <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
@@ -2232,8 +2237,8 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
         </div>
       ) : (
         <div className="artifact-panel">
-          <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
-            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}产物</span>
+          <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title={S.collapseToggleTitle}>
+            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}{S.artifactsLabel}</span>
             <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
@@ -2259,15 +2264,15 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
                 style={{ maxWidth: "100%", maxHeight: "60vh", objectFit: "contain" }}
               />
             ) : (
-              <div className="subtitle">二进制文件</div>
+              <div className="subtitle">{S.binaryFileLabel}</div>
             )}
             <div className="form-row" style={{ justifyContent: "flex-end" }}>
-              <button onClick={() => setPreview(null)}>关闭</button>
+              <button onClick={() => setPreview(null)}>{S.close}</button>
               {preview.text != null && (
-                <button onClick={() => navigator.clipboard.writeText(preview.text ?? "").catch(() => {})}>复制</button>
+                <button onClick={() => navigator.clipboard.writeText(preview.text ?? "").catch(() => {})}>{S.copy}</button>
               )}
               {preview.text != null ? (
-                <button onClick={() => saveText(preview.name, preview.text ?? "")}>保存</button>
+                <button onClick={() => saveText(preview.name, preview.text ?? "")}>{S.saveLabel}</button>
               ) : preview.data ? (
                 <button
                   onClick={() => {
@@ -2280,7 +2285,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
                     saveBlob(preview.name, blob);
                   }}
                 >
-                  保存
+                  {S.saveLabel}
                 </button>
               ) : null}
             </div>
@@ -2293,6 +2298,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
 
 function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?: boolean }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const roomId = store.currentRoom?.roomId;
   const sessionId = store.currentSession?.sessionId;
   const contextId = roomId ?? sessionId;
@@ -2323,7 +2329,7 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
   const onDeleteSelected = async () => {
     if (!contextId || selected.size === 0) return;
     const list = Array.from(selected);
-    if (!window.confirm(`确认删除选中的 ${list.length} 条事件？`)) return;
+    if (!window.confirm(S.confirmDeleteEventsFmt.replace("%s", String(list.length)))) return;
     await Promise.all(list.map((id) => store.removeEvent(contextId, id)));
     setSelected(new Set());
     setManaging(false);
@@ -2331,8 +2337,8 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
 
   const onClear = async () => {
     if (!contextId) return;
-    const label = clearAction ? `「${eventLabel(clearAction)}」` : "全部";
-    if (!window.confirm(`确认清空 ${label} 事件？`)) return;
+    const label = clearAction ? S.bracketNameFmt.replace("%s", eventLabel(S, clearAction)) : S.allLabel;
+    if (!window.confirm(S.confirmClearEventsFmt.replace("%s", label))) return;
     await store.clearEvents(contextId, clearAction ?? undefined);
     setSelected(new Set());
     setManaging(false);
@@ -2341,7 +2347,7 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
 
   const onRemoveActive = async () => {
     if (!contextId || !active) return;
-    if (!window.confirm(`确认删除该事件？\n${active.summary}`)) return;
+    if (!window.confirm(S.confirmDeleteEventFmt.replace("%s", active.summary))) return;
     await store.removeEvent(contextId, active.id);
     setActiveId(null);
   };
@@ -2354,11 +2360,11 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
       value={clearAction ?? ""}
       onChange={(e) => setClearAction(e.target.value || null)}
       onClick={(e) => e.stopPropagation()}
-      title="选择要清空的事件类型"
+      title={S.clearEventTypeTitle}
     >
-      <option value="">清空全部</option>
+      <option value="">{S.clearAllEvents}</option>
       {actionOptions.map((a) => (
-        <option key={a} value={a}>仅清空「{eventLabel(a)}」</option>
+        <option key={a} value={a}>{S.clearOnlyFmt.replace("%s", eventLabel(S, a))}</option>
       ))}
     </select>
   );
@@ -2368,13 +2374,13 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
       {!managing ? (
         <>
           {clearMenu}
-          <button className="context-action" onClick={onClear}>清空</button>
-          <button className="context-action" onClick={() => { setManaging(true); setActiveId(null); }}>管理</button>
+          <button className="context-action" onClick={onClear}>{S.clearLabel}</button>
+          <button className="context-action" onClick={() => { setManaging(true); setActiveId(null); }}>{S.manageLabel}</button>
         </>
       ) : (
         <>
           <button className="context-action danger" onClick={onDeleteSelected} disabled={selected.size === 0}>
-            删除选中{selected.size > 0 ? ` (${selected.size})` : ""}
+            {S.deleteSelected}{selected.size > 0 ? ` (${selected.size})` : ""}
           </button>
           <button
             className="context-action"
@@ -2383,7 +2389,7 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
               setSelected(new Set());
             }}
           >
-            完成
+            {S.doneLabel}
           </button>
         </>
       )}
@@ -2395,8 +2401,8 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
       <span className="artifact-active-name" title={active.summary}>
         {active.path || active.summary}
       </span>
-      <button className="artifact-action" title="引用" onClick={onQuote}>引</button>
-      <button className="artifact-action danger" title="删除" onClick={onRemoveActive}>删</button>
+      <button className="artifact-action" title={S.quoteLabel} onClick={onQuote}><Quote size={12} /></button>
+      <button className="artifact-action danger" title={S.deleteLabel} onClick={onRemoveActive}><Trash2 size={12} /></button>
     </div>
   ) : null;
 
@@ -2432,7 +2438,7 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
             <span className="artifact-author">@{store.sessionName(e.author)}</span>
             <span className="artifact-time">{formatArtifactTime(e.at)}</span>
             <span className="artifact-summary">
-              {eventLabel(e.action)} · {e.oldPath ? `${e.oldPath} → ` : ""}
+              {eventLabel(S, e.action)} · {e.oldPath ? `${e.oldPath} → ` : ""}
               {e.path ?? ""}{e.summary && (!e.path || !e.summary.includes(e.path)) ? ` · ${e.summary}` : ""}
             </span>
           </div>
@@ -2441,15 +2447,15 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
     </div>
   );
 
-  const countText = `${events.length} 条`;
-  const listContent = events.length > 0 ? list : <div className="context-empty">没有事件</div>;
+  const countText = S.itemsCountFmt.replace("%s", String(events.length));
+  const listContent = events.length > 0 ? list : <div className="context-empty">{S.noEvents}</div>;
 
   return (
     <>
       {minimal ? (
         <div className="context-content">
           <div className="context-content-header">
-            <span className="context-content-title">事件</span>
+            <span className="context-content-title">{S.eventsLabel}</span>
             <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
@@ -2458,8 +2464,8 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
         </div>
       ) : (
         <div className="artifact-panel">
-          <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title="点击折叠/展开">
-            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}事件</span>
+          <div className="artifact-header" onClick={() => setCollapsed(!collapsed)} title={S.collapseToggleTitle}>
+            <span className="artifact-title">{collapsed ? "▸ " : "▾ "}{S.eventsLabel}</span>
             <span className="artifact-count">{countText}</span>
             {manageActions}
           </div>
@@ -2490,17 +2496,17 @@ function eventIcon(action?: string): ReactNode {
   return <Pencil size={12} />;
 }
 
-function eventLabel(action?: string): string {
-  if (action === "delete") return "删除";
-  if (action === "rename") return "重命名";
-  if (action === "command") return "命令";
-  if (action === "test") return "测试";
-  if (action === "add") return "新增";
-  if (action === "modify") return "修改";
-  return "事件";
+function eventLabel(S: Strings, action?: string): string {
+  if (action === "delete") return S.eventActionDelete;
+  if (action === "rename") return S.eventActionRename;
+  if (action === "command") return S.eventActionCommand;
+  if (action === "test") return S.eventActionTest;
+  if (action === "add") return S.eventActionAdd;
+  if (action === "modify") return S.eventActionModify;
+  return S.eventActionDefault;
 }
 
-function renderMarkdown(text: string): string {
+function renderMarkdown(text: string, S: Strings): string {
   try {
     const html = marked.parse(text, { gfm: true }) as string;
     const withScrollableTables = html
@@ -2509,7 +2515,7 @@ function renderMarkdown(text: string): string {
     return withScrollableTables
       .replace(
         /<pre><code/g,
-        '<div class="code-block"><button class="copy-code" title="复制" onclick=\'const n=this.nextElementSibling;if(n){navigator.clipboard.writeText(n.textContent).catch(()=>{});this.textContent="已复制";setTimeout(()=>this.textContent="复制",1500)}\'>复制</button><pre><code',
+        `<div class="code-block"><button class="copy-code" title="${S.copy}" onclick='const n=this.nextElementSibling;if(n){navigator.clipboard.writeText(n.textContent).catch(()=>{});this.textContent="${S.copied}";setTimeout(()=>this.textContent="${S.copy}",1500)}'>${S.copy}</button><pre><code`,
       )
       .replace(/<\/code><\/pre>/g, "</code></pre></div>");
   } catch {
@@ -2770,7 +2776,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
               <button
                 key={i}
                 className="flow-artifact"
-                onClick={() => copyArtifact(a)}
+                onClick={() => copyArtifact(S, a)}
                 title={a.path ? S.copyPathHint.replace("%s", a.path) : S.copySummaryHint}
               >
                 [{a.type}] {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)}
@@ -2792,11 +2798,11 @@ function formatQuotaReset(unix: number): string {
   });
 }
 
-function copyArtifact(a: FlowArtifact) {
+function copyArtifact(S: Strings, a: FlowArtifact) {
   const text = a.path ? `${a.path}\n${a.summary}` : a.summary;
   navigator.clipboard
     .writeText(text)
-    .then(() => alert(`已复制：${a.path || a.summary.slice(0, 40)}`))
+    .then(() => alert(S.copiedPathFmt.replace("%s", a.path || a.summary.slice(0, 40))))
     .catch(() => {});
 }
 
@@ -2897,7 +2903,7 @@ function ModelPicker() {
     codex: "Codex",
     opencode: "OpenCode",
     openclaw: "OpenClaw",
-    custom: "自定义",
+    custom: S.customOpt,
   };
 
   const handleSwitch = (m: ModelInfo) => {
@@ -2921,11 +2927,11 @@ function ModelPicker() {
                 else void store.refreshModelList();
                 void store.refreshBackendQuota(true);
               }}
-              title="刷新"
+              title={S.refreshTitle}
             >
               <RotateCcw size={14} />
             </button>
-            <button className="icon-btn" onClick={store.closeModelPicker} title="关闭">
+            <button className="icon-btn" onClick={store.closeModelPicker} title={S.close}>
               <X size={15} />
             </button>
           </span>
@@ -2958,7 +2964,7 @@ function ModelPicker() {
               className={selectedBackend === "all" ? "active" : ""}
               onClick={() => setSelectedBackend("all")}
             >
-              全部
+              {S.allLabel}
             </button>
             {Object.entries(backendNames).map(([key, name]) => (
               <button
@@ -2978,20 +2984,20 @@ function ModelPicker() {
             : store.currentSession?.agent;
           if (pickerBackend !== "devin" || !q?.available) return null;
           const windows = [
-            ["今日已用", q.daily],
-            ["本周已用", q.weekly],
+            [S.quotaToday, q.daily],
+            [S.quotaWeek, q.weekly],
           ] as const;
           return (
             <div className="quota-card">
               <div className="quota-card-title">
-                Devin 用量{q.planName ? ` · ${q.planName}` : ""}
+                {S.devinQuotaLabel}{q.planName ? ` · ${q.planName}` : ""}
               </div>
               {windows.map(([label, w]) => w && (
                 <div className="quota-row" key={label}>
                   <span className="quota-label">{label}</span>
                   <span className="quota-bar"><span style={{ width: `${w.usedPercent}%` }} /></span>
                   <span className="quota-pct">{w.usedPercent}%</span>
-                  {w.resetAtUnix && <span className="quota-reset">重置 {formatQuotaReset(w.resetAtUnix)}</span>}
+                  {w.resetAtUnix && <span className="quota-reset">{S.quotaResetFmt.replace("%s", formatQuotaReset(w.resetAtUnix))}</span>}
                 </div>
               ))}
             </div>

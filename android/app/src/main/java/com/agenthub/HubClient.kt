@@ -23,7 +23,10 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import java.util.concurrent.TimeUnit
 
-class HubClient(private val scope: CoroutineScope) {
+class HubClient(
+    private val scope: CoroutineScope,
+    private val strings: () -> com.agenthub.ui.Strings = { com.agenthub.ui.ZhStrings },
+) {
     private val client = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
@@ -126,7 +129,7 @@ class HubClient(private val scope: CoroutineScope) {
     private fun scheduleReconnect(msg: String) {
         if (!shouldReconnect) return
         if (reconnectAttempts >= maxReconnectAttempts) {
-            onFailureCallback?.invoke("连接失败，请检查服务器或手动重连")
+            onFailureCallback?.invoke(strings().connectFailed)
             return
         }
         reconnectAttempts++

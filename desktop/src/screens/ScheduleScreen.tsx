@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { CalendarClock, Info, Pencil, Plus, ScrollText, Trash2, Power, X } from "lucide-react";
 import { useHubStore } from "../hub/store";
+import { stringsFor, type Strings } from "../hub/strings";
 import type { ScheduledTask, Schedule, SimpleSchedule, CronSchedule, TaskLog } from "../hub/types";
 import { FormRow } from "../components/FormRow";
 
@@ -10,27 +11,30 @@ function formatTime(ts: number | null): string {
   return d.toLocaleString();
 }
 
-function describeSchedule(s: Schedule): string {
+function describeSchedule(S: Strings, s: Schedule): string {
   if (s.mode === "cron") return `Cron: ${s.expr}`;
-  if (s.kind === "daily") return `每天 ${s.time ?? "09:00"}`;
-  if (s.kind === "interval") return `每 ${s.intervalMinutes ?? 0} 分钟`;
-  if (s.kind === "once") return `一次性 ${formatTime(s.at ?? null)}`;
+  if (s.kind === "daily") return S.schedDailyFmt.replace("%s", s.time ?? "09:00");
+  if (s.kind === "interval") return S.schedIntervalFmt.replace("%s", String(s.intervalMinutes ?? 0));
+  if (s.kind === "once") return S.schedOnceFmt.replace("%s", formatTime(s.at ?? null));
   return "—";
 }
 
-const CRON_EXAMPLES = [
-  { expr: "0 9 * * *", desc: "每天 9:00" },
-  { expr: "0 9 * * 1-5", desc: "工作日 9:00" },
-  { expr: "*/30 * * * *", desc: "每 30 分钟" },
-  { expr: "0 */2 * * *", desc: "每 2 小时" },
-  { expr: "0 9,18 * * *", desc: "每天 9:00 和 18:00" },
-  { expr: "0 0 * * 0", desc: "每周日 0:00" },
-  { expr: "0 0 1 * *", desc: "每月 1 号 0:00" },
-  { expr: "0 9 1-7 * 1", desc: "每月第一个周一 9:00" },
-];
+function cronExamples(S: Strings) {
+  return [
+    { expr: "0 9 * * *", desc: S.cronExDaily9 },
+    { expr: "0 9 * * 1-5", desc: S.cronExWeekday9 },
+    { expr: "*/30 * * * *", desc: S.cronExEvery30m },
+    { expr: "0 */2 * * *", desc: S.cronExEvery2h },
+    { expr: "0 9,18 * * *", desc: S.cronExDaily9And18 },
+    { expr: "0 0 * * 0", desc: S.cronExSunday0 },
+    { expr: "0 0 1 * *", desc: S.cronExMonthly1st },
+    { expr: "0 9 1-7 * 1", desc: S.cronExFirstMonday },
+  ];
+}
 
 export function ScheduleScreen() {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [editing, setEditing] = useState<ScheduledTask | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
@@ -42,13 +46,13 @@ export function ScheduleScreen() {
   return (
     <div className="settings-screen">
       <nav className="settings-nav">
-        <div className="nav-heading">定时任务</div>
+        <div className="nav-heading">{S.scheduledTasksTitle}</div>
         <span className="spacer" />
         <button onClick={() => void store.loadTaskLogs().then(() => setShowLogs(true))}>
-          <ScrollText size={15} /> 执行日志
+          <ScrollText size={15} /> {S.taskLogsTitle}
         </button>
         <button onClick={() => useHubStore.setState({ screen: "sessions" })}>
-          <X size={15} /> 返回
+          <X size={15} /> {S.backLabel}
         </button>
       </nav>
       <div className="settings-content">
@@ -56,7 +60,7 @@ export function ScheduleScreen() {
           {store.scheduledTasks.length === 0 && !showCreate && (
             <div className="card">
               <p style={{ color: "var(--text-dim)", margin: 0 }}>
-                暂无定时任务。点击下方按钮创建一个，例如"每天 9 点发送最新天气"。
+                {S.noTasksHint}
               </p>
             </div>
           )}
@@ -72,30 +76,30 @@ export function ScheduleScreen() {
                     color: task.enabled ? "var(--accent)" : "var(--text-dim)",
                   }}
                 >
-                  {task.enabled ? "启用" : "禁用"}
+                  {task.enabled ? S.enabledLabel : S.disabledLabel}
                 </span>
               </div>
               <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}>
-                <div>目标：{task.targetType === "room" ? "群聊" : "会话"} · {task.targetName}</div>
-                <div>调度：{describeSchedule(task.schedule)}</div>
-                <div>消息：{task.message.slice(0, 80)}{task.message.length > 80 ? "…" : ""}</div>
-                <div>下次执行：{formatTime(task.nextRunAt)}</div>
-                <div>上次执行：{formatTime(task.lastRunAt)}</div>
+                <div>{S.targetRowFmt.replace("%s", task.targetType === "room" ? S.roomsLabel : S.sessionsLabel).replace("%s", task.targetName)}</div>
+                <div>{S.scheduleRowFmt.replace("%s", describeSchedule(S, task.schedule))}</div>
+                <div>{S.messageRowFmt.replace("%s", task.message.slice(0, 80) + (task.message.length > 80 ? "…" : ""))}</div>
+                <div>{S.nextRunFmt.replace("%s", formatTime(task.nextRunAt))}</div>
+                <div>{S.lastRunFmt.replace("%s", formatTime(task.lastRunAt))}</div>
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button
                   className="icon-btn"
-                  title={task.enabled ? "禁用" : "启用"}
+                  title={task.enabled ? S.disabledLabel : S.enabledLabel}
                   onClick={() => void store.toggleScheduledTask(task.id)}
                 >
                   <Power size={14} />
                 </button>
-                <button className="icon-btn" title="编辑" onClick={() => setEditing(task)}>
+                <button className="icon-btn" title={S.editTitle} onClick={() => setEditing(task)}>
                   <Pencil size={14} />
                 </button>
                 <button
                   className="icon-btn danger"
-                  title="删除"
+                  title={S.deleteLabel}
                   onClick={() => void store.deleteScheduledTask(task.id)}
                 >
                   <Trash2 size={14} />
@@ -106,7 +110,7 @@ export function ScheduleScreen() {
 
           {!showCreate && !editing && (
             <button style={{ alignSelf: "flex-start" }} onClick={() => setShowCreate(true)}>
-              <Plus size={15} /> 创建定时任务
+              <Plus size={15} /> {S.createTask}
             </button>
           )}
 
@@ -139,20 +143,21 @@ export function ScheduleScreen() {
 }
 
 function LogsPanel({ logs, onClose, onClear }: { logs: TaskLog[]; onClose: () => void; onClear: () => void }) {
+  const S = stringsFor(useHubStore().lang);
   return (
     <div className="card" style={{ position: "relative" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <ScrollText size={16} />
-        <strong style={{ flex: 1 }}>执行日志</strong>
-        <button className="icon-btn" title="清空日志" onClick={onClear}>
+        <strong style={{ flex: 1 }}>{S.taskLogsTitle}</strong>
+        <button className="icon-btn" title={S.clearLogsTitle} onClick={onClear}>
           <Trash2 size={14} />
         </button>
-        <button className="icon-btn" title="关闭" onClick={onClose}>
+        <button className="icon-btn" title={S.close} onClick={onClose}>
           <X size={14} />
         </button>
       </div>
       {logs.length === 0 ? (
-        <p style={{ color: "var(--text-dim)", margin: 0 }}>暂无执行记录。</p>
+        <p style={{ color: "var(--text-dim)", margin: 0 }}>{S.noLogs}</p>
       ) : (
         <div style={{ maxHeight: 400, overflowY: "auto", fontSize: 13 }}>
           {logs.map((log) => (
@@ -179,13 +184,13 @@ function LogsPanel({ logs, onClose, onClear }: { logs: TaskLog[]; onClose: () =>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 500 }}>{log.taskName}</div>
                 <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
-                  {formatTime(log.at)} → {log.targetType === "room" ? "群聊" : "会话"} · {log.targetName}
+                  {formatTime(log.at)} → {log.targetType === "room" ? S.roomsLabel : S.sessionsLabel} · {log.targetName}
                 </div>
                 <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
-                  消息：{log.message.slice(0, 60)}{log.message.length > 60 ? "…" : ""}
+                  {S.messageRowFmt.replace("%s", log.message.slice(0, 60) + (log.message.length > 60 ? "…" : ""))}
                 </div>
                 {log.error && (
-                  <div style={{ color: "var(--danger, #e53e3e)", fontSize: 12 }}>错误：{log.error}</div>
+                  <div style={{ color: "var(--danger, #e53e3e)", fontSize: 12 }}>{S.errorRowFmt.replace("%s", log.error)}</div>
                 )}
               </div>
             </div>
@@ -208,6 +213,7 @@ function TaskEditor({
   onCancel: () => void;
 }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [name, setName] = useState(task?.name ?? "");
   const [targetType, setTargetType] = useState<"session" | "room">(task?.targetType ?? "session");
   const [targetId, setTargetId] = useState(task?.targetId ?? "");
@@ -268,55 +274,55 @@ function TaskEditor({
 
   return (
     <div className="card">
-      <h3>{task ? "编辑定时任务" : "创建定时任务"}</h3>
-      <FormRow label="名称">
-        <input value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="如：每日天气" />
+      <h3>{task ? S.editTask : S.createTask}</h3>
+      <FormRow label={S.nameLabel}>
+        <input value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder={S.taskNamePlaceholder} />
       </FormRow>
-      <FormRow label="目标类型">
+      <FormRow label={S.targetTypeLabel}>
         <select value={targetType} onChange={(e) => { setTargetType(e.currentTarget.value as "session" | "room"); setTargetId(""); }}>
-          <option value="session">会话（单聊）</option>
-          <option value="room">群聊</option>
+          <option value="session">{S.sessionSingleLabel}</option>
+          <option value="room">{S.roomsLabel}</option>
         </select>
       </FormRow>
-      <FormRow label="目标">
+      <FormRow label={S.targetLabel}>
         <select value={targetId} onChange={(e) => setTargetId(e.currentTarget.value)}>
-          <option value="">请选择…</option>
+          <option value="">{S.pleaseSelect}</option>
           {targets.map((t) => (
             <option key={t.id} value={t.id}>{t.name}</option>
           ))}
         </select>
       </FormRow>
-      <FormRow label="消息内容">
+      <FormRow label={S.messageContentLabel}>
         <textarea
           value={message}
           onChange={(e) => setMessage(e.currentTarget.value)}
-          placeholder="如：给我发送最新天气"
+          placeholder={S.messagePlaceholder}
           rows={3}
           style={{ width: "100%", resize: "vertical" }}
         />
       </FormRow>
-      <FormRow label="调度模式">
+      <FormRow label={S.scheduleModeLabel}>
         <select value={mode} onChange={(e) => setMode(e.currentTarget.value as "simple" | "cron")}>
-          <option value="simple">简易模式</option>
-          <option value="cron">高级模式（Cron）</option>
+          <option value="simple">{S.simpleModeLabel}</option>
+          <option value="cron">{S.cronModeLabel}</option>
         </select>
       </FormRow>
       {mode === "simple" ? (
         <>
-          <FormRow label="重复方式">
+          <FormRow label={S.repeatLabel}>
             <select value={kind} onChange={(e) => setKind(e.currentTarget.value as "daily" | "interval" | "once")}>
-              <option value="daily">每天</option>
-              <option value="interval">间隔</option>
-              <option value="once">一次性</option>
+              <option value="daily">{S.dailyOpt}</option>
+              <option value="interval">{S.intervalOpt}</option>
+              <option value="once">{S.onceOpt}</option>
             </select>
           </FormRow>
           {kind === "daily" && (
-            <FormRow label="时间">
+            <FormRow label={S.timeLabel}>
               <input type="time" value={time} onChange={(e) => setTime(e.currentTarget.value)} />
             </FormRow>
           )}
           {kind === "interval" && (
-            <FormRow label="间隔（分钟）">
+            <FormRow label={S.intervalMinLabel}>
               <input
                 type="number"
                 min={1}
@@ -326,24 +332,24 @@ function TaskEditor({
             </FormRow>
           )}
           {kind === "once" && (
-            <FormRow label="执行时间">
+            <FormRow label={S.runAtLabel}>
               <input type="datetime-local" value={at} onChange={(e) => setAt(e.currentTarget.value)} />
             </FormRow>
           )}
         </>
       ) : (
         <>
-          <FormRow label="Cron 表达式">
+          <FormRow label={S.cronExprLabel}>
             <div style={{ display: "flex", gap: 4, alignItems: "center", width: "100%" }}>
               <input
                 value={cronExpr}
                 onChange={(e) => setCronExpr(e.currentTarget.value)}
-                placeholder="分 时 日 月 周，如 0 9 * * *"
+                placeholder={S.cronPlaceholder}
                 style={{ fontFamily: "monospace", flex: 1 }}
               />
               <button
                 className="icon-btn"
-                title="Cron 语法说明"
+                title={S.cronSyntaxTitle}
                 onClick={() => setShowCronHelp(true)}
                 style={{ flexShrink: 0 }}
               >
@@ -354,42 +360,45 @@ function TaskEditor({
           {showCronHelp && <CronHelpDialog onClose={() => setShowCronHelp(false)} onPick={(expr) => { setCronExpr(expr); setShowCronHelp(false); }} />}
         </>
       )}
-      <FormRow label="启用">
+      <FormRow label={S.enabledLabel}>
         <select value={enabled ? "true" : "false"} onChange={(e) => setEnabled(e.currentTarget.value === "true")}>
-          <option value="true">是</option>
-          <option value="false">否</option>
+          <option value="true">{S.yesLabel}</option>
+          <option value="false">{S.noLabel}</option>
         </select>
       </FormRow>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button onClick={() => void submit()}>保存</button>
-        <button onClick={onCancel}>取消</button>
+        <button onClick={() => void submit()}>{S.saveLabel}</button>
+        <button onClick={onCancel}>{S.cancelLabel}</button>
       </div>
     </div>
   );
 }
 
 function CronHelpDialog({ onClose, onPick }: { onClose: () => void; onPick: (expr: string) => void }) {
+  const S = stringsFor(useHubStore().lang);
   return (
     <div className="card" style={{ marginTop: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <Info size={16} />
-        <strong style={{ flex: 1 }}>Cron 表达式说明</strong>
+        <strong style={{ flex: 1 }}>{S.cronHelpTitle}</strong>
         <button className="icon-btn" onClick={onClose}>
           <X size={14} />
         </button>
       </div>
       <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8, marginBottom: 12 }}>
-        <div>格式：<code style={{ fontFamily: "monospace" }}>分 时 日 月 周</code></div>
-        <div>· 分：0-59</div>
-        <div>· 时：0-23</div>
-        <div>· 日：1-31</div>
-        <div>· 月：1-12</div>
-        <div>· 周：0-6（0=周日）</div>
-        <div style={{ marginTop: 4 }}>支持 <code>*</code>（任意）、<code>*/N</code>（步长）、<code>1-5</code>（范围）、<code>1,3,5</code>（列表）</div>
+        <div>{S.cronFormatLine}<code style={{ fontFamily: "monospace" }}>{S.cronFieldMin} {S.cronFieldHour} {S.cronFieldDay} {S.cronFieldMonth} {S.cronFieldWeek}</code></div>
+        <div>· {S.cronFieldMin}: 0-59</div>
+        <div>· {S.cronFieldHour}: 0-23</div>
+        <div>· {S.cronFieldDay}: 1-31</div>
+        <div>· {S.cronFieldMonth}: 1-12</div>
+        <div>· {S.cronFieldWeek}: 0-6 (0={S.cronSundayLabel})</div>
+        <div style={{ marginTop: 4 }}>
+          {S.cronSupportPrefix} <code>*</code>（{S.cronAny}）、<code>*/N</code>（{S.cronStep}）、<code>1-5</code>（{S.cronRange}）、<code>1,3,5</code>（{S.cronList}）
+        </div>
       </div>
-      <div style={{ fontWeight: 500, marginBottom: 6 }}>常用示例（点击使用）：</div>
+      <div style={{ fontWeight: 500, marginBottom: 6 }}>{S.cronExamplesTitle}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {CRON_EXAMPLES.map((ex) => (
+        {cronExamples(S).map((ex) => (
           <button
             key={ex.expr}
             onClick={() => onPick(ex.expr)}

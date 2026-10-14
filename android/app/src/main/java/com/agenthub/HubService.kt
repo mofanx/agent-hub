@@ -22,6 +22,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import com.agenthub.ui.stringsFor
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -86,7 +87,8 @@ class HubService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val statusText = if (isConnected) "后台连接保持中" else "正在连接 Hub…"
+        val lang = getSharedPreferences("agent-hub", MODE_PRIVATE).getString("lang", "zh") ?: "zh"
+        val statusText = stringsFor(lang).let { if (isConnected) it.serviceRunning else it.connectingHub }
         val notification: Notification = NotificationCompat.Builder(this, Notifier.CHANNEL_SERVICE)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle("Agent Hub")
@@ -130,7 +132,9 @@ class HubService : Service() {
             }
         }
         val url = buildWsUrl(address, token)
-        val client = hub ?: HubClient(scope).also { hub = it }
+        val client = hub ?: HubClient(scope) {
+            stringsFor(getSharedPreferences("agent-hub", MODE_PRIVATE).getString("lang", "zh") ?: "zh")
+        }.also { hub = it }
         client.onEvent = { raw -> handleEvent(raw) }
         client.onClosed = { onDisconnected() }
         client.connect(url, publicToken,
@@ -197,12 +201,15 @@ class HubService : Service() {
             "permission.request" -> {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
+                val S = stringsFor(
+                    getSharedPreferences("agent-hub", MODE_PRIVATE).getString("lang", "zh") ?: "zh",
+                )
                 val title = p["toolCall"]?.jsonObject?.get("title")?.jsonPrimitive?.content
-                    ?: "工具调用"
+                    ?: S.toolCallLabel
                 Notifier.notify(
                     this,
                     Notifier.CHANNEL_PERMISSION,
-                    "审批请求 · ${sessionName(sid)}",
+                    S.approvalNotificationFmt.format(sessionName(sid)),
                     title,
                     (p["requestId"]?.jsonPrimitive?.content ?: sid).hashCode(),
                 )

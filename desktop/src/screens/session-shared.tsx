@@ -1,5 +1,6 @@
 import { useMemo, type ReactNode } from "react";
 import { useHubStore } from "../hub/store";
+import { stringsFor, type Strings } from "../hub/strings";
 import type { SearchGroup, SessionInfo } from "../hub/types";
 
 export type SessionStatus = "online" | "offline" | "busy" | "pinned" | "archived";
@@ -21,30 +22,39 @@ export interface RoomListFilter {
   showArchived: boolean;
 }
 
-export const SESSION_STATUS_LABELS: Record<SessionStatus, string> = {
-  online: "在线",
-  offline: "离线",
-  busy: "忙碌",
-  pinned: "置顶",
-  archived: "归档",
-};
+export function sessionStatusLabel(S: Strings, st: SessionStatus): string {
+  switch (st) {
+    case "online": return S.statusOnline;
+    case "offline": return S.statusOffline;
+    case "busy": return S.statusBusy;
+    case "pinned": return S.statusPinned;
+    case "archived": return S.statusArchived;
+  }
+}
 
-export const GROUP_BY_LABELS: Record<SessionGroupBy | RoomGroupBy, string> = {
-  none: "不分组",
-  agent: "按 Agent",
-  cwd: "按目录",
-  mode: "按模式",
-};
+export function groupByLabel(S: Strings, g: SessionGroupBy | RoomGroupBy): string {
+  switch (g) {
+    case "none": return S.groupByNone;
+    case "agent": return S.groupByAgent;
+    case "cwd": return S.groupByCwd;
+    case "mode": return S.groupByMode;
+  }
+}
 
-export const MODE_LABELS: Record<string, string> = {
-  mention: "普通群",
-  conductor: "指挥家",
-  roundrobin: "轮询",
-  parallel: "并行",
-  pipeline: "流水线",
-  debate: "辩论",
-  auto: "自动",
-};
+export function modeLabel(S: Strings, m: string): string {
+  switch (m) {
+    case "mention": return S.modeMention;
+    case "conductor": return S.modeConductor;
+    case "roundrobin": return S.modeRoundRobin;
+    case "parallel": return S.modeParallel;
+    case "pipeline": return S.modePipeline;
+    case "debate": return S.modeDebate;
+    case "auto": return S.modeAuto;
+    case "self": return S.modeSelfLabel;
+    case "deciding": return S.modeDecidingLabel;
+    default: return m;
+  }
+}
 
 export function truncatePath(path: string, maxLen = 40): string {
   if (path.length <= maxLen) return path;
@@ -80,22 +90,22 @@ export interface ActiveChip {
   label: string;
 }
 
-export function buildActiveSessionChips(filter: SessionListFilter, agents: string[], cwds: string[]): ActiveChip[] {
+export function buildActiveSessionChips(S: Strings, filter: SessionListFilter, agents: string[], cwds: string[]): ActiveChip[] {
   const chips: ActiveChip[] = [];
-  if (filter.query.trim()) chips.push({ kind: "session", key: "query", label: `搜索: ${filter.query.trim()}` });
-  if (filter.groupBy !== "none") chips.push({ kind: "session", key: "groupBy", label: `分组: ${GROUP_BY_LABELS[filter.groupBy]}` });
+  if (filter.query.trim()) chips.push({ kind: "session", key: "query", label: S.searchChipFmt.replace("%s", filter.query.trim()) });
+  if (filter.groupBy !== "none") chips.push({ kind: "session", key: "groupBy", label: S.groupByChipFmt.replace("%s", groupByLabel(S, filter.groupBy)) });
   for (const a of agents) if (filter.agents.has(a)) chips.push({ kind: "session", key: a, label: a });
   for (const c of cwds) if (filter.cwds.has(c)) chips.push({ kind: "session", key: c, label: truncatePath(c) });
-  for (const st of Array.from(filter.statuses)) chips.push({ kind: "session", key: st, label: SESSION_STATUS_LABELS[st] });
+  for (const st of Array.from(filter.statuses)) chips.push({ kind: "session", key: st, label: sessionStatusLabel(S, st) });
   return chips;
 }
 
-export function buildActiveRoomChips(filter: RoomListFilter, modes: string[], archivedCount: number): ActiveChip[] {
+export function buildActiveRoomChips(S: Strings, filter: RoomListFilter, modes: string[], archivedCount: number): ActiveChip[] {
   const chips: ActiveChip[] = [];
-  if (filter.query.trim()) chips.push({ kind: "room", key: "query", label: `搜索: ${filter.query.trim()}` });
-  if (filter.groupBy !== "none") chips.push({ kind: "room", key: "groupBy", label: `分组: ${GROUP_BY_LABELS[filter.groupBy]}` });
-  if (filter.showArchived && archivedCount > 0) chips.push({ kind: "room", key: "showArchived", label: `归档 (${archivedCount})` });
-  for (const m of modes) if (filter.modes.has(m)) chips.push({ kind: "room", key: m, label: MODE_LABELS[m] ?? m });
+  if (filter.query.trim()) chips.push({ kind: "room", key: "query", label: S.searchChipFmt.replace("%s", filter.query.trim()) });
+  if (filter.groupBy !== "none") chips.push({ kind: "room", key: "groupBy", label: S.groupByChipFmt.replace("%s", groupByLabel(S, filter.groupBy)) });
+  if (filter.showArchived && archivedCount > 0) chips.push({ kind: "room", key: "showArchived", label: S.archivedChipFmt.replace("%s", String(archivedCount)) });
+  for (const m of modes) if (filter.modes.has(m)) chips.push({ kind: "room", key: m, label: modeLabel(S, m) });
   return chips;
 }
 
@@ -132,6 +142,7 @@ export function FilterChip({
 
 export function SearchGroupCard({ group, query }: { group: SearchGroup; query: string }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const q = query.trim().toLowerCase();
   const name = useMemo(() => {
     if (group.scope === "room") {
@@ -141,10 +152,10 @@ export function SearchGroupCard({ group, query }: { group: SearchGroup; query: s
   }, [group, store.sessions, store.rooms]);
   return (
     <div className="search-group-card">
-      <div className="search-group-title">{name} · 共 {group.count} 条</div>
+      <div className="search-group-title">{name} · {S.totalCountFmt.replace("%s", String(group.count))}</div>
       {group.previews.map((hit, i) => (
         <div key={i} className="search-preview" onClick={() => store.openSearchHit(hit)}>
-          <span className="search-author">{hit.author || "系统"} · </span>
+          <span className="search-author">{hit.author || S.systemAuthor} · </span>
           {highlightText((hit.text || "").slice(0, 120), q)}
         </div>
       ))}

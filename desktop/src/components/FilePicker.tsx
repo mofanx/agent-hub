@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FileCode, FolderTree, Search, X } from "lucide-react";
 import type { FileTreeRoot, FileTreeNode } from "../hub/types";
 import { useHubStore } from "../hub/store";
+import { stringsFor } from "../hub/strings";
 
 interface FilePickerProps {
   open: boolean;
@@ -16,6 +17,7 @@ interface FileNode extends FileTreeRoot, FileTreeNode {
 
 export function FilePicker({ open, onClose, onSelect }: FilePickerProps) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPath, setCurrentPath] = useState("");
   const [files, setFiles] = useState<FileNode[]>([]);
@@ -129,7 +131,7 @@ export function FilePicker({ open, onClose, onSelect }: FilePickerProps) {
     <div className="file-picker-backdrop" onClick={onClose}>
       <div className="file-picker" onClick={e => e.stopPropagation()} onKeyDown={onKeyDown} tabIndex={0}>
         <div className="file-picker-header">
-          <div className="file-picker-title">选择文件</div>
+          <div className="file-picker-title">{S.pickFileTitle}</div>
           <button className="icon-btn" onClick={onClose}><X size={16} /></button>
         </div>
 
@@ -138,7 +140,7 @@ export function FilePicker({ open, onClose, onSelect }: FilePickerProps) {
           <input
             ref={searchRef}
             type="text"
-            placeholder="搜索文件..."
+            placeholder={S.searchFilesPlaceholder}
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
           />
@@ -149,7 +151,7 @@ export function FilePicker({ open, onClose, onSelect }: FilePickerProps) {
             className={!currentPath ? "breadcrumb active" : "breadcrumb"}
             onClick={() => handleBreadcrumbClick("")}
           >
-            根目录
+            {S.rootDirLabel}
           </button>
           {breadcrumbs.map((crumb, i) => (
             <button
@@ -164,10 +166,10 @@ export function FilePicker({ open, onClose, onSelect }: FilePickerProps) {
 
         <div className="file-picker-body" ref={listRef}>
           {loading ? (
-            <div className="file-picker-loading">加载中...</div>
+            <div className="file-picker-loading">{S.loadingDots}</div>
           ) : filteredFiles.length === 0 ? (
             <div className="file-picker-empty">
-              {searchQuery ? "未找到匹配的文件" : "此目录为空"}
+              {searchQuery ? S.noMatchFiles : S.dirEmpty}
             </div>
           ) : (
             filteredFiles.map((file, i) => {
@@ -192,10 +194,10 @@ export function FilePicker({ open, onClose, onSelect }: FilePickerProps) {
 
         <div className="file-picker-footer">
           <div className="shortcut-hint">
-            <span>↑↓ 选择</span>
-            <span>Enter 确认</span>
-            <span>Esc 关闭</span>
-            <span>Backspace 返回</span>
+            <span>{S.hintSelect}</span>
+            <span>{S.hintConfirm}</span>
+            <span>{S.hintClose}</span>
+            <span>{S.hintBack}</span>
           </div>
         </div>
       </div>

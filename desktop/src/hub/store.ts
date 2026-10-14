@@ -38,7 +38,7 @@ import {
   requestNotificationPermission,
   isNotificationPermissionGranted,
 } from "./commands";
-import { stringsFor } from "./strings";
+import { stringsFor, type Strings } from "./strings";
 
 type SelectedIds = { sessions: string[]; rooms: string[] };
 
@@ -730,7 +730,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         };
         set({ chatItems: [...get().chatItems, next] });
         ensurePermission().then(() => {
-          showNotification(`审批请求 · ${get().sessionName(sid)}`, title).catch(() => {});
+          showNotification(stringsFor(get().lang).approvalNotificationFmt.replace("%s", get().sessionName(sid)), title).catch(() => {});
         });
         break;
       }
@@ -754,7 +754,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         };
         set({ chatItems: [...get().chatItems, next] });
         ensurePermission().then(() => {
-          showNotification(`输入请求 · ${get().sessionName(sid)}`, String(params.message ?? "")).catch(() => {});
+          showNotification(stringsFor(get().lang).elicitationNotificationFmt.replace("%s", get().sessionName(sid)), String(params.message ?? "")).catch(() => {});
         });
         break;
       }
@@ -911,11 +911,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
     pinnedIds: [],
     recentCwds: [],
     customCommands: [],
-    defaultCommands: [
-      "继续",
-      "总结目前的进展，列出下一步计划",
-      "运行项目的测试并修复所有失败",
-    ],
+    defaultCommands: (() => {
+      const S = stringsFor("zh");
+      return [S.cmdContinue, S.cmdSummarize, S.cmdRunTests];
+    })(),
     screen: "connect",
     themeMode: "system",
     lang: "zh",
@@ -1001,9 +1000,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
           lang: cfg.lang ?? "zh",
           sendKey: cfg.sendKey ?? "enter",
           agentStatus: S.notConnected,
+          defaultCommands: [S.cmdContinue, S.cmdSummarize, S.cmdRunTests],
         });
       } catch {
-        set({ agentStatus: stringsFor("zh").notConnected });
+        set({ agentStatus: stringsFor(get().lang).notConnected });
       }
     },
 
@@ -1058,7 +1058,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     updateLang: (lang: string) => {
-      set({ lang });
+      const S = stringsFor(lang);
+      const prev = get().agentStatus;
+      const remap: [keyof Strings, string][] = (["zh", "en"] as const).flatMap((l) => {
+        const t = stringsFor(l);
+        return [
+          ["connected", t.connected],
+          ["notConnected", t.notConnected],
+          ["agentDisconnected", t.agentDisconnected],
+        ];
+      });
+      const key = remap.find(([, v]) => v === prev)?.[0];
+      set({
+        lang,
+        defaultCommands: [S.cmdContinue, S.cmdSummarize, S.cmdRunTests],
+        ...(key ? { agentStatus: S[key] } : {}),
+      });
       persist();
     },
 
@@ -1424,7 +1439,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (updated && autoOpen) {
           get().openChat(updated);
         } else if (!updated) {
-          set({ connectError: "恢复失败：agent 不支持或会话已失效" });
+          set({ connectError: stringsFor(get().lang).resumeFailed });
         }
       } catch (e) {
         set({ connectError: String(e) });
@@ -1578,7 +1593,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       };
       set({ chatItems: [...get().chatItems, userItem], quote: null, pendingAttachments: [] });
       const content: Record<string, unknown>[] = [];
-      if (text) content.push({ type: "text", text: q ? `（引用 ${q[0]} 的消息："${q[1].slice(0, 300)}"）\n${text}` : text });
+      if (text) content.push({ type: "text", text: q ? `${stringsFor(get().lang).quoteHeaderFmt.replace("%s", q[0]).replace("%s", q[1].slice(0, 300))}\n${text}` : text });
       for (const a of atts) {
         content.push({
           type: "image",
@@ -1623,7 +1638,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         });
       }
 
-      const params: Record<string, unknown> = { roomId: room.roomId, text: text || "（图片）", content };
+      const params: Record<string, unknown> = { roomId: room.roomId, text: text || stringsFor(get().lang).imageMessage, content };
       if (q) {
         params.quote = { author: q[0], text: q[1] };
       }
@@ -2174,14 +2189,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
             // 群聊模式：需要 @成员名 前缀
             const mentionMatch = arg.match(/^@(\S+)\s+(.+)$/);
             if (!mentionMatch) {
-              set({ chatItems: [...get().chatItems, { kind: "error", text: "群聊中切换模型请指定成员：/model @成员名 模型名", author: "" }] });
+              set({ chatItems: [...get().chatItems, { kind: "error", text: S.roomModelHint, author: "" }] });
               return true;
             }
             const memberName = mentionMatch[1];
             const modelName = mentionMatch[2];
             const member = room.members.find((m) => m[1] === memberName);
             if (!member) {
-              set({ chatItems: [...get().chatItems, { kind: "error", text: `未找到成员 @${memberName}`, author: "" }] });
+              set({ chatItems: [...get().chatItems, { kind: "error", text: S.memberNotFoundFmt.replace("%s", memberName), author: "" }] });
               return true;
             }
             void getOrCall("model.set", { model: modelName, sessionId: member[0] })
@@ -2190,7 +2205,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
                 if (model) {
                   const uid = String(model.uid ?? modelName);
                   const label = String(model.label ?? "");
-                  set({ chatItems: [...get().chatItems, { kind: "system", text: `@${memberName} 模型已切换为 ${label || uid}`, author: "" }] });
+                  set({ chatItems: [...get().chatItems, { kind: "system", text: S.modelSwitchedForFmt.replace("%s", memberName).replace("%s", label || uid), author: "" }] });
                   void get().refreshRoomMemberModels();
                 } else {
                   set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelUnknown.replace("%s", modelName), author: "" }] });
@@ -2368,7 +2383,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         await client.call("room.blackboard.remove", { roomId, id });
       } catch (err) {
-        alert(`删除失败：${err}`);
+        alert(stringsFor(get().lang).deleteFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2378,7 +2393,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         await client.call("room.blackboard.clear", { roomId });
       } catch (err) {
-        alert(`清空失败：${err}`);
+        alert(stringsFor(get().lang).clearFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2392,7 +2407,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           isSession ? { sessionId: contextId, artifactId } : { roomId: contextId, artifactId },
         );
       } catch (err) {
-        alert(`删除失败：${err}`);
+        alert(stringsFor(get().lang).deleteFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2406,7 +2421,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           : kind === "event" ? "room.clearEvents" : "room.clearArtifacts";
         await client.call(method, isSession ? { sessionId: contextId } : { roomId: contextId, kind });
       } catch (err) {
-        alert(`清空失败：${err}`);
+        alert(stringsFor(get().lang).clearFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2420,7 +2435,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           isSession ? { sessionId: contextId, eventId } : { roomId: contextId, eventId },
         );
       } catch (err) {
-        alert(`删除失败：${err}`);
+        alert(stringsFor(get().lang).deleteFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2434,7 +2449,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (action) (params as Record<string, unknown>)["action"] = action;
         await client.call(method, params);
       } catch (err) {
-        alert(`清空失败：${err}`);
+        alert(stringsFor(get().lang).clearFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2445,7 +2460,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const params = isSession ? { sessionId: contextId, path: filePath } : { roomId: contextId, path: filePath };
         await client.call("file.delete", params);
       } catch (err) {
-        alert(`删除失败：${err}`);
+        alert(stringsFor(get().lang).deleteFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2458,7 +2473,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           : { roomId: contextId, from, to };
         await client.call("file.rename", params);
       } catch (err) {
-        alert(`重命名失败：${err}`);
+        alert(stringsFor(get().lang).renameFailedFmt.replace("%s", String(err)));
       }
     },
 
@@ -2656,7 +2671,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           modelCurrent: model.uid,
           modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === model.uid })),
         });
-        set({ chatItems: [...get().chatItems, { kind: "system", text: `@${memberName} 模型已切换为 ${model.label || model.uid}`, author: "" }] });
+        set({ chatItems: [...get().chatItems, { kind: "system", text: stringsFor(get().lang).modelSwitchedForFmt.replace("%s", memberName).replace("%s", model.label || model.uid), author: "" }] });
       } catch (e) {
         set({ connectError: String(e) });
       }

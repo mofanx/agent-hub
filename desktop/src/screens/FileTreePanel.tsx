@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowUp, FileText, Folder, RefreshCw, X } from "lucide-react";
 import { useHubStore } from "../hub/store";
+import { stringsFor } from "../hub/strings";
 import type { FileTreeRoot, FileTreeNode } from "../hub/types";
 
 type FileGetResult = {
@@ -35,6 +36,7 @@ export function FileTreePanel({
   onPreview?: (file: FileGetResult & { name: string }) => void;
 }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [roots, setRoots] = useState<FileTreeRoot[]>([]);
   const [nodes, setNodes] = useState<FileTreeNode[]>([]);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
@@ -69,7 +71,7 @@ export function FileTreePanel({
         setCurrentPath(path);
       }
     } catch (e) {
-      alert(`加载失败：${e}`);
+      alert(S.loadFailedFmt.replace("%s", String(e)));
     } finally {
       setLoading(false);
     }
@@ -120,7 +122,7 @@ export function FileTreePanel({
       else params.roomId = contextId;
       return (await client.call("file.get", params)) as FileGetResult;
     } catch (e) {
-      alert(`读取失败：${e}`);
+      alert(S.readFailedFmt.replace("%s", String(e)));
       return null;
     }
   };
@@ -202,14 +204,14 @@ export function FileTreePanel({
   };
 
   const remove = async (node: FileTreeNode) => {
-    if (!window.confirm(`确认删除文件？\n${node.path}`)) return;
+    if (!window.confirm(S.confirmDeleteFileFmt.replace("%s", node.path))) return;
     await store.deleteFile(contextId, isSession, node.path);
     setContextMenu(null);
     load(currentPath ?? undefined);
   };
 
   const rename = async (node: FileTreeNode) => {
-    const newName = window.prompt("重命名为", node.name);
+    const newName = window.prompt(S.renameToPrompt, node.name);
     if (!newName || newName.trim() === node.name) return;
     const trimmed = newName.trim();
     const lastSep = Math.max(node.path.lastIndexOf("/"), node.path.lastIndexOf("\\"));
@@ -261,28 +263,28 @@ export function FileTreePanel({
   return (
     <div className="file-tree-panel" onClick={() => setContextMenu(null)}>
       <div className="file-tree-header">
-        <h4 title={rootName ?? undefined}>{rootName ?? "项目文件"}</h4>
+        <h4 title={rootName ?? undefined}>{rootName ?? S.projectFiles}</h4>
         <div className="file-tree-actions">
           <button
             className="icon-btn"
             onClick={() => load(currentPath ?? undefined)}
             disabled={loading}
-            title="刷新"
+            title={S.refreshTitle}
           >
             <RefreshCw size={13} />
           </button>
-          <button className="icon-btn" onClick={onClose} title="关闭">
+          <button className="icon-btn" onClick={onClose} title={S.close}>
             <X size={14} />
           </button>
         </div>
       </div>
       {currentPath && (
         <div className="file-tree-up" onClick={up}>
-          <ArrowUp size={12} /> 返回上级
+          <ArrowUp size={12} /> {S.goUpLabel}
         </div>
       )}
       <div className="file-tree-list">
-        {loading && <div className="file-tree-loading">加载中…</div>}
+        {loading && <div className="file-tree-loading">{S.loadingDots}</div>}
         {currentPath == null &&
           roots.map((r) => (
             <div
@@ -335,30 +337,30 @@ export function FileTreePanel({
         >
           {menuDir && (
             <button onClick={() => { load(menuDir.path); setContextMenu(null); }}>
-              进入
+              {S.enterLabel}
             </button>
           )}
           {menuFile && (
             <>
               <button onClick={() => { previewFile(menuFile); setContextMenu(null); }}>
-                预览
+                {S.previewLabel}
               </button>
               <button onClick={() => { downloadFile(menuFile); setContextMenu(null); }}>
-                下载
+                {S.downloadLabel}
               </button>
               <button onClick={() => rename(menuFile)}>
-                重命名
+                {S.renameTitle}
               </button>
               <button className="danger" onClick={() => remove(menuFile)}>
-                删除
+                {S.deleteLabel}
               </button>
             </>
           )}
           <button onClick={() => quote(contextMenu.item)}>
-            引用到输入框
+            {S.quoteToInput}
           </button>
           <button onClick={() => setContextMenu(null)}>
-            取消
+            {S.cancelLabel}
           </button>
         </div>
       )}

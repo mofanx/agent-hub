@@ -58,8 +58,8 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
     val scope = rememberCoroutineScope()
     val onClose: () -> Unit = { scope.launch { drawerState.close() } }
     val current = vm.currentProfile
-    val isConnected = current != null && vm.agentStatus != "未连接"
-    val statusColor = if (vm.agentStatus == "连接已断开") Color(0xFFF1C40F) else Color(0xFF2ECC71)
+    val isConnected = current != null && vm.agentStatus == "connected"
+    val statusColor = if (vm.agentStatus == "reconnecting") Color(0xFFF1C40F) else Color(0xFF2ECC71)
 
     var showProfileDialog by remember { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<ConnProfile?>(null) }
@@ -79,8 +79,8 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
     deleteTarget?.let { p ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("删除 Hub") },
-            text = { Text("确定删除「${p.name}」？") },
+            title = { Text(S.deleteHubTitle) },
+            text = { Text(S.deleteHubMsg.format(p.name)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -147,7 +147,7 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
                 }
             } else {
                 Text(
-                    "未连接",
+                    S.statusNotConnected,
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -164,7 +164,7 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
                 if (vm.profiles.isEmpty()) {
                     item {
                         Text(
-                            "暂无保存的 Hub",
+                            S.noConnections,
                             modifier = Modifier.padding(vertical = 24.dp),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -201,7 +201,7 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("添加 Hub")
+                Text(S.addConnection)
             }
 
             Spacer(Modifier.height(8.dp))
@@ -218,7 +218,7 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("断开当前")
+                    Text(S.disconnectCurrent)
                 }
             }
 
@@ -277,21 +277,21 @@ private fun ProfileDrawerItem(
             Box {
                 var expanded by remember { mutableStateOf(false) }
                 IconButton(onClick = { expanded = true }) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Filled.MoreVert, contentDescription = LocalStrings.current.more)
                 }
                 DropdownMenu(
                     expanded = expanded,
                     onDismissRequest = { expanded = false },
                 ) {
                     DropdownMenuItem(
-                        text = { Text("编辑") },
+                        text = { Text(LocalStrings.current.edit) },
                         onClick = {
                             expanded = false
                             onEdit()
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("删除") },
+                        text = { Text(LocalStrings.current.delete) },
                         onClick = {
                             expanded = false
                             onDelete()

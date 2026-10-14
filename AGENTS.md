@@ -78,6 +78,7 @@ cd android
 - 优先编辑现有文件，而不是创建新文件。
 - TypeScript 默认紧凑代码，避免过度错误处理。
 - Android 包名：`com.agenthub.ui`（UI 组件）、`com.agenthub`（ViewModel/业务）。
+- **i18n（硬性要求）**：所有用户可见文案必须走既有双语机制——Android 用 `Strings.kt`/`stringsFor(lang)`，Desktop 用 `hub/strings.ts`/`stringsFor(store.lang)`；禁止在 UI 代码中硬编码任何单语言字符串（含提示、确认框、占位符、空态、tooltip）。逻辑判断用稳定 key（如状态 id），仅在渲染时映射为文案；新增字段须同步更新接口与中英两份字典。协议/持久化数据标记（如 `"我"`）、双语关键词匹配正则、注释不受此限。
 
 ## 常用开发命令
 

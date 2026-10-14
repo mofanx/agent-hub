@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { X } from "lucide-react";
+import { useHubStore } from "../../hub/store";
+import { stringsFor } from "../../hub/strings";
 import {
   FilterChip,
-  GROUP_BY_LABELS,
-  MODE_LABELS,
-  SESSION_STATUS_LABELS,
+  groupByLabel,
+  modeLabel,
+  sessionStatusLabel,
   toggleSet,
   truncatePath,
   type RoomGroupBy,
@@ -35,19 +37,20 @@ export function FilterSheet({
   archivedRoomCount: number;
   onClose: () => void;
 }) {
+  const S = stringsFor(useHubStore().lang);
   const [tab, setTab] = useState<"session" | "room">("session");
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog filter-sheet" onClick={(e) => e.stopPropagation()}>
         <div className="filter-sheet-tabs">
           <button className={tab === "session" ? "active" : ""} onClick={() => setTab("session")}>
-            会话
+            {S.sessionsLabel}
           </button>
           <button className={tab === "room" ? "active" : ""} onClick={() => setTab("room")}>
-            群聊
+            {S.roomsLabel}
           </button>
           <span style={{ flex: 1 }} />
-          <button className="icon-btn" onClick={onClose} title="关闭">
+          <button className="icon-btn" onClick={onClose} title={S.close}>
             <X size={15} />
           </button>
         </div>
@@ -83,6 +86,7 @@ function FilterSheetSession({
   agents: string[];
   cwds: string[];
 }) {
+  const S = stringsFor(useHubStore().lang);
   const isFiltered =
     filter.query.trim() ||
     filter.groupBy !== "none" ||
@@ -94,18 +98,18 @@ function FilterSheetSession({
     <div className="filter-sheet-body">
       <input
         className="filter-query"
-        placeholder="按名称、目录或 Agent 过滤…"
+        placeholder={S.sessionFilterPlaceholder}
         value={filter.query}
         onChange={(e) => onChange({ ...filter, query: e.currentTarget.value })}
       />
 
       <div className="filter-section">
-        <span className="chip-label">分组</span>
+        <span className="chip-label">{S.groupBySection}</span>
         <div className="chips">
           {(["none", "agent", "cwd"] as SessionGroupBy[]).map((g) => (
             <FilterChip
               key={g}
-              label={GROUP_BY_LABELS[g]}
+              label={groupByLabel(S, g)}
               selected={filter.groupBy === g}
               onClick={() => onChange({ ...filter, groupBy: g })}
             />
@@ -114,12 +118,12 @@ function FilterSheetSession({
       </div>
 
       <div className="filter-section">
-        <span className="chip-label">状态</span>
+        <span className="chip-label">{S.statusSectionLabel}</span>
         <div className="chips">
           {(["online", "offline", "busy", "pinned", "archived"] as SessionStatus[]).map((st) => (
             <FilterChip
               key={st}
-              label={SESSION_STATUS_LABELS[st]}
+              label={sessionStatusLabel(S, st)}
               selected={filter.statuses.has(st)}
               onClick={() => onChange({ ...filter, statuses: toggleSet(filter.statuses, st) })}
             />
@@ -145,7 +149,7 @@ function FilterSheetSession({
 
       {cwds.length > 0 && (
         <div className="filter-section">
-          <span className="chip-label">工作目录</span>
+          <span className="chip-label">{S.cwdSection}</span>
           <div className="chips">
             {cwds.map((c) => (
               <FilterChip
@@ -175,7 +179,7 @@ function FilterSheetSession({
               })
             }
           >
-            重置
+            {S.resetLabel}
           </button>
         </div>
       )}
@@ -194,6 +198,7 @@ function FilterSheetRoom({
   modes: string[];
   archivedCount: number;
 }) {
+  const S = stringsFor(useHubStore().lang);
   const isFiltered =
     filter.query.trim() ||
     filter.groupBy !== "none" ||
@@ -204,18 +209,18 @@ function FilterSheetRoom({
     <div className="filter-sheet-body">
       <input
         className="filter-query"
-        placeholder="按名称、成员或模式过滤…"
+        placeholder={S.roomFilterPlaceholder}
         value={filter.query}
         onChange={(e) => onChange({ ...filter, query: e.currentTarget.value })}
       />
 
       <div className="filter-section">
-        <span className="chip-label">分组</span>
+        <span className="chip-label">{S.groupBySection}</span>
         <div className="chips">
           {(["none", "mode"] as RoomGroupBy[]).map((g) => (
             <FilterChip
               key={g}
-              label={GROUP_BY_LABELS[g]}
+              label={groupByLabel(S, g)}
               selected={filter.groupBy === g}
               onClick={() => onChange({ ...filter, groupBy: g })}
             />
@@ -226,7 +231,7 @@ function FilterSheetRoom({
       {archivedCount > 0 && (
         <div className="filter-section">
           <FilterChip
-            label={`归档 (${archivedCount})`}
+            label={S.archivedChipFmt.replace("%s", String(archivedCount))}
             selected={filter.showArchived}
             onClick={() => onChange({ ...filter, showArchived: !filter.showArchived })}
           />
@@ -235,12 +240,12 @@ function FilterSheetRoom({
 
       {modes.length > 0 && (
         <div className="filter-section">
-          <span className="chip-label">模式</span>
+          <span className="chip-label">{S.modeSection}</span>
           <div className="chips">
             {modes.map((m) => (
               <FilterChip
                 key={m}
-                label={MODE_LABELS[m] ?? m}
+                label={modeLabel(S, m)}
                 selected={filter.modes.has(m)}
                 onClick={() => onChange({ ...filter, modes: toggleSet(filter.modes, m) })}
               />
@@ -263,7 +268,7 @@ function FilterSheetRoom({
               })
             }
           >
-            重置
+            {S.resetLabel}
           </button>
         </div>
       )}

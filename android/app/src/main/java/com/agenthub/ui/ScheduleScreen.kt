@@ -89,7 +89,7 @@ fun ScheduleScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         vm.loadTaskLogs()
                         showLogs = true
                     }) {
-                        Icon(Icons.Filled.History, contentDescription = "日志")
+                        Icon(Icons.Filled.History, contentDescription = S.logsTitle)
                     }
                     IconButton(onClick = { showCreate = true }) {
                         Icon(Icons.Filled.Add, contentDescription = S.createTask)
@@ -188,6 +188,7 @@ private fun LogsPanel(
     onClear: () -> Unit,
     onClose: () -> Unit,
 ) {
+    val S = LocalStrings.current
     val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     Card(
         Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -200,15 +201,15 @@ private fun LogsPanel(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.History, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.size(8.dp))
-                Text("执行日志", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text(S.runLogsTitle, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 IconButton(onClick = onClear, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Filled.Delete, contentDescription = "清空", modifier = Modifier.size(16.dp),
+                    Icon(Icons.Filled.Delete, contentDescription = S.actionClear, modifier = Modifier.size(16.dp),
                         tint = MaterialTheme.colorScheme.error)
                 }
             }
             Spacer(Modifier.height(8.dp))
             if (logs.isEmpty()) {
-                Text("暂无执行记录", style = MaterialTheme.typography.bodySmall,
+                Text(S.noRunRecords, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 logs.forEach { log ->
@@ -225,14 +226,14 @@ private fun LogsPanel(
                         )
                         Column(Modifier.weight(1f)) {
                             Text(log.taskName, style = MaterialTheme.typography.labelMedium)
-                            Text("${df.format(Date(log.at))} → ${if (log.targetType == "room") "群聊" else "会话"} · ${log.targetName}",
+                            Text("${df.format(Date(log.at))} → ${if (log.targetType == "room") S.roomLabel else S.sessionLabel} · ${log.targetName}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("消息：${log.message.take(60)}${if (log.message.length > 60) "…" else ""}",
+                            Text(S.messageFmt.format(log.message.take(60) + if (log.message.length > 60) "…" else ""),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             if (log.error != null) {
-                                Text("错误：${log.error}",
+                                Text(S.errorFmt.format(log.error),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.error)
                             }
@@ -273,7 +274,7 @@ private fun TaskCard(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    if (task.enabled) S.taskEnabled else "禁用",
+                    if (task.enabled) S.taskEnabled else S.disabledTag,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (task.enabled) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -281,11 +282,11 @@ private fun TaskCard(
             }
             Spacer(Modifier.height(8.dp))
             val desc = describeSchedule(task, S)
-            Text("目标：${if (task.targetType == "room") "群聊" else "会话"} · ${task.targetName}",
+            Text(S.targetFmt.format(if (task.targetType == "room") S.roomLabel else S.sessionLabel, task.targetName),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("调度：$desc",
+            Text(S.scheduleFmt.format(desc),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("消息：${task.message.take(80)}${if (task.message.length > 80) "…" else ""}",
+            Text(S.messageFmt.format(task.message.take(80) + if (task.message.length > 80) "…" else ""),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("${
                 if (task.nextRunAt != null) "${S.nextRun}: ${df.format(Date(task.nextRunAt))}"
@@ -326,16 +327,6 @@ private fun describeSchedule(task: ScheduledTask, S: Strings): String {
         else -> "—"
     }
 }
-
-private val CRON_EXAMPLES = listOf(
-    "0 9 * * *" to "每天 9:00",
-    "0 9 * * 1-5" to "工作日 9:00",
-    "*/30 * * * *" to "每 30 分钟",
-    "0 */2 * * *" to "每 2 小时",
-    "0 9,18 * * *" to "每天 9:00 和 18:00",
-    "0 0 * * 0" to "每周日 0:00",
-    "0 0 1 * *" to "每月 1 号 0:00",
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -388,12 +379,12 @@ private fun TaskEditorDialog(
                         selected = targetType == "session",
                         onClick = { targetType = "session"; targetId = "" },
                         shape = SegmentedButtonDefaults.itemShape(0, 2),
-                    ) { Text("会话") }
+                    ) { Text(S.sessionLabel) }
                     SegmentedButton(
                         selected = targetType == "room",
                         onClick = { targetType = "room"; targetId = "" },
                         shape = SegmentedButtonDefaults.itemShape(1, 2),
-                    ) { Text("群聊") }
+                    ) { Text(S.roomLabel) }
                 }
                 Spacer(Modifier.height(8.dp))
 
@@ -455,7 +446,7 @@ private fun TaskEditorDialog(
                             OutlinedTextField(
                                 value = intervalMinutes,
                                 onValueChange = { intervalMinutes = it.filter { c -> c.isDigit() } },
-                                label = { Text("间隔（分钟）") },
+                                label = { Text(S.intervalMinutesLabel) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                             )
@@ -467,11 +458,11 @@ private fun TaskEditorDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
                                 Text(
-                                    if (atTimestamp > 0) df.format(Date(atTimestamp)) else "请选择时间",
+                                    if (atTimestamp > 0) df.format(Date(atTimestamp)) else S.pickTimeHint,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
                                 TextButton(onClick = { showDatePicker = true }) {
-                                    Text("选择日期时间")
+                                    Text(S.pickDateTime)
                                 }
                             }
                         }
@@ -485,15 +476,15 @@ private fun TaskEditorDialog(
                         OutlinedTextField(
                             value = cronExpr,
                             onValueChange = { cronExpr = it },
-                            label = { Text("Cron（分 时 日 月 周）") },
+                            label = { Text(S.cronLabel) },
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(onClick = { showCronHelp = true }) {
-                            Icon(Icons.Filled.Info, contentDescription = "Cron 说明")
+                            Icon(Icons.Filled.Info, contentDescription = S.cronHelp)
                         }
                     }
-                    Text("如 0 9 * * * 表示每天 9:00",
+                    Text(S.cronDailyHint,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -521,9 +512,9 @@ private fun TaskEditorDialog(
                         enabled)
                 },
                 enabled = name.isNotBlank() && targetId.isNotBlank() && message.isNotBlank(),
-            ) { Text("保存") }
+            ) { Text(S.save) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(S.cancel) } },
     )
 
     if (showCronHelp) {
@@ -554,9 +545,9 @@ private fun TaskEditorDialog(
                         showDatePicker = false
                         showTimePicker = true
                     }
-                }) { Text("下一步") }
+                }) { Text(S.nextStep) }
             },
-            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text(S.cancel) } },
         ) { DatePicker(state = state) }
     }
 
@@ -579,9 +570,9 @@ private fun TaskEditorDialog(
                     cal2.set(Calendar.SECOND, 0)
                     atTimestamp = cal2.timeInMillis
                     showTimePicker = false
-                }) { Text("确定") }
+                }) { Text(S.ok) }
             },
-            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text(S.cancel) } },
             text = { TimePicker(state = state) },
         )
     }
@@ -589,24 +580,25 @@ private fun TaskEditorDialog(
 
 @Composable
 private fun CronHelpDialog(onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    val S = LocalStrings.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Cron 表达式说明") },
+        title = { Text(S.cronHelpTitle) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("格式：分 时 日 月 周", style = MaterialTheme.typography.bodyMedium)
+                Text(S.cronFormatLine, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(4.dp))
-                Text("· 分：0-59\n· 时：0-23\n· 日：1-31\n· 月：1-12\n· 周：0-6（0=周日）",
+                Text(S.cronRanges,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(4.dp))
-                Text("支持 *（任意）、*/N（步长）、1-5（范围）、1,3,5（列表）",
+                Text(S.cronSyntax,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(12.dp))
-                Text("常用示例（点击使用）：", style = MaterialTheme.typography.labelMedium)
+                Text(S.cronExamples, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(4.dp))
-                CRON_EXAMPLES.forEach { (expr, desc) ->
+                S.cronPresets.forEach { (expr, desc) ->
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -616,12 +608,12 @@ private fun CronHelpDialog(onDismiss: () -> Unit, onPick: (String) -> Unit) {
                         Text(desc, style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.size(8.dp))
-                        TextButton(onClick = { onPick(expr) }) { Text("使用") }
+                        TextButton(onClick = { onPick(expr) }) { Text(S.useIt) }
                     }
                 }
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(S.actionClose) } },
     )
 }

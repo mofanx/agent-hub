@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import com.agenthub.ui.stringsFor
 
 object Notifier {
     const val CHANNEL_MESSAGES = "messages"
@@ -17,27 +18,31 @@ object Notifier {
     const val CHANNEL_SERVICE = "service"
 
     fun ensureChannels(context: Context) {
+        val S = stringsFor(
+            context.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
+                .getString("lang", "zh") ?: "zh",
+        )
         val nm = context.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_MESSAGES,
-                "Agent 回复",
+                S.notifChannelReply,
                 NotificationManager.IMPORTANCE_DEFAULT,
-            ).apply { description = "Agent 任务完成或回复消息时提醒" },
+            ).apply { description = S.notifChannelReplyDesc },
         )
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_PERMISSION,
-                "审批请求",
+                S.notifChannelApproval,
                 NotificationManager.IMPORTANCE_HIGH,
-            ).apply { description = "Agent 发起权限审批时提醒" },
+            ).apply { description = S.notifChannelApprovalDesc },
         )
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_SERVICE,
-                "后台连接",
+                S.notifChannelService,
                 NotificationManager.IMPORTANCE_MIN,
-            ).apply { description = "保持与 Hub 的后台连接（常驻，可隐藏）" },
+            ).apply { description = S.notifChannelServiceDesc },
         )
     }
 

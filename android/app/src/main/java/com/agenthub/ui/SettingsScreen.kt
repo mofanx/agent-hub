@@ -368,7 +368,7 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             }
                         },
                         modifier = Modifier.padding(top = 4.dp),
-                    ) { Text("应用详情设置") }
+                    ) { Text(S.appDetails) }
                 }
             }
             Card(
@@ -390,7 +390,7 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     Column(Modifier.weight(1f)) {
                         Text(S.scheduledTasks, style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "定时向会话或群聊发送消息",
+                            S.scheduleDesc,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

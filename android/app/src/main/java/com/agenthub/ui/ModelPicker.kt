@@ -211,7 +211,7 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                                             if (selectedBackends.contains(backend)) selectedBackends.remove(backend)
                                             else selectedBackends.add(backend)
                                         },
-                                        label = { Text(backendDisplayName(backend)) },
+                                        label = { Text(backendDisplayName(S, backend)) },
                                         modifier = Modifier.padding(end = 8.dp),
                                     )
                                 }
@@ -271,17 +271,17 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                                 ) {
                                     Column(Modifier.fillMaxWidth().padding(12.dp)) {
                                         Text(
-                                            "Devin 用量${quota.planName?.let { " · $it" } ?: ""}",
+                                            "${S.devinUsage}${quota.planName?.let { " · $it" } ?: ""}",
                                             style = MaterialTheme.typography.labelLarge,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
                                         Spacer(Modifier.height(6.dp))
                                         listOfNotNull(
-                                            quota.daily?.let { "今日已用" to it },
-                                            quota.weekly?.let { "本周已用" to it },
+                                            quota.daily?.let { S.dailyUsed to it },
+                                            quota.weekly?.let { S.weeklyUsed to it },
                                         ).forEach { (label, w) ->
-                                            QuotaRow(label, w)
+                                            QuotaRow(S, label, w)
                                             Spacer(Modifier.height(4.dp))
                                         }
                                     }
@@ -338,7 +338,7 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                         if (!isRoom) {
                             item(key = "header:$backend") {
                                 Text(
-                                    backendDisplayName(backend),
+                                    backendDisplayName(S, backend),
                                     style = MaterialTheme.typography.titleSmall,
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.padding(vertical = 8.dp),
@@ -397,7 +397,7 @@ private fun SectionHeader(
 }
 
 @Composable
-private fun QuotaRow(label: String, w: QuotaWindow) {
+private fun QuotaRow(S: Strings, label: String, w: QuotaWindow) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -417,9 +417,9 @@ private fun QuotaRow(label: String, w: QuotaWindow) {
             )
         }
         if (w.resetAtUnix != null) {
-            val reset = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault()).format(Date(w.resetAtUnix * 1000))
+            val reset = SimpleDateFormat(S.resetDatePattern, Locale.getDefault()).format(Date(w.resetAtUnix * 1000))
             Text(
-                "重置 $reset",
+                S.quotaResetFmt.format(reset),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(start = 56.dp + 8.dp),
@@ -504,13 +504,13 @@ private fun tierName(S: Strings, tier: String): String = when (tier) {
     else -> tier
 }
 
-private fun backendDisplayName(backend: String): String = when (backend) {
+private fun backendDisplayName(S: Strings, backend: String): String = when (backend) {
     "devin" -> "Devin"
     "claude" -> "Claude Code"
     "codex" -> "Codex"
     "opencode" -> "OpenCode"
     "openclaw" -> "OpenClaw"
-    "custom" -> "自定义"
+    "custom" -> S.customBackend
     else -> backend
 }
 

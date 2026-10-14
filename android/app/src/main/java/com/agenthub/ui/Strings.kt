@@ -260,6 +260,192 @@ interface Strings {
     val retryAction: String
     val waitingReply: String
     val you: String
+    val actionCancel: String
+    val actionDelete: String
+    val actionClear: String
+    val actionManage: String
+    val actionClose: String
+    val actionCopy: String
+    val actionQuote: String
+    val actionDownload: String
+    val actionPreview: String
+    val actionSubmit: String
+    val actionDecline: String
+    val itemCount: String
+    val authorMe: String
+    val fileLabel: String
+    val loadMoreHistory: String
+    val jumpToBottom: String
+    val uploadImage: String
+    val removeAttachment: String
+    val multiSelect: String
+    val elicitationTitle: String
+    val outcomeAccepted: String
+    val outcomeDeclined: String
+    val outcomeCancelled: String
+    val commaSeparatedHint: String
+    val flowTitleConductor: String
+    val flowTitleRoom: String
+    val phasePlanning: String
+    val phaseWorking: String
+    val phaseReviewing: String
+    val phaseSummarizing: String
+    val phaseAwaitingRetry: String
+    val phaseDone: String
+    val helpWanted: String
+    val flowProgressFmt: String
+    val flowProgressFailed: String
+    val interruptFlow: String
+    val supplementCount: String
+    val capsuleBlackboard: String
+    val capsuleArtifact: String
+    val capsuleEvent: String
+    val capsuleFlow: String
+    val capsuleFlowPhase: String
+    val capsuleFlowProgress: String
+    val artifactsTitle: String
+    val eventsTitle: String
+    val sharedBlackboard: String
+    val deleteSelectedCount: String
+    val clearAll: String
+    val clearActionOnly: String
+    val quotedToast: String
+    val copiedToast: String
+    val deleteArtifactTitle: String
+    val deleteArtifactMsg: String
+    val clearArtifactsTitle: String
+    val clearArtifactsMsg: String
+    val deleteSelectedArtifactsTitle: String
+    val deleteSelectedArtifactsMsg: String
+    val deleteEventTitle: String
+    val deleteEventMsg: String
+    val clearEventsTitle: String
+    val clearEventsMsg: String
+    val clearEventsActionMsg: String
+    val deleteSelectedEventsTitle: String
+    val deleteSelectedEventsMsg: String
+    val clearBlackboardTitle: String
+    val clearBlackboardMsg: String
+    val eventAdd: String
+    val eventModify: String
+    val eventDelete: String
+    val eventRename: String
+    val eventCommand: String
+    val eventTest: String
+    val eventOther: String
+    val statusNotConnected: String
+    val statusConnected: String
+    val statusReconnecting: String
+    val statusDisconnected: String
+    val resumeFailed: String
+    val lostReply: String
+    val retryFailedFmt: String
+    val cancelFlowFailedFmt: String
+    val copiedMessagesFmt: String
+    val noDownloadableFile: String
+    val fileNotReadable: String
+    val fileNotFound: String
+    val downloadFailed: String
+    val openFailed: String
+    val loadFailedFmt: String
+    val savedToFmt: String
+    val saveFailed: String
+    val cannotOpenStream: String
+    val continueFilePrompt: String
+    val toolCallLabel: String
+    val roomModelHint: String
+    val memberNotFoundFmt: String
+    val modelSwitchedForFmt: String
+    val cmdContinue: String
+    val cmdSummarize: String
+    val cmdRunTests: String
+    val fusionDesc: String
+    val quoteHeaderFmt: String
+    val deleteHubTitle: String
+    val deleteHubMsg: String
+    val disconnectCurrent: String
+    val more: String
+    val save: String
+    val sessionLabel: String
+    val roomLabel: String
+    val targetFmt: String
+    val scheduleFmt: String
+    val messageFmt: String
+    val errorFmt: String
+    val disabledTag: String
+    val logsTitle: String
+    val runLogsTitle: String
+    val noRunRecords: String
+    val intervalMinutesLabel: String
+    val pickTimeHint: String
+    val pickDateTime: String
+    val cronLabel: String
+    val cronHelp: String
+    val cronDailyHint: String
+    val nextStep: String
+    val cronHelpTitle: String
+    val cronFormatLine: String
+    val cronRanges: String
+    val cronSyntax: String
+    val cronExamples: String
+    val useIt: String
+    val cronPresets: List<Pair<String, String>>
+    val renameSessionTitle: String
+    val newNameLabel: String
+    val connectingHub: String
+    val notConnectedHub: String
+    val noSavedHubs: String
+    val pickOrAddHubHint: String
+    val addOrPickHub: String
+    val hideArchived: String
+    val archiveCountFmt: String
+    val roleFieldLabel: String
+    val defaultRole: String
+    val debateRoundsFmt: String
+    val totalCountFmt: String
+    val modeDescMention: String
+    val modeDescConductor: String
+    val modeDescRoundRobin: String
+    val modeDescParallel: String
+    val modeDescPipeline: String
+    val modeDescDebate: String
+    val modeDescAuto: String
+    val projectFiles: String
+    val refresh: String
+    val upOneLevel: String
+    val deleteFileTitle: String
+    val deleteFileMsg: String
+    val openLabel: String
+    val enterLabel: String
+    val quoteToInput: String
+    val binaryNoPreview: String
+    val cannotParseImage: String
+    val connectFailed: String
+    val notifChannelReply: String
+    val notifChannelReplyDesc: String
+    val notifChannelApproval: String
+    val notifChannelApprovalDesc: String
+    val notifChannelService: String
+    val notifChannelServiceDesc: String
+    val serviceRunning: String
+    val approvalNotificationFmt: String
+    val devinUsage: String
+    val dailyUsed: String
+    val weeklyUsed: String
+    val quotaResetFmt: String
+    val resetDatePattern: String
+    val customBackend: String
+    val addHub: String
+    val editHub: String
+    val nameExampleLabel: String
+    val saveAndSwitch: String
+    val saveAndConnect: String
+    val addAndConnect: String
+    val appDetails: String
+    val scheduleDesc: String
+    val statusSection: String
+    val filterAllHint: String
+    val resetLabel: String
 }
 
 object ZhStrings : Strings {
@@ -520,6 +706,200 @@ object ZhStrings : Strings {
     override val retryAction = "重试"
     override val waitingReply = "⏳ 等待 %s 回复："
     override val you = "你"
+    override val actionCancel = "取消"
+    override val actionDelete = "删除"
+    override val actionClear = "清空"
+    override val actionManage = "管理"
+    override val actionClose = "关闭"
+    override val actionCopy = "复制"
+    override val actionQuote = "引用"
+    override val actionDownload = "下载"
+    override val actionPreview = "预览"
+    override val actionSubmit = "提交"
+    override val actionDecline = "拒绝"
+    override val itemCount = "%d 条"
+    override val authorMe = "我"
+    override val fileLabel = "文件"
+    override val loadMoreHistory = "加载更多历史…"
+    override val jumpToBottom = "跳转到最下方"
+    override val uploadImage = "上传图片"
+    override val removeAttachment = "移除"
+    override val multiSelect = "多选"
+    override val elicitationTitle = "输入请求"
+    override val outcomeAccepted = "已提交"
+    override val outcomeDeclined = "已拒绝"
+    override val outcomeCancelled = "已取消"
+    override val commaSeparatedHint = "逗号分隔多个值"
+    override val flowTitleConductor = "指挥编排"
+    override val flowTitleRoom = "编排进度"
+    override val phasePlanning = "规划中"
+    override val phaseWorking = "执行中"
+    override val phaseReviewing = "验收中"
+    override val phaseSummarizing = "汇总中"
+    override val phaseAwaitingRetry = "等待重试"
+    override val phaseDone = "已完成"
+    override val helpWanted = "向你求助"
+    override val flowProgressFmt = "%d/%d 完成 · %d 进行中 · %d 待执行"
+    override val flowProgressFailed = " · %d 失败"
+    override val interruptFlow = "中断"
+    override val supplementCount = "用户补充 %d 条"
+    override val capsuleBlackboard = "黑板 %d"
+    override val capsuleArtifact = "产物 %d"
+    override val capsuleEvent = "事件 %d"
+    override val capsuleFlow = "编排"
+    override val capsuleFlowPhase = "编排 · %s"
+    override val capsuleFlowProgress = "编排 %d/%d"
+    override val artifactsTitle = "产物"
+    override val eventsTitle = "事件"
+    override val sharedBlackboard = "共享黑板"
+    override val deleteSelectedCount = "删除 %d"
+    override val clearAll = "清空全部"
+    override val clearActionOnly = "仅清空「%s」"
+    override val quotedToast = "已引用到输入框"
+    override val copiedToast = "已复制"
+    override val deleteArtifactTitle = "删除产物"
+    override val deleteArtifactMsg = "确定删除该产物？\n%s"
+    override val clearArtifactsTitle = "清空产物"
+    override val clearArtifactsMsg = "确定清空全部产物？"
+    override val deleteSelectedArtifactsTitle = "删除选中产物"
+    override val deleteSelectedArtifactsMsg = "确定删除 %d 条产物？"
+    override val deleteEventTitle = "删除事件"
+    override val deleteEventMsg = "确定删除该事件？\n%s"
+    override val clearEventsTitle = "清空事件"
+    override val clearEventsMsg = "确定清空全部事件？"
+    override val clearEventsActionMsg = "确定清空全部「%s」事件？"
+    override val deleteSelectedEventsTitle = "删除选中事件"
+    override val deleteSelectedEventsMsg = "确定删除 %d 条事件？"
+    override val clearBlackboardTitle = "清空黑板"
+    override val clearBlackboardMsg = "确定清空全部 %d 条黑板摘要？"
+    override val eventAdd = "新增"
+    override val eventModify = "修改"
+    override val eventDelete = "删除"
+    override val eventRename = "重命名"
+    override val eventCommand = "命令"
+    override val eventTest = "测试"
+    override val eventOther = "事件"
+    override val statusNotConnected = "未连接"
+    override val statusConnected = "已连接"
+    override val statusReconnecting = "连接已断开，正在重连…"
+    override val statusDisconnected = "连接已断开"
+    override val resumeFailed = "恢复失败：agent 不支持或会话已失效"
+    override val lostReply = "上一条回复在 Hub 重启中丢失"
+    override val retryFailedFmt = "重试失败: %s"
+    override val cancelFlowFailedFmt = "取消编排失败: %s"
+    override val copiedMessagesFmt = "已复制 %d 条消息"
+    override val noDownloadableFile = "该产物没有可下载文件"
+    override val fileNotReadable = "文件不存在或无法读取"
+    override val fileNotFound = "文件不存在"
+    override val downloadFailed = "下载失败"
+    override val openFailed = "打开失败"
+    override val loadFailedFmt = "加载失败: %s"
+    override val savedToFmt = "已保存到：%s"
+    override val saveFailed = "保存失败"
+    override val cannotOpenStream = "无法打开输出流"
+    override val continueFilePrompt = "继续处理这个文件：%s"
+    override val toolCallLabel = "工具调用"
+    override val roomModelHint = "群聊中切换模型请指定成员：/model @成员名 模型名"
+    override val memberNotFoundFmt = "未找到成员 @%s"
+    override val modelSwitchedForFmt = "@%s 模型已切换为 %s"
+    override val cmdContinue = "继续"
+    override val cmdSummarize = "总结目前的进展，列出下一步计划"
+    override val cmdRunTests = "运行项目的测试并修复所有失败"
+    override val fusionDesc = "/fusion - 选择 Fusion 模型"
+    override val quoteHeaderFmt = "（引用 %s 的消息：\"%s\"）"
+    override val deleteHubTitle = "删除 Hub"
+    override val deleteHubMsg = "确定删除「%s」？"
+    override val disconnectCurrent = "断开当前"
+    override val more = "更多"
+    override val save = "保存"
+    override val sessionLabel = "会话"
+    override val roomLabel = "群聊"
+    override val targetFmt = "目标：%s · %s"
+    override val scheduleFmt = "调度：%s"
+    override val messageFmt = "消息：%s"
+    override val errorFmt = "错误：%s"
+    override val disabledTag = "禁用"
+    override val logsTitle = "日志"
+    override val runLogsTitle = "执行日志"
+    override val noRunRecords = "暂无执行记录"
+    override val intervalMinutesLabel = "间隔（分钟）"
+    override val pickTimeHint = "请选择时间"
+    override val pickDateTime = "选择日期时间"
+    override val cronLabel = "Cron（分 时 日 月 周）"
+    override val cronHelp = "Cron 说明"
+    override val cronDailyHint = "如 0 9 * * * 表示每天 9:00"
+    override val nextStep = "下一步"
+    override val cronHelpTitle = "Cron 表达式说明"
+    override val cronFormatLine = "格式：分 时 日 月 周"
+    override val cronRanges = "· 分：0-59\n· 时：0-23\n· 日：1-31\n· 月：1-12\n· 周：0-6（0=周日）"
+    override val cronSyntax = "支持 *（任意）、*/N（步长）、1-5（范围）、1,3,5（列表）"
+    override val cronExamples = "常用示例（点击使用）："
+    override val useIt = "使用"
+    override val cronPresets = listOf(
+        "0 9 * * *" to "每天 9:00",
+        "0 9 * * 1-5" to "工作日 9:00",
+        "*/30 * * * *" to "每 30 分钟",
+        "0 */2 * * *" to "每 2 小时",
+        "0 9,18 * * *" to "每天 9:00 和 18:00",
+        "0 0 * * 0" to "每周日 0:00",
+        "0 0 1 * *" to "每月 1 号 0:00",
+    )
+    override val renameSessionTitle = "重命名会话"
+    override val newNameLabel = "新名称"
+    override val connectingHub = "正在连接 Hub…"
+    override val notConnectedHub = "当前未连接到 Hub"
+    override val noSavedHubs = "还没有保存的 Hub，点击下方按钮添加"
+    override val pickOrAddHubHint = "点击下方按钮选择或添加 Hub"
+    override val addOrPickHub = "添加 / 选择 Hub"
+    override val hideArchived = "隐藏归档"
+    override val archiveCountFmt = "归档 (%d)"
+    override val roleFieldLabel = "角色："
+    override val defaultRole = "默认（无角色卡）"
+    override val debateRoundsFmt = "%s 轮数："
+    override val totalCountFmt = "共 %d 条"
+    override val modeDescMention = "成员自由发言，@某个成员时该成员单独回答。适合闲聊、快速提问。"
+    override val modeDescConductor = "指挥家自动拆解任务，派发给不同成员并行执行，最后汇总结果。适合复杂任务。"
+    override val modeDescRoundRobin = "每个问题按顺序由一个成员回答，可设置起始发言人。适合多角色依次表态。"
+    override val modeDescParallel = "所有成员同时回答同一个问题，最后由汇总者综合出一致结论。适合头脑风暴。"
+    override val modeDescPipeline = "成员按指定顺序串行处理，后一个成员基于前一个的结果继续。适合多步骤流程。"
+    override val modeDescDebate = "正方与反方交替辩论若干轮，最后由裁判给出公正总结。适合观点碰撞。"
+    override val modeDescAuto = "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。"
+    override val projectFiles = "项目文件"
+    override val refresh = "刷新"
+    override val upOneLevel = "↑ 返回上级"
+    override val deleteFileTitle = "删除文件"
+    override val deleteFileMsg = "确认删除 %s？"
+    override val openLabel = "打开"
+    override val enterLabel = "进入"
+    override val quoteToInput = "引用到输入框"
+    override val binaryNoPreview = "二进制文件，无法直接预览"
+    override val cannotParseImage = "无法解析图片"
+    override val connectFailed = "连接失败，请检查服务器或手动重连"
+    override val notifChannelReply = "Agent 回复"
+    override val notifChannelReplyDesc = "Agent 任务完成或回复消息时提醒"
+    override val notifChannelApproval = "审批请求"
+    override val notifChannelApprovalDesc = "Agent 发起权限审批时提醒"
+    override val notifChannelService = "后台连接"
+    override val notifChannelServiceDesc = "保持与 Hub 的后台连接（常驻，可隐藏）"
+    override val serviceRunning = "后台连接保持中"
+    override val approvalNotificationFmt = "审批请求 · %s"
+    override val devinUsage = "Devin 用量"
+    override val dailyUsed = "今日已用"
+    override val weeklyUsed = "本周已用"
+    override val quotaResetFmt = "重置 %s"
+    override val resetDatePattern = "M月d日 HH:mm"
+    override val customBackend = "自定义"
+    override val addHub = "添加 Hub"
+    override val editHub = "编辑 Hub"
+    override val nameExampleLabel = "名称（如 本机 / 公网 VPS）"
+    override val saveAndSwitch = "保存并切换"
+    override val saveAndConnect = "保存并连接"
+    override val addAndConnect = "添加并连接"
+    override val appDetails = "应用详情设置"
+    override val scheduleDesc = "定时向会话或群聊发送消息"
+    override val statusSection = "状态"
+    override val filterAllHint = "未选择时显示全部"
+    override val resetLabel = "重置"
 }
 
 object EnStrings : Strings {
@@ -780,6 +1160,200 @@ object EnStrings : Strings {
     override val retryAction = "Retry"
     override val waitingReply = "⏳ Waiting for %s to reply: "
     override val you = "you"
+    override val actionCancel = "Cancel"
+    override val actionDelete = "Delete"
+    override val actionClear = "Clear"
+    override val actionManage = "Manage"
+    override val actionClose = "Close"
+    override val actionCopy = "Copy"
+    override val actionQuote = "Quote"
+    override val actionDownload = "Download"
+    override val actionPreview = "Preview"
+    override val actionSubmit = "Submit"
+    override val actionDecline = "Decline"
+    override val itemCount = "%d"
+    override val authorMe = "me"
+    override val fileLabel = "File"
+    override val loadMoreHistory = "Load more history…"
+    override val jumpToBottom = "Jump to bottom"
+    override val uploadImage = "Upload image"
+    override val removeAttachment = "Remove"
+    override val multiSelect = "Select"
+    override val elicitationTitle = "Input required"
+    override val outcomeAccepted = "Submitted"
+    override val outcomeDeclined = "Declined"
+    override val outcomeCancelled = "Cancelled"
+    override val commaSeparatedHint = "Separate multiple values with commas"
+    override val flowTitleConductor = "Orchestration"
+    override val flowTitleRoom = "Flow progress"
+    override val phasePlanning = "Planning"
+    override val phaseWorking = "Working"
+    override val phaseReviewing = "Reviewing"
+    override val phaseSummarizing = "Summarizing"
+    override val phaseAwaitingRetry = "Awaiting retry"
+    override val phaseDone = "Done"
+    override val helpWanted = "Needs you"
+    override val flowProgressFmt = "%d/%d done · %d running · %d pending"
+    override val flowProgressFailed = " · %d failed"
+    override val interruptFlow = "Abort"
+    override val supplementCount = "%d user supplements"
+    override val capsuleBlackboard = "Board %d"
+    override val capsuleArtifact = "Artifacts %d"
+    override val capsuleEvent = "Events %d"
+    override val capsuleFlow = "Flow"
+    override val capsuleFlowPhase = "Flow · %s"
+    override val capsuleFlowProgress = "Flow %d/%d"
+    override val artifactsTitle = "Artifacts"
+    override val eventsTitle = "Events"
+    override val sharedBlackboard = "Blackboard"
+    override val deleteSelectedCount = "Delete %d"
+    override val clearAll = "Clear all"
+    override val clearActionOnly = "Clear \"%s\" only"
+    override val quotedToast = "Quoted to input"
+    override val copiedToast = "Copied"
+    override val deleteArtifactTitle = "Delete artifact"
+    override val deleteArtifactMsg = "Delete this artifact?\n%s"
+    override val clearArtifactsTitle = "Clear artifacts"
+    override val clearArtifactsMsg = "Clear all artifacts?"
+    override val deleteSelectedArtifactsTitle = "Delete selected artifacts"
+    override val deleteSelectedArtifactsMsg = "Delete %d artifacts?"
+    override val deleteEventTitle = "Delete event"
+    override val deleteEventMsg = "Delete this event?\n%s"
+    override val clearEventsTitle = "Clear events"
+    override val clearEventsMsg = "Clear all events?"
+    override val clearEventsActionMsg = "Clear all \"%s\" events?"
+    override val deleteSelectedEventsTitle = "Delete selected events"
+    override val deleteSelectedEventsMsg = "Delete %d events?"
+    override val clearBlackboardTitle = "Clear blackboard"
+    override val clearBlackboardMsg = "Clear all %d blackboard entries?"
+    override val eventAdd = "add"
+    override val eventModify = "modify"
+    override val eventDelete = "delete"
+    override val eventRename = "rename"
+    override val eventCommand = "command"
+    override val eventTest = "test"
+    override val eventOther = "event"
+    override val statusNotConnected = "Not connected"
+    override val statusConnected = "Connected"
+    override val statusReconnecting = "Disconnected, reconnecting…"
+    override val statusDisconnected = "Disconnected"
+    override val resumeFailed = "Resume failed: agent unsupported or session expired"
+    override val lostReply = "Previous reply lost during Hub restart"
+    override val retryFailedFmt = "Retry failed: %s"
+    override val cancelFlowFailedFmt = "Cancel flow failed: %s"
+    override val copiedMessagesFmt = "Copied %d messages"
+    override val noDownloadableFile = "No downloadable file for this artifact"
+    override val fileNotReadable = "File missing or unreadable"
+    override val fileNotFound = "File not found"
+    override val downloadFailed = "Download failed"
+    override val openFailed = "Open failed"
+    override val loadFailedFmt = "Load failed: %s"
+    override val savedToFmt = "Saved to: %s"
+    override val saveFailed = "Save failed"
+    override val cannotOpenStream = "Cannot open output stream"
+    override val continueFilePrompt = "Continue working on this file: %s"
+    override val toolCallLabel = "Tool call"
+    override val roomModelHint = "In rooms, specify a member: /model @member model"
+    override val memberNotFoundFmt = "Member @%s not found"
+    override val modelSwitchedForFmt = "@%s model switched to %s"
+    override val cmdContinue = "Continue"
+    override val cmdSummarize = "Summarize progress and list next steps"
+    override val cmdRunTests = "Run project tests and fix all failures"
+    override val fusionDesc = "/fusion - pick a Fusion model"
+    override val quoteHeaderFmt = "(Quoting %s: \"%s\")"
+    override val deleteHubTitle = "Delete Hub"
+    override val deleteHubMsg = "Delete \"%s\"?"
+    override val disconnectCurrent = "Disconnect"
+    override val more = "More"
+    override val save = "Save"
+    override val sessionLabel = "Session"
+    override val roomLabel = "Room"
+    override val targetFmt = "Target: %s · %s"
+    override val scheduleFmt = "Schedule: %s"
+    override val messageFmt = "Message: %s"
+    override val errorFmt = "Error: %s"
+    override val disabledTag = "Disabled"
+    override val logsTitle = "Logs"
+    override val runLogsTitle = "Run logs"
+    override val noRunRecords = "No run records"
+    override val intervalMinutesLabel = "Interval (minutes)"
+    override val pickTimeHint = "Pick a time"
+    override val pickDateTime = "Pick date & time"
+    override val cronLabel = "Cron (min hour day month dow)"
+    override val cronHelp = "Cron help"
+    override val cronDailyHint = "e.g. 0 9 * * * runs daily at 9:00"
+    override val nextStep = "Next"
+    override val cronHelpTitle = "Cron expression"
+    override val cronFormatLine = "Format: minute hour day month weekday"
+    override val cronRanges = "· minute: 0-59\n· hour: 0-23\n· day: 1-31\n· month: 1-12\n· weekday: 0-6 (0=Sun)"
+    override val cronSyntax = "Supports * (any), */N (step), 1-5 (range), 1,3,5 (list)"
+    override val cronExamples = "Common examples (tap to use):"
+    override val useIt = "Use"
+    override val cronPresets = listOf(
+        "0 9 * * *" to "Daily 9:00",
+        "0 9 * * 1-5" to "Weekdays 9:00",
+        "*/30 * * * *" to "Every 30 minutes",
+        "0 */2 * * *" to "Every 2 hours",
+        "0 9,18 * * *" to "Daily 9:00 and 18:00",
+        "0 0 * * 0" to "Sundays 0:00",
+        "0 0 1 * *" to "1st of month 0:00",
+    )
+    override val renameSessionTitle = "Rename session"
+    override val newNameLabel = "New name"
+    override val connectingHub = "Connecting to Hub…"
+    override val notConnectedHub = "Not connected to a Hub"
+    override val noSavedHubs = "No saved Hubs yet — tap the button below to add one"
+    override val pickOrAddHubHint = "Tap the button below to pick or add a Hub"
+    override val addOrPickHub = "Add / Pick Hub"
+    override val hideArchived = "Hide archived"
+    override val archiveCountFmt = "Archive (%d)"
+    override val roleFieldLabel = "Role:"
+    override val defaultRole = "Default (no role card)"
+    override val debateRoundsFmt = "%s rounds:"
+    override val totalCountFmt = "%d total"
+    override val modeDescMention = "Members chat freely; @a member to get a direct answer. Good for quick questions."
+    override val modeDescConductor = "A conductor breaks the task down, dispatches subtasks to members in parallel, then summarizes. Good for complex tasks."
+    override val modeDescRoundRobin = "Each question is answered by one member in turn; the starting speaker can be set. Good for sequential opinions."
+    override val modeDescParallel = "All members answer the same question at once; a summarizer merges conclusions. Good for brainstorming."
+    override val modeDescPipeline = "Members process in a fixed order, each building on the previous result. Good for multi-step flows."
+    override val modeDescDebate = "Pro and con sides debate for several rounds, then a judge summarizes. Good for weighing options."
+    override val modeDescAuto = "The host picks the best mode automatically. Use when unsure."
+    override val projectFiles = "Project files"
+    override val refresh = "Refresh"
+    override val upOneLevel = "↑ Up one level"
+    override val deleteFileTitle = "Delete file"
+    override val deleteFileMsg = "Delete %s?"
+    override val openLabel = "Open"
+    override val enterLabel = "Enter"
+    override val quoteToInput = "Quote into input"
+    override val binaryNoPreview = "Binary file, cannot preview"
+    override val cannotParseImage = "Cannot parse image"
+    override val connectFailed = "Connection failed — check the server or reconnect manually"
+    override val notifChannelReply = "Agent reply"
+    override val notifChannelReplyDesc = "Notify when the agent finishes a task or replies"
+    override val notifChannelApproval = "Approval request"
+    override val notifChannelApprovalDesc = "Notify when the agent requests permission approval"
+    override val notifChannelService = "Background connection"
+    override val notifChannelServiceDesc = "Keeps a background connection to the Hub (ongoing, hideable)"
+    override val serviceRunning = "Background connection active"
+    override val approvalNotificationFmt = "Approval request · %s"
+    override val devinUsage = "Devin usage"
+    override val dailyUsed = "Used today"
+    override val weeklyUsed = "Used this week"
+    override val quotaResetFmt = "Resets %s"
+    override val resetDatePattern = "MMM d HH:mm"
+    override val customBackend = "Custom"
+    override val addHub = "Add Hub"
+    override val editHub = "Edit Hub"
+    override val nameExampleLabel = "Name (e.g. Laptop / VPS)"
+    override val saveAndSwitch = "Save & switch"
+    override val saveAndConnect = "Save & connect"
+    override val addAndConnect = "Add & connect"
+    override val appDetails = "App details"
+    override val scheduleDesc = "Send scheduled messages to a session or room"
+    override val statusSection = "Status"
+    override val filterAllHint = "All shown when nothing selected"
+    override val resetLabel = "Reset"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }

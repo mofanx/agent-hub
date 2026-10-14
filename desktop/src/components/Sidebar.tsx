@@ -25,9 +25,10 @@ import {
   X,
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
+import { stringsFor } from "../hub/strings";
 import type { ConnProfile, RoomInfo, SessionInfo } from "../hub/types";
 import {
-  MODE_LABELS,
+  modeLabel,
   buildActiveRoomChips,
   buildActiveSessionChips,
   isSessionStatus,
@@ -62,6 +63,7 @@ const EMPTY_ROOM_FILTER: RoomListFilter = {
 
 export function Sidebar() {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebarCollapsed") === "1");
   const [query, setQuery] = useState("");
   const [batch, setBatch] = useState(false);
@@ -189,10 +191,10 @@ export function Sidebar() {
 
   const activeChips = useMemo(
     () => [
-      ...buildActiveSessionChips(sessionFilter, availableAgents, availableCwds),
-      ...buildActiveRoomChips(roomFilter, availableModes, archivedRoomCount),
+      ...buildActiveSessionChips(S, sessionFilter, availableAgents, availableCwds),
+      ...buildActiveRoomChips(S, roomFilter, availableModes, archivedRoomCount),
     ],
-    [sessionFilter, roomFilter, availableAgents, availableCwds, availableModes, archivedRoomCount],
+    [S, sessionFilter, roomFilter, availableAgents, availableCwds, availableModes, archivedRoomCount],
   );
 
   const onRemoveChip = (kind: "session" | "room", key: string) => {
@@ -236,7 +238,7 @@ export function Sidebar() {
   const onBatchDelete = () => {
     const { sessions, rooms } = store.selectedIds;
     if (!sessions.length && !rooms.length) return;
-    if (!confirm(`确认删除选中的 ${sessions.length} 个会话和 ${rooms.length} 个群？此操作不可撤销。`)) return;
+    if (!confirm(S.batchDeleteConfirmFmt.replace("%s", String(sessions.length)).replace("%s", String(rooms.length)))) return;
     void store.batchDelete(sessions, rooms);
   };
 
@@ -275,13 +277,13 @@ export function Sidebar() {
             </button>
           ))}
         </div>
-        <button className="icon-btn" title="展开侧栏" onClick={() => setCollapsed(false)}>
+        <button className="icon-btn" title={S.expandSidebar} onClick={() => setCollapsed(false)}>
           <PanelLeftOpen size={16} />
         </button>
-        <button className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`} title="定时任务" onClick={() => useHubStore.setState({ screen: "schedule" })}>
+        <button className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`} title={S.scheduledTasks} onClick={() => useHubStore.setState({ screen: "schedule" })}>
           <CalendarClock size={16} />
         </button>
-        <button className={`icon-btn ${store.screen === "settings" ? "active" : ""}`} title="设置" onClick={() => useHubStore.setState({ screen: "settings" })}>
+        <button className={`icon-btn ${store.screen === "settings" ? "active" : ""}`} title={S.settings} onClick={() => useHubStore.setState({ screen: "settings" })}>
           <Settings size={16} />
         </button>
       </aside>
@@ -290,10 +292,10 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-brand" style={{ cursor: "pointer" }} title="返回首页" onClick={() => store.backToList()}>
+      <div className="sidebar-brand" style={{ cursor: "pointer" }} title={S.backHome} onClick={() => store.backToList()}>
         <img src="/logo.svg" alt="Agent Hub" />
         <span className="brand-name">Agent Hub</span>
-        <button className="icon-btn" title="收起侧栏" onClick={(e) => { e.stopPropagation(); setCollapsed(true); }}>
+        <button className="icon-btn" title={S.collapseSidebar} onClick={(e) => { e.stopPropagation(); setCollapsed(true); }}>
           <PanelLeftClose size={15} />
         </button>
       </div>
@@ -308,7 +310,7 @@ export function Sidebar() {
           ref={searchInputRef}
           value={query}
           onChange={(e) => setQuery(e.currentTarget.value)}
-          placeholder="搜索会话、群聊、消息…"
+          placeholder={S.searchAllPlaceholder}
           title="Ctrl+K"
         />
       </div>
@@ -333,17 +335,17 @@ export function Sidebar() {
       {batch && (
         <div className="batch-bar">
           <button className="tiny secondary" onClick={selectAll}>
-            全选
+            {S.selectAll}
           </button>
           <button className="tiny secondary" onClick={invertSelection}>
-            反选
+            {S.invertSelection}
           </button>
-          <span className="count">已选 {batchCount}</span>
+          <span className="count">{S.selectedCountFmt.replace("%s", String(batchCount))}</span>
           <button className="tiny danger" onClick={onBatchDelete} disabled={batchCount === 0}>
-            <Trash2 size={12} /> 删除
+            <Trash2 size={12} /> {S.deleteLabel}
           </button>
           <button className="tiny secondary" onClick={() => setBatch(false)}>
-            退出
+            {S.exitLabel}
           </button>
         </div>
       )}
@@ -355,17 +357,17 @@ export function Sidebar() {
           <>
             <div className="sidebar-section">
               <span className="section-label">
-                会话 <span>{sessionCount}</span>
+                {S.sessionsLabel} <span>{sessionCount}</span>
               </span>
               <span className="section-actions">
                 <button
                   className={`icon-btn ${activeChips.length > 0 ? "active" : ""}`}
-                  title="筛选"
+                  title={S.filterTitle}
                   onClick={() => setShowFilter(true)}
                 >
                   <ListFilter size={13} />
                 </button>
-                <button className="icon-btn" title="新建会话 (Ctrl+N)" onClick={() => setDialog({ type: "session" })}>
+                <button className="icon-btn" title={S.newSessionTitle} onClick={() => setDialog({ type: "session" })}>
                   <Plus size={14} />
                 </button>
               </span>
@@ -382,14 +384,14 @@ export function Sidebar() {
                 ))}
               </div>
             ))}
-            {sessionCount === 0 && <div className="empty">暂无会话</div>}
+            {sessionCount === 0 && <div className="empty">{S.noSessions}</div>}
 
             <div className="sidebar-section">
               <span className="section-label">
-                群聊 <span>{roomCount}</span>
+                {S.roomsLabel} <span>{roomCount}</span>
               </span>
               <span className="section-actions">
-                <button className="icon-btn" title="新建群聊" onClick={() => setDialog({ type: "room" })}>
+                <button className="icon-btn" title={S.newRoomTitle} onClick={() => setDialog({ type: "room" })}>
                   <Plus size={14} />
                 </button>
               </span>
@@ -398,7 +400,7 @@ export function Sidebar() {
               <div key={g.title || "_"}>
                 {g.title && (
                   <div className="nav-group-header">
-                    {MODE_LABELS[g.title] ?? g.title} ({g.rooms.length})
+                    {modeLabel(S, g.title)} ({g.rooms.length})
                   </div>
                 )}
                 {g.rooms.map((r) => (
@@ -406,7 +408,7 @@ export function Sidebar() {
                 ))}
               </div>
             ))}
-            {roomCount === 0 && <div className="empty">暂无群聊</div>}
+            {roomCount === 0 && <div className="empty">{S.noRooms}</div>}
           </>
         )}
       </div>
@@ -414,32 +416,32 @@ export function Sidebar() {
       <div className="sidebar-footer">
         <button
           className={`icon-btn ${batch ? "active" : ""}`}
-          title={batch ? "退出批量管理" : "批量管理"}
+          title={batch ? S.exitBatch : S.batchManage}
           onClick={() => setBatch(!batch)}
         >
           {batch ? <X size={15} /> : <CheckSquare size={15} />}
         </button>
-        <button className="icon-btn" title="刷新" onClick={() => void store.refreshAll()}>
+        <button className="icon-btn" title={S.refreshTitle} onClick={() => void store.refreshAll()}>
           <RefreshCw size={15} />
         </button>
         <span className="spacer" />
         <button
           className="icon-btn"
-          title={`主题：${store.themeMode === "system" ? "跟随系统" : store.themeMode === "light" ? "浅色" : "深色"}（点击切换）`}
+          title={S.themeTitleFmt.replace("%s", store.themeMode === "system" ? S.themeSystem : store.themeMode === "light" ? S.themeLight : S.themeDark)}
           onClick={cycleTheme}
         >
           {themeIcon}
         </button>
         <button
           className={`icon-btn ${store.screen === "schedule" ? "active" : ""}`}
-          title="定时任务"
+          title={S.scheduledTasks}
           onClick={() => useHubStore.setState({ screen: "schedule" })}
         >
           <CalendarClock size={15} />
         </button>
         <button
           className={`icon-btn ${store.screen === "settings" ? "active" : ""}`}
-          title="设置"
+          title={S.settings}
           onClick={() => useHubStore.setState({ screen: "settings" })}
         >
           <Settings size={15} />
@@ -467,6 +469,7 @@ export function Sidebar() {
 
 function HubCard() {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const connected = !!store.client?.isConnected;
@@ -490,14 +493,14 @@ function HubCard() {
       <div className="hub-card" onClick={() => setOpen(!open)}>
         <span className="dot" style={{ background: connected ? "var(--success)" : "var(--warn)" }} />
         <div className="title-wrap">
-          <span className="hub-name">{store.currentProfile?.name ?? "未连接"}</span>
-          <span className="hub-addr">{store.currentProfile?.address ?? "点击配置 Hub"}</span>
+          <span className="hub-name">{store.currentProfile?.name ?? S.notConnected}</span>
+          <span className="hub-addr">{store.currentProfile?.address ?? S.clickToConfigHub}</span>
         </div>
         <ChevronsUpDown size={13} style={{ color: "var(--muted)", flexShrink: 0 }} />
       </div>
       {open && (
         <div className="hub-popover">
-          {store.profiles.length === 0 && <div className="empty">暂无保存的 Hub</div>}
+          {store.profiles.length === 0 && <div className="empty">{S.noSavedHubs}</div>}
           {store.profiles.map((p) => {
             const active = store.currentProfile?.address === p.address;
             return (
@@ -522,7 +525,7 @@ function HubCard() {
             }}
           >
             <Plus size={14} style={{ color: "var(--muted)" }} />
-            <span className="title">添加 / 管理 Hub</span>
+            <span className="title">{S.manageHubsTitle}</span>
           </div>
           {store.client && (
             <div
@@ -534,7 +537,7 @@ function HubCard() {
             >
               <Unplug size={14} style={{ color: "var(--danger)" }} />
               <span className="title" style={{ color: "var(--danger)" }}>
-                断开当前连接
+                {S.disconnectCurrent}
               </span>
             </div>
           )}
@@ -546,6 +549,7 @@ function HubCard() {
 
 function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const selected = store.selectedIds.sessions.includes(s.sessionId);
   const active = store.currentSession?.sessionId === s.sessionId;
   const pinned = store.pinnedIds.includes(s.sessionId);
@@ -602,8 +606,8 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
                 </span>
               )}
               {store.displayName(s)}
-              {s.busy && <span className="busy-tag">执行中</span>}
-              {s.offline && <span className="offline-tag">离线</span>}
+              {s.busy && <span className="busy-tag">{S.busyTag}</span>}
+              {s.offline && <span className="offline-tag">{S.statusOffline}</span>}
             </span>
             <span className="nav-sub">{truncatePath(s.cwd, 34)}</span>
           </>
@@ -611,28 +615,28 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
       </div>
       {!batch && !renaming && (
         <div className="nav-actions" onClick={(e) => e.stopPropagation()}>
-          <button className="icon-btn" title={pinned ? "取消置顶" : "置顶"} onClick={() => store.togglePin(s.sessionId)}>
+          <button className="icon-btn" title={pinned ? S.unpinTitle : S.pinTitle} onClick={() => store.togglePin(s.sessionId)}>
             <Pin size={12} />
           </button>
-          <button className="icon-btn" title="重命名" onClick={() => { setName(s.name); setRenaming(true); }}>
+          <button className="icon-btn" title={S.renameTitle} onClick={() => { setName(s.name); setRenaming(true); }}>
             <Pencil size={12} />
           </button>
-          <button className="icon-btn" title="克隆" onClick={() => void store.cloneSession(s)}>
+          <button className="icon-btn" title={S.cloneTitle} onClick={() => void store.cloneSession(s)}>
             <Copy size={12} />
           </button>
           <button
             className="icon-btn"
-            title={s.archived ? "取消归档" : "归档"}
+            title={s.archived ? S.unarchiveTitle : S.archiveTitle}
             onClick={() => void store.archiveSession(s, !s.archived)}
           >
             {s.archived ? <ArchiveRestore size={12} /> : <Archive size={12} />}
           </button>
           {s.offline && (
-            <button className="icon-btn" title="恢复" onClick={() => void store.resumeSession(s)}>
+            <button className="icon-btn" title={S.resumeTitle} onClick={() => void store.resumeSession(s)}>
               <RotateCw size={12} />
             </button>
           )}
-          <button className="icon-btn danger" title="删除" onClick={() => void store.deleteSession(s)}>
+          <button className="icon-btn danger" title={S.deleteLabel} onClick={() => void store.deleteSession(s)}>
             <Trash2 size={12} />
           </button>
         </div>
@@ -643,6 +647,7 @@ function SessionNavItem({ s, batch }: { s: SessionInfo; batch: boolean }) {
 
 function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const selected = store.selectedIds.rooms.includes(r.roomId);
   const active = store.currentRoom?.roomId === r.roomId;
   const [renaming, setRenaming] = useState(false);
@@ -690,33 +695,33 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
           <>
             <span className="nav-title">
               {r.name}
-              {r.archived && <span className="offline-tag">已归档</span>}
+              {r.archived && <span className="offline-tag">{S.statusArchived}</span>}
             </span>
             <span className="nav-sub">
-              {MODE_LABELS[r.mode] ?? r.mode} · {r.members.map((m) => m[1]).join("、")}
+              {modeLabel(S, r.mode)} · {r.members.map((m) => m[1]).join("、")}
             </span>
           </>
         )}
       </div>
       {!batch && !renaming && (
         <div className="nav-actions" onClick={(e) => e.stopPropagation()}>
-          <button className="icon-btn" title="重命名" onClick={() => { setName(r.name); setRenaming(true); }}>
+          <button className="icon-btn" title={S.renameTitle} onClick={() => { setName(r.name); setRenaming(true); }}>
             <Pencil size={12} />
           </button>
-          <button className="icon-btn" title="编辑群聊" onClick={() => store.openEditRoomDialog(r)}>
+          <button className="icon-btn" title={S.editRoomTitle} onClick={() => store.openEditRoomDialog(r)}>
             <Settings size={12} />
           </button>
-          <button className="icon-btn" title="克隆" onClick={() => void store.cloneRoom(r, `${r.name} (副本)`)}>
+          <button className="icon-btn" title={S.cloneTitle} onClick={() => void store.cloneRoom(r, S.copySuffixFmt.replace("%s", r.name))}>
             <Copy size={12} />
           </button>
           <button
             className="icon-btn"
-            title={r.archived ? "取消归档" : "归档"}
+            title={r.archived ? S.unarchiveTitle : S.archiveTitle}
             onClick={() => void store.archiveRoom(r, !r.archived)}
           >
             {r.archived ? <ArchiveRestore size={12} /> : <Archive size={12} />}
           </button>
-          <button className="icon-btn danger" title="删除" onClick={() => void store.deleteRooms([r.roomId])}>
+          <button className="icon-btn danger" title={S.deleteLabel} onClick={() => void store.deleteRooms([r.roomId])}>
             <Trash2 size={12} />
           </button>
         </div>
@@ -727,6 +732,7 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
 
 function SidebarSearchResults({ query }: { query: string }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const q = query.trim().toLowerCase();
 
   const sessionMatches = useMemo(() => {
@@ -756,13 +762,13 @@ function SidebarSearchResults({ query }: { query: string }) {
   }, [q, store.rooms]);
 
   const hasAny = sessionMatches.length > 0 || roomMatches.length > 0 || store.searchGroups.length > 0;
-  if (!hasAny) return <div className="empty">无结果</div>;
+  if (!hasAny) return <div className="empty">{S.noResults}</div>;
 
   return (
     <div>
       {sessionMatches.length > 0 && (
         <>
-          <div className="nav-group-header">会话 ({sessionMatches.length})</div>
+          <div className="nav-group-header">{S.sessionsCountFmt.replace("%s", String(sessionMatches.length))}</div>
           {sessionMatches.map((s) => (
             <SessionNavItem key={s.sessionId} s={s} batch={false} />
           ))}
@@ -770,7 +776,7 @@ function SidebarSearchResults({ query }: { query: string }) {
       )}
       {roomMatches.length > 0 && (
         <>
-          <div className="nav-group-header">群聊 ({roomMatches.length})</div>
+          <div className="nav-group-header">{S.roomsCountFmt.replace("%s", String(roomMatches.length))}</div>
           {roomMatches.map((r) => (
             <RoomNavItem key={r.roomId} r={r} batch={false} />
           ))}
@@ -779,7 +785,7 @@ function SidebarSearchResults({ query }: { query: string }) {
       {store.searchGroups.length > 0 && (
         <>
           <div className="nav-group-header">
-            历史消息 ({store.searchGroups.reduce((sum, g) => sum + g.count, 0)})
+            {S.historyCountFmt.replace("%s", String(store.searchGroups.reduce((sum, g) => sum + g.count, 0)))}
           </div>
           {store.searchGroups.map((g, i) => (
             <SearchGroupCard key={i} group={g} query={query} />

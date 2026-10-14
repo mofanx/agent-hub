@@ -148,9 +148,9 @@ private fun FilterSheetContent(vm: ChatViewModel, selectedTab: Int, onDismiss: (
                 }
 
                 item {
-                    SectionTitle("状态")
+                    SectionTitle(S.statusSection)
                     Text(
-                        "未选择时显示全部",
+                        S.filterAllHint,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -205,7 +205,7 @@ private fun FilterSheetContent(vm: ChatViewModel, selectedTab: Int, onDismiss: (
                     TextButton(onClick = {
                         if (selectedTab == 0) vm.sessionListFilter = com.agenthub.SessionListFilter()
                         else vm.roomListFilter = com.agenthub.RoomListFilter()
-                    }) { Text("重置") }
+                    }) { Text(S.resetLabel) }
                 }
             }
         }

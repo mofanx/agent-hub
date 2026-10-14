@@ -1,55 +1,23 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useHubStore } from "../../hub/store";
+import { stringsFor, type Strings } from "../../hub/strings";
 import type { RoomInfo, RoomModeConfig, SessionInfo } from "../../hub/types";
 import { FormRow } from "../../components/FormRow";
 
-type RoomModeOption = { value: string; label: string; description: string; suggestWhen?: string };
+type RoomModeOption = { value: string; label: string; description: string };
 
-const MODES: RoomModeOption[] = [
-  {
-    value: "mention",
-    label: "普通群 (@mention / 广播)",
-    description: "成员自由发言，@某个成员时该成员单独回答。适合闲聊、快速提问。",
-    suggestWhen: "闲聊、单点提问",
-  },
-  {
-    value: "conductor",
-    label: "指挥家（拆解派工汇总）",
-    description: "指挥家自动拆解任务，派发给不同成员并行执行，最后汇总结果。适合复杂任务。",
-    suggestWhen: "复杂任务、需要分工",
-  },
-  {
-    value: "roundrobin",
-    label: "轮询（轮流作答）",
-    description: "每个问题按顺序由一个成员回答，可设置起始发言人。适合多角色依次表态。",
-    suggestWhen: "依次表态、轮流负责",
-  },
-  {
-    value: "parallel",
-    label: "并行（集思广益 + 汇总）",
-    description: "所有成员同时回答同一个问题，最后由汇总者综合出一致结论。适合头脑风暴。",
-    suggestWhen: "头脑风暴、收集多观点",
-  },
-  {
-    value: "pipeline",
-    label: "流水线（按成员顺序串行）",
-    description: "成员按指定顺序串行处理，后一个成员基于前一个的结果继续。适合多步骤流程。",
-    suggestWhen: "多步骤、前后依赖",
-  },
-  {
-    value: "debate",
-    label: "辩论（正反方 + 裁判）",
-    description: "正方与反方交替辩论若干轮，最后由裁判给出公正总结。适合观点碰撞。",
-    suggestWhen: "观点辩论、利弊分析",
-  },
-  {
-    value: "auto",
-    label: "自动（由主持人选择模式）",
-    description: "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。",
-    suggestWhen: "不确定适合哪种模式",
-  },
-];
+function roomModeOptions(S: Strings): RoomModeOption[] {
+  return [
+    { value: "mention", label: S.rmMentionLabel, description: S.rmMentionDesc },
+    { value: "conductor", label: S.rmConductorLabel, description: S.rmConductorDesc },
+    { value: "roundrobin", label: S.rmRoundrobinLabel, description: S.rmRoundrobinDesc },
+    { value: "parallel", label: S.rmParallelLabel, description: S.rmParallelDesc },
+    { value: "pipeline", label: S.rmPipelineLabel, description: S.rmPipelineDesc },
+    { value: "debate", label: S.rmDebateLabel, description: S.rmDebateDesc },
+    { value: "auto", label: S.rmAutoLabel, description: S.rmAutoDesc },
+  ];
+}
 
 function recommendMode(name: string): string | null {
   const n = name.toLowerCase();
@@ -64,6 +32,8 @@ function recommendMode(name: string): string | null {
 
 export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; editingRoom?: RoomInfo | null }) {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const modes = roomModeOptions(S);
   const editing = editingRoom;
   const isEdit = !!editing;
   const [form, setForm] = useState({
@@ -195,21 +165,21 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
       case "debate": {
         const label =
           form.mode === "conductor"
-            ? "指挥家"
+            ? S.conductorLabel
             : form.mode === "auto"
-              ? "主持人"
+              ? S.moderatorLabel
               : form.mode === "roundrobin"
-                ? "起始发言人"
+                ? S.firstSpeakerLabel
                 : form.mode === "parallel"
-                  ? "汇总者"
-                  : "裁判";
+                  ? S.summarizerLabel
+                  : S.judgeLabel;
         return (
           <FormRow label={label}>
             <select
               value={form.specialId}
               onChange={(e) => setForm({ ...form, specialId: e.currentTarget.value })}
             >
-              <option value="">请选择</option>
+              <option value="">{S.pleaseSelect}</option>
               {selectedOptions}
             </select>
           </FormRow>
@@ -217,7 +187,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
       }
       case "pipeline":
         return (
-          <FormRow label="执行顺序">
+          <FormRow label={S.pipelineOrderLabel}>
             <div className="pipeline-order">
               {form.pipelineOrder.map((sid, i) => {
                 const s = store.sessions.find((x) => x.sessionId === sid);
@@ -258,7 +228,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
     if (form.mode !== "debate") return null;
     return (
       <>
-        <FormRow label="正方">
+        <FormRow label={S.proSideLabel}>
           <select
             value={form.debateSides[0]}
             onChange={(e) =>
@@ -268,11 +238,11 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
               })
             }
           >
-            <option value="">请选择</option>
+            <option value="">{S.pleaseSelect}</option>
             {selectedOptions}
           </select>
         </FormRow>
-        <FormRow label="反方">
+        <FormRow label={S.conSideLabel}>
           <select
             value={form.debateSides[1]}
             onChange={(e) =>
@@ -282,11 +252,11 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
               })
             }
           >
-            <option value="">请选择</option>
+            <option value="">{S.pleaseSelect}</option>
             {selectedOptions}
           </select>
         </FormRow>
-        <FormRow label="轮数">
+        <FormRow label={S.roundsLabel}>
           <input
             type="number"
             min={1}
@@ -304,8 +274,8 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>{isEdit ? "编辑群聊" : "新建群聊"}</h3>
-        <FormRow label="名称">
+        <h3>{isEdit ? S.editRoomTitle : S.newRoomTitle}</h3>
+        <FormRow label={S.nameLabel}>
           <input
             value={form.name}
             onChange={(e) => {
@@ -322,9 +292,9 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
             }}
           />
         </FormRow>
-        <FormRow label="模式">
+        <FormRow label={S.modeSection}>
           <select value={form.mode} onChange={(e) => onModeChange(e.currentTarget.value)}>
-            {MODES.map((m) => (
+            {modes.map((m) => (
               <option key={m.value} value={m.value}>
                 {m.label}
               </option>
@@ -332,7 +302,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
           </select>
         </FormRow>
         {(() => {
-          const modeInfo = MODES.find((m) => m.value === form.mode);
+          const modeInfo = modes.find((m) => m.value === form.mode);
           if (!modeInfo) return null;
           return <div className="mode-description">{modeInfo.description}</div>;
         })()}
@@ -341,7 +311,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
         {renderDebateConfig()}
 
         <div className="member-picker">
-          <h4>选择成员与角色</h4>
+          <h4>{S.pickMembersLabel}</h4>
           {available.map((s) => (
             <div key={s.sessionId} className="member-row">
               <label className="member-check">
@@ -366,7 +336,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
                     })
                   }
                 >
-                  <option value="">默认（无角色卡）</option>
+                  <option value="">{S.defaultRoleLabel}</option>
                   {store.roles.map((r) => (
                     <option key={r.id} value={r.id}>
                       {r.name}
@@ -380,10 +350,10 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
 
         <div className="form-actions">
           <button className="secondary" onClick={onClose}>
-            取消
+            {S.cancelLabel}
           </button>
           <button className="primary" onClick={submit} disabled={!isValid()}>
-            {isEdit ? "保存" : "创建"}
+            {isEdit ? S.saveLabel : S.createLabel}
           </button>
         </div>
       </div>

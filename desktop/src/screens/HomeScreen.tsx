@@ -1,20 +1,22 @@
 import { useMemo, useState } from "react";
 import { ArrowRight, Bot, Plus, Users } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { MODE_LABELS, truncatePath } from "./session-shared";
+import { stringsFor, type Strings } from "../hub/strings";
+import { modeLabel, truncatePath } from "./session-shared";
 import { SessionDialog } from "./dialogs/SessionDialog";
 import { RoomDialog } from "./dialogs/RoomDialog";
 
-function greeting(): string {
+function greeting(S: Strings): string {
   const h = new Date().getHours();
-  if (h < 5) return "夜深了";
-  if (h < 12) return "早上好";
-  if (h < 18) return "下午好";
-  return "晚上好";
+  if (h < 5) return S.greetingLate;
+  if (h < 12) return S.greetingMorning;
+  if (h < 18) return S.greetingAfternoon;
+  return S.greetingEvening;
 }
 
 export function HomeScreen() {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [dialog, setDialog] = useState<"session" | "room" | null>(null);
 
   const recentSessions = useMemo(
@@ -37,9 +39,11 @@ export function HomeScreen() {
       <div className="home-inner">
         <div className="home-hero">
           <img src="/logo.svg" alt="Agent Hub" />
-          <h1>{greeting()}</h1>
+          <h1>{greeting(S)}</h1>
           <p>
-            {store.currentProfile ? `已连接到 ${store.currentProfile.name} · ${store.agentStatus}` : "选择一个会话开始工作，或创建新的协作"}
+            {store.currentProfile
+              ? S.connectedToFmt.replace("%s", store.currentProfile.name).replace("%s", store.agentStatus)
+              : S.homePickHint}
           </p>
         </div>
 
@@ -49,8 +53,8 @@ export function HomeScreen() {
               <Plus size={16} />
             </span>
             <span>
-              <span className="action-title">新建会话</span>
-              <div className="action-desc">与单个 Agent 开始一对一任务</div>
+              <span className="action-title">{S.newSessionTitle}</span>
+              <div className="action-desc">{S.newSessionDesc}</div>
             </span>
           </button>
           <button className="home-action" onClick={() => setDialog("room")}>
@@ -58,8 +62,8 @@ export function HomeScreen() {
               <Users size={16} />
             </span>
             <span>
-              <span className="action-title">新建群聊</span>
-              <div className="action-desc">多个 Agent 协作：指挥家 / 辩论 / 流水线…</div>
+              <span className="action-title">{S.newRoomTitle}</span>
+              <div className="action-desc">{S.newRoomDesc}</div>
             </span>
           </button>
           <button className="home-action" onClick={() => useHubStore.setState({ screen: "settings" })}>
@@ -67,8 +71,8 @@ export function HomeScreen() {
               <Bot size={16} />
             </span>
             <span>
-              <span className="action-title">Agent 来源</span>
-              <div className="action-desc">管理本地与远程 Agent 连接</div>
+              <span className="action-title">{S.agentSources}</span>
+              <div className="action-desc">{S.agentSourcesDesc}</div>
             </span>
           </button>
           <button className="home-action" onClick={() => void store.refreshAll()}>
@@ -76,15 +80,15 @@ export function HomeScreen() {
               <ArrowRight size={16} />
             </span>
             <span>
-              <span className="action-title">刷新状态</span>
-              <div className="action-desc">同步会话、群聊与 Agent 最新状态</div>
+              <span className="action-title">{S.refreshStatus}</span>
+              <div className="action-desc">{S.refreshStatusDesc}</div>
             </span>
           </button>
         </div>
 
         {(recentSessions.length > 0 || recentRooms.length > 0) && (
           <>
-            <div className="home-section-title">最近会话</div>
+            <div className="home-section-title">{S.recentSessions}</div>
             <div className="home-recent">
               {recentSessions.map((s) => (
                 <div key={s.sessionId} className="home-recent-item" onClick={() => store.openChat(s)}>
@@ -107,7 +111,7 @@ export function HomeScreen() {
                   <div className="nav-text">
                     <span className="nav-title">{r.name}</span>
                     <span className="nav-sub">
-                      {MODE_LABELS[r.mode] ?? r.mode} · {r.members.map((m) => m[1]).join("、")}
+                      {modeLabel(S, r.mode)} · {r.members.map((m) => m[1]).join("、")}
                     </span>
                   </div>
                   <ArrowRight size={13} style={{ color: "var(--muted)" }} />
@@ -119,16 +123,16 @@ export function HomeScreen() {
 
         <div className="home-kbd-row">
           <span className="kbd-item">
-            <kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索
+            <kbd>Ctrl</kbd>+<kbd>K</kbd> {S.shortcutSearch}
           </span>
           <span className="kbd-item">
-            <kbd>Ctrl</kbd>+<kbd>N</kbd> 新建会话
+            <kbd>Ctrl</kbd>+<kbd>N</kbd> {S.shortcutNewSession}
           </span>
           <span className="kbd-item">
-            <kbd>Ctrl</kbd>+<kbd>F</kbd> 聊天内搜索
+            <kbd>Ctrl</kbd>+<kbd>F</kbd> {S.shortcutChatSearch}
           </span>
           <span className="kbd-item">
-            <kbd>Esc</kbd> 返回首页
+            <kbd>Esc</kbd> {S.shortcutBackHome}
           </span>
         </div>
       </div>

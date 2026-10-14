@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Globe, Laptop, Pencil, PlugZap, Trash2 } from "lucide-react";
 import { useHubStore } from "../hub/store";
+import { stringsFor } from "../hub/strings";
 import type { ConnProfile } from "../hub/types";
 import { FormRow } from "../components/FormRow";
 
@@ -14,6 +15,7 @@ function isRemote(p: ConnProfile) {
 
 export function HubConfigScreen() {
   const store = useHubStore();
+  const S = stringsFor(store.lang);
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [token, setToken] = useState("dev-token");
@@ -67,25 +69,25 @@ export function HubConfigScreen() {
       <div className="connect-brand">
         <img src="/logo.svg" alt="Agent Hub" />
         <h1>Agent Hub</h1>
-        <p>连接一个 Hub，统一调度你的所有 Agent</p>
+        <p>{S.hubTagline}</p>
       </div>
 
       <div className="card connect-card">
-        <h2>{editing ? "编辑 Hub 配置" : "添加 / 连接 Hub"}</h2>
+        <h2>{editing ? S.editHubConfig : S.addConnectHub}</h2>
         <form onSubmit={onSubmit}>
-          <FormRow label="名称">
+          <FormRow label={S.nameLabel}>
             <input
               value={name}
               onChange={(e) => setName(e.currentTarget.value)}
-              placeholder="例如 本机 / 公网 VPS"
+              placeholder={S.hubNamePlaceholder}
               required
             />
           </FormRow>
-          <FormRow label="地址">
+          <FormRow label={S.hubAddressLabel}>
             <input
               value={host}
               onChange={(e) => setHost(e.currentTarget.value)}
-              placeholder="例如 localhost:8787 或 wss://hub.example.com"
+              placeholder={S.hubAddressPlaceholder}
               required
             />
           </FormRow>
@@ -101,11 +103,11 @@ export function HubConfigScreen() {
           <div className="form-actions">
             {editing && (
               <button type="button" className="secondary" onClick={reset}>
-                取消编辑
+                {S.cancelEdit}
               </button>
             )}
             <button type="submit" className="primary" disabled={store.connecting}>
-              {store.connecting ? "连接中…" : editing ? "保存并连接" : "添加并连接"}
+              {store.connecting ? S.connectingLabel : editing ? S.saveAndConnect : S.addAndConnect}
             </button>
           </div>
         </form>
@@ -113,7 +115,7 @@ export function HubConfigScreen() {
 
       {store.profiles.length > 0 && (
         <div className="card connect-card">
-          <h3>已保存的 Hub</h3>
+          <h3>{S.savedHubs}</h3>
           <div className="profile-list">
             {store.profiles.map((p) => {
               const active = store.currentProfile && profileKey(store.currentProfile) === profileKey(p);
@@ -123,22 +125,22 @@ export function HubConfigScreen() {
                   <div className="title-wrap">
                     <span className="title">{p.name}</span>
                     <span className="subtitle">
-                      {isRemote(p) ? "远程 (wss)" : "局域网"} · {p.address}
+                      {isRemote(p) ? S.remoteWss : S.lanLabel} · {p.address}
                     </span>
                   </div>
                   <div className="actions" onClick={(e) => e.stopPropagation()}>
-                    <button className="icon-btn" title="编辑" onClick={() => fill(p, true)}>
+                    <button className="icon-btn" title={S.editTitle} onClick={() => fill(p, true)}>
                       <Pencil size={13} />
                     </button>
                     <button
                       className="icon-btn"
-                      title="连接"
+                      title={S.connectTitle}
                       onClick={() => store.switchProfile(p)}
                       disabled={!!active}
                     >
                       <PlugZap size={13} />
                     </button>
-                    <button className="icon-btn danger" title="删除" onClick={() => onDelete(p)}>
+                    <button className="icon-btn danger" title={S.deleteLabel} onClick={() => onDelete(p)}>
                       <Trash2 size={13} />
                     </button>
                   </div>
