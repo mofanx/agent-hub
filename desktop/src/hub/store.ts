@@ -42,6 +42,13 @@ import { stringsFor } from "./strings";
 
 type SelectedIds = { sessions: string[]; rooms: string[] };
 
+type ScopeSeen = {
+  artifacts?: Set<string>;
+  events?: Set<string>;
+  board?: Set<string>;
+  counts?: { artifact: number; event: number; blackboard: number };
+};
+
 interface State {
   client: HubClient | null;
   profiles: ConnProfile[];
@@ -102,6 +109,7 @@ interface State {
   pendingAttachments: Attachment[];
   historyCache: Record<string, ChatItem[]>;
   historyCacheKeys: string[];
+  seenCache: Record<string, ScopeSeen>;
   fileUpdateAt: number;
   scheduledTasks: ScheduledTask[];
   taskLogs: TaskLog[];
@@ -271,11 +279,13 @@ interface Actions {
 
 }
 
-const countAdded = <T extends { id: string }>(previous: T[] | null, next: T[]) =>
-  previous === null ? 0 : next.filter((item) => !previous.some((old) => old.id === item.id)).length;
-
 let artifactRefreshGeneration = 0;
 let usageRefreshGeneration = 0;
+const flowCache = new Map<string, FlowInfo | null>();
+const panelsCache = new Map<
+  string,
+  { artifacts: ArtifactInfo[]; events: EventInfo[]; blackboard: BlackboardInfo[] }
+>();
 
 const defaultConfig: AppConfig = {
   profiles: [],
@@ -360,9 +370,65 @@ export const useHubStore = create<State & Actions>((set, get) => {
     return get().historyCache[historyCacheKey(scope, id)];
   };
 
+  const liveKeyOf = (it: ChatItem): string => {
+    switch (it.kind) {
+      case "tool":
+        return `tool|${it.toolCallId}`;
+      case "permission":
+        return `perm|${it.requestId}`;
+      case "elicitation":
+        return `elicit|${it.requestId}`;
+      case "plan":
+        return `plan|${it.author}|${it.entries.join("\n")}`;
+      case "assistant":
+      case "thought":
+        return `${it.kind}|id:${it.id}`;
+      default:
+        return `${it.kind}|${it.author}|${"text" in it ? it.text : ""}`;
+    }
+  };
+
+  const isCoveredByHistory = (it: ChatItem, hist: ChatItem[]): boolean => {
+    switch (it.kind) {
+      case "user":
+        return hist.some(
+          (h) => h.kind === "user" && (h.text === it.text || h.text.endsWith(it.text)),
+        );
+      case "system":
+        return hist.some((h) => h.kind === "system" && h.text === it.text);
+      case "assistant":
+        return hist.some(
+          (h) =>
+            h.kind === "assistant" &&
+            h.author === it.author &&
+            (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
+        );
+      case "thought":
+        return hist.some(
+          (h) =>
+            h.kind === "thought" &&
+            h.author === it.author &&
+            (h.text === it.text || h.text.startsWith(it.text)),
+        );
+      case "tool":
+        return hist.some((h) => h.kind === "tool" && h.toolCallId === it.toolCallId);
+      case "plan":
+        return hist.some(
+          (h) =>
+            h.kind === "plan" &&
+            h.author === it.author &&
+            h.entries.join("\n") === it.entries.join("\n"),
+        );
+      case "error":
+        return hist.some((h) => h.kind === "error" && h.text === it.text);
+      default:
+        return false;
+    }
+  };
+
   const mergeHistoryItems = (a: ChatItem[], b: ChatItem[]): ChatItem[] => {
     const byId = new Map<number, ChatItem>();
-    const result: ChatItem[] = [];
+    const live = new Map<string, ChatItem>();
     for (const it of [...a, ...b]) {
       if (it.historyId != null) {
         const existing = byId.get(it.historyId);
@@ -370,10 +436,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
           byId.set(it.historyId, it);
         }
       } else {
-        result.push(it);
+        const k = liveKeyOf(it);
+        const existing = live.get(k);
+        if (!existing || (it.at ?? 0) >= (existing.at ?? 0)) live.set(k, it);
       }
     }
-    for (const it of byId.values()) result.push(it);
+    const hist = [...byId.values()];
+    const result = [...hist];
+    for (const it of live.values()) {
+      if (!isCoveredByHistory(it, hist)) result.push(it);
+    }
     result.sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity));
     return result;
   };
@@ -382,8 +454,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const key = historyCacheKey(scope, id);
     const { historyCache, historyCacheKeys } = get();
     const cached = historyCache[key] ?? [];
-    const storable = items.filter((it) => it.historyId != null);
-    const merged = mergeHistoryItems(cached, storable);
+    const merged = mergeHistoryItems(cached, items);
     const next: Record<string, ChatItem[]> = { ...historyCache, [key]: merged };
     const nextKeys = [key, ...historyCacheKeys.filter((k) => k !== key)];
     while (nextKeys.length > MAX_HISTORY_CACHE) {
@@ -398,6 +469,51 @@ export const useHubStore = create<State & Actions>((set, get) => {
     if (historySearchContext) return;
     if (currentSession) setHistoryCache("session", currentSession.sessionId, chatItems);
     if (currentRoom) setHistoryCache("room", currentRoom.roomId, chatItems);
+  };
+
+  const scopeKeyNow = (): string | null => {
+    const r = get().currentRoom;
+    if (r) return `room:${r.roomId}`;
+    const s = get().currentSession;
+    return s ? `session:${s.sessionId}` : null;
+  };
+
+  const saveCurrentScopeCounts = () => {
+    const key = scopeKeyNow();
+    if (!key) return;
+    const { currentArtifacts, currentEvents, blackboard } = get();
+    panelsCache.set(key, {
+      artifacts: currentArtifacts ?? [],
+      events: currentEvents ?? [],
+      blackboard: blackboard ?? [],
+    });
+    const prev = get().seenCache[key] ?? {};
+    set({
+      seenCache: {
+        ...get().seenCache,
+        [key]: { ...prev, counts: { ...get().newCounts } },
+      },
+    });
+  };
+
+  const restoredCounts = (scope: "session" | "room", id: string) => {
+    const counts = get().seenCache[`${scope}:${id}`]?.counts;
+    return counts ? { ...counts } : { artifact: 0, event: 0, blackboard: 0 };
+  };
+
+  const dropScopeCache = (scope: "session" | "room", id: string) => {
+    const key = historyCacheKey(scope, id);
+    const historyCache = { ...get().historyCache };
+    delete historyCache[key];
+    const seenCache = { ...get().seenCache };
+    delete seenCache[key];
+    if (scope === "room") flowCache.delete(id);
+    panelsCache.delete(key);
+    set({
+      historyCache,
+      historyCacheKeys: get().historyCacheKeys.filter((k) => k !== key),
+      seenCache,
+    });
   };
 
   const saveLastProfile = async (address: string, token: string) => {
@@ -509,9 +625,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
       case "room.flowUpdate": {
         const roomId = String(params.roomId ?? "");
+        const flow = (params.flow as FlowInfo | undefined) ?? null;
+        flowCache.set(roomId, flow);
         const room = get().currentRoom;
         if (room && room.roomId === roomId) {
-          set({ flow: (params.flow as FlowInfo) ?? null });
+          set({ flow });
           get().refreshArtifacts({ roomId });
         }
         break;
@@ -530,10 +648,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
               at: typeof e.at === "number" ? e.at : 0,
             } as BlackboardInfo;
           });
-          const added = countAdded(get().blackboard, blackboard);
+          const key = `room:${roomId}`;
+          const seenMap = { ...get().seenCache };
+          const seen: ScopeSeen = { ...(seenMap[key] ?? {}) };
+          let boardCount = get().newCounts.blackboard;
+          if (seen.board) {
+            boardCount = blackboard.filter((b) => !seen.board!.has(b.id)).length;
+          } else {
+            seen.board = new Set(blackboard.map((b) => b.id));
+          }
+          seenMap[key] = seen;
           set({
             blackboard,
-            newCounts: { ...get().newCounts, blackboard: get().newCounts.blackboard + added },
+            newCounts: { ...get().newCounts, blackboard: boardCount },
+            seenCache: seenMap,
           });
         }
         break;
@@ -837,6 +965,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     pendingAttachments: [],
     historyCache: {},
     historyCacheKeys: [],
+    seenCache: {},
     fileUpdateAt: 0,
     scheduledTasks: [],
     taskLogs: [],
@@ -968,6 +1097,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     disconnect: () => {
+      flowCache.clear();
+      panelsCache.clear();
       get().client?.disconnect();
       set({
         client: null,
@@ -997,6 +1128,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         selectedIds: { sessions: [], rooms: [] },
         historyCache: {},
         historyCacheKeys: [],
+        seenCache: {},
         historySearchContext: false,
         currentProfile: null,
         flow: null,
@@ -1217,18 +1349,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     openChat: (session: SessionInfo, anchorAt?: number) => {
       saveCurrentHistoryCache();
+      saveCurrentScopeCounts();
       const cached = getHistoryCache("session", session.sessionId);
+      const panels = panelsCache.get(`session:${session.sessionId}`);
       set({
         currentSession: session,
         currentRoom: null,
-        currentArtifacts: null,
-        currentEvents: null,
-        blackboard: null,
+        currentArtifacts: panels?.artifacts ?? null,
+        currentEvents: panels?.events ?? null,
+        blackboard: panels?.blackboard ?? null,
         flow: null,
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
-        newCounts: { artifact: 0, event: 0, blackboard: 0 },
+        newCounts: restoredCounts("session", session.sessionId),
         screen: "chat",
         historyHasMore: false,
         historyLoading: false,
@@ -1253,20 +1387,21 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const updatedRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? latestRoom;
 
       saveCurrentHistoryCache();
+      saveCurrentScopeCounts();
       const cached = getHistoryCache("room", updatedRoom.roomId);
-      const isSameRoom = get().currentRoom?.roomId === updatedRoom.roomId;
+      const panels = panelsCache.get(`room:${updatedRoom.roomId}`);
       set({
         currentRoom: updatedRoom,
         currentSession: null,
-        currentArtifacts: null,
-        currentEvents: null,
-        blackboard: null,
+        currentArtifacts: panels?.artifacts ?? null,
+        currentEvents: panels?.events ?? null,
+        blackboard: panels?.blackboard ?? null,
         chatItems: cached ?? [],
         quote: null,
         fileRefToInsert: null,
-        newCounts: { artifact: 0, event: 0, blackboard: 0 },
+        newCounts: restoredCounts("room", updatedRoom.roomId),
         screen: "room",
-        ...(isSameRoom ? {} : { flow: null }),
+        flow: flowCache.get(updatedRoom.roomId) ?? null,
         historyHasMore: false,
         historyLoading: false,
         historySearchContext: anchorAt != null,
@@ -1342,6 +1477,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     deleteSession: async (session) => {
       try {
         await getOrCall("session.delete", { sessionId: session.sessionId });
+        dropScopeCache("session", session.sessionId);
         await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });
@@ -1351,6 +1487,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     deleteSessions: async (sessionIds) => {
       try {
         await getOrCall("session.deleteBatch", { sessionIds });
+        sessionIds.forEach((id) => dropScopeCache("session", id));
         await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });
@@ -1360,6 +1497,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     deleteRooms: async (roomIds) => {
       try {
         await getOrCall("room.deleteBatch", { roomIds });
+        roomIds.forEach((id) => dropScopeCache("room", id));
         await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });
@@ -1413,6 +1551,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         if (sessionIds.length) await getOrCall("session.deleteBatch", { sessionIds });
         if (roomIds.length) await getOrCall("room.deleteBatch", { roomIds });
+        sessionIds.forEach((id) => dropScopeCache("session", id));
+        roomIds.forEach((id) => dropScopeCache("room", id));
         await get().refreshAll();
         set({ selectedIds: { sessions: [], rooms: [] } });
       } catch (e) {
@@ -1624,6 +1764,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     backToList: () => {
       saveCurrentHistoryCache();
+      saveCurrentScopeCounts();
       set({
         currentSession: null,
         currentRoom: null,
@@ -1833,42 +1974,69 @@ export const useHubStore = create<State & Actions>((set, get) => {
             text: String(o.text ?? ""),
             at: typeof o.at === "number" ? o.at : undefined,
             historyId: typeof o.id === "number" ? o.id : undefined,
+            usage: (o as Record<string, unknown>).usage as Record<string, unknown> | undefined,
+            attachments: ((o as Record<string, unknown>).attachments as unknown[] | undefined)
+              ?.map((it) => parseAttachment(it as Record<string, unknown>)),
           };
         });
         const chat: ChatItem[] = [];
         for (const e of entries) {
-          const attachments = ((e as Record<string, unknown>).attachments as unknown[] | undefined)
-            ?.map((it) => parseAttachment(it as Record<string, unknown>));
           switch (e.kind) {
             case "user":
-              chat.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments });
+              chat.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments: e.attachments });
               break;
-            case "assistant": {
-              const usage = (e as Record<string, unknown>).usage as Record<string, unknown> | undefined;
-              chat.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
+            case "assistant":
+              chat.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: e.usage ? parseTokenUsage(e.usage) : undefined });
               break;
-            }
             case "system":
               chat.push({ kind: "system", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
               break;
             case "error":
               chat.push({ kind: "error", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
               break;
+            case "thought":
+              chat.push({ kind: "thought", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author });
+              break;
+            case "tool": {
+              let data: Record<string, unknown> = {};
+              try { data = JSON.parse(e.text) as Record<string, unknown>; } catch { /* keep */ }
+              chat.push({
+                kind: "tool",
+                at: e.at,
+                historyId: e.historyId,
+                toolCallId: String(data.toolCallId ?? ""),
+                title: String(data.title ?? "tool"),
+                status: String(data.status ?? "completed"),
+                author: e.author,
+              });
+              break;
+            }
+            case "plan": {
+              let data: { entries?: string[] } = {};
+              try { data = JSON.parse(e.text) as { entries?: string[] }; } catch { /* keep */ }
+              chat.push({ kind: "plan", at: e.at, historyId: e.historyId, entries: data.entries ?? [], author: e.author });
+              break;
+            }
           }
         }
         const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
+        const merged = mergeHistoryItems(chat, currentId === id ? get().chatItems : []);
+        const maxLiveId = merged.reduce(
+          (m, it) => ("id" in it && typeof it.id === "number" ? Math.max(m, it.id) : m),
+          0,
+        );
         if (currentId === id) {
           set({
-            chatItems: chat,
-            itemSeq: chat.length,
+            chatItems: merged,
+            itemSeq: Math.max(chat.length, maxLiveId),
             historyHasMore: result.hasMore === true,
             historySearchContext: anchorAt != null,
           });
         }
         if (anchorAt == null) {
-          setHistoryCache(scope, id, chat);
+          setHistoryCache(scope, id, merged);
         }
         get().syncBusyIds().catch(() => {});
       } catch {}
@@ -1890,33 +2058,57 @@ export const useHubStore = create<State & Actions>((set, get) => {
             text: String(o.text ?? ""),
             at: typeof o.at === "number" ? o.at : undefined,
             historyId: typeof o.id === "number" ? o.id : undefined,
+            usage: (o as Record<string, unknown>).usage as Record<string, unknown> | undefined,
+            attachments: ((o as Record<string, unknown>).attachments as unknown[] | undefined)
+              ?.map((it) => parseAttachment(it as Record<string, unknown>)),
           };
         });
         const more: ChatItem[] = [];
         for (const e of entries) {
-          const attachments = ((e as Record<string, unknown>).attachments as unknown[] | undefined)
-            ?.map((it) => parseAttachment(it as Record<string, unknown>));
           switch (e.kind) {
             case "user":
-              more.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments });
+              more.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments: e.attachments });
               break;
-            case "assistant": {
-              const usage = (e as Record<string, unknown>).usage as Record<string, unknown> | undefined;
-              more.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: usage ? parseTokenUsage(usage) : undefined });
+            case "assistant":
+              more.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: e.usage ? parseTokenUsage(e.usage) : undefined });
               break;
-            }
             case "system":
               more.push({ kind: "system", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
               break;
             case "error":
               more.push({ kind: "error", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
               break;
+            case "thought":
+              more.push({ kind: "thought", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author });
+              break;
+            case "tool": {
+              let data: Record<string, unknown> = {};
+              try { data = JSON.parse(e.text) as Record<string, unknown>; } catch { /* keep */ }
+              more.push({
+                kind: "tool",
+                at: e.at,
+                historyId: e.historyId,
+                toolCallId: String(data.toolCallId ?? ""),
+                title: String(data.title ?? "tool"),
+                status: String(data.status ?? "completed"),
+                author: e.author,
+              });
+              break;
+            }
+            case "plan": {
+              let data: { entries?: string[] } = {};
+              try { data = JSON.parse(e.text) as { entries?: string[] }; } catch { /* keep */ }
+              more.push({ kind: "plan", at: e.at, historyId: e.historyId, entries: data.entries ?? [], author: e.author });
+              break;
+            }
           }
         }
         const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
-        const nextItems = [...more, ...items];
+        const existingIds = new Set(items.map((it) => it.historyId).filter((x) => x != null));
+        const deduped = more.filter((it) => it.historyId == null || !existingIds.has(it.historyId));
+        const nextItems = [...deduped, ...items];
         if (currentId === id) {
           set({ chatItems: nextItems, historyHasMore: result.hasMore === true, historyLoading: false });
         }
@@ -2046,8 +2238,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!client) return;
       try {
         const result = (await client.call("room.flow", { roomId })) as Record<string, unknown>;
-        const flow = result.flow as FlowInfo | undefined;
-        set({ flow: flow ?? null });
+        const flow = (result.flow as FlowInfo | undefined) ?? null;
+        flowCache.set(roomId, flow);
+        if (get().currentRoom?.roomId === roomId) set({ flow });
       } catch {
         /* ignore */
       }
@@ -2113,20 +2306,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
             })
           : get().blackboard;
         const board = isRoom ? (blackboard ?? []) : [];
-        const prev = get();
-        const newArtifacts = countAdded(prev.currentArtifacts, artifacts);
-        const newEvents = countAdded(prev.currentEvents, events);
-        const newBoard = countAdded(prev.blackboard, board);
+        const key = isRoom ? `room:${scope.roomId}` : `session:${scope.sessionId}`;
+        const seenMap = { ...get().seenCache };
+        const seen: ScopeSeen = { ...(seenMap[key] ?? {}) };
+        const counts = { ...get().newCounts };
+        if (seen.artifacts) {
+          counts.artifact = artifacts.filter((a) => !seen.artifacts!.has(a.id)).length;
+        } else {
+          seen.artifacts = new Set(artifacts.map((a) => a.id));
+        }
+        if (seen.events) {
+          counts.event = events.filter((e) => !seen.events!.has(e.id)).length;
+        } else {
+          seen.events = new Set(events.map((e) => e.id));
+        }
+        if (isRoom) {
+          if (seen.board) {
+            counts.blackboard = board.filter((b) => !seen.board!.has(b.id)).length;
+          } else {
+            seen.board = new Set(board.map((b) => b.id));
+          }
+        }
+        seenMap[key] = seen;
         set({
           currentArtifacts: artifacts,
           currentEvents: events,
           ...(isRoom ? { blackboard } : {}),
-          newCounts: {
-            ...prev.newCounts,
-            artifact: prev.newCounts.artifact + newArtifacts,
-            event: prev.newCounts.event + newEvents,
-            blackboard: prev.newCounts.blackboard + newBoard,
-          },
+          newCounts: counts,
+          seenCache: seenMap,
         });
       } catch {
         /* ignore */
@@ -2268,11 +2475,27 @@ export const useHubStore = create<State & Actions>((set, get) => {
     clearFileRef: () => set({ fileRefToInsert: null }),
     clearNewCounts: (kind?: "artifact" | "event" | "blackboard") => {
       const prev = get().newCounts;
-      if (!kind) {
-        set({ newCounts: { artifact: 0, event: 0, blackboard: 0 } });
-      } else {
-        set({ newCounts: { ...prev, [kind]: 0 } });
+      const key = scopeKeyNow();
+      const seenMap = { ...get().seenCache };
+      const seen: ScopeSeen | null = key ? { ...(seenMap[key] ?? {}) } : null;
+      const next = { ...prev };
+      if (!kind || kind === "artifact") {
+        next.artifact = 0;
+        if (seen) seen.artifacts = new Set((get().currentArtifacts ?? []).map((a) => a.id));
       }
+      if (!kind || kind === "event") {
+        next.event = 0;
+        if (seen) seen.events = new Set((get().currentEvents ?? []).map((e) => e.id));
+      }
+      if (!kind || kind === "blackboard") {
+        next.blackboard = 0;
+        if (seen) seen.board = new Set((get().blackboard ?? []).map((b) => b.id));
+      }
+      if (seen && key) {
+        seen.counts = { ...next };
+        seenMap[key] = seen;
+      }
+      set({ newCounts: next, seenCache: seenMap });
     },
 
     saveProfileAndConnect: (address: string, token: string, name?: string) => {

@@ -30,6 +30,7 @@ import { getDevinQuota } from "./quota.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
+import { TurnProcessRecorder } from "./process-log.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -574,6 +575,30 @@ function listAllSessions(): {
 }
 
 const turnDrafts = new Map<string, { sessionDraftId?: number; roomDraftId?: number }>();
+const turnProcess = new TurnProcessRecorder();
+
+function flushTurnProcess(sessionId: string): void {
+  const buf = turnProcess.take(sessionId);
+  if (buf.length === 0) return;
+  const roomId = roomModeManager.roomIdForTurn(sessionId);
+  const writeRoom = roomId != null && !roomModeManager.isHiddenSession(sessionId);
+  for (const item of buf) {
+    store.append("session", sessionId, {
+      at: item.at,
+      kind: item.kind,
+      author: item.author,
+      text: item.text,
+    });
+    if (writeRoom && roomId) {
+      store.append("room", roomId, {
+        at: item.at,
+        kind: item.kind,
+        author: item.author,
+        text: item.text,
+      });
+    }
+  }
+}
 
 function displayNameFor(sessionId: string): string {
   const meta = sessionMetas.get(sessionId);
@@ -618,6 +643,7 @@ function onTurnProgress(sessionId: string, fullText: string): void {
 }
 
 function interruptTurnDrafts(sessionId: string): void {
+  flushTurnProcess(sessionId);
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
   turnDrafts.delete(sessionId);
@@ -631,6 +657,7 @@ function interruptTurnDrafts(sessionId: string): void {
 
 function onTurnEnd(sessionId: string, text: string): void {
   const displayName = displayNameFor(sessionId);
+  flushTurnProcess(sessionId);
   const draft = turnDrafts.get(sessionId);
   turnDrafts.delete(sessionId);
   if (text.trim()) {
@@ -764,7 +791,25 @@ function onAgentEvent(event: HubEvent): void {
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
+      flushTurnProcess(sessionId);
+      const errorRoomId = roomModeManager.roomIdForTurn(sessionId);
       interruptTurnDrafts(sessionId);
+      const message = String(event.params.message ?? "");
+      const author = displayNameFor(sessionId);
+      store.append("session", sessionId, {
+        at: Date.now(),
+        kind: "error",
+        author,
+        text: message,
+      });
+      if (errorRoomId && !roomModeManager.isHiddenSession(sessionId)) {
+        store.append("room", errorRoomId, {
+          at: Date.now(),
+          kind: "error",
+          author,
+          text: message,
+        });
+      }
       roomModeManager.onPromptError(sessionId);
       persistState();
     }
@@ -777,7 +822,10 @@ function onAgentEvent(event: HubEvent): void {
     });
   } else if (event.method === "session.update" && sessionId) {
     const update = (event.params as Record<string, unknown> | undefined)?.update;
-    if (update !== undefined) roomModeManager.observeToolUpdate(sessionId, update);
+    if (update !== undefined) {
+      turnProcess.record(sessionId, update as Record<string, unknown>, displayNameFor(sessionId));
+      roomModeManager.observeToolUpdate(sessionId, update);
+    }
   }
   if (!skipBroadcast) broadcast(toPublicHubEvent(event));
 }
@@ -1193,6 +1241,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       owners.delete(sessionId);
       sessionMetas.delete(sessionId);
       sessionLedger.drop(sessionId);
+      turnDrafts.delete(sessionId);
+      turnProcess.clear(sessionId);
       modelManager.clearSessionConfig(sessionId);
       store.deleteHistory("session", sessionId);
       const dissolved = rooms.removeMember(sessionId);
@@ -1220,6 +1270,8 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         owners.delete(sessionId);
         sessionMetas.delete(sessionId);
         sessionLedger.drop(sessionId);
+        turnDrafts.delete(sessionId);
+        turnProcess.clear(sessionId);
         modelManager.clearSessionConfig(sessionId);
         store.deleteHistory("session", sessionId);
         dissolved.push(...rooms.removeMember(sessionId));

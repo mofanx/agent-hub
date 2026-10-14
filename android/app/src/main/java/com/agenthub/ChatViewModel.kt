@@ -39,6 +39,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
 import com.agenthub.ui.Strings
 import com.agenthub.ui.stringsFor
 import com.agenthub.ui.splitMessageBlocks
@@ -634,9 +635,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var newArtifactCount by mutableStateOf(0)
     var newEventCount by mutableStateOf(0)
     var newBlackboardCount by mutableStateOf(0)
-    private var artifactsInitialized = false
-    private var eventsInitialized = false
-    private var blackboardInitialized = false
+    private class ScopeSeen {
+        var artifacts: Set<String>? = null
+        var events: Set<String>? = null
+        var board: Set<String>? = null
+        var counts: Triple<Int, Int, Int> = Triple(0, 0, 0)
+    }
+    private val scopeSeen = mutableMapOf<String, ScopeSeen>()
+    private val chatCache = mutableMapOf<String, List<ChatItem>>()
+    private val chatCacheKeys = ArrayDeque<String>()
+    private val flowCache = mutableMapOf<String, FlowInfo?>()
+
+    private class ScopePanels(
+        val artifacts: List<ArtifactInfo>,
+        val events: List<EventInfo>,
+        val board: List<BlackboardEntry>,
+    )
+
+    private val panelsCache = mutableMapOf<String, ScopePanels>()
     private var artifactRefreshGeneration = 0L
     private var usageRefreshGeneration = 0L
     var fileTreeRoots by mutableStateOf<List<FileTreeRoot>>(emptyList())
@@ -981,7 +997,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (roomMemberModels.values.any { it.second == "devin" }) refreshBackendQuota()
                 } else {
                     val session = currentSession ?: return@launch
-                    val backend = session.agent ?: "devin"
+                    val backend = session.agent
                     if (backend == "devin") refreshBackendQuota()
                     val result = hub.call("model.current", buildJsonObject {
                         put("backend", backend)
@@ -1399,6 +1415,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         flow = null
         quote = null
         fileRefToInsert = null
+        chatCache.clear()
+        chatCacheKeys.clear()
+        scopeSeen.clear()
+        flowCache.clear()
+        panelsCache.clear()
         connecting = false
         connectError = null
         agentStatus = "未连接"
@@ -1969,12 +1990,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun dropScopeCache(scope: String, id: String) {
+        val key = "$scope:$id"
+        chatCache.remove(key)
+        chatCacheKeys.remove(key)
+        scopeSeen.remove(key)
+        panelsCache.remove(key)
+        if (scope == "room") flowCache.remove(id)
+    }
+
     fun deleteRoom(room: RoomInfo) {
         viewModelScope.launch {
             try {
                 hub.call("room.delete", buildJsonObject {
                     put("roomId", room.roomId)
                 })
+                dropScopeCache("room", room.roomId)
                 if (currentRoom?.roomId == room.roomId) backToList()
                 refreshAll()
             } catch (e: Exception) {
@@ -2037,6 +2068,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val isSameSession = currentSession?.sessionId == session.sessionId
+        saveCurrentScope()
         listTab.value = 0
         currentSession = session
         currentRoom = null
@@ -2047,8 +2079,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             blackboard.clear()
             quote = null
             flow = null
+            chatItems.clear()
+            scopeKey()?.let { key -> chatCache[key]?.let { chatItems.addAll(it) } }
         }
-        resetNewCounts()
+        restoreScopeCounts()
         fileRefToInsert = null
         historyHasMore = false
         historyLoading = false
@@ -2080,6 +2114,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 syncRefreshAll()
                 val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
                 val isSameRoom = currentRoom?.roomId == updatedRoom.roomId
+                saveCurrentScope()
                 listTab.value = 1
                 currentRoom = updatedRoom
                 currentSession = null
@@ -2088,11 +2123,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     currentEvents.clear()
                     blackboard.clear()
                     quote = null
-                    flow = null
                     helpReplyTo = null
+                    flow = flowCache[updatedRoom.roomId]
                     chatItems.clear()
+                    scopeKey()?.let { key -> chatCache[key]?.let { chatItems.addAll(it) } }
                 }
-                resetNewCounts()
+                restoreScopeCounts()
                 fileRefToInsert = null
                 historyHasMore = false
                 historyLoading = false
@@ -2119,7 +2155,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         try {
             val result = hub.call("room.flow", buildJsonObject { put("roomId", roomId) })
             val flowObj = result["flow"]?.jsonObject
-            flow = parseFlow(flowObj)
+            val parsed = parseFlow(flowObj)
+            flowCache[roomId] = parsed
+            if (currentRoom?.roomId == roomId) flow = parsed
         } catch (e: Exception) {
             // ignore
         }
@@ -2164,50 +2202,83 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun scopeKey(): String? =
+        currentRoom?.let { "room:${it.roomId}" } ?: currentSession?.let { "session:${it.sessionId}" }
+
+    private fun saveCurrentScope() {
+        val key = scopeKey() ?: return
+        chatCache[key] = chatItems.toList()
+        panelsCache[key] = ScopePanels(
+            currentArtifacts.toList(),
+            currentEvents.toList(),
+            blackboard.toList(),
+        )
+        scopeSeen.getOrPut(key) { ScopeSeen() }.counts =
+            Triple(newArtifactCount, newEventCount, newBlackboardCount)
+        chatCacheKeys.remove(key)
+        chatCacheKeys.addFirst(key)
+        while (chatCacheKeys.size > 20) {
+            chatCache.remove(chatCacheKeys.removeLast())
+        }
+    }
+
+    private fun restoreScopeCounts() {
+        ++artifactRefreshGeneration
+        ++usageRefreshGeneration
+        val key = scopeKey()
+        val panels = key?.let { panelsCache[it] }
+        if (panels != null) {
+            currentArtifacts.clear()
+            currentArtifacts.addAll(panels.artifacts)
+            currentEvents.clear()
+            currentEvents.addAll(panels.events)
+            blackboard.clear()
+            blackboard.addAll(panels.board)
+        }
+        val counts = key?.let { scopeSeen[it]?.counts }
+        newArtifactCount = counts?.first ?: 0
+        newEventCount = counts?.second ?: 0
+        newBlackboardCount = counts?.third ?: 0
+    }
+
     private fun trackNewArtifacts(
         artifacts: List<ArtifactInfo>,
         events: List<EventInfo>,
         board: List<BlackboardEntry>?,
     ) {
-        if (artifactsInitialized) {
-            val oldIds = currentArtifacts.map { it.id }.toSet()
-            newArtifactCount += artifacts.count { it.id !in oldIds }
-        } else {
-            artifactsInitialized = true
-        }
-        if (eventsInitialized) {
-            val oldIds = currentEvents.map { it.id }.toSet()
-            newEventCount += events.count { it.id !in oldIds }
-        } else {
-            eventsInitialized = true
-        }
+        val key = scopeKey() ?: return
+        val seen = scopeSeen.getOrPut(key) { ScopeSeen() }
+        seen.artifacts?.let { old ->
+            newArtifactCount = artifacts.count { it.id !in old }
+        } ?: run { seen.artifacts = artifacts.map { it.id }.toSet() }
+        seen.events?.let { old ->
+            newEventCount = events.count { it.id !in old }
+        } ?: run { seen.events = events.map { it.id }.toSet() }
         if (board != null) {
-            if (blackboardInitialized) {
-                val oldIds = blackboard.map { it.id }.toSet()
-                newBlackboardCount += board.count { it.id !in oldIds }
-            } else {
-                blackboardInitialized = true
-            }
+            seen.board?.let { old ->
+                newBlackboardCount = board.count { it.id !in old }
+            } ?: run { seen.board = board.map { it.id }.toSet() }
         }
     }
 
     fun clearNewCounts(kind: String) {
+        val key = scopeKey() ?: return
+        val seen = scopeSeen.getOrPut(key) { ScopeSeen() }
         when (kind) {
-            "artifact" -> newArtifactCount = 0
-            "event" -> newEventCount = 0
-            "blackboard" -> newBlackboardCount = 0
+            "artifact" -> {
+                newArtifactCount = 0
+                seen.artifacts = currentArtifacts.map { it.id }.toSet()
+            }
+            "event" -> {
+                newEventCount = 0
+                seen.events = currentEvents.map { it.id }.toSet()
+            }
+            "blackboard" -> {
+                newBlackboardCount = 0
+                seen.board = blackboard.map { it.id }.toSet()
+            }
         }
-    }
-
-    private fun resetNewCounts() {
-        newArtifactCount = 0
-        newEventCount = 0
-        newBlackboardCount = 0
-        artifactsInitialized = false
-        eventsInitialized = false
-        blackboardInitialized = false
-        ++artifactRefreshGeneration
-        ++usageRefreshGeneration
+        seen.counts = Triple(newArtifactCount, newEventCount, newBlackboardCount)
     }
 
     private fun parseBlackboardEntry(obj: JsonObject): BlackboardEntry {
@@ -2447,6 +2518,62 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun parseHistoryItem(o: JsonObject, itemId: Long): ChatItem? {
+        val kind = o["kind"]!!.jsonPrimitive.content
+        val author = o["author"]!!.jsonPrimitive.content
+        val text = o["text"]!!.jsonPrimitive.content
+        val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+        return when (kind) {
+            "user" -> ChatItem.User(itemId, text, at = at)
+            "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
+                ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失", at = at)
+            } else {
+                ChatItem.Assistant(itemId, text, author, at = at)
+            }
+            "system" -> ChatItem.System(itemId, text, at = at)
+            "thought" -> ChatItem.Thought(itemId, text, author, at = at)
+            "tool" -> {
+                val data = try { Json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
+                ChatItem.Tool(
+                    itemId,
+                    data?.get("toolCallId")?.jsonPrimitive?.contentOrNull ?: "",
+                    data?.get("title")?.jsonPrimitive?.contentOrNull ?: "tool",
+                    data?.get("status")?.jsonPrimitive?.contentOrNull ?: "completed",
+                    author,
+                    at = at,
+                )
+            }
+            "plan" -> {
+                val data = try { Json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
+                val entries = data?.get("entries")?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+                ChatItem.Plan(itemId, entries, author, at = at)
+            }
+            "error" -> ChatItem.Error(itemId, text, author, at = at)
+            else -> null
+        }
+    }
+
+    private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> =
+        tail.filter { t ->
+            when (t) {
+                is ChatItem.User ->
+                    hist.none { it is ChatItem.User && it.author == t.author && (it.text == t.text || it.text.endsWith(t.text)) }
+                is ChatItem.System ->
+                    hist.none { it is ChatItem.System && it.text == t.text }
+                is ChatItem.Assistant ->
+                    hist.none { it is ChatItem.Assistant && it.author == t.author && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
+                is ChatItem.Thought ->
+                    hist.none { it is ChatItem.Thought && it.author == t.author && it.text.startsWith(t.text) }
+                is ChatItem.Tool ->
+                    hist.none { it is ChatItem.Tool && it.toolCallId == t.toolCallId }
+                is ChatItem.Plan ->
+                    hist.none { it is ChatItem.Plan && it.author == t.author && it.entries == t.entries }
+                is ChatItem.Error ->
+                    hist.none { it is ChatItem.Error && it.author == t.author && it.text == t.text }
+                else -> true
+            }
+        }
+
     private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null) {
         viewModelScope.launch {
             try {
@@ -2460,27 +2587,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val items = mutableListOf<ChatItem>()
                 for (e in entries) {
                     val o = e.jsonObject
-                    val kind = o["kind"]!!.jsonPrimitive.content
-                    val author = o["author"]!!.jsonPrimitive.content
-                    val text = o["text"]!!.jsonPrimitive.content
                     val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
-                    val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
                     val itemId = if (historyId != null) -historyId else ++itemSeq
-                    when (kind) {
-                        "user" -> items.add(ChatItem.User(itemId, text, at = at))
-                        "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
-                            items.add(ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失", at = at))
-                        } else {
-                            items.add(ChatItem.Assistant(itemId, text, author, at = at))
-                        }
-                        "system" -> items.add(ChatItem.System(itemId, text, at = at))
-                    }
+                    parseHistoryItem(o, itemId)?.let { items.add(it) }
                 }
                 if (anchorAt != null) {
                     chatItems.addAll(items)
                 } else {
+                    val scopeKey = if (method == "room.history") "room:$id" else "session:$id"
+                    val tail = dedupeTail(items, chatItems.filter { it.id > 0 })
                     chatItems.clear()
-                    chatItems.addAll(items)
+                    chatItems.addAll(items + tail)
+                    chatCache[scopeKey] = chatItems.toList()
                 }
                 syncBusyIds()
             } catch (_: Exception) {
@@ -2510,23 +2628,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val items = mutableListOf<ChatItem>()
                 for (e in entries) {
                     val o = e.jsonObject
-                    val kind = o["kind"]!!.jsonPrimitive.content
-                    val author = o["author"]!!.jsonPrimitive.content
-                    val text = o["text"]!!.jsonPrimitive.content
                     val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
-                    val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
                     val itemId = if (historyId != null) -historyId else ++itemSeq
-                    when (kind) {
-                        "user" -> items.add(ChatItem.User(itemId, text, at = at))
-                        "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
-                            items.add(ChatItem.System(itemId, "上一条回复在 Hub 重启中丢失", at = at))
-                        } else {
-                            items.add(ChatItem.Assistant(itemId, text, author, at = at))
-                        }
-                        "system" -> items.add(ChatItem.System(itemId, text, at = at))
-                    }
+                    parseHistoryItem(o, itemId)?.let { items.add(it) }
                 }
-                chatItems.addAll(0, items)
+                val existingIds = chatItems.map { it.id }.toSet()
+                chatItems.addAll(0, items.filter { it.id !in existingIds })
+                scopeKey()?.let { key -> chatCache[key] = chatItems.toList() }
             } catch (_: Exception) {
             } finally {
                 historyLoading = false
@@ -2729,6 +2837,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 hub.call("session.delete", buildJsonObject {
                     put("sessionId", session.sessionId)
                 })
+                dropScopeCache("session", session.sessionId)
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -2742,6 +2851,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 hub.call("session.deleteBatch", buildJsonObject {
                     put("sessionIds", buildJsonArray { sessionIds.forEach { add(it) } })
                 })
+                sessionIds.forEach { dropScopeCache("session", it) }
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -2755,6 +2865,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 hub.call("room.deleteBatch", buildJsonObject {
                     put("roomIds", buildJsonArray { roomIds.forEach { add(it) } })
                 })
+                roomIds.forEach { dropScopeCache("room", it) }
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -2775,6 +2886,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         put("roomIds", buildJsonArray { roomIds.forEach { add(it) } })
                     })
                 }
+                sessionIds.forEach { dropScopeCache("session", it) }
+                roomIds.forEach { dropScopeCache("room", it) }
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -2861,6 +2974,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
                 flow = null
+                flowCache[room.roomId] = null
             } catch (e: Exception) {
                 chatItems.add(ChatItem.Error(++itemSeq, "取消编排失败: ${e.message}"))
             }
@@ -3684,8 +3798,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "room.flowUpdate" -> {
                 val p = obj["params"]!!.jsonObject
                 val roomId = p["roomId"]!!.jsonPrimitive.content
+                flowCache[roomId] = parseFlow(p["flow"]?.jsonObject)
                 if (currentRoom?.roomId == roomId) {
-                    flow = parseFlow(p["flow"]?.jsonObject)
+                    flow = flowCache[roomId]
                     viewModelScope.launch { refreshArtifacts(roomId) }
                 }
             }
@@ -3694,11 +3809,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val roomId = p["roomId"]!!.jsonPrimitive.content
                 if (currentRoom?.roomId == roomId) {
                     val list = p["blackboard"]?.jsonArray?.map { parseBlackboardEntry(it.jsonObject) } ?: emptyList()
-                    if (blackboardInitialized) {
-                        val oldIds = blackboard.map { it.id }.toSet()
-                        newBlackboardCount += list.count { it.id !in oldIds }
-                    } else {
-                        blackboardInitialized = true
+                    scopeKey()?.let { key ->
+                        val seen = scopeSeen.getOrPut(key) { ScopeSeen() }
+                        seen.board?.let { old ->
+                            newBlackboardCount = list.count { it.id !in old }
+                        } ?: run { seen.board = list.map { it.id }.toSet() }
                     }
                     blackboard.clear()
                     blackboard.addAll(list)

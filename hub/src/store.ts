@@ -30,7 +30,7 @@ export type SessionMeta = {
 
 export type HistoryEntry = {
   at: number;
-  kind: "user" | "assistant" | "system";
+  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error";
   author: string;
   text: string;
 };
@@ -477,8 +477,8 @@ export class Store {
   completeReplyDraft(rowId: number, text: string): void {
     try {
       this.db
-        .prepare("UPDATE history SET text = ?, draft = 0 WHERE id = ? AND draft = 1")
-        .run(text, rowId);
+        .prepare("UPDATE history SET text = ?, draft = 0, at = ? WHERE id = ? AND draft = 1")
+        .run(text, Date.now(), rowId);
     } catch (err) {
       logWarn("store", `completeReplyDraft failed: ${String(err)}`);
     }
@@ -488,9 +488,9 @@ export class Store {
     try {
       this.db
         .prepare(
-          "UPDATE history SET text = CASE WHEN trim(text) = '' THEN ? ELSE text || ? END, draft = 0 WHERE id = ? AND draft = 1",
+          "UPDATE history SET text = CASE WHEN trim(text) = '' THEN ? ELSE text || ? END, draft = 0, at = ? WHERE id = ? AND draft = 1",
         )
-        .run(INTERRUPTED_REPLY_MARKER, `\n\n${INTERRUPTED_REPLY_MARKER}`, rowId);
+        .run(INTERRUPTED_REPLY_MARKER, `\n\n${INTERRUPTED_REPLY_MARKER}`, Date.now(), rowId);
     } catch (err) {
       logWarn("store", `interruptReplyDraft failed: ${String(err)}`);
     }
@@ -503,7 +503,7 @@ export class Store {
           .prepare("SELECT id, scope, scope_id AS scopeId, text FROM history WHERE draft = 1")
           .all() as { id: number; scope: "session" | "room"; scopeId: string; text: string }[];
         const finalize = this.db.prepare(
-          "UPDATE history SET text = ?, draft = 0 WHERE id = ? AND draft = 1",
+          "UPDATE history SET text = ?, draft = 0, at = ? WHERE id = ? AND draft = 1",
         );
         const affected = new Map<string, { scope: "session" | "room"; id: string }>();
         for (const r of rows) {
@@ -511,6 +511,7 @@ export class Store {
             r.text.trim()
               ? `${r.text}\n\n${RESTART_INTERRUPTED_MARKER}`
               : RESTART_INTERRUPTED_MARKER,
+            Date.now(),
             r.id,
           );
           affected.set(`${r.scope}:${r.scopeId}`, { scope: r.scope, id: r.scopeId });
