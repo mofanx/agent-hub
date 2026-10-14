@@ -412,6 +412,8 @@ interface Strings {
     val modeDescAuto: String
     val projectFiles: String
     val refresh: String
+    val menu: String
+    val toggle: String
     val upOneLevel: String
     val deleteFileTitle: String
     val deleteFileMsg: String
@@ -866,6 +868,8 @@ object ZhStrings : Strings {
     override val modeDescAuto = "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。"
     override val projectFiles = "项目文件"
     override val refresh = "刷新"
+    override val menu = "菜单"
+    override val toggle = "启用/停用"
     override val upOneLevel = "↑ 返回上级"
     override val deleteFileTitle = "删除文件"
     override val deleteFileMsg = "确认删除 %s？"
@@ -1320,6 +1324,8 @@ object EnStrings : Strings {
     override val modeDescAuto = "The host picks the best mode automatically. Use when unsure."
     override val projectFiles = "Project files"
     override val refresh = "Refresh"
+    override val menu = "Menu"
+    override val toggle = "Toggle"
     override val upOneLevel = "↑ Up one level"
     override val deleteFileTitle = "Delete file"
     override val deleteFileMsg = "Delete %s?"

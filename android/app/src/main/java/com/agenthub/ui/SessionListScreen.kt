@@ -255,7 +255,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     } else {
                         IconButton(onClick = onMenuClick) {
-                            Icon(Icons.Filled.Menu, contentDescription = "Menu")
+                            Icon(Icons.Filled.Menu, contentDescription = S.menu)
                         }
                     }
                 },

@@ -301,15 +301,15 @@ private fun TaskCard(
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 IconButton(onClick = onToggle, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Filled.PowerSettingsNew, contentDescription = "toggle",
+                    Icon(Icons.Filled.PowerSettingsNew, contentDescription = S.toggle,
                         modifier = Modifier.size(18.dp))
                 }
                 IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Filled.Edit, contentDescription = "edit",
+                    Icon(Icons.Filled.Edit, contentDescription = S.edit,
                         modifier = Modifier.size(18.dp))
                 }
                 IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Filled.Delete, contentDescription = "delete",
+                    Icon(Icons.Filled.Delete, contentDescription = S.delete,
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.error)
                 }

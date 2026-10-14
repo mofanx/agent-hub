@@ -102,6 +102,21 @@ fn set_tray_title(app: tauri::AppHandle, title: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn set_tray_menu(app: tauri::AppHandle, show: String, hide: String, quit: String) -> Result<(), String> {
+    let menu = tauri::menu::MenuBuilder::new(&app)
+        .text("show", show)
+        .text("hide", hide)
+        .separator()
+        .text("quit", quit)
+        .build()
+        .map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -117,7 +132,8 @@ pub fn run() {
             hide_window,
             toggle_window,
             set_tray_tooltip,
-            set_tray_title
+            set_tray_title,
+            set_tray_menu
         ])
         .setup(|app| {
             #[cfg(desktop)]

@@ -146,7 +146,7 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                         vm.refreshModelList()
                         vm.refreshBackendQuota(force = true)
                     }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        Icon(Icons.Filled.Refresh, contentDescription = S.refresh)
                     }
                 }
 

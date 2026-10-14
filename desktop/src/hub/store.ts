@@ -34,6 +34,7 @@ import {
   loadConfig,
   saveConfig,
   setTrayTooltip,
+  setTrayMenu,
   showNotification,
   requestNotificationPermission,
   isNotificationPermissionGranted,
@@ -343,6 +344,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
   const updateTray = () => {
     const status = get().agentStatus;
     setTrayTooltip(`Agent Hub - ${status}`).catch(() => {});
+  };
+
+  const syncTrayMenu = () => {
+    const S = stringsFor(get().lang);
+    setTrayMenu(S.trayShow, S.trayHide, S.trayQuit).catch(() => {});
   };
 
   const persist = async () => {
@@ -972,6 +978,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     init: async () => {
       await get().loadConfigFromDisk();
       ensurePermission().catch(() => {});
+      updateTray();
+      syncTrayMenu();
       const { profiles } = get();
       if (profiles.length > 0) {
         const last = profiles[profiles.length - 1];
@@ -1074,6 +1082,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         defaultCommands: [S.cmdContinue, S.cmdSummarize, S.cmdRunTests],
         ...(key ? { agentStatus: S[key] } : {}),
       });
+      updateTray();
+      syncTrayMenu();
       persist();
     },
 

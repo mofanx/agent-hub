@@ -39,3 +39,7 @@ export async function setTrayTooltip(tooltip: string): Promise<void> {
 export async function setTrayTitle(title: string): Promise<void> {
   return invoke("set_tray_title", { title });
 }
+
+export async function setTrayMenu(show: string, hide: string, quit: string): Promise<void> {
+  return invoke("set_tray_menu", { show, hide, quit });
+}

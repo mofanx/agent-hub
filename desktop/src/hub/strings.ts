@@ -11,6 +11,9 @@ export interface Strings {
   agentDisconnected: string;
   notConnected: string;
   connected: string;
+  trayShow: string;
+  trayHide: string;
+  trayQuit: string;
   permissionRequest: string;
   modelSwitched: string;
   modelUnknown: string;
@@ -490,6 +493,9 @@ const zh: Strings = {
   agentDisconnected: "连接已断开",
   notConnected: "未连接",
   connected: "已连接",
+  trayShow: "显示窗口",
+  trayHide: "隐藏窗口",
+  trayQuit: "退出",
   permissionRequest: "工具调用",
   modelSwitched: "已切换到 %s（%s）",
   modelUnknown: "未知模型: %s",
@@ -968,6 +974,9 @@ const en: Strings = {
   connectError: "Connection failed",
   agentDisconnected: "Disconnected",
   notConnected: "Not connected",
+  trayShow: "Show window",
+  trayHide: "Hide window",
+  trayQuit: "Quit",
   connected: "Connected",
   permissionRequest: "Tool call",
   modelSwitched: "Switched to %s (%s)",
