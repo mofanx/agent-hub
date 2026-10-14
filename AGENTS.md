@@ -108,6 +108,13 @@ adb install app/build/outputs/apk/debug/app-debug.apk
   - `OPENCODE_BIN` / `DEVIN_BIN`：其他本地 Agent 的入口
 - 启动失败的具体原因会通过 `agent.status` 事件推送到桌面端，并在顶部错误条中显示。
 
+## 跨平台兼容
+
+- 测试脚本中 shell glob 使用双引号（`"src/**/*.test.ts"`），避免 Windows `cmd.exe` 不剥离单引号导致匹配失败。
+- 不要硬编码 POSIX 路径（如 `/usr/bin/git`），改用命令名走 `PATH` 解析。
+- `path.relative` / `path.join` 等产生的路径比较前统一规范化（`split(path.sep).join("/")`），避免 Windows 反斜杠分隔符导致字符串不匹配。
+- 涉及文件系统/子进程的新代码需同时考虑 Linux、macOS、Windows 行为差异。
+
 ## 当前架构要点
 
 - **群聊编排**：支持 mention、conductor、roundrobin、parallel、pipeline、debate、auto 七种模式。

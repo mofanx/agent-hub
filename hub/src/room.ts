@@ -118,6 +118,11 @@ function isWithin(parent: string, target: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
+/** 统一相对路径分隔符为正斜杠，保证跨平台比较一致 */
+function normalizeRel(p: string): string {
+  return p.split(path.sep).join("/");
+}
+
 function mimeFromExt(ext: string): string {
   const map: Record<string, string> = {
     ".txt": "text/plain", ".md": "text/markdown", ".ts": "text/x-typescript", ".tsx": "text/x-typescript",
@@ -902,7 +907,7 @@ export class RoomManager {
     const found = this.resolveEntryPath(roomId, filePath, author, "file");
     if (!found) throw new Error("path outside project root");
     const { real, root } = found;
-    const rel = path.relative(root, real);
+    const rel = normalizeRel(path.relative(root, real));
     const existing = room.artifacts?.find((a) => a.path === rel);
     if (existing) {
       existing.summary = summary ?? rel;
@@ -1011,7 +1016,7 @@ export class RoomManager {
     const { real, root } = found;
     if (!fs.existsSync(real)) throw new Error("file not found");
     fs.unlinkSync(real);
-    const rel = path.relative(root, real);
+    const rel = normalizeRel(path.relative(root, real));
     room.artifacts = (room.artifacts ?? []).filter((a) => a.path !== rel);
     this.addEvent(roomId, {
       action: "delete",
@@ -1034,8 +1039,8 @@ export class RoomManager {
     if (!fs.existsSync(fromReal)) throw new Error("source file not found");
     if (fs.existsSync(toFound.real)) throw new Error("target file already exists");
     fs.renameSync(fromReal, toFound.real);
-    const oldRel = path.relative(fromRoot, fromReal);
-    const newRel = path.relative(toFound.root, toFound.real);
+    const oldRel = normalizeRel(path.relative(fromRoot, fromReal));
+    const newRel = normalizeRel(path.relative(toFound.root, toFound.real));
     for (const a of room.artifacts ?? []) {
       if (a.path === oldRel) a.path = newRel;
     }
@@ -1144,7 +1149,7 @@ export class RoomManager {
     }
     if (!fs.existsSync(found.real)) throw new Error("file not found");
     fs.unlinkSync(found.real);
-    return { deleted: true, rel: path.relative(found.root, found.real) };
+    return { deleted: true, rel: normalizeRel(path.relative(found.root, found.real)) };
   }
 
   /** 重命名指定 session 允许路径内的文件 */
@@ -1159,8 +1164,8 @@ export class RoomManager {
     fs.renameSync(fromFound.real, toFound.real);
     return {
       renamed: true,
-      fromRel: path.relative(fromFound.root, fromFound.real),
-      toRel: path.relative(toFound.root, toFound.real),
+      fromRel: normalizeRel(path.relative(fromFound.root, fromFound.real)),
+      toRel: normalizeRel(path.relative(toFound.root, toFound.real)),
     };
   }
 

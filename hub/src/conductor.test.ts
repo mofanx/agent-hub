@@ -2651,7 +2651,7 @@ describe("conductor", () => {
   it("workspaceSnapshotHash：跟踪/未跟踪/删除/恢复均反映真实字节", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-iso-hash-"));
     const git = (args: string[]) =>
-      execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
+      execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
     try {
       assert.equal(
         workspaceSnapshotHash(dir),
@@ -2702,7 +2702,7 @@ describe("conductor", () => {
       Boolean(process.env.XDG_RUNTIME_DIR);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-iso-test-"));
     const git = (args: string[]) =>
-      execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
+      execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
     try {
       git(["init", "--quiet"]);
       fs.writeFileSync(path.join(dir, ".gitignore"), "data/\n");
