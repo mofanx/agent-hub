@@ -68,6 +68,48 @@ export function parseTaskCommand(
   return tasks.length > 0 ? tasks : [];
 }
 
+type ConductorTask = {
+  to: string;
+  task: string;
+  id?: string;
+  dependsOn?: string[];
+  files?: string[];
+};
+
+const normalizeFilePath = (f: string) =>
+  f.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+
+/** 声明了相同文件的并行任务合并为一个，避免多 worker 写同一文件产生冲突 */
+function mergeFileOverlappingTasks(tasks: ConductorTask[] | undefined): ConductorTask[] | undefined {
+  if (!tasks || tasks.length === 0 || tasks.every((t) => !t.files?.length)) return tasks;
+  const out: ConductorTask[] = [];
+  const idMap = new Map<string, string>();
+  let merged = false;
+  for (const t of tasks) {
+    const files = (t.files ?? []).map(normalizeFilePath);
+    const target = files.length
+      ? out.find((o) => (o.files ?? []).map(normalizeFilePath).some((f) => files.includes(f)))
+      : undefined;
+    if (!target) {
+      out.push({ ...t });
+      continue;
+    }
+    merged = true;
+    target.task = `${target.task}\n\n${t.task}`;
+    if (t.files) target.files = [...new Set([...(target.files ?? []), ...t.files])];
+    target.dependsOn = [...new Set([...(target.dependsOn ?? []), ...(t.dependsOn ?? [])])];
+    if (t.id && !target.id) target.id = t.id;
+    if (t.id && target.id && t.id !== target.id) idMap.set(t.id, target.id);
+  }
+  if (!merged) return tasks;
+  logWarn("room-modes conductor", `检测到声明相同文件的并行任务，已合并（${tasks.length} -> ${out.length}）`);
+  for (const t of out) {
+    if (!t.dependsOn) continue;
+    t.dependsOn = [...new Set(t.dependsOn.map((d) => idMap.get(d) ?? d))].filter((d) => d !== t.id);
+  }
+  return out;
+}
+
 type AutoDecisionContext = PromptOptions & {
   roomId: string;
   text: string;
@@ -657,19 +699,38 @@ export class RoomModeManager {
       if (list.length > 50) list.shift();
       this.autoHistory.set(room.roomId, list);
       this.lastAuto.set(room.roomId, { at });
-      const label = MODE_LABELS[decision.mode] ?? decision.mode;
-      logWarn("room-modes auto", `解析决策：mode=${decision.mode}，reason=${decision.reason}`);
-      this.setSubMode(room.roomId, decision.mode, this.activeSpeakerFor(room, decision.mode, decision.params), decision.reason);
+      // 退化检测：conductor 全部任务指向同一成员时，编排开销无意义，降级执行
+      let mode = decision.mode;
+      let params = decision.params;
+      if (mode === "conductor" && Array.isArray(params?.tasks) && params.tasks.length > 0) {
+        const resolved = (params.tasks as { to?: unknown }[]).map((t) =>
+          typeof t.to === "string" ? resolveMemberByString(room, t.to)?.sessionId : undefined,
+        );
+        if (resolved.every(Boolean) && new Set(resolved).size === 1) {
+          const only = resolved[0]!;
+          if (only === room.conductorId) {
+            mode = "self";
+            params = undefined;
+          } else {
+            mode = "mention";
+            params = { targets: [only] };
+          }
+          logWarn("room-modes auto", `conductor 任务全部指向 ${only}，降级为 ${mode}`);
+        }
+      }
+      const label = MODE_LABELS[mode] ?? mode;
+      logWarn("room-modes auto", `解析决策：mode=${mode}，reason=${decision.reason}`);
+      this.setSubMode(room.roomId, mode, this.activeSpeakerFor(room, mode, params), decision.reason);
       this.notice({
         roomId: room.roomId,
         message: `🎛️ 本轮自动选择：${label}${decision.reason ? ` —— ${decision.reason}` : ""}`,
       });
-      const result = await this.executeMode(room, decision.mode, autoCtx.text, {
+      const result = await this.executeMode(room, mode, autoCtx.text, {
         note: autoCtx.note,
         quote: autoCtx.quote,
         content: autoCtx.content,
         sessionNote: autoCtx.sessionNote,
-        params: decision.params,
+        params,
         artifactContext: autoCtx.artifactContext,
       });
       logWarn("room-modes auto", `executeMode 完成：sent=[${result.sent.join(", ")}]，skipped=[${result.skipped.join(", ")}]`);
@@ -951,7 +1012,7 @@ export class RoomModeManager {
           .map((t) => {
             const o = t as Record<string, unknown>;
             if (typeof o.to !== "string" || typeof o.task !== "string") return null;
-            const result: { to: string; task: string; id?: string; dependsOn?: string[] } = {
+            const result: { to: string; task: string; id?: string; dependsOn?: string[]; files?: string[] } = {
               to: o.to,
               task: o.task,
             };
@@ -959,15 +1020,19 @@ export class RoomModeManager {
             if (Array.isArray(o.dependsOn)) {
               result.dependsOn = o.dependsOn.map((s) => String(s)).filter(Boolean);
             }
+            if (Array.isArray(o.files)) {
+              result.files = o.files.map((s) => String(s)).filter(Boolean);
+            }
             return result;
           })
-          .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[] }[]
+          .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[]; files?: string[] }[]
       : undefined;
 
     const jsonTasks = parseTasks(text, room) ?? [];
     const commandTasks = parseTaskCommand(text) ?? [];
-    const initialTasks =
-      paramTasks?.length ? paramTasks : jsonTasks.length ? jsonTasks : (commandTasks.length ? commandTasks : undefined);
+    const initialTasks = mergeFileOverlappingTasks(
+      paramTasks?.length ? paramTasks : jsonTasks.length ? jsonTasks : (commandTasks.length ? commandTasks : undefined),
+    );
 
     let task = text;
     if (options?.note) task = `${options.note}\n\n${task}`;
@@ -1493,14 +1558,14 @@ export class RoomModeManager {
       '- parallel: { "summarizer": "sessionId" }',
       '- pipeline: { "order": ["sessionId", ...] }',
       '- debate: { "sides": ["sessionId", "sessionId"], "judge": "sessionId", "rounds": 2 }',
-      '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":[]}] }',
+      '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":[],"files":["预计修改的文件，可选"]}] }',
       '- self: { }',
       "",
       "conductor 模式 params 使用约束：",
       "- `tasks` 中的 `to` 必须是除主持人（你自己）之外的成员 id 或名字；",
       "- 不要写\"提交\"、\"汇总\"等主持人动作作为 worker task，这些由主持人自动完成；",
       "- `dependsOn` 只能引用同一 `tasks` 列表里、且排在前面的任务 `id`，不要自引用或引用未定义的任务；",
-      "- 各任务之间应尽量文件级排他，避免多个 worker 修改同一文件产生冲突。",
+      "- 各任务之间应尽量文件级排他，可用 `files` 声明预计修改文件；若两个任务声明了相同文件，系统会自动合并为一个任务。",
       "",
       "最近上下文：",
       boardText,
