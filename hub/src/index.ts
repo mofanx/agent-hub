@@ -457,7 +457,14 @@ const agentOps: AgentOps = {
     if (typeof content === "string") return agent.prompt(sessionId, content);
     return agent.promptContent(sessionId, content);
   },
-  isBusy: (sessionId) => ownerOf(sessionId).isBusy(sessionId),
+  isBusy: (sessionId) => {
+    try {
+      return ownerOf(sessionId).isBusy(sessionId);
+    } catch {
+      return false; // 会话已被删除或 owner 未连接：视为不忙
+    }
+  },
+  has: (sessionId) => sessionMetas.has(sessionId),
   cancel: (sessionId) => ownerOf(sessionId).cancel(sessionId),
   cwd: (sessionId) => sessionMetas.get(sessionId)?.cwd,
   runIsolatedCheck,

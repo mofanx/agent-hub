@@ -12,6 +12,8 @@ export type PromptContent = Array<Record<string, unknown>>;
 export interface AgentOps {
   prompt(sessionId: string, content: string | PromptContent): Promise<void>;
   isBusy(sessionId: string): boolean;
+  /** 会话是否仍存在（被删除的会话返回 false），用于编排恢复时识别失效成员 */
+  has?(sessionId: string): boolean;
   cwd?(sessionId: string): string | undefined;
   runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
 }
@@ -922,7 +924,7 @@ export class ConductorOrchestrator {
   }
 
   private sendPlanningPrompt(flow: Flow, room: Room): void {
-    if (flow.phase !== "planning" || !room.conductorId) {
+    if (flow.phase !== "planning" || !room.conductorId || this.conductorGone(flow, room)) {
       this.planningInFlight.delete(flow.roomId);
       return;
     }
@@ -1592,6 +1594,16 @@ export class ConductorOrchestrator {
     this.dispatchPendingHelp(flow, room);
     this.ensureHelpDispatch(flow, room);
 
+    // 成员会话已删除的任务直接标记失败，避免无限重试
+    if (this.agent.has) {
+      for (const t of flow.tasks.values()) {
+        if ((t.status === "pending" || t.status === "running") && !this.agent.has(t.sessionId)) {
+          t.status = "failed";
+          t.failureMessage = "成员会话已失效";
+        }
+      }
+    }
+
     // 依赖失败传播：任何 failed task 的下游 pending task 标记为 failed
     const failedIds = new Set<string>();
     for (const [id, t] of flow.tasks) {
@@ -1862,8 +1874,18 @@ export class ConductorOrchestrator {
       .map((t) => t.id);
   }
 
+  /** 主持人会话已被删除时终止 flow，避免无限重试 */
+  private conductorGone(flow: Flow, room: Room): boolean {
+    if (room.conductorId && (!this.agent.has || this.agent.has(room.conductorId))) return false;
+    this.notice({ roomId: flow.roomId, message: "主持人会话已失效，本次编排终止" });
+    flow.phase = "done";
+    this.emitFlow?.(flow.roomId);
+    return true;
+  }
+
   private async review(flow: Flow, room: Room): Promise<void> {
     if (flow.phase !== "working" && flow.phase !== "reviewing") return;
+    if (this.conductorGone(flow, room)) return;
     if (flow.phase === "reviewing" && this.agent.isBusy(room.conductorId!)) return;
     flow.phase = "reviewing";
     this.emitFlow?.(flow.roomId);
@@ -1997,6 +2019,7 @@ export class ConductorOrchestrator {
 
   private async summarize(flow: Flow, room: Room): Promise<void> {
     if (flow.phase !== "working" && flow.phase !== "reviewing" && flow.phase !== "summarizing") return;
+    if (this.conductorGone(flow, room)) return;
     if (flow.phase === "summarizing" && this.agent.isBusy(room.conductorId!)) return;
     flow.phase = "summarizing";
     this.emitFlow?.(flow.roomId);

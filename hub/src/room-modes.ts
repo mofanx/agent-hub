@@ -9,6 +9,8 @@ export type PromptContent = Array<Record<string, unknown>>;
 export interface AgentOps {
   prompt(sessionId: string, content: string | PromptContent): Promise<void>;
   isBusy(sessionId: string): boolean;
+  /** 会话是否仍存在（被删除的会话返回 false），用于编排恢复时识别失效成员 */
+  has?(sessionId: string): boolean;
   cancel(sessionId: string): Promise<void>;
   cwd?(sessionId: string): string | undefined;
   runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
