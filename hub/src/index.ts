@@ -1151,7 +1151,11 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const sessionId = String(req.params?.sessionId ?? "");
       const meta = sessionMetas.get(sessionId);
       if (!meta) throw new Error(`unknown session: ${sessionId}`);
-      if (owners.has(sessionId)) return { resumed: true, already: true };
+      const ownerAgent = agents.get(owners.get(sessionId) ?? "");
+      if (ownerAgent?.listSessions().some((s) => s.sessionId === sessionId)) {
+        return { resumed: true, already: true };
+      }
+      owners.delete(sessionId);
       const connectionId = meta.connectionId;
       if (!connectionId) throw new Error("session has no connection");
       const connection = getConnectionById(connectionId);
