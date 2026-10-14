@@ -1514,22 +1514,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hub.call("room.list")
                 val list = result["rooms"]?.jsonArray ?: return
                 rooms.clear()
-                for (r in list) {
-                    val o = r.jsonObject
-                    rooms.add(
-                        RoomInfo(
-                            o["roomId"]!!.jsonPrimitive.content,
-                            o["name"]!!.jsonPrimitive.content,
-                            o["mode"]?.jsonPrimitive?.content ?: "mention",
-                            o["conductorId"]?.jsonPrimitive?.content,
-                            o["members"]!!.jsonArray.map {
-                                val m = it.jsonObject
-                                m["sessionId"]!!.jsonPrimitive.content to
-                                    m["name"]!!.jsonPrimitive.content
-                            },
-                        )
-                    )
-                }
+                for (r in list) rooms.add(parseRoom(r.jsonObject))
+                currentRoom?.let { cur -> rooms.find { it.roomId == cur.roomId }?.let { currentRoom = it } }
             } catch (_: Exception) {
             }
             try {

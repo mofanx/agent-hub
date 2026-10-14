@@ -1323,7 +1323,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (isRoomNameTaken(name, roomId)) throw new Error("room name already exists");
       rooms.rename(roomId, name);
       persistState();
-      return { room };
+      return { room: enrichRoom(rooms.get(roomId)!) };
     }
     case "room.archive": {
       const roomId = String(req.params?.roomId ?? "");
@@ -1332,7 +1332,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!room) throw new Error(`unknown room: ${roomId}`);
       rooms.archive(roomId, archived);
       persistState();
-      return { room };
+      return { room: enrichRoom(rooms.get(roomId)!) };
     }
     case "room.update": {
       const roomId = String(req.params?.roomId ?? "");
@@ -1393,7 +1393,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       };
       const room = rooms.create(newName, newMembers, source.mode, config);
       persistState();
-      return { room };
+      return { room: enrichRoom(room) };
     }
     case "connection.list":
       return {

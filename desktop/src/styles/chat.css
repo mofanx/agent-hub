@@ -77,6 +77,10 @@
   font-weight: 600;
 }
 
+.chat-quota {
+  margin-left: auto;
+}
+
 .chat-meta > * {
   flex: none;
   max-width: 100%;

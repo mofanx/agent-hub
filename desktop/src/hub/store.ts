@@ -1232,7 +1232,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const list = ((rmList.rooms as unknown[] | undefined) ?? []).map((it) =>
           parseRoom(it as Record<string, unknown>),
         );
-        set({ rooms: list });
+        const cur = get().currentRoom;
+        set({
+          rooms: list,
+          ...(cur ? { currentRoom: list.find((r) => r.roomId === cur.roomId) ?? cur } : {}),
+        });
       } catch {}
 
       try {

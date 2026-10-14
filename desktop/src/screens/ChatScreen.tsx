@@ -725,12 +725,12 @@ export function ChatScreen() {
               <>
                 <div className="chat-meta">
                   {subtitle && <div className="chat-subtitle">{subtitle}</div>}
-                  {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
                   {subModeLabel && (
                     <div className="chat-usage chat-current-mode">
                       {S.modeCurrent.replace("%s", subModeLabel)}
                     </div>
                   )}
+                  {quotaSummary && <div className="chat-usage chat-quota">{quotaSummary}</div>}
                 </div>
                 {contextUsage && <div className="chat-usage">{formatContextUsage(contextUsage, S)}</div>}
               </>

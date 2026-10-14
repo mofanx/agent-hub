@@ -502,28 +502,38 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 else -> sub
                             }
                         }
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                modeLabel,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    modeLabel,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (subModeLabel != null) {
+                                    Text(
+                                        S.modeCurrent.format(subModeLabel),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
                             if (quotaText.isNotEmpty()) {
                                 Text(
                                     quotaText,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.outline,
-                                )
-                            }
-                            if (subModeLabel != null) {
-                                Text(
-                                    S.modeCurrent.format(subModeLabel),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
