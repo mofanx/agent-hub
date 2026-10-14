@@ -44,6 +44,11 @@ export interface Strings {
   errorLabel: string;
   thoughtProcess: string;
   plan: string;
+  processSteps: string;
+  finalSummary: string;
+  summaryCompleted: string;
+  summaryAdopted: string;
+  summaryVerified: string;
   verificationBy: string;
   verificationStatusLabel: string;
   verificationStatusUnverified: string;
@@ -150,6 +155,11 @@ const zh: Strings = {
   errorLabel: "错误",
   thoughtProcess: "思考过程",
   plan: "计划",
+  processSteps: "执行过程（%s 步）",
+  finalSummary: "最终总结",
+  summaryCompleted: "%s/%s 任务已完成",
+  summaryAdopted: "已采纳 %s 条用户补充",
+  summaryVerified: "已记录 %s 条独立验证",
   verificationBy: "成员验证 @%s：",
   verificationStatusLabel: "验证：",
   verificationStatusUnverified: "尚未验证",
@@ -256,6 +266,11 @@ const en: Strings = {
   errorLabel: "Error",
   thoughtProcess: "Thinking",
   plan: "Plan",
+  processSteps: "Process (%s steps)",
+  finalSummary: "Final summary",
+  summaryCompleted: "%s/%s tasks completed",
+  summaryAdopted: "Adopted %s user supplements",
+  summaryVerified: "Recorded %s independent verifications",
   verificationBy: "Member review by @%s: ",
   verificationStatusLabel: "Verification: ",
   verificationStatusUnverified: "Not yet verified",

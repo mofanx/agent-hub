@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { Store } from "./store.js";
 
 export type RoomMode =
   | "mention"
@@ -181,6 +182,7 @@ export class RoomManager {
   private aliasSeqs = new Map<string, number>();
   private getPersona?: (roleId: string) => string | undefined;
   private getCwd?: (sessionId: string) => string | undefined;
+  private store?: Store;
 
   setRoleResolver(getPersona: (roleId: string) => string | undefined): void {
     this.getPersona = getPersona;
@@ -188,6 +190,14 @@ export class RoomManager {
 
   setCwdResolver(getCwd: (sessionId: string) => string | undefined): void {
     this.getCwd = getCwd;
+  }
+
+  setStore(store: Store): void {
+    this.store = store;
+  }
+
+  private appendEvent(roomId: string, type: string, payload: Record<string, unknown>): void {
+    this.store?.appendRoomEvent(roomId, type, payload);
   }
 
   create(
@@ -288,6 +298,113 @@ export class RoomManager {
     }
     this.rooms.set(room.roomId, room);
     this.aliasSeqs.set(room.roomId, room.artifacts.length);
+    this.replayRoomEvents(room);
+  }
+
+  private replayRoomEvents(room: Room): void {
+    if (!this.store) return;
+    const events = this.store.getRoomEvents(room.roomId);
+    if (events.length === 0) return;
+    room.blackboard = [];
+    room.artifacts = [];
+    room.events = [];
+    this.aliasSeqs.set(room.roomId, 0);
+    for (const e of events) this.applyRoomEvent(room, e);
+  }
+
+  private applyRoomEvent(
+    room: Room,
+    e: { seq: number; at: number; type: string; payload: Record<string, unknown> },
+  ): void {
+    const p = e.payload;
+    if (e.type === "blackboard") {
+      if (p.op === "clear") {
+        room.blackboard = [];
+        return;
+      }
+      if (p.op === "remove") {
+        const id = String(p.id ?? "");
+        room.blackboard = room.blackboard!.filter((b) => b.id !== id);
+        return;
+      }
+      const entry = p.entry as Record<string, unknown> | undefined;
+      if (entry) {
+        room.blackboard!.push({
+          id: String(entry.id),
+          from: String(entry.from),
+          text: String(entry.text),
+          detail: String(entry.detail),
+          at: Number(entry.at),
+        });
+      }
+      return;
+    }
+    if (e.type === "event") {
+      const ev = p.event as Record<string, unknown> | undefined;
+      if (!ev) return;
+      if (p.op === "update") {
+        const id = String(ev.id ?? "");
+        const existing = room.events!.find((x) => x.id === id);
+        if (existing) {
+          const action = typeof ev.action === "string" ? ev.action : undefined;
+          existing.action = isEventAction(action) ? action : existing.action;
+          existing.summary = String(ev.summary ?? existing.summary);
+          existing.at = Number(ev.at ?? existing.at);
+        }
+        return;
+      }
+      room.events!.push(this.deserializeRoomEvent(ev, e.at));
+      return;
+    }
+    if (e.type === "artifact") {
+      if (p.op === "clear") {
+        room.artifacts = [];
+        this.aliasSeqs.set(room.roomId, 0);
+        return;
+      }
+      if (p.op === "remove") {
+        const artifactId = String(p.artifactId ?? "");
+        room.artifacts = room.artifacts!.filter((a) => a.id !== artifactId);
+        return;
+      }
+      const artifact = p.artifact as Record<string, unknown> | undefined;
+      if (!artifact) return;
+      const id = String(artifact.id);
+      const existing = room.artifacts!.find((a) => a.id === id);
+      if (existing && p.op === "update") {
+        existing.author = String(artifact.author);
+        existing.summary = String(artifact.summary);
+        existing.at = Number(artifact.at);
+        if (artifact.taskId) existing.taskId = String(artifact.taskId);
+        room.artifacts!.splice(room.artifacts!.indexOf(existing), 1);
+        room.artifacts!.push(existing);
+        return;
+      }
+      room.artifacts!.push({
+        id,
+        alias: String(artifact.alias ?? this.nextAlias(room.roomId)),
+        author: String(artifact.author),
+        at: Number(artifact.at),
+        summary: String(artifact.summary),
+        ...(artifact.path ? { path: String(artifact.path) } : {}),
+        ...(artifact.taskId ? { taskId: String(artifact.taskId) } : {}),
+      });
+      return;
+    }
+  }
+
+  private deserializeRoomEvent(ev: Record<string, unknown>, at: number): RoomEvent {
+    const action = typeof ev.action === "string" ? ev.action : undefined;
+    return {
+      id: String(ev.id),
+      author: String(ev.author),
+      at: Number(ev.at ?? at),
+      action: isEventAction(action) ? action : "command",
+      summary: String(ev.summary),
+      ...(ev.path ? { path: String(ev.path) } : {}),
+      ...(ev.oldPath ? { oldPath: String(ev.oldPath) } : {}),
+      ...(ev.taskId ? { taskId: String(ev.taskId) } : {}),
+    };
   }
 
   roomsFor(sessionId: string): Room[] {
@@ -454,6 +571,7 @@ export class RoomManager {
         // 移到末尾，保持数组顺序与时间顺序一致（getArtifacts 倒序后最新在前）
         list.splice(list.indexOf(existing), 1);
         list.push(existing);
+        this.appendEvent(roomId, "artifact", { op: "update", artifact: this.serializeArtifact(existing) });
         return existing;
       }
     }
@@ -476,7 +594,21 @@ export class RoomManager {
     }
     list.push(item);
     if (list.length > ARTIFACT_LIMIT) list.shift();
+    this.appendEvent(roomId, "artifact", { op: "add", artifact: this.serializeArtifact(item) });
     return item;
+  }
+
+  private serializeArtifact(a: Artifact): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      id: a.id,
+      alias: a.alias,
+      author: a.author,
+      at: a.at,
+      summary: a.summary,
+    };
+    if (a.path) out.path = a.path;
+    if (a.taskId) out.taskId = a.taskId;
+    return out;
   }
 
   /** 添加一个事件到时间轴 */
@@ -502,7 +634,22 @@ export class RoomManager {
     };
     list.push(item);
     if (list.length > EVENT_LIMIT) list.shift();
+    this.appendEvent(roomId, "event", { event: this.serializeRoomEvent(item) });
     return item;
+  }
+
+  private serializeRoomEvent(e: RoomEvent): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      id: e.id,
+      author: e.author,
+      at: e.at,
+      action: e.action,
+      summary: e.summary,
+    };
+    if (e.path) out.path = e.path;
+    if (e.oldPath) out.oldPath = e.oldPath;
+    if (e.taskId) out.taskId = e.taskId;
+    return out;
   }
 
   /** fs 写入事件：5 秒窗口内同路径的 modify 事件（tool_call edit 先到）被修正为准确 action，避免重复 */
@@ -517,6 +664,7 @@ export class RoomManager {
         last.action = event.action;
         last.summary = event.summary;
         last.at = Date.now();
+        this.appendEvent(roomId, "event", { op: "update", event: this.serializeRoomEvent(last) });
         return last;
       }
     }
@@ -577,7 +725,11 @@ export class RoomManager {
     if (!room || !room.artifacts) return false;
     const before = room.artifacts.length;
     room.artifacts = room.artifacts.filter((a) => a.id !== artifactId);
-    return room.artifacts.length < before;
+    if (room.artifacts.length < before) {
+      this.appendEvent(roomId, "artifact", { op: "remove", artifactId });
+      return true;
+    }
+    return false;
   }
 
   /** 清空房间的产物登记处 */
@@ -586,6 +738,7 @@ export class RoomManager {
     if (!room || !room.artifacts) return 0;
     const before = room.artifacts.length;
     room.artifacts = [];
+    if (before > 0) this.appendEvent(roomId, "artifact", { op: "clear" });
     return before;
   }
 
@@ -1263,6 +1416,7 @@ export class RoomManager {
     const before = room.blackboard.length;
     const idx = room.blackboard.findIndex((e) => e.id === id);
     if (idx >= 0) room.blackboard.splice(idx, 1);
+    if (room.blackboard.length < before) this.appendEvent(roomId, "blackboard", { op: "remove", id });
     return room.blackboard.length < before;
   }
 
@@ -1271,6 +1425,7 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room || !room.blackboard || room.blackboard.length === 0) return false;
     room.blackboard.length = 0;
+    this.appendEvent(roomId, "blackboard", { op: "clear" });
     return true;
   }
 
@@ -1282,8 +1437,10 @@ export class RoomManager {
     const text = detail.replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN);
     if (!text) return false;
     const board = (room.blackboard ??= []);
-    board.push({ id: randomUUID(), from: sessionName, text, detail, at: Date.now() });
+    const entry = { id: randomUUID(), from: sessionName, text, detail, at: Date.now() };
+    board.push(entry);
     if (board.length > BLACKBOARD_LIMIT) board.shift();
+    this.appendEvent(roomId, "blackboard", { op: "add", entry });
     return true;
   }
 }

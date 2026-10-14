@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { logError, logWarn } from "./logger.js";
+import type { Store } from "./store.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -381,6 +382,7 @@ export class ConductorOrchestrator {
   private pendingToolCalls = new Map<string, Map<string, PendingToolCall>>();
   private readonly promptRetryMs: number;
   private readonly emitFlow: ((roomId: string) => void) | undefined;
+  private store?: Store;
 
   constructor(
     private readonly agent: AgentOps,
@@ -392,6 +394,10 @@ export class ConductorOrchestrator {
   ) {
     this.emitFlow = emitFlow;
     this.promptRetryMs = promptRetryMs ?? PROMPT_RETRY_MS;
+  }
+
+  setStore(store: Store): void {
+    this.store = store;
   }
 
   hasActiveFlow(roomId: string): boolean {
@@ -2142,61 +2148,67 @@ export class ConductorOrchestrator {
     return true;
   }
 
-  export(): Record<string, unknown> {
+  private serializeFlow(flow: Flow): Record<string, unknown> {
     return {
-      flows: [...this.flows.values()].map((flow) => ({
-        roomId: flow.roomId,
-        phase: flow.phase,
-        goal: flow.goal,
-        acceptanceCriteria: flow.acceptanceCriteria,
-        iteration: flow.iteration,
-        maxIterations: flow.maxIterations,
-        ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
-        tasks: [...flow.tasks.values()].map((t) => ({
-          id: t.id,
-          sessionId: t.sessionId,
-          task: t.task,
-          dependsOn: t.dependsOn,
-          status: t.status,
-          iteration: t.iteration,
-          ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
-          ...(t.retries !== undefined ? { retries: t.retries } : {}),
-          ...(t.helpRounds !== undefined ? { helpRounds: t.helpRounds } : {}),
-          ...(t.waitingForHelp !== undefined ? { waitingForHelp: t.waitingForHelp } : {}),
-          ...(t.verifications !== undefined ? { verifications: t.verifications } : {}),
-          ...(t.backendRuns !== undefined ? { backendRuns: t.backendRuns } : {}),
-          ...(t.automaticCheck !== undefined ? { automaticCheck: t.automaticCheck } : {}),
-        })),
-        supplements: flow.supplements,
-        help: [...flow.help.values()],
-        ...(flow.clarification ? { clarification: flow.clarification } : {}),
-        ...(flow.clarificationAsked ? { clarificationAsked: true } : {}),
-        ...(flow.clarificationAnswer !== undefined
-          ? { clarificationAnswer: flow.clarificationAnswer }
-          : {}),
-        ...(flow.challengeScheduled ? { challengeScheduled: true } : {}),
-        ...(flow.challengeTaskId ? { challengeTaskId: flow.challengeTaskId } : {}),
-        planFormatRetries: flow.planFormatRetries,
-        results: Object.fromEntries(
-          [...flow.results.entries()].map(([id, r]) => [
-            id,
-            {
-              text: r.text,
-              artifacts: r.artifacts,
-              ...(r.baseline !== undefined ? { baseline: r.baseline } : {}),
-              ...(r.diff !== undefined ? { diff: r.diff } : {}),
-              ...(r.reproSteps !== undefined ? { reproSteps: r.reproSteps } : {}),
-              ...(r.verifyCommand !== undefined ? { verifyCommand: r.verifyCommand } : {}),
-              ...(r.verifyExitCode !== undefined ? { verifyExitCode: r.verifyExitCode } : {}),
-              ...(r.verifyStdout !== undefined ? { verifyStdout: r.verifyStdout } : {}),
-              ...(r.verifyStderr !== undefined ? { verifyStderr: r.verifyStderr } : {}),
-              ...(r.verifyCheckId !== undefined ? { verifyCheckId: r.verifyCheckId } : {}),
-            },
-          ]),
-        ),
-        artifactContext: flow.artifactContext,
+      roomId: flow.roomId,
+      phase: flow.phase,
+      goal: flow.goal,
+      acceptanceCriteria: flow.acceptanceCriteria,
+      iteration: flow.iteration,
+      maxIterations: flow.maxIterations,
+      ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
+      tasks: [...flow.tasks.values()].map((t) => ({
+        id: t.id,
+        sessionId: t.sessionId,
+        task: t.task,
+        dependsOn: t.dependsOn,
+        status: t.status,
+        iteration: t.iteration,
+        ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
+        ...(t.retries !== undefined ? { retries: t.retries } : {}),
+        ...(t.helpRounds !== undefined ? { helpRounds: t.helpRounds } : {}),
+        ...(t.waitingForHelp !== undefined ? { waitingForHelp: t.waitingForHelp } : {}),
+        ...(t.verifications !== undefined ? { verifications: t.verifications } : {}),
+        ...(t.backendRuns !== undefined ? { backendRuns: t.backendRuns } : {}),
+        ...(t.automaticCheck !== undefined ? { automaticCheck: t.automaticCheck } : {}),
       })),
+      supplements: flow.supplements,
+      help: [...flow.help.values()],
+      ...(flow.clarification ? { clarification: flow.clarification } : {}),
+      ...(flow.clarificationAsked ? { clarificationAsked: true } : {}),
+      ...(flow.clarificationAnswer !== undefined
+        ? { clarificationAnswer: flow.clarificationAnswer }
+        : {}),
+      ...(flow.challengeScheduled ? { challengeScheduled: true } : {}),
+      ...(flow.challengeTaskId ? { challengeTaskId: flow.challengeTaskId } : {}),
+      planFormatRetries: flow.planFormatRetries,
+      results: Object.fromEntries(
+        [...flow.results.entries()].map(([id, r]) => [
+          id,
+          {
+            text: r.text,
+            artifacts: r.artifacts,
+            ...(r.baseline !== undefined ? { baseline: r.baseline } : {}),
+            ...(r.diff !== undefined ? { diff: r.diff } : {}),
+            ...(r.reproSteps !== undefined ? { reproSteps: r.reproSteps } : {}),
+            ...(r.verifyCommand !== undefined ? { verifyCommand: r.verifyCommand } : {}),
+            ...(r.verifyExitCode !== undefined ? { verifyExitCode: r.verifyExitCode } : {}),
+            ...(r.verifyStdout !== undefined ? { verifyStdout: r.verifyStdout } : {}),
+            ...(r.verifyStderr !== undefined ? { verifyStderr: r.verifyStderr } : {}),
+            ...(r.verifyCheckId !== undefined ? { verifyCheckId: r.verifyCheckId } : {}),
+          },
+        ]),
+      ),
+      artifactContext: flow.artifactContext,
     };
+  }
+
+  export(): Record<string, unknown> {
+    for (const flow of this.flows.values()) {
+      const snapshot = this.serializeFlow(flow);
+      this.store?.saveFlowSnapshot(flow.roomId, this.store.getMaxRoomSeq(flow.roomId), snapshot);
+    }
+    return { flows: [...this.flows.values()].map((flow) => this.serializeFlow(flow)) };
   }
 
   async import(state: Record<string, unknown>): Promise<void> {

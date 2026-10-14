@@ -119,6 +119,57 @@ export class Store {
   readonly dir: string;
   private db: Database.Database;
 
+  appendRoomEvent(
+    roomId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(seq), 0) AS m FROM room_events WHERE room_id = ?")
+      .get(roomId) as { m: number };
+    const seq = (row?.m ?? 0) + 1;
+    this.db
+      .prepare(
+        "INSERT INTO room_events(room_id, seq, at, type, payload) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(roomId, seq, Date.now(), type, JSON.stringify(payload));
+    return seq;
+  }
+
+  getRoomEvents(
+    roomId: string,
+    since = 0,
+  ): { seq: number; at: number; type: string; payload: Record<string, unknown> }[] {
+    const rows = this.db
+      .prepare(
+        "SELECT seq, at, type, payload FROM room_events WHERE room_id = ? AND seq > ? ORDER BY seq",
+      )
+      .all(roomId, since) as { seq: number; at: number; type: string; payload: string }[];
+    return rows.map((r) => ({ seq: r.seq, at: r.at, type: r.type, payload: JSON.parse(r.payload) as Record<string, unknown> }));
+  }
+
+  saveFlowSnapshot(roomId: string, seq: number, snapshot: Record<string, unknown>): void {
+    this.db
+      .prepare(
+        "INSERT INTO flow_snapshots(room_id, seq, at, snapshot) VALUES (?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET seq = excluded.seq, at = excluded.at, snapshot = excluded.snapshot",
+      )
+      .run(roomId, seq, Date.now(), JSON.stringify(snapshot));
+  }
+
+  getMaxRoomSeq(roomId: string): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(seq), 0) AS m FROM room_events WHERE room_id = ?")
+      .get(roomId) as { m: number } | undefined;
+    return row?.m ?? 0;
+  }
+
+  loadFlowSnapshot(roomId: string): { seq: number; snapshot: Record<string, unknown> } | undefined {
+    const row = this.db
+      .prepare("SELECT seq, snapshot FROM flow_snapshots WHERE room_id = ?")
+      .get(roomId) as { seq: number; snapshot: string } | undefined;
+    return row ? { seq: row.seq, snapshot: JSON.parse(row.snapshot) as Record<string, unknown> } : undefined;
+  }
+
   close(): void {
     try { this.db.close(); } catch { /* already closed */ }
   }
@@ -166,6 +217,23 @@ export class Store {
         cwd TEXT,
         persona TEXT NOT NULL,
         builtin INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS room_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        UNIQUE(room_id, seq)
+      );
+      CREATE INDEX IF NOT EXISTS idx_room_events_room_seq
+        ON room_events(room_id, seq);
+      CREATE TABLE IF NOT EXISTS flow_snapshots (
+        room_id TEXT PRIMARY KEY,
+        seq INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        snapshot TEXT NOT NULL
       );
     `);
     this.migrateSchema();

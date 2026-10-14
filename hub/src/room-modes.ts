@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
 import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
+import type { Store } from "./store.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -188,6 +189,7 @@ export class RoomModeManager {
   private promptRooms = new Map<string, string>();
   private autoHistory = new Map<string, { at: number; mode: string; reason: string; accepted?: boolean }[]>();
   private lastAuto = new Map<string, { at: number }>();
+  private store?: Store;
 
   constructor(
     private readonly agent: AgentOps,
@@ -199,6 +201,11 @@ export class RoomModeManager {
     this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs, isolatedChecks);
   }
 
+  setStore(store: Store): void {
+    this.store = store;
+    this.conductor.setStore(store);
+  }
+
   exportRuntime(): Record<string, unknown> {
     return {
       conductor: this.conductor.export(),
@@ -207,11 +214,25 @@ export class RoomModeManager {
   }
 
   async importRuntime(state: Record<string, unknown> | undefined): Promise<void> {
-    if (!state) return;
-    const conductorState = typeof state.conductor === "object" && state.conductor !== null
+    if (!state) state = {};
+    const conductorState: Record<string, unknown> = typeof state.conductor === "object" && state.conductor !== null
       ? (state.conductor as Record<string, unknown>)
-      : undefined;
-    if (conductorState) await this.conductor.import(conductorState);
+      : { flows: [] };
+    if (this.store) {
+      const byRoom = new Map<string, Record<string, unknown>>();
+      const existing = Array.isArray(conductorState.flows) ? (conductorState.flows as unknown[]) : [];
+      for (const raw of existing) {
+        const f = raw as Record<string, unknown>;
+        const roomId = String(f.roomId ?? "");
+        if (roomId) byRoom.set(roomId, f);
+      }
+      for (const room of this.rooms.list()) {
+        const snap = this.store.loadFlowSnapshot(room.roomId);
+        if (snap) byRoom.set(room.roomId, snap.snapshot);
+      }
+      if (byRoom.size > 0) conductorState.flows = [...byRoom.values()];
+    }
+    await this.conductor.import(conductorState);
     const subModes = typeof state.subModes === "object" && state.subModes !== null
       ? (state.subModes as Record<string, { mode: RuntimeMode; activeSpeaker?: string; reason?: string }>)
       : undefined;

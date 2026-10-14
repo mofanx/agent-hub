@@ -1733,8 +1733,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     shouldShowInRoom: (sessionId: string) => {
       const room = get().currentRoom;
       if (!room) return true;
-      if (room.mode !== "conductor") return true;
-      return sessionId === room.conductorId;
+      return room.members.some((m) => m[0] === sessionId);
     },
 
     applyUpdate: (sessionId: string, u: Record<string, unknown>) => {

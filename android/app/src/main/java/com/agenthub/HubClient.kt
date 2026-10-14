@@ -20,6 +20,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import java.util.concurrent.TimeUnit
 
 class HubClient(private val scope: CoroutineScope) {
@@ -96,6 +97,11 @@ class HubClient(private val scope: CoroutineScope) {
                     return
                 }
                 scope.launch { _events.emit(obj) }
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (webSocket != ws) return
+                onMessage(webSocket, bytes.utf8())
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {

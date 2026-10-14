@@ -87,7 +87,7 @@ export class HubClient {
     this.callbacks?.onOpen();
   }
 
-  private _onMessage(text: string) {
+  private _handleText(text: string) {
     let obj: Record<string, unknown>;
     try {
       obj = JSON.parse(text);
@@ -108,6 +108,17 @@ export class HubClient {
     }
 
     this.eventListeners.forEach((l) => l(obj));
+  }
+
+  private _onMessage(data: unknown) {
+    if (typeof data === "string") return this._handleText(data);
+    if (data instanceof Blob) {
+      data.text().then((text) => this._handleText(text)).catch(() => {});
+      return;
+    }
+    if (data instanceof ArrayBuffer) {
+      return this._handleText(new TextDecoder().decode(data));
+    }
   }
 
   private _onClose() {

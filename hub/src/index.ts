@@ -71,6 +71,7 @@ const modelManager = new ModelManager();
 
 
 rooms.setRoleResolver((roleId) => store.listRoles().find((r) => r.id === roleId)?.persona);
+rooms.setStore(store);
 ensureDefaultLocalConnections();
 const savedState = store.load();
 const savedRuntime = savedState.runtime;
@@ -467,6 +468,7 @@ const roomModeManager = new RoomModeManager(
   undefined,
   parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS),
 );
+roomModeManager.setStore(store);
 
 // 恢复运行时编排状态（必须在 roomModeManager 创建后，但 agents 可能尚未连接）
 if (savedRuntime) {

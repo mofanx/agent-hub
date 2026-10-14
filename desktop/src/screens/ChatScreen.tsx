@@ -1951,6 +1951,18 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
           </ol>
         </div>
       )}
+      {phase === "done" && (
+        <div className="flow-summary-card">
+          <div className="flow-summary-title">{S.finalSummary}</div>
+          <div className="flow-summary-line">{S.summaryCompleted.replace("%s", String(progress.done)).replace("%s", String(progress.total))}</div>
+          {flow.supplements && flow.supplements.length > 0 && (
+            <div className="flow-summary-line">{S.summaryAdopted.replace("%s", String(flow.supplements.length))}</div>
+          )}
+          <div className="flow-summary-line">
+            {S.summaryVerified.replace("%s", String(tasks.reduce((n, t) => n + (t.verifications?.length ?? 0), 0)))}
+          </div>
+        </div>
+      )}
       <div className="flow-tasks">
         {tasks.map((t) => (
           <FlowTaskItem key={t.id} task={t} showRetry={showRetry} />

@@ -104,6 +104,11 @@ interface Strings {
     val thought: String
     val thoughtOf: String
     val plan: String
+    val processSteps: String
+    val finalSummary: String
+    val summaryCompleted: String
+    val summaryAdopted: String
+    val summaryVerified: String
     val permissionRequest: String
     val chose: String
     val errorTag: String
@@ -356,6 +361,11 @@ object ZhStrings : Strings {
     override val thought = "思考过程"
     override val thoughtOf = "%s 的思考"
     override val plan = "计划"
+    override val processSteps = "执行过程（%d 步）"
+    override val finalSummary = "最终总结"
+    override val summaryCompleted = "%d/%d 任务已完成"
+    override val summaryAdopted = "已采纳 %d 条用户补充"
+    override val summaryVerified = "已记录 %d 条独立验证"
     override val permissionRequest = "审批请求"
     override val chose = "已选择：%s"
     override val errorTag = "错误"
@@ -608,6 +618,11 @@ object EnStrings : Strings {
     override val thought = "Thinking"
     override val thoughtOf = "%s's thinking"
     override val plan = "Plan"
+    override val processSteps = "Process (%d steps)"
+    override val finalSummary = "Final summary"
+    override val summaryCompleted = "%d/%d tasks completed"
+    override val summaryAdopted = "Adopted %d user supplements"
+    override val summaryVerified = "Recorded %d independent verifications"
     override val permissionRequest = "Approval request"
     override val chose = "Selected: %s"
     override val errorTag = "Error"

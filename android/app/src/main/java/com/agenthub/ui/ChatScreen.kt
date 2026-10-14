@@ -1369,6 +1369,14 @@ fun ChatBubble(
             isQuoted = isQuoted,
             onMatchKeywordY = onMatchKeywordY,
         )
+        is ChatListItem.ProcessGroup -> ProcessGroupBlock(
+            item,
+            vm,
+            showAuthor = showAuthor,
+            highlight = highlight,
+            isCurrentMatch = isCurrentMatch,
+            onMatchKeywordY = onMatchKeywordY,
+        )
     }
 }
 
@@ -1505,6 +1513,54 @@ private fun MessageBlock(
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 4.dp),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessGroupBlock(
+    item: ChatListItem.ProcessGroup,
+    vm: ChatViewModel,
+    showAuthor: Boolean,
+    highlight: String = "",
+    isCurrentMatch: Boolean = false,
+    onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
+    val S = LocalStrings.current
+    var expanded by remember { mutableStateOf(false) }
+    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+    val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
+    Column(Modifier.padding(vertical = 4.dp)) {
+        if (showAuthor) AuthorLabel(item.author)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = bgColor),
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(
+                        (if (expanded) "▾ " else "▸ ") + "${S.processSteps.format(item.items.size)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = textColor,
+                    )
+                }
+                if (expanded) {
+                    Spacer(Modifier.height(4.dp))
+                    item.items.reversed().forEach { child ->
+                        RawChatBubble(
+                            child,
+                            vm,
+                            showAuthor = false,
+                            highlight = highlight,
+                            isCurrentMatch = false,
+                            isQuoted = false,
+                            onMatchKeywordY = keywordCallback,
+                        )
+                    }
+                }
             }
         }
     }
@@ -2146,6 +2202,43 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                         )
                     }
                     Spacer(Modifier.height(4.dp))
+                }
+                if (flow.phase == "done") {
+                    Spacer(Modifier.height(6.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                S.finalSummary,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                S.summaryCompleted.format(progress.done, progress.total),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                            if (flow.supplements.isNotEmpty()) {
+                                Text(
+                                    S.summaryAdopted.format(flow.supplements.size),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                )
+                            }
+                            val verificationCount = flow.tasks.sumOf { it.verifications.size }
+                            if (verificationCount > 0) {
+                                Text(
+                                    S.summaryVerified.format(verificationCount),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                )
+                            }
+                        }
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->

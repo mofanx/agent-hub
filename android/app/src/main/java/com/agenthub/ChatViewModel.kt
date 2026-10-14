@@ -205,6 +205,16 @@ sealed class ChatListItem {
         override val at: Long get() = item.at
         override val isFirst: Boolean get() = true
     }
+
+    data class ProcessGroup(
+        override val id: String,
+        override val originalId: Long,
+        override val author: String,
+        override val text: String,
+        override val at: Long,
+        val items: List<ChatItem>,
+        override val isFirst: Boolean = true,
+    ) : ChatListItem()
 }
 
 data class ConnectionInfo(
@@ -3588,12 +3598,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun shouldShowInRoom(sessionId: String): Boolean {
         val room = currentRoom ?: return true
-        val sub = room.subMode
-        return when {
-            room.mode == "conductor" -> sessionId == room.conductorId
-            room.mode == "auto" && (sub == "deciding" || sub == "self" || sub == "conductor" || sub == "roundrobin") -> sessionId == room.activeSpeaker
-            else -> true
-        }
+        return true
     }
 
     private fun handleEvent(obj: JsonObject) {
@@ -3831,13 +3836,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun expandChatItems(items: List<ChatItem>): List<ChatListItem> {
         val currentKeys = items.map { it.id to it.text }.toSet()
         chatListCache.keys.retainAll(currentKeys)
-        return items.flatMap { item ->
-            when (item) {
-                is ChatItem.User -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = true) }
-                is ChatItem.Assistant -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
-                else -> listOf(ChatListItem.Other(item))
+        val result = mutableListOf<ChatListItem>()
+        var i = 0
+        while (i < items.size) {
+            val item = items[i]
+            if (item is ChatItem.Thought || item is ChatItem.Tool || item is ChatItem.Plan) {
+                val group = mutableListOf<ChatItem>(item)
+                val author = item.author
+                i++
+                while (i < items.size) {
+                    val next = items[i]
+                    if (next.author == author && (next is ChatItem.Thought || next is ChatItem.Tool || next is ChatItem.Plan)) {
+                        group.add(next)
+                        i++
+                    } else break
+                }
+                result.add(
+                    ChatListItem.ProcessGroup(
+                        id = "p_${group.first().id}",
+                        originalId = group.first().id,
+                        author = author,
+                        text = group.joinToString("\n") { it.text },
+                        at = group.last().at,
+                        items = group,
+                    ),
+                )
+            } else {
+                result.addAll(
+                    when (item) {
+                        is ChatItem.User -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = true) }
+                        is ChatItem.Assistant -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
+                        else -> listOf(ChatListItem.Other(item))
+                    },
+                )
+                i++
             }
         }
+        return result
     }
 
     private fun splitItemBlocks(item: ChatItem, isUser: Boolean): List<ChatListItem> {
