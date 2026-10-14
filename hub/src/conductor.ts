@@ -94,6 +94,7 @@ type AutomaticCheck =
       status: "blocked";
       runner: "bubblewrap";
       reason: string;
+      detail?: string;
       startedAt: number;
       finishedAt: number;
     };
@@ -253,10 +254,12 @@ function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
   const startedAt = Number(o.startedAt ?? 0);
   const finishedAt = Number(o.finishedAt ?? 0);
   if (status === "blocked" && o.commandHash === undefined) {
+    const detail = typeof o.detail === "string" ? o.detail : undefined;
     return {
       status: "blocked",
       runner: "bubblewrap",
       reason: reason ?? "unknown",
+      ...(detail ? { detail } : {}),
       startedAt,
       finishedAt,
     };
@@ -281,7 +284,8 @@ function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
 function describeAutomaticCheck(c: AutomaticCheck, snapshotCurrent?: boolean): string {
   const exitCode = "exitCode" in c ? c.exitCode : undefined;
   const snapshot = "snapshotHash" in c ? c.snapshotHash : undefined;
-  return `隔离检查：${c.status},exitCode=${exitCode ?? "unknown"},snapshotHash=${snapshot?.slice(0, 12) ?? "none"}${snapshotCurrent === false ? "，当前工作区已变化或无法核对，旧隔离检查仅对应历史快照，不得据此宣称当前版本通过。" : ""}`;
+  const detail = "detail" in c && c.detail ? `,detail=${c.detail.slice(0, 200)}` : "";
+  return `隔离检查：${c.status},exitCode=${exitCode ?? "unknown"},snapshotHash=${snapshot?.slice(0, 12) ?? "none"}${detail}${snapshotCurrent === false ? "，当前工作区已变化或无法核对，旧隔离检查仅对应历史快照，不得据此宣称当前版本通过。" : ""}`;
 }
 
 type BackendClaimStatus =
@@ -574,10 +578,11 @@ export class ConductorOrchestrator {
     task.automaticCheck = check;
     const exitCode = "exitCode" in check ? check.exitCode : undefined;
     const snapshot = "snapshotHash" in check ? check.snapshotHash : undefined;
+    const detail = "detail" in check && check.detail ? `, detail=${check.detail.slice(0, 200)}` : "";
     this.rooms.addEvent(flow.roomId, {
       author: sessionId,
       action: "test",
-      summary: `隔离检查 [${task.id}]：${check.status}（exit=${exitCode ?? "unknown"}, snapshot=${snapshot?.slice(0, 12) ?? "none"}）`,
+      summary: `隔离检查 [${task.id}]：${check.status}（exit=${exitCode ?? "unknown"}, snapshot=${snapshot?.slice(0, 12) ?? "none"}${detail}）`,
       taskId: task.id,
     });
     this.emitFlow?.(flow.roomId);
@@ -2761,6 +2766,7 @@ export type IsolatedCheckResult = {
   startedAt: number;
   finishedAt: number;
   reason?: string;
+  detail?: string;
 };
 
 const ISO_EXCLUDED_DIRS = new Set([
@@ -2783,8 +2789,11 @@ const ISO_COMMAND_MAX = 256;
 let isolatedCheckInFlight = false;
 
 class IsoAbort extends Error {
-  constructor(public readonly reason: string) {
-    super(reason);
+  constructor(
+    public readonly reason: string,
+    public readonly detail?: string,
+  ) {
+    super(detail ? `${reason}: ${detail}` : reason);
   }
 }
 
@@ -2827,7 +2836,7 @@ function gitLsFiles(realCwd: string): string[] {
     return out.toString("utf8").split("\0").filter(Boolean);
   } catch (e) {
     if (e instanceof IsoAbort) throw e;
-    throw new IsoAbort("snapshot_error");
+    throw new IsoAbort("snapshot_error", String(e));
   }
 }
 
@@ -2865,7 +2874,7 @@ function snapshotWorkspace(srcRoot: string, dstRoot?: string): string {
         marker(rel, "DELETED");
         continue;
       }
-      throw new IsoAbort("snapshot_error");
+      throw new IsoAbort("snapshot_error", String(e));
     }
     if (lst.isSymbolicLink()) {
       marker(rel, "SKIPPED_SYMLINK");
@@ -2967,16 +2976,19 @@ export async function runIsolatedCheck(
     finishedAt: Date.now(),
     ...extra,
   });
-  const blocked = (reason: string) => finish("blocked", { reason });
+  const blocked = (reason: string, detail?: string) =>
+    finish("blocked", { reason, ...(detail ? { detail } : {}) });
   const trimmed = typeof command === "string" ? command.trim() : "";
   if (!trimmed || trimmed.length > ISO_COMMAND_MAX || /[\r\n]/.test(trimmed)) {
     return blocked("invalid_command");
   }
   if (isolatedCheckInFlight) return blocked("busy");
-  if (process.platform !== "linux") return blocked("unavailable");
-  if (!fs.existsSync("/usr/bin/systemd-run") || !fs.existsSync("/usr/bin/bwrap")) {
-    return blocked("unavailable");
-  }
+  if (process.platform !== "linux") return blocked("unavailable", `platform=${process.platform}`);
+  const missingBin = [
+    !fs.existsSync("/usr/bin/systemd-run") && "/usr/bin/systemd-run",
+    !fs.existsSync("/usr/bin/bwrap") && "/usr/bin/bwrap",
+  ].filter(Boolean).join(", ");
+  if (missingBin) return blocked("unavailable", `missing=${missingBin}`);
   isolatedCheckInFlight = true;
   let snapshotDir: string | undefined;
   try {
@@ -3013,6 +3025,7 @@ export async function runIsolatedCheck(
     } catch {}
     const outcome = await new Promise<{
       spawnError?: boolean;
+      spawnErrorMessage?: string;
       code: number | null;
       timedOut: boolean;
       stdout: Buffer;
@@ -3113,10 +3126,11 @@ export async function runIsolatedCheck(
           } catch {}
         }, 800).unref();
       }, ISO_TIMEOUT_MS);
-      child.on("error", () => {
+      child.on("error", (err) => {
         clearTimeout(killTimer);
         resolve({
           spawnError: true,
+          spawnErrorMessage: String(err),
           code: null,
           timedOut,
           stdout,
@@ -3137,7 +3151,7 @@ export async function runIsolatedCheck(
         });
       });
     });
-    if (outcome.spawnError) return blocked("start_failed");
+    if (outcome.spawnError) return blocked("start_failed", outcome.spawnErrorMessage);
     const shared = {
       snapshotHash,
       ...(outcome.stdout.length
@@ -3159,14 +3173,14 @@ export async function runIsolatedCheck(
     if (code !== 0) {
       const stderrText = outcome.stderr.toString("utf8");
       if (/bwrap:|systemd-run|Failed to (?:connect|start|create|allocate)/.test(stderrText)) {
-        return blocked("start_failed");
+        return blocked("start_failed", stderrText.slice(0, 500));
       }
       return finish("exited_nonzero", { ...shared, exitCode: code });
     }
     return finish("exited_zero", { ...shared, exitCode: 0 });
   } catch (e) {
-    if (e instanceof IsoAbort) return blocked(e.reason);
-    return blocked("snapshot_error");
+    if (e instanceof IsoAbort) return blocked(e.reason, e.detail);
+    return blocked("snapshot_error", String(e));
   } finally {
     if (snapshotDir) {
       try {
