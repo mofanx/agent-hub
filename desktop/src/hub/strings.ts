@@ -49,6 +49,14 @@ export interface Strings {
   thoughtProcess: string;
   plan: string;
   processSteps: string;
+  /** 房间时间线过程卡：@%s · N 步 */
+  processCardFmt: string;
+  processRunning: string;
+  processLoading: string;
+  processUnavailable: string;
+  /** 派发卡：已派发 %s 个子任务 */
+  dispatchCardFmt: string;
+  viewProcess: string;
   toolStatusPending: string;
   toolStatusInProgress: string;
   toolStatusCompleted: string;
@@ -536,6 +544,12 @@ const zh: Strings = {
   thoughtProcess: "思考过程",
   plan: "计划",
   processSteps: "执行过程（%s 步）",
+  processCardFmt: "@%s · 执行过程（%s 步）",
+  processRunning: "进行中…",
+  processLoading: "加载过程…",
+  processUnavailable: "过程不可用（会话已失效或 Hub 不支持）",
+  dispatchCardFmt: "已派发 %s 个子任务",
+  viewProcess: "查看过程",
   toolStatusPending: "排队中",
   toolStatusInProgress: "进行中",
   toolStatusCompleted: "已完成",
@@ -1023,6 +1037,12 @@ const en: Strings = {
   thoughtProcess: "Thinking",
   plan: "Plan",
   processSteps: "Process (%s steps)",
+  processCardFmt: "@%s · Process (%s steps)",
+  processRunning: "Running…",
+  processLoading: "Loading process…",
+  processUnavailable: "Process unavailable (session gone or unsupported)",
+  dispatchCardFmt: "Dispatched %s subtasks",
+  viewProcess: "View process",
   toolStatusPending: "Pending",
   toolStatusInProgress: "In progress",
   toolStatusCompleted: "Completed",

@@ -171,6 +171,25 @@ sealed class ChatItem {
     ) : ChatItem() {
         override val text: String get() = message
     }
+    data class ProcessStep(val kind: String, val title: String? = null, val text: String? = null)
+    data class DispatchTask(val id: String? = null, val to: String? = null, val task: String? = null)
+    data class Process(
+        override val id: Long,
+        val processId: String,
+        val sessionId: String,
+        val taskId: String?,
+        val status: String,
+        val steps: List<ProcessStep>,
+        val turnStartAt: Long,
+        val turnEndAt: Long,
+        val cardType: String = "",
+        val dispatchCount: Int = 0,
+        val dispatchTasks: List<DispatchTask> = emptyList(),
+        override val author: String,
+        override val at: Long = java.lang.System.currentTimeMillis(),
+    ) : ChatItem() {
+        override val text: String get() = steps.joinToString("\n") { it.title ?: it.text.orEmpty() }
+    }
 }
 
 /** 聊天列表里的可显示项：单个消息会按 Markdown 块展开为多个 ChatListItem.Message。 */
@@ -375,6 +394,8 @@ data class FlowTask(
     val verifyStdout: String? = null,
     val verifyStderr: String? = null,
     val verifyCheckId: String? = null,
+    val dispatchedAt: Long = 0,
+    val finishedAt: Long = 0,
 )
 
 data class FlowProgress(
@@ -2403,6 +2424,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             verifyStderr = obj["verifyStderr"]?.jsonPrimitive?.contentOrNull,
             verifyCheckId = obj["verifyCheckId"]?.jsonPrimitive?.contentOrNull
                 ?.takeIf { it.matches(Regex("[a-z][a-z0-9_-]{0,63}")) },
+            dispatchedAt = obj["dispatchedAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0,
+            finishedAt = obj["finishedAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0,
         )
     }
 
@@ -2532,9 +2555,48 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 ChatItem.Plan(itemId, entries, author, at = at)
             }
             "error" -> ChatItem.Error(itemId, text, author, at = at)
+            "process" -> {
+                try {
+                    parseProcessMeta(itemId, Json.parseToJsonElement(text).jsonObject, author, at)
+                } catch (_: Exception) {
+                    null
+                }
+            }
             else -> null
         }
     }
+
+    private fun parseProcessMeta(itemId: Long, data: JsonObject, author: String, at: Long): ChatItem.Process =
+        ChatItem.Process(
+            itemId,
+            processId = data["processId"]?.jsonPrimitive?.contentOrNull ?: "",
+            sessionId = data["sessionId"]?.jsonPrimitive?.contentOrNull ?: "",
+            taskId = data["taskId"]?.jsonPrimitive?.contentOrNull,
+            status = data["status"]?.jsonPrimitive?.contentOrNull ?: "",
+            steps = (data["steps"] as? JsonArray)?.mapNotNull { s ->
+                val o = s as? JsonObject ?: return@mapNotNull null
+                ChatItem.ProcessStep(
+                    kind = o["kind"]?.jsonPrimitive?.contentOrNull ?: "",
+                    title = o["title"]?.jsonPrimitive?.contentOrNull,
+                    text = o["text"]?.jsonPrimitive?.contentOrNull,
+                )
+            } ?: emptyList(),
+            turnStartAt = data["turnStartAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
+            turnEndAt = data["turnEndAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
+            cardType = data["type"]?.jsonPrimitive?.contentOrNull
+                ?: data["card"]?.jsonPrimitive?.contentOrNull ?: "",
+            dispatchTasks = (data["tasks"] as? JsonArray)?.mapNotNull { t ->
+                val o = t as? JsonObject ?: return@mapNotNull null
+                ChatItem.DispatchTask(
+                    id = o["id"]?.jsonPrimitive?.contentOrNull,
+                    to = o["to"]?.jsonPrimitive?.contentOrNull,
+                    task = o["task"]?.jsonPrimitive?.contentOrNull,
+                )
+            } ?: emptyList(),
+            dispatchCount = data["count"]?.jsonPrimitive?.intOrNull ?: 0,
+            author = author,
+            at = at,
+        )
 
     private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
         fun sameWindow(h: ChatItem, t: ChatItem): Boolean =
@@ -2558,6 +2620,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     hist.none { it is ChatItem.Plan && sameWindow(it, t) && sameAuthor(it, t) && it.entries == t.entries }
                 is ChatItem.Error ->
                     hist.none { it is ChatItem.Error && sameWindow(it, t) && sameAuthor(it, t) && it.text == t.text }
+                is ChatItem.Process ->
+                    hist.none { it is ChatItem.Process && t.processId.isNotEmpty() && it.processId == t.processId }
                 else -> true
             }
         }
@@ -2636,6 +2700,101 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 historyLoading = false
             }
         }
+    }
+
+    // 过程卡/任务钻取的懒加载缓存：key 为 processId、"card:<itemId>" 或 "task:<roomId>:<taskId>"
+    val processItems = mutableStateMapOf<String, List<ChatItem>>()
+    val processLoading = mutableStateMapOf<String, Boolean>()
+    val processUnavailable = mutableStateMapOf<String, Boolean>()
+
+    fun processKey(item: ChatItem.Process): String =
+        item.processId.ifEmpty { "card:${item.id}" }
+
+    fun loadProcessCard(item: ChatItem.Process) {
+        if (item.cardType == "dispatch" || item.dispatchTasks.isNotEmpty()) return
+        val key = processKey(item)
+        if (processLoading[key] == true) return
+        processLoading[key] = true
+        processUnavailable.remove(key)
+        viewModelScope.launch {
+            try {
+                val running = item.turnEndAt <= 0L || item.status == "running"
+                processItems[key] = fetchProcessItems(item.sessionId, item.turnStartAt, item.turnEndAt, running)
+            } catch (_: Exception) {
+                processUnavailable[key] = true
+            } finally {
+                processLoading[key] = false
+            }
+        }
+    }
+
+    fun loadTaskProcess(roomId: String, task: FlowTask) {
+        val key = "task:$roomId:${task.id}"
+        if (task.sessionId.isEmpty()) {
+            processUnavailable[key] = true
+            return
+        }
+        if (processLoading[key] == true) return
+        processLoading[key] = true
+        processUnavailable.remove(key)
+        viewModelScope.launch {
+            try {
+                processItems[key] = if (task.status == "pending") {
+                    emptyList()
+                } else if (task.status == "running") {
+                    fetchProcessItems(task.sessionId, 0L, 0L, running = true)
+                } else {
+                    // 已完成任务：优先用房内过程卡的精确回合窗口，找不到则退化为该成员最近过程
+                    val card = chatItems.filterIsInstance<ChatItem.Process>()
+                        .lastOrNull { it.taskId == task.id && it.sessionId == task.sessionId }
+                    if (card != null) {
+                        fetchProcessItems(card.sessionId, card.turnStartAt, card.turnEndAt, running = false)
+                    } else {
+                        fetchProcessItems(task.sessionId, task.dispatchedAt, task.finishedAt, running = false)
+                    }
+                }
+            } catch (_: Exception) {
+                processUnavailable[key] = true
+            } finally {
+                processLoading.remove(key)
+            }
+        }
+    }
+
+    /** running 时走 session.process 读内存缓冲；否则按 [startAt..endAt] 窗口取 session.history。 */
+    private suspend fun fetchProcessItems(sessionId: String, startAt: Long, endAt: Long, running: Boolean): List<ChatItem> {
+        if (sessionId.isEmpty()) throw IllegalStateException("no session")
+        val result = if (running) {
+            hub.call("session.process", buildJsonObject { put("sessionId", sessionId) })
+        } else {
+            try {
+                hub.call("session.history", buildJsonObject {
+                    put("sessionId", sessionId)
+                    if (startAt > 0) put("after", JsonPrimitive(startAt - 1))
+                    put("limit", JsonPrimitive(500))
+                })
+            } catch (_: Exception) {
+                hub.call("session.history", buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("limit", JsonPrimitive(200))
+                })
+            }
+        }
+        val arr = result["items"]?.jsonArray
+            ?: result["entries"]?.jsonArray
+            ?: result["process"]?.jsonArray
+            ?: JsonArray(emptyList())
+        val out = mutableListOf<ChatItem>()
+        for (e in arr) {
+            try {
+                parseHistoryItem(e.jsonObject, ++itemSeq)?.let { out.add(it) }
+            } catch (_: Exception) {
+            }
+        }
+        return out
+            .filter { it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan }
+            .filter { running || it.at <= 0L || (it.at >= startAt - 2000 && (endAt <= 0L || it.at <= endAt + 2000)) }
+            .sortedBy { it.at }
     }
 
     private fun syncBusyIdsFromList(list: List<SessionInfo>) {
@@ -3778,6 +3937,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 if (p["roomId"]!!.jsonPrimitive.content == currentRoom?.roomId) {
                     chatItems.add(ChatItem.System(++itemSeq, p["message"]!!.jsonPrimitive.content))
+                }
+            }
+            "room.process" -> {
+                val p = obj["params"]!!.jsonObject
+                val roomId = p["roomId"]?.jsonPrimitive?.contentOrNull
+                val entry = p["entry"]?.jsonObject
+                if (roomId != null && roomId == currentRoom?.roomId && entry != null) {
+                    val eid = entry["id"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val author = entry["author"]?.jsonPrimitive?.contentOrNull ?: ""
+                    val at = entry["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+                    val meta = try {
+                        Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (meta != null) {
+                        val card = parseProcessMeta(if (eid != null) -eid else ++itemSeq, meta, author, at)
+                        val idx = chatItems.indexOfLast {
+                            it.id == card.id ||
+                                (it is ChatItem.Process && it.processId.isNotEmpty() && it.processId == card.processId)
+                        }
+                        if (idx >= 0) chatItems[idx] = card else chatItems.add(card)
+                    }
                 }
             }
             "room.modeSelected" -> {

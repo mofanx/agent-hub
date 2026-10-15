@@ -1353,6 +1353,11 @@ function getItemText(item: ChatItem, S: Strings): string {
   if (item.kind === "tool") return `[${item.title}] ${toolStatusLabel(S, item.status)}`;
   if (item.kind === "permission") return `${S.permissionRequestLabel}: ${item.title}`;
   if (item.kind === "elicitation") return `${S.elicitationRequestLabel}: ${item.message}`;
+  if (item.kind === "process") {
+    return item.dispatchCount !== undefined
+      ? S.dispatchCardFmt.replace("%s", String(item.dispatchCount))
+      : S.processCardFmt.replace("%s", item.author).replace("%s", String(item.steps));
+  }
   return "";
 }
 
@@ -1472,7 +1477,7 @@ function ChatMessage({
   const markdownHtml = (text: string) => (highlight ? highlightHtml(renderMarkdown(text, S), highlight) : renderMarkdown(text, S));
 
   switch (item.kind) {
-    case "system":
+    case "system": {
       return (
         <div className={`message system ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="text">{highlight ? highlightText(item.text, highlight) : item.text}</div>
@@ -1480,6 +1485,7 @@ function ChatMessage({
           {selectModal}
         </div>
       );
+    }
 
     case "user":
       return (
@@ -1632,9 +1638,121 @@ function ChatMessage({
         />
       );
 
+    case "process":
+      return (
+        <ProcessCard item={item} showAuthor={showAuthor} currentMatchClass={currentMatchClass} />
+      );
+
     default:
       return null;
   }
+}
+
+/** 已加载的过程步骤（会话历史项），紧凑渲染 */
+function ProcessSteps({ items }: { items: ChatItem[] }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  return (
+    <div className="process-steps">
+      {items.map((it, i) => {
+        switch (it.kind) {
+          case "tool":
+            return (
+              <div key={i} className="process-step-line process-tool">
+                <Wrench size={11} /> {it.title} · {toolStatusLabel(S, it.status)}
+              </div>
+            );
+          case "plan":
+            return (
+              <div key={i} className="process-step-line">
+                <ListTodo size={11} /> {it.entries.map((e) => planEntryLabel(S, e)).join("；")}
+              </div>
+            );
+          case "error":
+            return (
+              <div key={i} className="process-step-line process-error">{it.text}</div>
+            );
+          default:
+            return "text" in it && it.text ? (
+              <div key={i} className="process-step-line">{it.text}</div>
+            ) : null;
+        }
+      })}
+    </div>
+  );
+}
+
+/** 房间时间线的过程折叠卡：`▸ @成员 · N 步`，展开后懒加载过程明细 */
+function ProcessCard({
+  item,
+  showAuthor,
+  currentMatchClass,
+}: {
+  item: Extract<ChatItem, { kind: "process" }>;
+  showAuthor: boolean;
+  currentMatchClass: string;
+}) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<ChatItem[] | null>(null);
+  const isDispatch = item.dispatchCount !== undefined;
+  const running = item.status === "running";
+  const label = isDispatch
+    ? S.dispatchCardFmt.replace("%s", String(item.dispatchCount))
+    : S.processCardFmt.replace("%s", item.author || "?").replace("%s", String(item.steps));
+
+  const toggle = async () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (!next || isDispatch || items !== null || loading) return;
+    setLoading(true);
+    setItems(
+      await store.fetchProcessItems(item.sessionId, {
+        running,
+        from: item.turnStartAt,
+        to: item.turnEndAt,
+      }),
+    );
+    setLoading(false);
+  };
+
+  return (
+    <div className={`message process ${currentMatchClass}`}>
+      <div className="msg-body">
+        {showAuthor && item.author && !isDispatch && (
+          <div className="author">{item.author}</div>
+        )}
+        <button className="thought-toggle" onClick={toggle}>
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {label}
+          {running && <span className="process-running">{S.processRunning}</span>}
+        </button>
+        {expanded &&
+          (isDispatch ? (
+            <div className="process-steps">
+              {(item.dispatchTasks ?? []).length > 0 ? (
+                item.dispatchTasks!.map((t, i) => (
+                  <div key={i} className="process-step-line">
+                    {t.id ? `${t.id} ` : ""}{t.to ? `@${t.to} ` : ""}{t.task ?? ""}
+                  </div>
+                ))
+              ) : (
+                <div className="process-step-line">{S.processUnavailable}</div>
+              )}
+            </div>
+          ) : loading ? (
+            <div className="process-step-line">{S.processLoading}</div>
+          ) : items === null ? (
+            <div className="process-step-line process-error">{S.processUnavailable}</div>
+          ) : items.length === 0 ? (
+            <div className="process-step-line">{running ? S.processRunning : S.processUnavailable}</div>
+          ) : (
+            <ProcessSteps items={items} />
+          ))}
+      </div>
+    </div>
+  );
 }
 
 function ElicitationCard({
@@ -2614,6 +2732,36 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     } catch { /* ignore */ }
   };
   const showRetryBtn = showRetry && task.status === "failed";
+  // 过程钻取：running 读内存缓冲（session.process），完成态按 [dispatchedAt, finishedAt] 窗口读会话历史
+  const [procOpen, setProcOpen] = useState(false);
+  const [procLoading, setProcLoading] = useState(false);
+  const [procItems, setProcItems] = useState<ChatItem[] | null>(null);
+  const toggleProcess = async () => {
+    const next = !procOpen;
+    setProcOpen(next);
+    if (!next || procItems !== null || procLoading) return;
+    setProcLoading(true);
+    setProcItems(
+      await store.fetchProcessItems(task.sessionId, {
+        running: task.status === "running",
+        from: task.dispatchedAt,
+        to: task.finishedAt,
+      }),
+    );
+    setProcLoading(false);
+  };
+  // running 任务：展开期间 2s 轮询内存缓冲，收起/收尾/卸载即停
+  useEffect(() => {
+    if (!procOpen || task.status !== "running") return;
+    const timer = setInterval(() => {
+      void store
+        .fetchProcessItems(task.sessionId, { running: true, from: task.dispatchedAt })
+        .then((r) => {
+          if (r !== null) setProcItems(r);
+        });
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [procOpen, task.status, task.sessionId, task.dispatchedAt, store]);
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
@@ -2765,6 +2913,26 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
             )}
           </div>
         )}
+        {task.status !== "pending" && (
+          <button className="flow-task-proc-toggle" onClick={toggleProcess}>
+            {procOpen ? "▾" : "▸"} {S.viewProcess}
+            {task.status === "running" && (
+              <span className="process-running">{S.processRunning}</span>
+            )}
+          </button>
+        )}
+        {procOpen &&
+          (procLoading ? (
+            <div className="process-step-line">{S.processLoading}</div>
+          ) : procItems === null ? (
+            <div className="process-step-line process-error">{S.processUnavailable}</div>
+          ) : procItems.length === 0 ? (
+            <div className="process-step-line">
+              {task.status === "running" ? S.processRunning : S.processUnavailable}
+            </div>
+          ) : (
+            <ProcessSteps items={procItems} />
+          ))}
         {showRetryBtn && (
           <button className="flow-task-retry-btn" onClick={handleRetry}>
             <RotateCcw size={11} /> {S.retryAction}

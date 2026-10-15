@@ -108,6 +108,13 @@ interface Strings {
     val thoughtOf: String
     val plan: String
     val processSteps: String
+    val processCardFmt: String
+    val processRunningHint: String
+    val processUnavailable: String
+    val processLoading: String
+    val processEmpty: String
+    val viewProcess: String
+    val dispatchCollapsedFmt: String
     val finalSummary: String
     val summaryCompleted: String
     val summaryAdopted: String
@@ -561,6 +568,13 @@ object ZhStrings : Strings {
     override val thoughtOf = "%s 的思考"
     override val plan = "计划"
     override val processSteps = "执行过程（%d 步）"
+    override val processCardFmt = "@%s · %d 步"
+    override val processRunningHint = "进行中，完成后可查看完整过程"
+    override val processUnavailable = "过程已不可用"
+    override val processLoading = "加载过程…"
+    override val processEmpty = "暂无过程记录"
+    override val viewProcess = "查看过程"
+    override val dispatchCollapsedFmt = "已派发 %d 个子任务"
     override val finalSummary = "最终总结"
     override val summaryCompleted = "%d/%d 任务已完成"
     override val summaryAdopted = "已采纳 %d 条用户补充"
@@ -1022,6 +1036,13 @@ object EnStrings : Strings {
     override val thoughtOf = "%s's thinking"
     override val plan = "Plan"
     override val processSteps = "Process (%d steps)"
+    override val processCardFmt = "@%s · %d steps"
+    override val processRunningHint = "Running — full process available after completion"
+    override val processUnavailable = "Process unavailable"
+    override val processLoading = "Loading process…"
+    override val processEmpty = "No process items"
+    override val viewProcess = "View process"
+    override val dispatchCollapsedFmt = "Dispatched %d subtasks"
     override val finalSummary = "Final summary"
     override val summaryCompleted = "%d/%d tasks completed"
     override val summaryAdopted = "Adopted %d user supplements"

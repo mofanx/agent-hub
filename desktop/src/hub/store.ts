@@ -226,6 +226,11 @@ interface Actions {
   applyUpdate(sessionId: string, u: Record<string, unknown>): void;
   loadHistory(method: string, idKey: string, id: string, anchorAt?: number): Promise<void>;
   loadMoreHistory(method: string, idKey: string, id: string): Promise<void>;
+  /** 过程钻取：running 走 session.process（内存 buf），完成态走 session.history 时间窗；失败/不支持返回 null */
+  fetchProcessItems(
+    sessionId: string,
+    opts?: { running?: boolean; from?: number; to?: number },
+  ): Promise<ChatItem[] | null>;
   syncBusyIdsFromList(list: SessionInfo[]): void;
   syncBusyIds(): Promise<void>;
   handleSlashCommand(text: string): boolean;
@@ -376,10 +381,104 @@ export const useHubStore = create<State & Actions>((set, get) => {
     return get().historyCache[historyCacheKey(scope, id)];
   };
 
+  const entryToChatItem = (o: Record<string, unknown>): ChatItem | null => {
+    const kind = String(o.kind ?? "");
+    const author = String(o.author ?? "");
+    const text = String(o.text ?? "");
+    const at = typeof o.at === "number" ? o.at : undefined;
+    const historyId = typeof o.id === "number" ? o.id : undefined;
+    const usage = (o as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+    const attachments = ((o as Record<string, unknown>).attachments as unknown[] | undefined)
+      ?.map((it) => parseAttachment(it as Record<string, unknown>));
+    switch (kind) {
+      case "user":
+        return { kind: "user", at, historyId, text, author, attachments };
+      case "assistant":
+        return { kind: "assistant", at, historyId, id: 0, text, author, usage: usage ? parseTokenUsage(usage) : undefined };
+      case "system":
+        return { kind: "system", at, historyId, text, author };
+      case "error":
+        return { kind: "error", at, historyId, text, author };
+      case "thought":
+        return { kind: "thought", at, historyId, id: 0, text, author };
+      case "tool": {
+        let data: Record<string, unknown> = {};
+        try { data = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
+        return {
+          kind: "tool",
+          at,
+          historyId,
+          toolCallId: String(data.toolCallId ?? ""),
+          title: String(data.title ?? "tool"),
+          status: String(data.status ?? "completed"),
+          author,
+        };
+      }
+      case "plan": {
+        let data: { entries?: string[] } = {};
+        try { data = JSON.parse(text) as { entries?: string[] }; } catch { /* keep */ }
+        return { kind: "plan", at, historyId, entries: data.entries ?? [], author };
+      }
+      case "process": {
+        let m: Record<string, unknown> = {};
+        try { m = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
+        return processMetaToItem(m, { at, historyId, author });
+      }
+      default:
+        return null;
+    }
+  };
+
+  /** 房史 process 条目的 JSON meta → ChatItem；meta 内嵌 dispatch 列表时转派发卡 */
+  const processMetaToItem = (
+    m: Record<string, unknown>,
+    base: { at?: number; historyId?: number; author: string },
+  ): ChatItem => {
+    const tasks = Array.isArray(m.tasks)
+      ? (m.tasks as unknown[]).map((t) => {
+          const o = t as Record<string, unknown>;
+          return {
+            id: o.id != null ? String(o.id) : undefined,
+            to: o.to != null ? String(o.to) : undefined,
+            task: o.task != null ? String(o.task) : undefined,
+          };
+        })
+      : undefined;
+    return {
+      kind: "process",
+      at: base.at,
+      historyId: base.historyId,
+      author: base.author,
+      processId: String(m.processId ?? ""),
+      sessionId: String(m.sessionId ?? ""),
+      turnStartAt: typeof m.turnStartAt === "number" ? m.turnStartAt : undefined,
+      turnEndAt: typeof m.turnEndAt === "number" ? m.turnEndAt : undefined,
+      steps: Array.isArray(m.steps)
+        ? m.steps.length
+        : typeof m.steps === "number"
+          ? m.steps
+          : 0,
+      taskId: typeof m.taskId === "string" ? m.taskId : undefined,
+      status: String(m.status ?? "done"),
+      dispatchCount:
+        m.type === "dispatch" || m.card === "dispatch" || typeof m.count === "number"
+          ? typeof m.count === "number"
+            ? m.count
+            : (tasks?.length ?? 0)
+          : undefined,
+      dispatchTasks: tasks,
+    };
+  };
+
   const liveKeyOf = (it: ChatItem): string => {
     switch (it.kind) {
       case "tool":
         return `tool|${it.toolCallId}`;
+      case "process":
+        // 空 processId 不配对：退回 at+author，避免不同过程卡互吞
+        return it.processId
+          ? `process|${it.processId}`
+          : `process|${it.author}|${it.sessionId}|${it.at ?? ""}`;
       case "permission":
         return `perm|${it.requestId}`;
       case "elicitation":
@@ -439,6 +538,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         );
       case "error":
         return near.some((h) => h.kind === "error" && h.text === it.text);
+      case "process":
+        // 仅非空 processId 配对；空 id 的历史卡不吞 live 卡
+        return near.some(
+          (h) => h.kind === "process" && !!it.processId && h.processId === it.processId,
+        );
       default:
         return false;
     }
@@ -698,6 +802,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
           });
           if (activeSpeaker) void get().refreshSessionUsage(activeSpeaker);
         }
+        break;
+      }
+      case "room.process": {
+        const roomId = String(params.roomId ?? "");
+        const room = get().currentRoom;
+        if (!room || room.roomId !== roomId) break;
+        // Hub 广播 {roomId, entry:{id,at,kind,author,text}}，meta JSON 在 entry.text
+        const item = entryToChatItem((params.entry ?? params) as Record<string, unknown>);
+        if (!item || item.kind !== "process") break;
+        const items = [...get().chatItems];
+        const idx = item.processId
+          ? items.findIndex((it) => it.kind === "process" && it.processId === item.processId)
+          : -1;
+        if (idx >= 0) items[idx] = { ...item, at: items[idx]!.at ?? item.at };
+        else items.push(item);
+        set({ chatItems: items });
         break;
       }
       case "room.artifact": {
@@ -2007,59 +2127,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const params: Record<string, unknown> = { [idKey]: id };
         if (anchorAt != null && Number.isFinite(anchorAt)) params.anchorAt = anchorAt;
         const result = (await getOrCall(method, params)) as Record<string, unknown>;
-        const entries = ((result.entries as unknown[] | undefined) ?? []).map((it) => {
-          const o = it as Record<string, unknown>;
-          return {
-            kind: String(o.kind ?? ""),
-            author: String(o.author ?? ""),
-            text: String(o.text ?? ""),
-            at: typeof o.at === "number" ? o.at : undefined,
-            historyId: typeof o.id === "number" ? o.id : undefined,
-            usage: (o as Record<string, unknown>).usage as Record<string, unknown> | undefined,
-            attachments: ((o as Record<string, unknown>).attachments as unknown[] | undefined)
-              ?.map((it) => parseAttachment(it as Record<string, unknown>)),
-          };
-        });
-        const chat: ChatItem[] = [];
-        for (const e of entries) {
-          switch (e.kind) {
-            case "user":
-              chat.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments: e.attachments });
-              break;
-            case "assistant":
-              chat.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: e.usage ? parseTokenUsage(e.usage) : undefined });
-              break;
-            case "system":
-              chat.push({ kind: "system", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
-              break;
-            case "error":
-              chat.push({ kind: "error", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
-              break;
-            case "thought":
-              chat.push({ kind: "thought", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author });
-              break;
-            case "tool": {
-              let data: Record<string, unknown> = {};
-              try { data = JSON.parse(e.text) as Record<string, unknown>; } catch { /* keep */ }
-              chat.push({
-                kind: "tool",
-                at: e.at,
-                historyId: e.historyId,
-                toolCallId: String(data.toolCallId ?? ""),
-                title: String(data.title ?? "tool"),
-                status: String(data.status ?? "completed"),
-                author: e.author,
-              });
-              break;
-            }
-            case "plan": {
-              let data: { entries?: string[] } = {};
-              try { data = JSON.parse(e.text) as { entries?: string[] }; } catch { /* keep */ }
-              chat.push({ kind: "plan", at: e.at, historyId: e.historyId, entries: data.entries ?? [], author: e.author });
-              break;
-            }
-          }
-        }
+        const entries = (result.entries as unknown[] | undefined) ?? [];
+        const chat = entries
+          .map((it) => entryToChatItem(it as Record<string, unknown>))
+          .filter((it): it is ChatItem => it !== null);
         const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
@@ -2083,6 +2154,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
     },
 
+    fetchProcessItems: async (sessionId, opts) => {
+      try {
+        if (opts?.running) {
+          const res = (await getOrCall("session.process", { sessionId })) as Record<string, unknown>;
+          const list =
+            ((res.entries ?? res.items ?? res.steps) as unknown[] | undefined) ?? [];
+          return list
+            .map((it) => entryToChatItem(it as Record<string, unknown>))
+            .filter((it): it is ChatItem => it !== null);
+        }
+        const params: Record<string, unknown> = { sessionId, limit: 200 };
+        if (opts?.from != null) params.after = opts.from;
+        if (opts?.to != null) params.before = opts.to + 1;
+        const res = (await getOrCall("session.history", params)) as Record<string, unknown>;
+        const list = ((res.entries ?? res.items) as unknown[] | undefined) ?? [];
+        return list
+          .map((it) => entryToChatItem(it as Record<string, unknown>))
+          .filter((it): it is ChatItem => it !== null)
+          .filter(
+            (it) =>
+              (opts?.from == null || it.at == null || it.at >= opts.from) &&
+              (opts?.to == null || it.at == null || it.at <= opts.to),
+          );
+      } catch {
+        return null;
+      }
+    },
+
     loadMoreHistory: async (method, idKey, id) => {
       if (get().historyLoading || !get().historyHasMore) return;
       const items = get().chatItems;
@@ -2091,59 +2190,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ historyLoading: true });
       try {
         const result = (await getOrCall(method, { [idKey]: id, before: oldest.at, beforeId: oldest.historyId, limit: 50 })) as Record<string, unknown>;
-        const entries = ((result.entries as unknown[] | undefined) ?? []).map((it) => {
-          const o = it as Record<string, unknown>;
-          return {
-            kind: String(o.kind ?? ""),
-            author: String(o.author ?? ""),
-            text: String(o.text ?? ""),
-            at: typeof o.at === "number" ? o.at : undefined,
-            historyId: typeof o.id === "number" ? o.id : undefined,
-            usage: (o as Record<string, unknown>).usage as Record<string, unknown> | undefined,
-            attachments: ((o as Record<string, unknown>).attachments as unknown[] | undefined)
-              ?.map((it) => parseAttachment(it as Record<string, unknown>)),
-          };
-        });
-        const more: ChatItem[] = [];
-        for (const e of entries) {
-          switch (e.kind) {
-            case "user":
-              more.push({ kind: "user", at: e.at, historyId: e.historyId, text: e.text, author: e.author, attachments: e.attachments });
-              break;
-            case "assistant":
-              more.push({ kind: "assistant", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author, usage: e.usage ? parseTokenUsage(e.usage) : undefined });
-              break;
-            case "system":
-              more.push({ kind: "system", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
-              break;
-            case "error":
-              more.push({ kind: "error", at: e.at, historyId: e.historyId, text: e.text, author: e.author });
-              break;
-            case "thought":
-              more.push({ kind: "thought", at: e.at, historyId: e.historyId, id: 0, text: e.text, author: e.author });
-              break;
-            case "tool": {
-              let data: Record<string, unknown> = {};
-              try { data = JSON.parse(e.text) as Record<string, unknown>; } catch { /* keep */ }
-              more.push({
-                kind: "tool",
-                at: e.at,
-                historyId: e.historyId,
-                toolCallId: String(data.toolCallId ?? ""),
-                title: String(data.title ?? "tool"),
-                status: String(data.status ?? "completed"),
-                author: e.author,
-              });
-              break;
-            }
-            case "plan": {
-              let data: { entries?: string[] } = {};
-              try { data = JSON.parse(e.text) as { entries?: string[] }; } catch { /* keep */ }
-              more.push({ kind: "plan", at: e.at, historyId: e.historyId, entries: data.entries ?? [], author: e.author });
-              break;
-            }
-          }
-        }
+        const entries = (result.entries as unknown[] | undefined) ?? [];
+        const more = entries
+          .map((it) => entryToChatItem(it as Record<string, unknown>))
+          .filter((it): it is ChatItem => it !== null);
         const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;

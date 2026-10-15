@@ -1603,6 +1603,205 @@ private fun ProcessGroupBlock(
 }
 
 @Composable
+private fun ProcessCardBlock(
+    item: ChatItem.Process,
+    vm: ChatViewModel,
+    showAuthor: Boolean,
+    highlight: String = "",
+    isCurrentMatch: Boolean = false,
+    onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
+    val S = LocalStrings.current
+    var expanded by remember { mutableStateOf(false) }
+    val key = vm.processKey(item)
+    val children = vm.processItems[key]
+    val loading = vm.processLoading[key] == true
+    val unavailable = vm.processUnavailable[key] == true
+    val running = item.turnEndAt <= 0L || item.status == "running"
+    val isDispatch = item.cardType == "dispatch" || item.dispatchTasks.isNotEmpty() || item.dispatchCount > 0
+    val dispatchCount = item.dispatchTasks.size.takeIf { it > 0 } ?: item.dispatchCount
+    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+    val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
+    Column(Modifier.padding(vertical = 4.dp)) {
+        if (showAuthor) AuthorLabel(item.author)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = bgColor),
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                TextButton(onClick = {
+                    expanded = !expanded
+                    if (expanded && !isDispatch) vm.loadProcessCard(item)
+                }) {
+                    Text(
+                        (if (expanded) "▾ " else "▸ ") +
+                            if (isDispatch) S.dispatchCollapsedFmt.format(dispatchCount)
+                            else S.processCardFmt.format(item.author, item.steps.size),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = textColor,
+                    )
+                }
+                if (expanded && isDispatch) {
+                    Spacer(Modifier.height(4.dp))
+                    if (item.dispatchTasks.isEmpty()) {
+                        Text(
+                            S.processEmpty,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = textColor,
+                        )
+                    } else {
+                        item.dispatchTasks.forEach { t ->
+                            val label = listOfNotNull(
+                                t.id,
+                                t.to?.let { "@$it" },
+                                t.task,
+                            ).joinToString("  ")
+                            if (label.isNotBlank()) {
+                                HighlightText(
+                                    text = label,
+                                    highlight = highlight,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = textColor,
+                                    onMatchKeywordY = keywordCallback,
+                                    modifier = Modifier.padding(vertical = 1.dp),
+                                )
+                            }
+                        }
+                    }
+                } else if (expanded) {
+                    Spacer(Modifier.height(4.dp))
+                    when {
+                        unavailable -> {
+                            if (item.steps.isNotEmpty()) {
+                                ProcessStepList(item.steps, textColor, highlight, keywordCallback)
+                            }
+                            Text(
+                                S.processUnavailable,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        children == null -> Text(
+                            if (loading || !running) S.processLoading else S.processRunningHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = textColor,
+                        )
+                        children.isEmpty() -> {
+                            if (item.steps.isNotEmpty()) {
+                                ProcessStepList(item.steps, textColor, highlight, keywordCallback)
+                            } else {
+                                Text(
+                                    if (running) S.processRunningHint else S.processEmpty,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = textColor,
+                                )
+                            }
+                        }
+                        else -> children.reversed().forEach { child ->
+                            RawChatBubble(
+                                child,
+                                vm,
+                                showAuthor = false,
+                                highlight = highlight,
+                                isCurrentMatch = false,
+                                isQuoted = false,
+                                onMatchKeywordY = keywordCallback,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessStepList(
+    steps: List<ChatItem.ProcessStep>,
+    color: Color,
+    highlight: String,
+    onMatchKeywordY: ((Float) -> Unit)?,
+) {
+    Column(
+        Modifier
+            .heightIn(max = 280.dp)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        steps.forEach { s ->
+            val label = when (s.kind) {
+                "tool" -> "🔧 ${s.title ?: s.text.orEmpty()}"
+                "plan" -> "📋 ${s.title ?: s.text.orEmpty()}"
+                else -> s.text ?: s.title.orEmpty()
+            }
+            if (label.isNotBlank()) {
+                HighlightText(
+                    text = label.trim(),
+                    highlight = highlight,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = color,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    onMatchKeywordY = onMatchKeywordY,
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+        }
+    }
+}
+
+
+
+@Composable
+private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel) {
+    val S = LocalStrings.current
+    val key = "task:$roomId:${task.id}"
+    val items = vm.processItems[key]
+    val loading = vm.processLoading[key] == true
+    val unavailable = vm.processUnavailable[key] == true
+    LaunchedEffect(task.sessionId, task.status) {
+        if (task.status == "running") {
+            while (true) {
+                vm.loadTaskProcess(roomId, task)
+                delay(2000)
+            }
+        } else {
+            vm.loadTaskProcess(roomId, task)
+        }
+    }
+    Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+        when {
+            unavailable -> Text(
+                S.processUnavailable,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            items == null -> Text(
+                S.processLoading,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            items.isEmpty() -> Text(
+                if (task.status == "running") S.processRunningHint else S.processEmpty,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> items.reversed().forEach { child ->
+                RawChatBubble(child, vm, showAuthor = false)
+            }
+        }
+        if (task.status == "running") {
+            Text(
+                S.processRunningHint,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+    }
+}
+
+@Composable
 private fun RawChatBubble(
     item: ChatItem,
     vm: ChatViewModel,
@@ -1624,10 +1823,11 @@ private fun RawChatBubble(
         shape = RoundedCornerShape(12.dp),
     ) else Modifier
     when (item) {
-        is ChatItem.System -> Box(
-            Modifier.fillMaxWidth().padding(vertical = 6.dp),
-            contentAlignment = Alignment.Center,
-        ) {
+        is ChatItem.System -> {
+            Box(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
@@ -1652,6 +1852,7 @@ private fun RawChatBubble(
                     )
                 }
             }
+        }
         }
 
         is ChatItem.User -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
@@ -2131,6 +2332,15 @@ private fun RawChatBubble(
             }
         }
 
+        is ChatItem.Process -> ProcessCardBlock(
+            item,
+            vm,
+            showAuthor = showAuthor,
+            highlight = highlight,
+            isCurrentMatch = isCurrentMatch,
+            onMatchKeywordY = keywordCallback,
+        )
+
     }
 }
 
@@ -2282,7 +2492,7 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                 }
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->
-                    FlowTaskRow(task, showRetry, vm) { vm.retryTask(task.id) }
+                    FlowTaskRow(task, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
                 }
                 if (flow.supplements.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
@@ -2306,8 +2516,9 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
 }
 
 @Composable
-private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, onRetry: () -> Unit) {
+private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, roomId: String, onRetry: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
+    var processExpanded by remember { mutableStateOf(false) }
     val icon = when (task.status) {
         "done" -> "✓"
         "running" -> "▶"
@@ -2380,6 +2591,27 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, o
                     }
                 }
             }
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .padding(start = 20.dp)
+                .clickable { processExpanded = !processExpanded },
+        ) {
+            Text(
+                if (processExpanded) "▾" else "▸",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                S.viewProcess,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (processExpanded) {
+            TaskProcessSection(roomId, task, vm)
         }
         if (expanded && hasDetail) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {

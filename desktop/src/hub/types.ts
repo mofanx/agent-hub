@@ -121,6 +121,10 @@ export interface FlowTask {
   sessionId: string;
   name: string;
   status: "pending" | "running" | "done" | "failed";
+  /** 最近一次派发时刻（过程钻取窗口下界，Hub 可选透出） */
+  dispatchedAt?: number;
+  /** 进入终态的时刻（过程钻取窗口上界，Hub 可选透出） */
+  finishedAt?: number;
   task: string;
   dependsOn: string[];
   artifacts: FlowArtifact[];
@@ -338,6 +342,23 @@ export type ChatItem =
   | { kind: "tool"; at?: number; historyId?: number; toolCallId: string; title: string; status: string; author: string }
   | { kind: "plan"; at?: number; historyId?: number; entries: string[]; author: string }
   | { kind: "error"; at?: number; historyId?: number; text: string; author: string }
+  | {
+      kind: "process";
+      at?: number;
+      historyId?: number;
+      author: string;
+      /** 过程卡配对键（dedupe/状态更新）；空串不配对 */
+      processId: string;
+      sessionId: string;
+      turnStartAt?: number;
+      turnEndAt?: number;
+      steps: number;
+      taskId?: string;
+      status: string;
+      /** 派发卡：已派发子任务数及列表（meta 内嵌，无需懒加载） */
+      dispatchCount?: number;
+      dispatchTasks?: { id?: string; to?: string; task?: string }[];
+    }
   | {
       kind: "permission";
       at?: number;

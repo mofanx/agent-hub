@@ -363,6 +363,54 @@
   border: none;
 }
 
+/* ---- 过程折叠卡 ---- */
+.process-steps {
+  margin: 0.2rem 0 0.3rem 1rem;
+  border-left: 2px solid var(--border);
+  padding-left: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.process-step-line {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.5;
+  word-break: break-word;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.process-step-line.process-error {
+  color: var(--danger);
+}
+
+.process-running {
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+.flow-task-proc-toggle {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 0.1rem 0;
+  font-size: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.flow-task-proc-toggle:hover:not(:disabled) {
+  color: var(--fg);
+}
+
 /* ---- 工具行 ---- */
 .tool-row {
   display: flex;
