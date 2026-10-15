@@ -1765,6 +1765,7 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
             while (true) {
                 vm.loadTaskProcess(roomId, task)
                 delay(2000)
+                if (vm.processUnavailable[key] == true) break
             }
         } else {
             vm.loadTaskProcess(roomId, task)
@@ -1791,7 +1792,7 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
                 RawChatBubble(child, vm, showAuthor = false)
             }
         }
-        if (task.status == "running") {
+        if (task.status == "running" && !items.isNullOrEmpty()) {
             Text(
                 S.processRunningHint,
                 style = MaterialTheme.typography.labelSmall,
