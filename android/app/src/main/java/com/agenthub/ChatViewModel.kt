@@ -1336,6 +1336,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 SlashCommand("stop", S.slashHelpStop),
                 SlashCommand("bypass", S.slashHelpBypass),
                 SlashCommand("model", S.slashHelpModel),
+                SlashCommand("new", S.slashHelpNew),
                 SlashCommand("fusion", S.fusionDesc),
             )
             val skillCmds = skills.map { SlashCommand(it.name, it.description) }
@@ -1354,6 +1355,76 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    /** /new：单聊重置为继承配置的新会话、群聊克隆为全新上下文的房间；旧的归档保留可回溯 */
+    private fun newChat() {
+        val S = stringsFor(lang)
+        val room = currentRoom
+        val session = currentSession
+        fun nextName(base: String, taken: Set<String>): String {
+            val stem = base.replace(Regex("""\s*\(\d+\)\s*$"""), "")
+            var n = 2
+            var name = "$stem ($n)"
+            while (name in taken) { n++; name = "$stem ($n)" }
+            return name
+        }
+        when {
+            room != null -> viewModelScope.launch {
+                try {
+                    val result = hub.call("room.clone", buildJsonObject {
+                        put("roomId", room.roomId)
+                        put("newName", nextName(room.name, rooms.map { it.name }.toSet()))
+                        put("fresh", true)
+                    })
+                    val newRoom = parseRoom(result["room"]!!.jsonObject)
+                    rooms.add(newRoom)
+                    openRoom(newRoom)
+                    try {
+                        hub.call("room.archive", buildJsonObject {
+                            put("roomId", room.roomId)
+                            put("archived", true)
+                        })
+                    } catch (_: Exception) {}
+                    refreshAll()
+                    chatItems.add(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newRoom.name)))
+                } catch (e: Exception) {
+                    chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "failed"))
+                }
+            }
+            session != null -> viewModelScope.launch {
+                try {
+                    // session.clone fresh:true：新建空上下文会话并继承模型/config/persona，名字由服务端派生
+                    val result = hub.call("session.clone", buildJsonObject {
+                        put("sessionId", session.sessionId)
+                        put("fresh", true)
+                    })
+                    val newSession = SessionInfo(
+                        result["sessionId"]!!.jsonPrimitive.content,
+                        session.cwd,
+                        result["name"]?.jsonPrimitive?.content ?: session.name,
+                        false,
+                        result["agent"]?.jsonPrimitive?.content ?: session.agent,
+                        result["address"]?.jsonPrimitive?.content ?: "",
+                        result["connectionId"]?.jsonPrimitive?.content ?: session.connectionId,
+                        result["roleId"]?.jsonPrimitive?.content ?: session.roleId,
+                        stoppable = false,
+                    )
+                    sessions.add(newSession)
+                    openChat(newSession)
+                    try {
+                        hub.call("session.archive", buildJsonObject {
+                            put("sessionId", session.sessionId)
+                            put("archived", true)
+                        })
+                    } catch (_: Exception) {}
+                    refreshAll()
+                    chatItems.add(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newSession.name)))
+                } catch (e: Exception) {
+                    chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "failed"))
+                }
+            }
+        }
+    }
+
     private fun handleSlashCommand(text: String): Boolean {
         if (!text.startsWith("/")) return false
         val parts = text.substring(1).trim().split("""\s+""".toRegex()).filter { it.isNotBlank() }
@@ -1364,6 +1435,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "bypass" -> toggleBypass(arg)
             "stop" -> stopCurrent()
             "fusion" -> loadModelList("fusion")
+            "new" -> newChat()
             "model", "models" -> handleModelSlash(arg)
             else -> return false // 不匹配本地命令，透传给 agent（可能是 agent skill）
         }

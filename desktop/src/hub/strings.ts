@@ -6,6 +6,8 @@ export interface Strings {
   slashHelpStop: string;
   slashHelpBypass: string;
   slashHelpModel: string;
+  slashHelpNew: string;
+  newChatDoneFmt: string;
   unknownCommandHint: string;
   connectError: string;
   agentDisconnected: string;
@@ -501,6 +503,8 @@ const zh: Strings = {
   slashHelpStop: "/stop — 停止当前生成",
   slashHelpBypass: "/bypass [on|off] — 切换审批自动通过",
   slashHelpModel: "/model [模型] — 切换模型",
+  slashHelpNew: "/new — 新建对话/群聊并重置上下文（旧的自动归档）",
+  newChatDoneFmt: "已切换到新会话 %s，原会话已归档",
   unknownCommandHint: "未知指令，输入 /help 查看可用指令",
   connectError: "连接失败",
   agentDisconnected: "连接已断开",
@@ -994,6 +998,8 @@ const en: Strings = {
   slashHelpStop: "/stop — stop current generation",
   slashHelpBypass: "/bypass [on|off] — toggle permission bypass",
   slashHelpModel: "/model [model] — switch model",
+  slashHelpNew: "/new — start a fresh chat/room (the old one is archived)",
+  newChatDoneFmt: "Switched to %s; the previous one was archived",
   unknownCommandHint: "Unknown command, type /help for available commands",
   connectError: "Connection failed",
   agentDisconnected: "Disconnected",

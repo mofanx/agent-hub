@@ -179,6 +179,8 @@ interface Strings {
     val slashHelpStop: String
     val slashHelpBypass: String
     val slashHelpModel: String
+    val slashHelpNew: String
+    val newChatDoneFmt: String
     val modelListTitle: String
     val modelCurrentPrefix: String
     val modelSwitched: String
@@ -639,6 +641,8 @@ object ZhStrings : Strings {
     override val slashHelpStop = "/stop — 停止当前生成（在群里可 @成员 指定）"
     override val slashHelpBypass = "/bypass [on|off|toggle] — 切换权限自动审批"
     override val slashHelpModel = "/model [name] — 列出或切换模型"
+    override val slashHelpNew = "/new — 新建对话/群聊并重置上下文（旧的自动归档）"
+    override val newChatDoneFmt = "已切换到新会话 %s，原会话已归档"
     override val modelListTitle = "可选模型："
     override val modelCurrentPrefix = "当前：%s"
     override val modelSwitched = "已切换到 %s（%s）"
@@ -1107,6 +1111,8 @@ object EnStrings : Strings {
     override val slashHelpStop = "/stop — stop current generation (use @name in a room)"
     override val slashHelpBypass = "/bypass [on|off|toggle] — toggle permission auto-approve"
     override val slashHelpModel = "/model [name] — list or switch model"
+    override val slashHelpNew = "/new — start a fresh chat/room (the old one is archived)"
+    override val newChatDoneFmt = "Switched to %s; the previous one was archived"
     override val modelListTitle = "Available models:"
     override val modelCurrentPrefix = "Current: %s"
     override val modelSwitched = "Switched to %s (%s)"

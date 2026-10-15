@@ -192,6 +192,7 @@ interface Actions {
   cloneSession(session: SessionInfo): Promise<SessionInfo | null>;
   renameRoom(room: RoomInfo, name: string): Promise<void>;
   cloneRoom(room: RoomInfo, newName: string): Promise<RoomInfo | null>;
+  newChat(): void;
 
   sendPrompt(text: string): void;
   sendRoomMessage(text: string, opts?: { replyTo?: string }): void;
@@ -1708,6 +1709,61 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
+    newChat: () => {
+      const S = stringsFor(get().lang);
+      const room = get().currentRoom;
+      const session = get().currentSession;
+      const notice = (kind: "system" | "error", text: string) =>
+        set({ chatItems: [...get().chatItems, { kind, text, author: "" }] });
+      void (async () => {
+        try {
+          if (room) {
+            const stem = room.name.replace(/\s*\(\d+\)\s*$/, "");
+            const taken = new Set(get().rooms.map((r) => r.name));
+            let n = 2;
+            let newName = `${stem} (${n})`;
+            while (taken.has(newName)) newName = `${stem} (${++n})`;
+            const res = await getOrCall<Record<string, unknown>>("room.clone", {
+              roomId: room.roomId,
+              newName,
+              fresh: true,
+            });
+            const newRoom = parseRoom((res.room ?? res) as Record<string, unknown>);
+            await get().openRoom(newRoom);
+            try {
+              await getOrCall("room.archive", { roomId: room.roomId, archived: true });
+            } catch {}
+            await get().refreshAll();
+            notice("system", S.newChatDoneFmt.replace("%s", newRoom.name));
+          } else if (session) {
+            const res = await getOrCall<Record<string, unknown>>("session.clone", {
+              sessionId: session.sessionId,
+              fresh: true,
+            });
+            const newSession: SessionInfo = {
+              sessionId: String(res.sessionId ?? ""),
+              cwd: session.cwd,
+              name: String(res.name ?? session.name),
+              busy: false,
+              agent: String(res.agent ?? session.agent),
+              address: String(res.address ?? session.address),
+              connectionId: res.connectionId ? String(res.connectionId) : session.connectionId,
+              offline: false,
+              archived: false,
+            };
+            get().openChat(newSession);
+            try {
+              await getOrCall("session.archive", { sessionId: session.sessionId, archived: true });
+            } catch {}
+            await get().refreshAll();
+            notice("system", S.newChatDoneFmt.replace("%s", newSession.name));
+          }
+        } catch (e) {
+          notice("error", String((e as Error).message ?? e));
+        }
+      })();
+    },
+
     batchDelete: async (sessionIds, roomIds) => {
       try {
         if (sessionIds.length) await getOrCall("session.deleteBatch", { sessionIds });
@@ -2245,7 +2301,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const S = stringsFor(get().lang);
       switch (command) {
         case "help": {
-          const msg = `${S.slashHelpTitle}\n${S.slashHelpHelp}\n${S.slashHelpStop}\n${S.slashHelpBypass}\n${S.slashHelpModel}`;
+          const msg = `${S.slashHelpTitle}\n${S.slashHelpHelp}\n${S.slashHelpStop}\n${S.slashHelpBypass}\n${S.slashHelpModel}\n${S.slashHelpNew}`;
           set({ chatItems: [...get().chatItems, { kind: "system", text: msg, author: "" }] });
           return true;
         }
@@ -2254,6 +2310,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
           return true;
         case "stop":
           get().stopCurrent();
+          return true;
+        case "new":
+          get().newChat();
           return true;
         case "fusion":
           void get().showModelPickerDialog().then(() => set({ modelFilter: "fusion" }));
@@ -2876,6 +2935,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         { name: "stop", description: S.slashHelpStop },
         { name: "bypass", description: S.slashHelpBypass },
         { name: "model", description: S.slashHelpModel },
+        { name: "new", description: S.slashHelpNew },
       ];
       const skills = get().skills.map((s) => ({ name: s.name, description: s.description }));
       return [...local, ...skills];
