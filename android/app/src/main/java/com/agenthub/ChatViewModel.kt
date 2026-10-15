@@ -2705,7 +2705,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // 过程卡/任务钻取的懒加载缓存：key 为 processId、"card:<itemId>" 或 "task:<roomId>:<taskId>"
     val processItems = mutableStateMapOf<String, List<ChatItem>>()
     val processLoading = mutableStateMapOf<String, Boolean>()
+    // 致命失败（会话不存在等）：停止重试并提示不可用；瞬时失败存 processErrors，不阻塞重试
     val processUnavailable = mutableStateMapOf<String, Boolean>()
+    val processErrors = mutableStateMapOf<String, String>()
 
     fun processKey(item: ChatItem.Process): String =
         item.processId.ifEmpty { "card:${item.id}" }
@@ -2713,15 +2715,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadProcessCard(item: ChatItem.Process) {
         if (item.cardType == "dispatch" || item.dispatchTasks.isNotEmpty()) return
         val key = processKey(item)
+        if (item.sessionId.isEmpty()) {
+            processUnavailable[key] = true
+            return
+        }
         if (processLoading[key] == true) return
         processLoading[key] = true
         processUnavailable.remove(key)
+        processErrors.remove(key)
         viewModelScope.launch {
             try {
                 val running = item.turnEndAt <= 0L || item.status == "running"
                 processItems[key] = fetchProcessItems(item.sessionId, item.turnStartAt, item.turnEndAt, running)
-            } catch (_: Exception) {
-                processUnavailable[key] = true
+            } catch (e: Exception) {
+                processErrors[key] = e.message ?: "error"
             } finally {
                 processLoading[key] = false
             }
@@ -2737,6 +2744,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (processLoading[key] == true) return
         processLoading[key] = true
         processUnavailable.remove(key)
+        processErrors.remove(key)
         viewModelScope.launch {
             try {
                 processItems[key] = if (task.status == "pending") {
@@ -2753,8 +2761,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         fetchProcessItems(task.sessionId, task.dispatchedAt, task.finishedAt, running = false)
                     }
                 }
-            } catch (_: Exception) {
-                processUnavailable[key] = true
+            } catch (e: Exception) {
+                processErrors[key] = e.message ?: "error"
             } finally {
                 processLoading.remove(key)
             }

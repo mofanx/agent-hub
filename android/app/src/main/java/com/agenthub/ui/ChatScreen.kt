@@ -1617,6 +1617,7 @@ private fun ProcessCardBlock(
     val children = vm.processItems[key]
     val loading = vm.processLoading[key] == true
     val unavailable = vm.processUnavailable[key] == true
+    val failed = vm.processErrors[key]
     val running = item.turnEndAt <= 0L || item.status == "running"
     val isDispatch = item.cardType == "dispatch" || item.dispatchTasks.isNotEmpty() || item.dispatchCount > 0
     val dispatchCount = item.dispatchTasks.size.takeIf { it > 0 } ?: item.dispatchCount
@@ -1673,6 +1674,17 @@ private fun ProcessCardBlock(
                 } else if (expanded) {
                     Spacer(Modifier.height(4.dp))
                     when {
+                        !children.isNullOrEmpty() -> children.reversed().forEach { child ->
+                            RawChatBubble(
+                                child,
+                                vm,
+                                showAuthor = false,
+                                highlight = highlight,
+                                isCurrentMatch = false,
+                                isQuoted = false,
+                                onMatchKeywordY = keywordCallback,
+                            )
+                        }
                         unavailable -> {
                             if (item.steps.isNotEmpty()) {
                                 ProcessStepList(item.steps, textColor, highlight, keywordCallback)
@@ -1684,11 +1696,12 @@ private fun ProcessCardBlock(
                             )
                         }
                         children == null -> Text(
-                            if (loading || !running) S.processLoading else S.processRunningHint,
+                            failed?.let { S.loadFailedFmt.format(it) }
+                                ?: if (loading || !running) S.processLoading else S.processRunningHint,
                             style = MaterialTheme.typography.bodySmall,
-                            color = textColor,
+                            color = if (failed != null) MaterialTheme.colorScheme.error else textColor,
                         )
-                        children.isEmpty() -> {
+                        else -> {
                             if (item.steps.isNotEmpty()) {
                                 ProcessStepList(item.steps, textColor, highlight, keywordCallback)
                             } else {
@@ -1699,17 +1712,13 @@ private fun ProcessCardBlock(
                                 )
                             }
                         }
-                        else -> children.reversed().forEach { child ->
-                            RawChatBubble(
-                                child,
-                                vm,
-                                showAuthor = false,
-                                highlight = highlight,
-                                isCurrentMatch = false,
-                                isQuoted = false,
-                                onMatchKeywordY = keywordCallback,
-                            )
-                        }
+                    }
+                    if (failed != null && children != null) {
+                        Text(
+                            S.loadFailedFmt.format(failed),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
                     }
                 }
             }
@@ -1758,8 +1767,8 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
     val S = LocalStrings.current
     val key = "task:$roomId:${task.id}"
     val items = vm.processItems[key]
-    val loading = vm.processLoading[key] == true
     val unavailable = vm.processUnavailable[key] == true
+    val failed = vm.processErrors[key]
     LaunchedEffect(task.sessionId, task.status) {
         if (task.status == "running") {
             while (true) {
@@ -1773,24 +1782,31 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
     }
     Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
         when {
+            !items.isNullOrEmpty() -> items.reversed().forEach { child ->
+                RawChatBubble(child, vm, showAuthor = false)
+            }
             unavailable -> Text(
                 S.processUnavailable,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
             items == null -> Text(
-                S.processLoading,
+                failed?.let { S.loadFailedFmt.format(it) } ?: S.processLoading,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (failed != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            items.isEmpty() -> Text(
+            else -> Text(
                 if (task.status == "running") S.processRunningHint else S.processEmpty,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            else -> items.reversed().forEach { child ->
-                RawChatBubble(child, vm, showAuthor = false)
-            }
+        }
+        if (failed != null && items != null) {
+            Text(
+                S.loadFailedFmt.format(failed),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         if (task.status == "running" && !items.isNullOrEmpty()) {
             Text(
