@@ -86,9 +86,25 @@ type SessionEntry = {
   stoppable: boolean;
   turnText: string;
   loading?: boolean;
+  turnGotUpdate?: boolean;
+  watchdog?: ReturnType<typeof setTimeout> | undefined;
+  /** 回合代际：每 prompt/cancel 递增，过期 settle 一律丢弃 */
+  turnEpoch?: number;
 };
 
+export function stripLoneSurrogates(s: string): string {
+  return s.replace(
+    /[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g,
+    (m) => (m.length === 2 ? m : "\uFFFD"),
+  );
+}
+
 const PERMISSION_TIMEOUT_MS = 120_000;
+let promptAckTimeoutMs = Number(process.env.HUB_PROMPT_ACK_TIMEOUT_MS ?? 180_000);
+
+export function setPromptAckTimeoutMs(v: number): void {
+  promptAckTimeoutMs = v;
+}
 const ELICITATION_TIMEOUT_MS = 600_000;
 const OUTPUT_CAPTURE_LEN = 800;
 const AUTH_REQUIRED_CODE = acp.RequestError.authRequired().code;
@@ -498,6 +514,7 @@ export class AcpAgent {
   private routeUpdate(params: { sessionId: string; update: unknown }): void {
     const entry = this.sessions.get(params.sessionId);
     if (!entry || entry.loading) return;
+    entry.turnGotUpdate = true;
     const u = params.update as {
       sessionUpdate?: string;
       content?: { type: string; text?: string };
@@ -563,12 +580,19 @@ export class AcpAgent {
     entry.turnText = "";
   }
 
+  /** agent→hub 请求同样证明存活：permission/elicitation/fs 期间不得误判为无输出 */
+  private markTurnAlive(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) entry.turnGotUpdate = true;
+  }
+
   private handlePermission(params: {
     sessionId: string;
     toolCall: unknown;
     options: PermissionOption[];
   }): Promise<{ outcome: { outcome: "selected"; optionId: string } }> {
     const requestId = randomUUID();
+    this.markTurnAlive(params.sessionId);
 
     if (permissionBypass) {
       const chosen =
@@ -641,6 +665,7 @@ export class AcpAgent {
     if (params.mode !== "form" || !sessionId || !schema) {
       return Promise.resolve({ action: "decline" });
     }
+    this.markTurnAlive(sessionId);
     const requestId = randomUUID();
     this.emit({
       method: "elicitation.request",
@@ -742,6 +767,7 @@ export class AcpAgent {
     line?: number | null;
     limit?: number | null;
   }): { content: string } {
+    this.markTurnAlive(params.sessionId);
     const target = this.resolveSessionPath(params.sessionId, params.path);
     const content = fs.readFileSync(target, "utf-8");
     return { content: sliceTextFile(content, params.line, params.limit) };
@@ -752,6 +778,7 @@ export class AcpAgent {
     path: string;
     content: string;
   }): Record<string, never> {
+    this.markTurnAlive(params.sessionId);
     const target = this.resolveSessionPath(params.sessionId, params.path);
     const dir = path.dirname(target);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -893,15 +920,53 @@ export class AcpAgent {
     entry.busy = true;
     entry.stoppable = true;
     entry.turnText = "";
+    entry.turnGotUpdate = false;
+    const epoch = (entry.turnEpoch ?? 0) + 1;
+    entry.turnEpoch = epoch;
+    const isCurrentTurn = () =>
+      this.sessions.get(sessionId) === entry && entry.turnEpoch === epoch;
+    prompt = prompt.map((p) =>
+      typeof p.text === "string" ? { ...p, text: stripLoneSurrogates(p.text) } : p,
+    );
     this.emit({
       method: "session.generating",
       params: { sessionId, stoppable: true },
     });
+    clearTimeout(entry.watchdog);
+    entry.watchdog = setTimeout(() => {
+      if (!isCurrentTurn()) return;
+      entry.watchdog = undefined;
+      if (!entry.busy || entry.turnGotUpdate) return;
+      // 尽力取消僵尸回合，避免会话被重派时同一 ACP 会话叠两个在途 prompt
+      this.cancel(sessionId).catch(() => {});
+      entry.busy = false;
+      entry.stoppable = false;
+      this.emit({
+        method: "session.generating",
+        params: { sessionId, stoppable: false },
+      });
+      const err = new Error(
+        `agent ${this.name} produced no output within ${promptAckTimeoutMs / 1000}s — request may have been rejected at transport level`,
+      );
+      this.emit({
+        method: "prompt.error",
+        params: { sessionId, message: String(err) },
+      });
+      const waiter = this.promptOnceWaiters.get(sessionId);
+      if (waiter) {
+        this.promptOnceWaiters.delete(sessionId);
+        waiter.reject(err);
+      }
+    }, promptAckTimeoutMs);
+    entry.watchdog.unref?.();
     this.ctx!.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt,
     })
       .then((resp) => {
+        if (!isCurrentTurn()) return;
+        clearTimeout(entry.watchdog);
+        entry.watchdog = undefined;
         this.finishTurn(
           sessionId,
           (resp as { stopReason?: unknown }).stopReason as string,
@@ -909,6 +974,9 @@ export class AcpAgent {
         );
       })
       .catch((err: unknown) => {
+        if (!isCurrentTurn()) return;
+        clearTimeout(entry.watchdog);
+        entry.watchdog = undefined;
         const wasActive = entry.busy || entry.stoppable;
         entry.busy = false;
         entry.stoppable = false;
@@ -976,12 +1044,28 @@ export class AcpAgent {
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (!this.ctx) throw new Error("agent not started");
     if (!entry.stoppable) return;
-    await this.ctx.notify(acp.methods.agent.session.cancel, { sessionId });
+    // 本地收尾：已流出的部分文本与过程缓冲照常落库（watchdog 场景 buf 为空，无过程卡）
     entry.stoppable = false;
-    this.emit({
-      method: "session.generating",
-      params: { sessionId, stoppable: false },
-    });
+    entry.busy = false;
+    this.onTurnEnd?.(sessionId, entry.turnText);
+    entry.turnText = "";
+    // 换代：取消后迟到的 settle 不得触碰新回合/复活本回合任务
+    entry.turnEpoch = (entry.turnEpoch ?? 0) + 1;
+    clearTimeout(entry.watchdog);
+    entry.watchdog = undefined;
+    const waiter = this.promptOnceWaiters.get(sessionId);
+    if (waiter) {
+      this.promptOnceWaiters.delete(sessionId);
+      waiter.reject(new Error("cancelled"));
+    }
+    try {
+      await this.ctx.notify(acp.methods.agent.session.cancel, { sessionId });
+    } finally {
+      this.emit({
+        method: "session.generating",
+        params: { sessionId, stoppable: false },
+      });
+    }
   }
 
   async setConfigOption(

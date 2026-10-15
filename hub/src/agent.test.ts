@@ -6,6 +6,7 @@ import {
   getPermissionBypass,
   normalizeElicitationFields,
   setPermissionBypass,
+  setPromptAckTimeoutMs,
   sliceTextFile,
   type HubEvent,
 } from "./agent.js";
@@ -395,6 +396,91 @@ describe("AcpAgent integration (in-memory stream)", () => {
     await pipes.a2c.writable.close();
     await firstRejects;
     await assert.rejects(hub.promptOnce("s1", "after"));
+  });
+
+  it("看门狗触发后同 session 重派：旧 prompt 迟到 settle 不影响新回合", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const { hub, agentConn, events } = setup({
+      promptHandler: () =>
+        new Promise<acp.PromptResponse>((r) => {
+          resolvers.push(r);
+        }),
+    });
+    setPromptAckTimeoutMs(60);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      // 零输出 → 看门狗报 prompt.error 并释放 busy
+      await waitFor(() =>
+        events.find(
+          (e) =>
+            e.method === "prompt.error" &&
+            /no output/.test(String((e.params as { message?: unknown }).message)),
+        ),
+      );
+      assert.equal(hub.isBusy("s1"), false, "看门狗触发后会话可重派");
+
+      await hub.prompt("s1", "second");
+      await waitFor(() => (resolvers.length >= 2 ? resolvers.length : undefined));
+      assert.equal(hub.isBusy("s1"), true);
+
+      // 旧回合迟到 resolve：不得发 prompt.done、不得清掉新回合的 busy/watchdog
+      resolvers[0]!({ stopReason: "end_turn" });
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      assert.equal(
+        events.filter((e) => e.method === "prompt.done").length,
+        0,
+        "过期 settle 不得产生 prompt.done",
+      );
+      assert.equal(hub.isBusy("s1"), true, "新回合仍在运行");
+
+      // 新回合正常 settle：恰好一次 done
+      resolvers[1]!({ stopReason: "end_turn" });
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 1);
+      assert.equal(hub.isBusy("s1"), false);
+      assert.equal(
+        events.filter((e) => e.method === "prompt.error").length,
+        1,
+        "prompt.error 只来自旧回合看门狗",
+      );
+    } finally {
+      setPromptAckTimeoutMs(180_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("cancel 换代后旧 prompt 迟到 settle 被丢弃", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const { hub, agentConn, events } = setup({
+      promptHandler: () =>
+        new Promise<acp.PromptResponse>((r) => {
+          resolvers.push(r);
+        }),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await waitFor(() => (resolvers.length >= 1 ? resolvers.length : undefined));
+      await hub.cancel("s1");
+      resolvers[0]!({ stopReason: "end_turn" });
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      assert.equal(
+        events.filter((e) => e.method === "prompt.done").length,
+        0,
+        "取消后的迟到 settle 不得发 prompt.done",
+      );
+      // 会话可正常进入新回合
+      await hub.prompt("s1", "next");
+      await waitFor(() => (resolvers.length >= 2 ? resolvers.length : undefined));
+      resolvers[1]!({ stopReason: "end_turn" });
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 1);
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
   });
 
   it("agent_message_chunk 触发进度回调且传累计文本，thought/tool 不触发", async () => {

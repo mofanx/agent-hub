@@ -1474,7 +1474,7 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room || !room.members.some((m) => m.sessionId === sessionId)) return false;
     const detail = output.trim();
-    const text = detail.replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN);
+    const text = detail.replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN).replace(/[\uD800-\uDBFF]$/, "");
     if (!text) return false;
     const board = (room.blackboard ??= []);
     const entry = { id: randomUUID(), from: sessionName, text, detail, at: Date.now() };
