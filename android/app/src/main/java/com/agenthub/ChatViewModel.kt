@@ -1370,6 +1370,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         when {
             room != null -> viewModelScope.launch {
                 try {
+                    // 先停在途编排与成员回合，避免旧房间归档后仍写入幽灵回合
+                    if (flow != null) {
+                        try {
+                            hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
+                        } catch (_: Exception) {}
+                    }
+                    for ((sid, _) in room.members) {
+                        if (busyIds.contains(sid)) {
+                            try {
+                                hub.call("session.cancel", buildJsonObject { put("sessionId", sid) })
+                            } catch (_: Exception) {}
+                        }
+                    }
                     val result = hub.call("room.clone", buildJsonObject {
                         put("roomId", room.roomId)
                         put("newName", nextName(room.name, rooms.map { it.name }.toSet()))
@@ -1377,6 +1390,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     })
                     val newRoom = parseRoom(result["room"]!!.jsonObject)
                     rooms.add(newRoom)
+                    // 预播种到新房间缓存：openRoom 协程内会清 chatItems，直插会被抹掉；
+                    // 经 chatCache 载入的条目（正 id）在 dedupeTail 中存活，空历史时也必现
+                    chatCache["room:${newRoom.roomId}"] =
+                        listOf(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newRoom.name)))
                     openRoom(newRoom)
                     try {
                         hub.call("room.archive", buildJsonObject {
@@ -1385,13 +1402,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         })
                     } catch (_: Exception) {}
                     refreshAll()
-                    chatItems.add(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newRoom.name)))
                 } catch (e: Exception) {
                     chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "failed"))
                 }
             }
             session != null -> viewModelScope.launch {
                 try {
+                    // 先停在途回合，避免旧会话归档后仍写入幽灵回合
+                    if (session.busy || busyIds.contains(session.sessionId)) {
+                        try {
+                            hub.call("session.cancel", buildJsonObject {
+                                put("sessionId", session.sessionId)
+                            })
+                        } catch (_: Exception) {}
+                    }
                     // session.clone fresh:true：新建空上下文会话并继承模型/config/persona，名字由服务端派生
                     val result = hub.call("session.clone", buildJsonObject {
                         put("sessionId", session.sessionId)
@@ -1409,6 +1433,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         stoppable = false,
                     )
                     sessions.add(newSession)
+                    chatCache["session:${newSession.sessionId}"] =
+                        listOf(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newSession.name)))
                     openChat(newSession)
                     try {
                         hub.call("session.archive", buildJsonObject {
@@ -1417,7 +1443,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         })
                     } catch (_: Exception) {}
                     refreshAll()
-                    chatItems.add(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newSession.name)))
                 } catch (e: Exception) {
                     chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "failed"))
                 }

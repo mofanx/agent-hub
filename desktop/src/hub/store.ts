@@ -1700,9 +1700,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     cloneRoom: async (room, newName) => {
       try {
-        const result = await getOrCall<RoomInfo>("room.clone", { roomId: room.roomId, newName });
+        // hub 返回 { room: {...} }，需解包（此前误标 RoomInfo，调用方未用返回值故无影响）
+        const result = await getOrCall<Record<string, unknown>>("room.clone", {
+          roomId: room.roomId,
+          newName,
+        });
         await get().refreshAll();
-        return result;
+        return parseRoom((result.room ?? result) as Record<string, unknown>);
       } catch (e) {
         set({ connectError: String(e) });
         return null;
@@ -1718,6 +1722,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
       void (async () => {
         try {
           if (room) {
+            // 先停在途回合：flow.cancel 收敛编排并取消忙成员，再补刀非编排的忙成员
+            const busyMembers = room.members
+              .map((m) => m[0])
+              .filter((id) => get().busyIds.includes(id));
+            if (busyMembers.length > 0 || get().flow) {
+              await getOrCall("room.flow.cancel", { roomId: room.roomId }).catch(() => {});
+              for (const sid of busyMembers) {
+                await getOrCall("session.cancel", { sessionId: sid }).catch(() => {});
+              }
+            }
             const stem = room.name.replace(/\s*\(\d+\)\s*$/, "");
             const taken = new Set(get().rooms.map((r) => r.name));
             let n = 2;
@@ -1736,6 +1750,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
             await get().refreshAll();
             notice("system", S.newChatDoneFmt.replace("%s", newRoom.name));
           } else if (session) {
+            if (get().busyIds.includes(session.sessionId)) {
+              await getOrCall("session.cancel", { sessionId: session.sessionId }).catch(() => {});
+            }
             const res = await getOrCall<Record<string, unknown>>("session.clone", {
               sessionId: session.sessionId,
               fresh: true,
