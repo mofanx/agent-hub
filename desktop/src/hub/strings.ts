@@ -49,6 +49,11 @@ export interface Strings {
   thoughtProcess: string;
   plan: string;
   processSteps: string;
+  toolStatusPending: string;
+  toolStatusInProgress: string;
+  toolStatusCompleted: string;
+  toolStatusFailed: string;
+  toolStatusCancelled: string;
   finalSummary: string;
   summaryCompleted: string;
   summaryAdopted: string;
@@ -531,6 +536,11 @@ const zh: Strings = {
   thoughtProcess: "思考过程",
   plan: "计划",
   processSteps: "执行过程（%s 步）",
+  toolStatusPending: "排队中",
+  toolStatusInProgress: "进行中",
+  toolStatusCompleted: "已完成",
+  toolStatusFailed: "失败",
+  toolStatusCancelled: "已取消",
   finalSummary: "最终总结",
   summaryCompleted: "%s/%s 任务已完成",
   summaryAdopted: "已采纳 %s 条用户补充",
@@ -1013,6 +1023,11 @@ const en: Strings = {
   thoughtProcess: "Thinking",
   plan: "Plan",
   processSteps: "Process (%s steps)",
+  toolStatusPending: "Pending",
+  toolStatusInProgress: "In progress",
+  toolStatusCompleted: "Completed",
+  toolStatusFailed: "Failed",
+  toolStatusCancelled: "Cancelled",
   finalSummary: "Final summary",
   summaryCompleted: "%s/%s tasks completed",
   summaryAdopted: "Adopted %s user supplements",
@@ -1446,4 +1461,21 @@ const en: Strings = {
 
 export function stringsFor(lang: string): Strings {
   return lang === "zh" ? zh : en;
+}
+
+export function toolStatusLabel(S: Strings, status: string): string {
+  switch (status) {
+    case "pending": return S.toolStatusPending;
+    case "in_progress": return S.toolStatusInProgress;
+    case "completed": return S.toolStatusCompleted;
+    case "failed": return S.toolStatusFailed;
+    case "cancelled": return S.toolStatusCancelled;
+    default: return status;
+  }
+}
+
+const PLAN_STATUS_RE = /^\[(pending|in_progress|completed|failed|cancelled)\]\s*/;
+
+export function planEntryLabel(S: Strings, entry: string): string {
+  return entry.replace(PLAN_STATUS_RE, (_m, s: string) => `[${toolStatusLabel(S, s)}] `);
 }

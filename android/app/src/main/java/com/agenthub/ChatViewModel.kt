@@ -2553,7 +2553,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 is ChatItem.Thought ->
                     hist.none { it is ChatItem.Thought && sameWindow(it, t) && sameAuthor(it, t) && it.text.startsWith(t.text) }
                 is ChatItem.Tool ->
-                    hist.none { it is ChatItem.Tool && sameWindow(it, t) && it.toolCallId == t.toolCallId }
+                    hist.none { it is ChatItem.Tool && sameWindow(it, t) && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId }
                 is ChatItem.Plan ->
                     hist.none { it is ChatItem.Plan && sameWindow(it, t) && sameAuthor(it, t) && it.entries == t.entries }
                 is ChatItem.Error ->
@@ -2581,7 +2581,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     parseHistoryItem(o, itemId)?.let { items.add(it) }
                 }
                 if (anchorAt != null) {
-                    chatItems.addAll(items)
+                    // 搜索跳转加载锚点窗口：按历史 id 去重并按时间排序，避免重复/乱序
+                    val existingIds = chatItems.mapTo(HashSet()) { it.id }
+                    chatItems.addAll(items.filter { it.id !in existingIds })
+                    chatItems.sortBy { if (it.at <= 0L) Long.MAX_VALUE else it.at }
+                    val scopeKey = if (method == "room.history") "room:$id" else "session:$id"
+                    chatCache[scopeKey] = chatItems.toList()
                 } else {
                     val scopeKey = if (method == "room.history") "room:$id" else "session:$id"
                     val tail = dedupeTail(items, chatItems.filter { it.id > 0 })

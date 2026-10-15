@@ -353,6 +353,11 @@ interface Strings {
     val cannotOpenStream: String
     val continueFilePrompt: String
     val toolCallLabel: String
+    val toolStatusPending: String
+    val toolStatusInProgress: String
+    val toolStatusCompleted: String
+    val toolStatusFailed: String
+    val toolStatusCancelled: String
     val roomModelHint: String
     val memberNotFoundFmt: String
     val modelSwitchedForFmt: String
@@ -801,6 +806,11 @@ object ZhStrings : Strings {
     override val cannotOpenStream = "无法打开输出流"
     override val continueFilePrompt = "继续处理这个文件：%s"
     override val toolCallLabel = "工具调用"
+    override val toolStatusPending = "排队中"
+    override val toolStatusInProgress = "进行中"
+    override val toolStatusCompleted = "已完成"
+    override val toolStatusFailed = "失败"
+    override val toolStatusCancelled = "已取消"
     override val roomModelHint = "群聊中切换模型请指定成员：/model @成员名 模型名"
     override val memberNotFoundFmt = "未找到成员 @%s"
     override val modelSwitchedForFmt = "@%s 模型已切换为 %s"
@@ -1257,6 +1267,11 @@ object EnStrings : Strings {
     override val cannotOpenStream = "Cannot open output stream"
     override val continueFilePrompt = "Continue working on this file: %s"
     override val toolCallLabel = "Tool call"
+    override val toolStatusPending = "Pending"
+    override val toolStatusInProgress = "In progress"
+    override val toolStatusCompleted = "Completed"
+    override val toolStatusFailed = "Failed"
+    override val toolStatusCancelled = "Cancelled"
     override val roomModelHint = "In rooms, specify a member: /model @member model"
     override val memberNotFoundFmt = "Member @%s not found"
     override val modelSwitchedForFmt = "@%s model switched to %s"
@@ -1365,3 +1380,17 @@ object EnStrings : Strings {
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }
 
 fun stringsFor(lang: String): Strings = if (lang == "en") EnStrings else ZhStrings
+
+fun toolStatusLabel(S: Strings, status: String): String = when (status) {
+    "pending" -> S.toolStatusPending
+    "in_progress" -> S.toolStatusInProgress
+    "completed" -> S.toolStatusCompleted
+    "failed" -> S.toolStatusFailed
+    "cancelled" -> S.toolStatusCancelled
+    else -> status
+}
+
+private val PLAN_STATUS_RE = Regex("^\\[(pending|in_progress|completed|failed|cancelled)\\]\\s*")
+
+fun planEntryLabel(S: Strings, entry: String): String =
+    PLAN_STATUS_RE.replace(entry) { "[${toolStatusLabel(S, it.groupValues[1])}] " }

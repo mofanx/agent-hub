@@ -35,7 +35,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { stringsFor, type Strings } from "../hub/strings";
+import { stringsFor, toolStatusLabel, planEntryLabel, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
@@ -1349,8 +1349,8 @@ export function ChatScreen() {
 
 function getItemText(item: ChatItem, S: Strings): string {
   if ("text" in item) return item.text;
-  if (item.kind === "plan") return item.entries.join("\n");
-  if (item.kind === "tool") return `[${item.title}] ${item.status}`;
+  if (item.kind === "plan") return item.entries.map((e) => planEntryLabel(S, e)).join("\n");
+  if (item.kind === "tool") return `[${item.title}] ${toolStatusLabel(S, item.status)}`;
   if (item.kind === "permission") return `${S.permissionRequestLabel}: ${item.title}`;
   if (item.kind === "elicitation") return `${S.elicitationRequestLabel}: ${item.message}`;
   return "";
@@ -1549,7 +1549,7 @@ function ChatMessage({
                 <Wrench size={12} />
               </span>
               <span>{highlight ? highlightText(item.title, highlight) : item.title}</span>
-              <span className="tool-status">{item.status}</span>
+              <span className="tool-status">{toolStatusLabel(S, item.status)}</span>
             </div>
           </div>
           {menuEl}
@@ -1567,7 +1567,7 @@ function ChatMessage({
             </div>
             {item.entries.map((e, i) => (
               <div key={i} className="text">
-                {highlight ? highlightText(e, highlight) : e}
+                {highlight ? highlightText(planEntryLabel(S, e), highlight) : planEntryLabel(S, e)}
               </div>
             ))}
           </div>

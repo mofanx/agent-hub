@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1804,7 +1805,7 @@ private fun RawChatBubble(
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
-                copyText = "[${item.title}] ${item.status}",
+                copyText = "[${item.title}] ${toolStatusLabel(S, item.status)}",
                 quote = null,
                 vm = vm,
                 itemId = item.id.toString(),
@@ -1832,7 +1833,7 @@ private fun RawChatBubble(
                             modifier = Modifier.weight(1f),
                         )
                         HighlightText(
-                            item.status,
+                            toolStatusLabel(S, item.status),
                             highlight,
                             onMatchKeywordY = keywordCallback,
                             style = MaterialTheme.typography.bodySmall,
@@ -1848,7 +1849,7 @@ private fun RawChatBubble(
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
             MessageBubbleBox(
-                copyText = "${S.plan}\n${item.entries.joinToString("\n")}",
+                copyText = "${S.plan}\n${item.entries.joinToString("\n") { planEntryLabel(S, it) }}",
                 quote = null,
                 vm = vm,
                 itemId = item.id.toString(),
@@ -1870,7 +1871,7 @@ private fun RawChatBubble(
                         Spacer(Modifier.height(4.dp))
                         item.entries.forEach {
                             HighlightText(
-                                it,
+                                planEntryLabel(S, it),
                                 highlight,
                                 onMatchKeywordY = keywordCallback,
                                 style = MaterialTheme.typography.bodySmall,
@@ -3361,6 +3362,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 12.dp)
             .padding(top = 8.dp, bottom = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -3368,7 +3370,7 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
         if (flowCount > 0) {
             AssistChip(
                 onClick = { onExpand(if (expanded == "flow") null else "flow") },
-                label = { Text(flowLabel, style = MaterialTheme.typography.labelMedium) },
+                label = { Text(flowLabel, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false) },
                 leadingIcon = {
                     Text(
                         if (expanded == "flow") "▾" else "▸",
@@ -3427,7 +3429,7 @@ private fun CapsuleWithBadge(label: String, badgeCount: Int, expanded: Boolean, 
     ) {
         AssistChip(
             onClick = onClick,
-            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+            label = { Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false) },
             leadingIcon = {
                 Text(
                     if (expanded) "▾" else "▸",

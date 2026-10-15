@@ -426,7 +426,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
             (h.text === it.text || h.text.startsWith(it.text)),
         );
       case "tool":
-        return near.some((h) => h.kind === "tool" && h.toolCallId === it.toolCallId);
+        return near.some(
+          (h) =>
+            h.kind === "tool" && !!it.toolCallId && h.toolCallId === it.toolCallId,
+        );
       case "plan":
         return near.some(
           (h) =>
