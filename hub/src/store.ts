@@ -30,7 +30,7 @@ export type SessionMeta = {
 
 export type HistoryEntry = {
   at: number;
-  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process";
+  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow";
   author: string;
   text: string;
 };
@@ -523,6 +523,37 @@ export class Store {
     } catch (err) {
       logWarn("store", `interruptReplyDrafts failed: ${String(err)}`);
       return [];
+    }
+  }
+
+  /** 非终态编排卡条目（phase 非 done/cancelled），供启动时的孤儿卡收尾 */
+  findUnfinishedFlowCards(): { id: number; scopeId: string; at: number; text: string }[] {
+    try {
+      const rows = this.db
+        .prepare(
+          "SELECT id, scope_id AS scopeId, at, text FROM history WHERE scope = 'room' AND kind = 'flow'",
+        )
+        .all() as { id: number; scopeId: string; at: number; text: string }[];
+      return rows.filter((r) => {
+        try {
+          const phase = String((JSON.parse(r.text) as Record<string, unknown>).phase ?? "");
+          return phase !== "done" && phase !== "cancelled";
+        } catch {
+          return false;
+        }
+      });
+    } catch (err) {
+      logWarn("store", `findUnfinishedFlowCards failed: ${String(err)}`);
+      return [];
+    }
+  }
+
+  /** 原位覆写已有历史条目（编排卡等长期存活条目）：只改 text，不动 at/id/draft */
+  updateEntry(rowId: number, text: string): void {
+    try {
+      this.db.prepare("UPDATE history SET text = ? WHERE id = ?").run(text, rowId);
+    } catch (err) {
+      logWarn("store", `updateEntry failed: ${String(err)}`);
     }
   }
 

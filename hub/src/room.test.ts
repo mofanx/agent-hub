@@ -811,6 +811,31 @@ describe("lostReplyAction", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("updateEntry 原位覆写 text，不改 id/at", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    try {
+      const at = 12345;
+      const rowId = store.append("room", "r1", {
+        at,
+        kind: "flow",
+        author: "",
+        text: '{"flowId":"fl-1-1","phase":"working"}',
+      });
+      assert.ok(rowId > 0);
+      store.updateEntry(rowId, '{"flowId":"fl-1-1","phase":"done"}');
+      const entries = store.read("room", "r1");
+      assert.equal(entries.length, 1, "原位更新不产生新行");
+      assert.equal(entries[0]!.id, rowId);
+      assert.equal(entries[0]!.at, at, "覆写不改 at 锚点");
+      assert.equal(entries[0]!.kind, "flow");
+      assert.equal(entries[0]!.text, '{"flowId":"fl-1-1","phase":"done"}');
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {

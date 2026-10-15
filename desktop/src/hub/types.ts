@@ -180,14 +180,35 @@ export interface ArtifactInfo {
 
 export interface FlowInfo {
   roomId: string;
+  /** 编排实例 id（Hub 生成，跨重启稳定）；旧 Hub 快照可能缺失 */
+  flowId?: string;
   phase: string;
   goal?: string;
+  mode?: string;
+  startedAt?: number;
+  finishedAt?: number;
   acceptanceCriteria?: string[];
   iteration?: number;
   maxIterations?: number;
   progress: { done: number; running: number; pending: number; failed: number; total: number };
   tasks: FlowTask[];
   /** 流程进行中用户补充并已并入的信息 */
+  supplements?: string[];
+  clarificationId?: string;
+  clarificationQuestions?: string[];
+}
+
+/** 房史 kind:"flow" 条目内嵌的卡片快照（Hub toCardSnapshot 白名单截断版） */
+export interface FlowCardSnapshot {
+  flowId: string;
+  phase: string;
+  goal?: string;
+  mode?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  acceptanceCriteria?: string[];
+  progress: { done: number; running: number; pending: number; failed: number; total: number };
+  tasks: FlowTask[];
   supplements?: string[];
   clarificationId?: string;
   clarificationQuestions?: string[];
@@ -377,6 +398,14 @@ export type ChatItem =
       message: string;
       fields: ElicitationField[];
       answered: "accepted" | "declined" | "cancelled" | null;
+      author: string;
+    }
+  | {
+      kind: "flow";
+      at?: number;
+      historyId?: number;
+      flowId: string;
+      snapshot: FlowCardSnapshot;
       author: string;
     };
 

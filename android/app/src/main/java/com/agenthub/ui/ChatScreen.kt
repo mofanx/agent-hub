@@ -106,6 +106,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -122,6 +123,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -164,8 +166,6 @@ import com.agenthub.FileTreeRoot
 import com.agenthub.Screen
 import com.agenthub.ContextUsage
 import com.agenthub.ElicitationField
-import com.agenthub.FlowArtifact
-import com.agenthub.FlowInfo
 import com.agenthub.FlowTask
 import com.agenthub.TokenUsage
 import kotlinx.serialization.json.JsonArray
@@ -595,7 +595,6 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     var expandedTop by remember(sessionKey) { mutableStateOf<String?>(null) }
                     ChatTopCapsules(vm, expandedTop, showRoomExtras = isRoom) { expandedTop = it }
                     when (expandedTop) {
-                        "flow" -> if (isRoom) FlowPanel(vm.flow, vm.currentRoom!!.mode, vm)
                         "blackboard" -> if (isRoom) BlackboardPanel(vm)
                         "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
                         "event" -> EventPanel(vm.currentEvents, vm)
@@ -1412,6 +1411,11 @@ fun ChatBubble(
             highlight = highlight,
             isCurrentMatch = isCurrentMatch,
             onMatchKeywordY = onMatchKeywordY,
+        )
+        is ChatListItem.FlowCard -> FlowCardBlock(
+            item.item,
+            vm,
+            isCurrentMatch = isCurrentMatch,
         )
     }
 }
@@ -2358,17 +2362,49 @@ private fun RawChatBubble(
             onMatchKeywordY = keywordCallback,
         )
 
+        is ChatItem.Flow -> FlowCardBlock(
+            item,
+            vm,
+            isCurrentMatch = isCurrentMatch,
+        )
+
     }
 }
 
 
+private fun formatElapsed(start: Long, end: Long, S: Strings): String {
+    val s = maxOf(0L, (end - start) / 1000)
+    if (s < 60) return S.elapsedSecFmt.format(s)
+    val m = s / 60
+    if (m < 60) return S.elapsedMinFmt.format(m, s % 60)
+    return S.elapsedHourFmt.format(m / 60, m % 60)
+}
+
+/** 编排消息卡：锚定在房史流中；vm.flow.flowId 匹配时走实时数据，否则渲染内嵌快照 */
 @Composable
-private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
+private fun FlowCardBlock(
+    item: ChatItem.Flow,
+    vm: ChatViewModel,
+    isCurrentMatch: Boolean = false,
+) {
     val S = LocalStrings.current
-    if (flow == null) return
-    var collapsed by remember { mutableStateOf(false) }
+    val live = vm.flow
+    val isLive = live != null && live.flowId.ifEmpty { "__live" } == item.flowId
+    val flow = if (isLive) live else item.snapshot
+    val terminal = flow.phase == "done" || flow.phase == "cancelled"
+    // 折叠默认：进行中展开、终态折叠；用户手动选择后按 flowId 记忆（-1 未选/0 展开/1 折叠）
+    var collapsedChoice by rememberSaveable(item.flowId) { mutableStateOf(-1) }
+    val collapsed = if (collapsedChoice >= 0) collapsedChoice == 1 else terminal
+    // 进行中卡片每秒刷新耗时
+    var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(terminal, flow.finishedAt > 0) {
+        while (!terminal && flow.finishedAt <= 0L) {
+            delay(1000)
+            nowTick = System.currentTimeMillis()
+        }
+    }
     val progress = flow.progress
-    val title = if (roomMode == "conductor") S.flowTitleConductor else S.flowTitleRoom
+    val title = if (flow.mode == "conductor") S.flowTitleConductor else S.flowTitleRoom
     val phaseLabel = when (flow.phase) {
         "planning" -> S.phasePlanning
         "awaiting-input" -> S.flowAwaitingInput
@@ -2377,79 +2413,171 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
         "summarizing" -> S.phaseSummarizing
         "awaiting-retry" -> S.phaseAwaitingRetry
         "done" -> S.phaseDone
+        "cancelled" -> S.phaseCancelled
         else -> ""
     }
-    val showRetry = flow.phase == "awaiting-retry"
-    val canCancel = flow.phase != "done" && flow.phase != "summarizing" && flow.phase != "reviewing"
+    val phaseTagColor = when (flow.phase) {
+        "done" -> MaterialTheme.colorScheme.primaryContainer
+        "cancelled" -> MaterialTheme.colorScheme.errorContainer
+        "awaiting-retry" -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.surface
+    }
+    val phaseTagTextColor = when (flow.phase) {
+        "done" -> MaterialTheme.colorScheme.onPrimaryContainer
+        "cancelled" -> MaterialTheme.colorScheme.onErrorContainer
+        "awaiting-retry" -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val showRetry = isLive && flow.phase == "awaiting-retry"
+    val canCancel = isLive &&
+        flow.phase !in setOf("done", "summarizing", "reviewing", "cancelled")
     val waitingOnUser = flow.tasks.any { it.waitingFor == "user" }
+    val bgColor = if (isCurrentMatch) {
+        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = bgColor),
     ) {
         Column(Modifier.padding(10.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { collapsed = !collapsed },
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .clickable { collapsedChoice = if (collapsed) 0 else 1 },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${if (collapsed) "▸" else "▾"} $title",
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    if (phaseLabel.isNotEmpty()) {
-                        Spacer(Modifier.width(6.dp))
-                        Surface(
-                            color = MaterialTheme.colorScheme.surface,
-                            shape = RoundedCornerShape(4.dp),
-                        ) {
-                            Text(
-                                phaseLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                            )
-                        }
-                    }
-                    if (waitingOnUser) {
-                        Spacer(Modifier.width(6.dp))
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = RoundedCornerShape(4.dp),
-                        ) {
-                            Text(
-                                S.helpWanted,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                            )
-                        }
+                Text(
+                    "${if (collapsed) "▸" else "▾"} $title",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                if (phaseLabel.isNotEmpty()) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        color = phaseTagColor,
+                        shape = RoundedCornerShape(4.dp),
+                    ) {
+                        Text(
+                            phaseLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = phaseTagTextColor,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        )
                     }
                 }
+                if (waitingOnUser) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(4.dp),
+                    ) {
+                        Text(
+                            S.helpWanted,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
                 if (flow.tasks.isNotEmpty()) {
                     Text(
                         S.flowProgressFmt.format(progress.done, progress.total, progress.running, progress.pending) +
                             if (progress.failed > 0) S.flowProgressFailed.format(progress.failed) else "",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
                     )
-                } else {
-                    Spacer(Modifier.weight(1f))
                 }
-                if (canCancel) {
-                    OutlinedButton(
-                        onClick = { vm.cancelFlow() },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    ) {
-                        Text(S.interruptFlow, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (flow.startedAt > 0 || progress.total > 0) {
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (progress.total > 0) {
+                        LinearProgressIndicator(
+                            progress = {
+                                if (progress.total > 0) progress.done.toFloat() / progress.total else 0f
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    val endAt = if (flow.finishedAt > 0) flow.finishedAt
+                        else if (terminal) 0L else nowTick
+                    val elapsed = if (flow.startedAt > 0 && endAt > flow.startedAt)
+                        formatElapsed(flow.startedAt, endAt, S) else ""
+                    val meta = buildString {
+                        if (flow.startedAt > 0) append(formatArtifactTime(flow.startedAt))
+                        if (elapsed.isNotEmpty()) {
+                            if (isNotEmpty()) append(" · ")
+                            append(S.flowElapsedFmt.format(elapsed))
+                        }
+                    }
+                    if (meta.isNotEmpty()) {
+                        Text(
+                            meta,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
             }
+            if (collapsed) {
+                // 折叠态：终态一行摘要；进行中列出 running/失败任务（与桌面端同构）
+                val collapsedLines = mutableListOf<Pair<String, Boolean>>()
+                if (flow.phase == "done") {
+                    collapsedLines.add(
+                        ("✓ ${progress.done}/${progress.total}" +
+                            (if (flow.finishedAt > 0 && flow.startedAt > 0)
+                                " · " + S.flowElapsedFmt.format(formatElapsed(flow.startedAt, flow.finishedAt, S))
+                            else "") +
+                            if (progress.failed > 0) S.flowProgressFailed.format(progress.failed) else "") to false,
+                    )
+                } else if (flow.phase == "cancelled") {
+                    collapsedLines.add(S.phaseCancelled to false)
+                } else {
+                    flow.tasks.filter { it.status == "running" }.take(2).forEach { t ->
+                        collapsedLines.add("@${t.name} ${t.task}" to false)
+                    }
+                    if (flow.phase == "awaiting-retry") {
+                        collapsedLines.add(S.flowInterruptedRetry to true)
+                    }
+                    flow.tasks.firstOrNull { it.status == "failed" }?.let { t ->
+                        collapsedLines.add("✗ @${t.name} ${t.task}" to true)
+                    }
+                    if (collapsedLines.isEmpty() && progress.pending > 0) {
+                        collapsedLines.add(S.flowCardPendingFmt.format(progress.pending) to false)
+                    }
+                }
+                collapsedLines.forEach { (line, danger) ->
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             if (!collapsed) {
+                flow.goal?.takeIf { it.isNotBlank() }?.let { goal ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        goal,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 if (flow.acceptanceCriteria.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -2525,6 +2653,31 @@ private fun FlowPanel(flow: FlowInfo?, roomMode: String, vm: ChatViewModel) {
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                }
+                if (canCancel || showRetry) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        if (canCancel) {
+                            OutlinedButton(
+                                onClick = { vm.cancelFlow() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            ) {
+                                Text(S.interruptFlow, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                        if (showRetry) {
+                            if (canCancel) Spacer(Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = { vm.retryFailedTasks() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            ) {
+                                Text(S.retryAllFailed, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
                     }
                 }
             }
@@ -3581,33 +3734,10 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
 @Composable
 private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras: Boolean = true, onExpand: (String?) -> Unit) {
     val S = LocalStrings.current
-    val flow = vm.flow
-    val flowActive = flow != null && flow.phase != "done"
-    val flowCount = if (showRoomExtras) {
-        val n = flow?.tasks?.size ?: 0
-        if (n == 0 && flowActive) 1 else n
-    } else 0
     val blackboardCount = if (showRoomExtras) vm.blackboard.size else 0
     val artifactCount = vm.currentArtifacts.size
     val eventCount = vm.currentEvents.size
-    if (flowCount == 0 && blackboardCount == 0 && artifactCount == 0 && eventCount == 0) return
-    val flowProgress = flow?.progress
-    val flowLabel = when {
-        flow != null && flow.tasks.isEmpty() -> {
-            val phase = when (flow.phase) {
-                "planning" -> S.phasePlanning
-                "awaiting-input" -> S.flowAwaitingInput
-                "working" -> S.phaseWorking
-                "reviewing" -> S.phaseReviewing
-                "summarizing" -> S.phaseSummarizing
-                "awaiting-retry" -> S.phaseAwaitingRetry
-                else -> ""
-            }
-            if (phase.isEmpty()) S.capsuleFlow else S.capsuleFlowPhase.format(phase)
-        }
-        flowProgress != null -> S.capsuleFlowProgress.format(flowProgress.done, flowProgress.total)
-        else -> S.capsuleFlow
-    }
+    if (blackboardCount == 0 && artifactCount == 0 && eventCount == 0) return
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -3616,18 +3746,6 @@ private fun ChatTopCapsules(vm: ChatViewModel, expanded: String?, showRoomExtras
             .padding(top = 8.dp, bottom = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (flowCount > 0) {
-            AssistChip(
-                onClick = { onExpand(if (expanded == "flow") null else "flow") },
-                label = { Text(flowLabel, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false) },
-                leadingIcon = {
-                    Text(
-                        if (expanded == "flow") "▾" else "▸",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                },
-            )
-        }
         if (blackboardCount > 0) {
             CapsuleWithBadge(
                 label = S.capsuleBlackboard.format(blackboardCount),

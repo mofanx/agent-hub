@@ -31,6 +31,7 @@ import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
+import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -502,14 +503,39 @@ const roomModeManager = new RoomModeManager(
   parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS),
 );
 roomModeManager.setStore(store);
+// 编排卡：flowUpdate 离散点同步房史 kind:"flow" 条目（append → hash 脏检查覆写 → 终态定稿），
+// 广播复用 room.process 信封，客户端按 historyId/flowId 配对原位更新
+roomModeManager.onFlowCard = makeFlowCardSync({
+  store,
+  rooms,
+  broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+  cardRowId: (roomId) => roomModeManager.flowCardRowId(roomId),
+  setCardRowId: (roomId, rowId) => roomModeManager.setFlowCardRowId(roomId, rowId),
+});
+
+// 孤儿编排卡收尾：重启后非终态 kind:"flow" 卡对应的 flow 已不存在
+// （parallel/pipeline/debate 不持久化，或 conductor 快照缺失）→ 定稿为已中断并重播条目
+function sweepOrphanFlowCards(): void {
+  sweepOrphanFlowCardsImpl({
+    store,
+    liveFlowId: (roomId) => {
+      const live = roomModeManager.getFlow(roomId);
+      return typeof live?.flowId === "string" ? live.flowId : undefined;
+    },
+    broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+  });
+}
 
 // 恢复运行时编排状态（必须在 roomModeManager 创建后，但 agents 可能尚未连接）
-if (savedRuntime) {
-  roomModeManager
-    .importRuntime(savedRuntime)
-    .then(() => persistState())
-    .catch((err) => logError("import runtime", err));
-}
+const restoreRuntime = savedRuntime
+  ? roomModeManager.importRuntime(savedRuntime)
+  : Promise.resolve();
+restoreRuntime
+  .then(() => {
+    sweepOrphanFlowCards();
+    persistState();
+  })
+  .catch((err) => logError("import runtime", err));
 
 const scheduler = new Scheduler(
   store,

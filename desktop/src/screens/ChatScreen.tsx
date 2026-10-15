@@ -694,12 +694,28 @@ export function ChatScreen() {
   const isContextPanel =
     sidePanel === "flow" || sidePanel === "blackboard" || sidePanel === "artifact" || sidePanel === "event";
 
+  /** 滚动定位到最近一张编排卡并闪一下；找不到（历史未加载等）返回 false */
+  const scrollToFlowCard = (): boolean => {
+    const root = messagesRef.current;
+    if (!root) return false;
+    const els = root.querySelectorAll<HTMLElement>(".flow-card[data-flow-id]");
+    const el = els[els.length - 1];
+    if (!el) return false;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("flow-card-flash");
+    setTimeout(() => el.classList.remove("flow-card-flash"), 1600);
+    return true;
+  };
+
   const openContextPanel = () => {
     if (isContextPanel) {
       setSidePanel(null);
       return;
     }
-    if (isRoom && flowCount > 0) setSidePanel("flow");
+    if (isRoom && flowCount > 0) {
+      if (scrollToFlowCard()) return;
+      setSidePanel("flow");
+    }
     else if (artifactCount > 0) {
       store.clearNewCounts("artifact");
       setSidePanel("artifact");
@@ -1192,7 +1208,9 @@ export function ChatScreen() {
                     className={`icon-btn ${sidePanel === "flow" ? "active" : ""}`}
                     title={S.flowCountFmt.replace("%s", String(flowCount))}
                     disabled={flowCount === 0 && sidePanel !== "flow"}
-                    onClick={() => setSidePanel("flow")}
+                    onClick={() => {
+                      if (!scrollToFlowCard()) setSidePanel("flow");
+                    }}
                   >
                     <ListTodo size={14} />
                   </button>
@@ -1357,6 +1375,10 @@ function getItemText(item: ChatItem, S: Strings): string {
     return item.dispatchCount !== undefined
       ? S.dispatchCardFmt.replace("%s", String(item.dispatchCount))
       : S.processCardFmt.replace("%s", item.author).replace("%s", String(item.steps));
+  }
+  if (item.kind === "flow") {
+    const f = item.snapshot;
+    return `[${f.mode === "conductor" ? S.flowTitleConductor : S.flowTitleDefault}] ${f.goal ?? ""} (${f.progress.done}/${f.progress.total})`;
   }
   return "";
 }
@@ -1642,6 +1664,9 @@ function ChatMessage({
       return (
         <ProcessCard item={item} showAuthor={showAuthor} currentMatchClass={currentMatchClass} />
       );
+
+    case "flow":
+      return <FlowCard item={item} currentMatchClass={currentMatchClass} />;
 
     default:
       return null;
@@ -2048,29 +2073,36 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
   );
 }
 
-function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null; roomMode: string; minimal?: boolean }) {
+/** 编排卡/面板共用的视图形状：FlowInfo（实时）与 FlowCardSnapshot（房史）都可赋入 */
+type FlowView = {
+  phase: string;
+  goal?: string;
+  mode?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  acceptanceCriteria?: string[];
+  progress: { done: number; running: number; pending: number; failed: number; total: number };
+  tasks: FlowTask[];
+  supplements?: string[];
+};
+
+const FLOW_PHASE_LABEL_KEYS = (S: Strings): Record<string, string> => ({
+  planning: S.phasePlanning,
+  "awaiting-input": S.flowAwaitingInput,
+  working: S.phaseWorking,
+  reviewing: S.phaseReviewing,
+  summarizing: S.phaseSummarizing,
+  "awaiting-retry": S.phaseAwaitingRetry,
+  done: S.phaseDone,
+  cancelled: S.phaseCancelled,
+});
+
+/** 验收清单 + 完成摘要 + 任务列表 + supplements，FlowPanel 与 FlowCard 共用 */
+function FlowCardBody({ flow, showRetry }: { flow: FlowView; showRetry: boolean }) {
   const store = useHubStore();
   const S = stringsFor(store.lang);
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("flowPanelCollapsed") === "1");
-  useEffect(() => {
-    localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
-  }, [collapsed]);
-  if (!flow) return null;
   const { progress, tasks, phase } = flow;
-  if (tasks.length === 0 && phase === "done") return null;
-  const title = roomMode === "conductor" ? S.flowTitleConductor : S.flowTitleDefault;
-  const phaseLabel: Record<string, string> = {
-    planning: S.phasePlanning,
-    "awaiting-input": S.flowAwaitingInput,
-    working: S.phaseWorking,
-    reviewing: S.phaseReviewing,
-    summarizing: S.phaseSummarizing,
-    "awaiting-retry": S.phaseAwaitingRetry,
-    done: S.phaseDone,
-  };
-  const phaseTag = phaseLabel[phase] ?? "";
-  const showRetry = phase === "awaiting-retry";
-  const content = (
+  return (
     <>
       {flow.acceptanceCriteria && flow.acceptanceCriteria.length > 0 && (
         <div className="flow-acceptance">
@@ -2111,6 +2143,194 @@ function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null;
       )}
     </>
   );
+}
+
+/** 消息流内的编排卡：锚定在 flow 开始位置，live 快照原位刷新，终态留作历史卡 */
+function FlowCard({
+  item,
+  currentMatchClass,
+}: {
+  item: Extract<ChatItem, { kind: "flow" }>;
+  currentMatchClass: string;
+}) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const live = store.flow && (store.flow.flowId ?? "__live") === item.flowId ? store.flow : null;
+  const flow: FlowView = live ?? item.snapshot;
+  const { progress, tasks, phase } = flow;
+  const mode = flow.mode ?? store.currentRoom?.mode ?? "";
+  const terminal = phase === "done" || phase === "cancelled";
+  const storageKey = `flowCardCollapsed:${item.flowId}`;
+  // 折叠默认：进行中展开、终态折叠；用户手动选择后按 localStorage 记忆
+  const [choice, setChoice] = useState<boolean | null>(() => {
+    const v = localStorage.getItem(storageKey);
+    return v === null ? null : v === "1";
+  });
+  const collapsed = choice ?? terminal;
+  const toggle = () => {
+    const next = !collapsed;
+    setChoice(next);
+    try {
+      localStorage.setItem(storageKey, next ? "1" : "0");
+    } catch {}
+  };
+  // 进行中卡片每秒 tick 一次刷新耗时
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (terminal || flow.finishedAt != null) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [terminal, flow.finishedAt]);
+
+  const title = mode === "conductor" ? S.flowTitleConductor : S.flowTitleDefault;
+  const phaseTag = FLOW_PHASE_LABEL_KEYS(S)[phase] ?? "";
+  // 中止/重试只对本房间当前活跃 flow 生效：非 live 的历史/孤儿卡不暴露可操作入口
+  const showRetry = live !== null && phase === "awaiting-retry";
+  const canAbort = live !== null && !terminal && phase !== "summarizing" && phase !== "reviewing";
+  const startedAt = flow.startedAt;
+  const endAt = flow.finishedAt ?? (terminal ? undefined : Date.now());
+  const elapsed = startedAt && endAt && endAt > startedAt ? formatElapsed(startedAt, endAt, S) : "";
+  const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const phaseGroup = terminal
+    ? phase === "done" && progress.failed === 0
+      ? "done"
+      : "failed"
+    : phase === "awaiting-retry"
+      ? "retry"
+      : "active";
+  const runningTasks = tasks.filter((t) => t.status === "running");
+  const failedTasks = tasks.filter((t) => t.status === "failed");
+  const retryAll = async () => {
+    const client = store.client;
+    const roomId = store.currentRoom?.roomId;
+    if (!client || !roomId) return;
+    try {
+      await client.call("room.retryTasks", { roomId });
+    } catch { /* ignore */ }
+  };
+  const collapsedLines: { key: string; text: string; danger?: boolean }[] = [];
+  if (phase === "done") {
+    collapsedLines.push({
+      key: "done",
+      text:
+        `✓ ${progress.done}/${progress.total}` +
+        (elapsed ? ` · ${S.flowElapsedFmt.replace("%s", elapsed)}` : "") +
+        (progress.failed > 0 ? S.failedSuffixFmt.replace("%s", String(progress.failed)) : ""),
+    });
+  } else if (phase === "cancelled") {
+    collapsedLines.push({ key: "cancelled", text: S.phaseCancelled });
+  } else {
+    for (const t of runningTasks.slice(0, 2)) {
+      collapsedLines.push({ key: t.id, text: `@${t.name} ${t.task}` });
+    }
+    if (phase === "awaiting-retry") {
+      collapsedLines.push({ key: "retry", text: S.flowInterruptedRetry, danger: true });
+    }
+    for (const t of failedTasks.slice(0, 1)) {
+      collapsedLines.push({ key: `f-${t.id}`, text: `✗ @${t.name} ${t.task}`, danger: true });
+    }
+    if (collapsedLines.length === 0 && progress.pending > 0) {
+      collapsedLines.push({
+        key: "pending",
+        text: S.flowCardPendingFmt.replace("%s", String(progress.pending)),
+      });
+    }
+  }
+  return (
+    <div className={`message flow ${currentMatchClass}`}>
+      <div className="msg-body">
+        <div className={`flow-card flow-card-${phaseGroup}`} data-flow-id={item.flowId}>
+          <div className="flow-card-head" onClick={toggle} title={S.collapseToggleTitle}>
+            {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+            <span className="flow-card-title">
+              {title}
+              {phaseTag && <span className="flow-phase-tag">{phaseTag}</span>}
+            </span>
+            <span className="flow-card-progress-text">
+              {progress.done}/{progress.total}
+              {progress.failed > 0 ? S.failedSuffixFmt.replace("%s", String(progress.failed)) : ""}
+            </span>
+            <span className="flow-card-meta">
+              {startedAt ? formatClock(startedAt) : ""}
+              {elapsed ? ` · ${elapsed}` : ""}
+            </span>
+          </div>
+          <div className="flow-card-bar">
+            <i style={{ width: `${pct}%` }} />
+          </div>
+          {collapsed ? (
+            <div className="flow-card-collapsed">
+              {collapsedLines.map((l) => (
+                <div key={l.key} className={`flow-card-collapsed-line${l.danger ? " danger" : ""}`}>
+                  {l.text}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              {flow.goal && (
+                <div className="flow-card-goal" title={flow.goal}>
+                  {flow.goal}
+                </div>
+              )}
+              <FlowCardBody flow={flow} showRetry={showRetry} />
+              {(canAbort || showRetry) && (
+                <div className="flow-card-actions">
+                  {canAbort && (
+                    <button
+                      className="flow-cancel-btn"
+                      title={S.abortFlowTitle}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm(S.confirmAbortFlow)) {
+                          void useHubStore.getState().cancelFlow();
+                        }
+                      }}
+                    >
+                      <X size={12} /> {S.abortLabel}
+                    </button>
+                  )}
+                  {showRetry && (
+                    <button className="flow-task-retry-btn" onClick={() => void retryAll()}>
+                      <RotateCcw size={11} /> {S.retryAllFailed}
+                    </button>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatClock(at: number): string {
+  return new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatElapsed(start: number, end: number | undefined, S: Strings): string {
+  const s = Math.max(0, Math.floor(((end ?? Date.now()) - start) / 1000));
+  if (s < 60) return S.elapsedSecFmt.replace("%s", String(s));
+  const m = Math.floor(s / 60);
+  if (m < 60) return S.elapsedMinFmt.replace("%s", String(m)).replace("%s", String(s % 60));
+  return S.elapsedHourFmt.replace("%s", String(Math.floor(m / 60))).replace("%s", String(m % 60));
+}
+
+function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null; roomMode: string; minimal?: boolean }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("flowPanelCollapsed") === "1");
+  useEffect(() => {
+    localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
+  if (!flow) return null;
+  const { progress, tasks, phase } = flow;
+  if (tasks.length === 0 && phase === "done") return null;
+  const title = roomMode === "conductor" ? S.flowTitleConductor : S.flowTitleDefault;
+  const phaseTag = FLOW_PHASE_LABEL_KEYS(S)[phase] ?? "";
+  const showRetry = phase === "awaiting-retry";
+  const content = <FlowCardBody flow={flow} showRetry={showRetry} />;
   if (minimal) {
     return <div className="context-content">{content}</div>;
   }

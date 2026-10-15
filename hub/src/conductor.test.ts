@@ -2807,4 +2807,53 @@ describe("conductor", () => {
     }
   });
 
+  it("flow 携带 flowId/startedAt，export/import 保留 id 与 cardRowId", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "card-id",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const emitted: string[] = [];
+    const orch = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+      (roomId) => emitted.push(roomId),
+    );
+    await orch.start(room, "任务");
+    assert.ok(emitted.includes(room.roomId), "flow 创建时应 emitFlow（建卡时机）");
+    const view = orch.getFlow(room.roomId) as Record<string, unknown>;
+    assert.match(String(view.flowId), /^fl-\d+-\d+$/);
+    assert.ok(Number(view.startedAt) > 0);
+
+    orch.setFlowCardRowId(room.roomId, 42);
+    const state = orch.export();
+
+    const orch2 = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orch2.import(state);
+    assert.equal(orch2.flowCardRowId(room.roomId), 42, "import 恢复 cardRowId 供继续覆写");
+    const view2 = orch2.getFlow(room.roomId) as Record<string, unknown>;
+    assert.equal(view2.flowId, view.flowId, "flowId 跨重启稳定");
+    assert.equal(view2.startedAt, view.startedAt, "startedAt 跨重启稳定");
+
+    const orch3 = new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    await orch3.import({ flows: [{ roomId: room.roomId, phase: "working", goal: "legacy" }] });
+    const legacy = orch3.getFlow(room.roomId) as Record<string, unknown>;
+    assert.match(String(legacy.flowId), /^fl-\d+-\d+$/, "旧快照无 id 时补生成");
+    assert.equal(orch3.flowCardRowId(room.roomId), undefined);
+  });
+
 });

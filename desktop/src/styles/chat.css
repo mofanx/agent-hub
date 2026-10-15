@@ -2223,3 +2223,115 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ---- 编排消息卡（消息流内） ---- */
+.message.flow {
+  align-self: stretch;
+}
+
+.flow-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-md);
+  padding: 0.5rem 0.65rem;
+  margin: 0.2rem 0;
+  font-size: 0.82rem;
+}
+
+.flow-card-active { border-left-color: var(--accent); }
+.flow-card-done { border-left-color: var(--success); }
+.flow-card-failed { border-left-color: var(--danger); }
+.flow-card-retry { border-left-color: var(--warn); }
+
+.flow-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+}
+
+.flow-card-title {
+  font-weight: 650;
+  color: var(--fg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-card-progress-text {
+  font-size: 0.72rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.flow-card-meta {
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.flow-card-bar {
+  height: 2px;
+  margin-top: 0.35rem;
+  background: var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.flow-card-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.flow-card-done .flow-card-bar > i { background: var(--success); }
+.flow-card-failed .flow-card-bar > i { background: var(--danger); }
+.flow-card-retry .flow-card-bar > i { background: var(--warn); }
+
+.flow-card-collapsed {
+  margin-top: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.flow-card-collapsed-line {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-card-collapsed-line.danger { color: var(--danger); }
+
+.flow-card-goal {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0.3rem 0 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-card-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+  justify-content: flex-end;
+}
+
+.flow-card-flash {
+  animation: flowCardFlash 1.6s ease;
+}
+
+@keyframes flowCardFlash {
+  0%, 60% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: none; }
+}

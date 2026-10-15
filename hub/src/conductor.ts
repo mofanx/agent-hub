@@ -153,7 +153,12 @@ type FlowTask = {
 };
 
 type Flow = {
+  /** 编排实例 id（fl-<startedAt>-<seq>），消息时间线卡片的配对键 */
+  id: string;
   roomId: string;
+  startedAt: number;
+  /** 对应房史 kind:"flow" 卡条目 rowId，随快照持久化供重启后继续覆写 */
+  cardRowId?: number;
   phase: FlowPhase;
   goal: string;
   acceptanceCriteria: string[];
@@ -386,6 +391,13 @@ function summarizeEvidence(ev: VerificationEvidence): string {
   if (ev.stdout) parts.push(ev.stdout.slice(0, 120));
   if (ev.stderr) parts.push(`stderr: ${ev.stderr.slice(0, 120)}`);
   return parts.join("；") || "无证据详情";
+}
+
+let flowSeq = 0;
+
+/** 编排实例 id：fl-<毫秒>-<进程内递增序号>，消息时间线卡片的配对键 */
+export function newFlowId(): string {
+  return `fl-${Date.now()}-${++flowSeq}`;
 }
 
 export class ConductorOrchestrator {
@@ -723,6 +735,8 @@ export class ConductorOrchestrator {
     const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId: flow.roomId,
+      flowId: flow.id,
+      startedAt: flow.startedAt,
       phase: flow.phase,
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
@@ -915,8 +929,11 @@ export class ConductorOrchestrator {
   }
 
   private newFlow(roomId: string, goal: string, artifactContext?: { refs?: string[] }): Flow {
+    const startedAt = Date.now();
     return {
+      id: newFlowId(),
       roomId,
+      startedAt,
       phase: "planning",
       goal,
       acceptanceCriteria: [...DEFAULT_ACCEPTANCE_CRITERIA],
@@ -1050,12 +1067,14 @@ export class ConductorOrchestrator {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
       this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
       const flow = this.flows.get(room.roomId)!;
+      this.emitFlow?.(room.roomId);
       await this.dispatchFromTasks(flow, room, initialTasks, text);
       return;
     }
     const promptText = this.buildPlanningPrompt(room, text, artifactContext);
     const flow = this.newFlow(room.roomId, text, artifactContext);
     this.flows.set(room.roomId, flow);
+    this.emitFlow?.(room.roomId);
     this.planningInFlight.add(room.roomId);
     this.notice({ roomId: room.roomId, message: "指挥家拆解任务中…" });
     try {
@@ -2274,9 +2293,22 @@ export class ConductorOrchestrator {
     return true;
   }
 
+  /** 编排卡对应的房史条目 rowId：建卡后由 Hub 写回，随快照持久化 */
+  flowCardRowId(roomId: string): number | undefined {
+    return this.flows.get(roomId)?.cardRowId;
+  }
+
+  setFlowCardRowId(roomId: string, rowId: number): void {
+    const flow = this.flows.get(roomId);
+    if (flow) flow.cardRowId = rowId;
+  }
+
   private serializeFlow(flow: Flow): Record<string, unknown> {
     return {
+      id: flow.id,
       roomId: flow.roomId,
+      startedAt: flow.startedAt,
+      ...(flow.cardRowId !== undefined ? { cardRowId: flow.cardRowId } : {}),
       phase: flow.phase,
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
@@ -2358,8 +2390,14 @@ export class ConductorOrchestrator {
       const artifactContext = f.artifactContext && typeof f.artifactContext === "object" && refsArr.length > 0
         ? { refs: refsArr }
         : undefined;
+      const restoredAt = Number(f.startedAt ?? 0) || Date.now();
       const flow: Flow = {
+        id: typeof f.id === "string" && f.id ? f.id : newFlowId(),
         roomId,
+        startedAt: restoredAt,
+        ...(typeof f.cardRowId === "number" && f.cardRowId > 0
+          ? { cardRowId: f.cardRowId }
+          : {}),
         phase: (f.phase as Flow["phase"]) ?? "working",
         goal: typeof f.goal === "string" ? f.goal : "",
         acceptanceCriteria: Array.isArray(f.acceptanceCriteria)

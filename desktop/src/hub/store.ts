@@ -11,6 +11,8 @@ import type {
   ElicitationField,
   ElicitationValue,
   EventInfo,
+  FlowArtifact,
+  FlowCardSnapshot,
   FlowInfo,
   ModelInfo,
   ModelBackend,
@@ -425,6 +427,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
         try { m = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
         return processMetaToItem(m, { at, historyId, author });
       }
+      case "flow": {
+        // 编排卡条目：text 为 toCardSnapshot 白名单快照 JSON，数组字段兜底归一化
+        let m: Record<string, unknown> = {};
+        try { m = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
+        const flowId = String(m.flowId ?? "");
+        if (!flowId) return null;
+        const tasks = Array.isArray(m.tasks)
+          ? m.tasks.map((t) => ({
+              dependsOn: [] as string[],
+              artifacts: [] as FlowArtifact[],
+              ...(t as Record<string, unknown>),
+            }))
+          : [];
+        const snapshot = { ...m, flowId, tasks } as unknown as FlowCardSnapshot;
+        return { kind: "flow", at, historyId, author, flowId, snapshot };
+      }
       default:
         return null;
     }
@@ -486,6 +504,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         return `elicit|${it.requestId}`;
       case "plan":
         return `plan|${it.author}|${it.entries.join("\n")}`;
+      case "flow":
+        return `flow|${it.flowId}`;
       case "assistant":
       case "thought":
         return `${it.kind}|id:${it.id}`;
@@ -544,6 +564,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         return near.some(
           (h) => h.kind === "process" && !!it.processId && h.processId === it.processId,
         );
+      case "flow":
+        return near.some((h) => h.kind === "flow" && h.flowId === it.flowId);
       default:
         return false;
     }
@@ -571,6 +593,40 @@ export const useHubStore = create<State & Actions>((set, get) => {
     }
     result.sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity));
     return result;
+  };
+
+  /**
+   * 编排卡兜底：flowUpdate/flow 拉取到 flow 但时间线里还没有对应卡片时
+   * （旧 Hub 无 flowId、历史条目尚未广播/加载），尾部补一张 live 合成卡。
+   * "__live" 占位卡在拿到真实 flowId 后就地升级为正式卡，随后由房史条目接管。
+   */
+  const ensureFlowCard = (flow: FlowInfo | null) => {
+    if (!flow) return;
+    const flowId = flow.flowId || "__live";
+    const items = get().chatItems;
+    if (items.some((it) => it.kind === "flow" && it.flowId === flowId)) return;
+    const snapshot = { ...flow, flowId } as FlowCardSnapshot;
+    const liveIdx = flow.flowId
+      ? items.findIndex((it) => it.kind === "flow" && it.flowId === "__live")
+      : -1;
+    if (liveIdx >= 0) {
+      const next = [...items];
+      next[liveIdx] = {
+        kind: "flow",
+        at: flow.startedAt ?? items[liveIdx]!.at,
+        flowId,
+        snapshot,
+        author: "",
+      };
+      set({ chatItems: next });
+      return;
+    }
+    set({
+      chatItems: [
+        ...items,
+        { kind: "flow", at: flow.startedAt ?? Date.now(), flowId, snapshot, author: "" },
+      ],
+    });
   };
 
   const setHistoryCache = (scope: "session" | "room", id: string, items: ChatItem[]) => {
@@ -753,6 +809,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const room = get().currentRoom;
         if (room && room.roomId === roomId) {
           set({ flow });
+          ensureFlowCard(flow);
           get().refreshArtifacts({ roomId });
         }
         break;
@@ -811,11 +868,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (!room || room.roomId !== roomId) break;
         // Hub 广播 {roomId, entry:{id,at,kind,author,text}}，meta JSON 在 entry.text
         const item = entryToChatItem((params.entry ?? params) as Record<string, unknown>);
-        if (!item || item.kind !== "process") break;
+        if (!item || (item.kind !== "process" && item.kind !== "flow")) break;
         const items = [...get().chatItems];
-        const idx = item.processId
-          ? items.findIndex((it) => it.kind === "process" && it.processId === item.processId)
-          : -1;
+        const idx =
+          item.kind === "process" && item.processId
+            ? items.findIndex((it) => it.kind === "process" && it.processId === item.processId)
+            : item.kind === "flow"
+              ? items.findIndex((it) => it.kind === "flow" && it.flowId === item.flowId)
+              : -1;
         if (idx >= 0) items[idx] = { ...item, at: items[idx]!.at ?? item.at };
         else items.push(item);
         set({ chatItems: items });
@@ -2407,7 +2467,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const result = (await client.call("room.flow", { roomId })) as Record<string, unknown>;
         const flow = (result.flow as FlowInfo | undefined) ?? null;
         flowCache.set(roomId, flow);
-        if (get().currentRoom?.roomId === roomId) set({ flow });
+        if (get().currentRoom?.roomId === roomId) {
+          set({ flow });
+          ensureFlowCard(flow);
+        }
       } catch {
         /* ignore */
       }

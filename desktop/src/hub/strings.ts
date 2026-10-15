@@ -459,6 +459,14 @@ export interface Strings {
   abortFlowTitle: string;
   confirmAbortFlow: string;
   abortLabel: string;
+  phaseCancelled: string;
+  elapsedSecFmt: string;
+  elapsedMinFmt: string;
+  elapsedHourFmt: string;
+  flowElapsedFmt: string;
+  flowInterruptedRetry: string;
+  retryAllFailed: string;
+  flowCardPendingFmt: string;
   previewFailedFmt: string;
   downloadFailedFmt: string;
   confirmDeleteArtifactsFmt: string;
@@ -954,6 +962,14 @@ const zh: Strings = {
   abortFlowTitle: "中断当前编排",
   confirmAbortFlow: "确认中断当前编排？所有进行中的任务将被取消。",
   abortLabel: "中断",
+  phaseCancelled: "已中断",
+  elapsedSecFmt: "%s 秒",
+  elapsedMinFmt: "%s 分 %s 秒",
+  elapsedHourFmt: "%s 小时 %s 分",
+  flowElapsedFmt: "用时 %s",
+  flowInterruptedRetry: "已中断 · 可重试",
+  retryAllFailed: "重试失败任务",
+  flowCardPendingFmt: "%s 个任务待执行",
   previewFailedFmt: "预览失败：%s",
   downloadFailedFmt: "下载失败：%s",
   confirmDeleteArtifactsFmt: "确认删除选中的 %s 个产物？\n%s",
@@ -1449,6 +1465,14 @@ const en: Strings = {
   abortFlowTitle: "Abort current flow",
   confirmAbortFlow: "Abort the current orchestration? All running tasks will be cancelled.",
   abortLabel: "Abort",
+  phaseCancelled: "Interrupted",
+  elapsedSecFmt: "%ss",
+  elapsedMinFmt: "%sm %ss",
+  elapsedHourFmt: "%sh %sm",
+  flowElapsedFmt: "took %s",
+  flowInterruptedRetry: "Interrupted · retry available",
+  retryAllFailed: "Retry failed tasks",
+  flowCardPendingFmt: "%s pending",
   previewFailedFmt: "Preview failed: %s",
   downloadFailedFmt: "Download failed: %s",
   confirmDeleteArtifactsFmt: "Delete the %s selected artifacts?\n%s",

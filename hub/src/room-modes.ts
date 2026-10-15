@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
-import { ConductorOrchestrator, extractTaskResult, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
+import { ConductorOrchestrator, extractTaskResult, newFlowId, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
 
@@ -134,6 +134,9 @@ type AutoDecision = {
 };
 
 type ParallelFlow = {
+  /** 编排实例 id：消息时间线卡片的配对键 */
+  id: string;
+  startedAt: number;
   pending: Set<string>;
   /** 出错/中断的成员，保留在任务视图中显示 failed */
   failed?: Set<string> | undefined;
@@ -155,6 +158,8 @@ type ParallelFlow = {
 };
 
 type PipelineFlow = {
+  id: string;
+  startedAt: number;
   order: string[];
   stage: number;
   outputs: string[];
@@ -178,6 +183,8 @@ type DebateOutput = {
 };
 
 type DebateFlow = {
+  id: string;
+  startedAt: number;
   sides: [string, string];
   judge: string;
   /** 收尾/中断后保留快照，下回合启动时清理 */
@@ -246,6 +253,8 @@ const MODE_LABELS: Record<RuntimeMode, string> = {
 };
 
 export class RoomModeManager {
+  /** 编排卡同步钩子：每次 flowUpdate 后调用，参数为 getFlow 视图（可能为 undefined） */
+  onFlowCard?: (roomId: string, flow: Record<string, unknown> | undefined) => void;
   private conductor: ConductorOrchestrator;
   private autoDecisions = new Map<string, AutoDecisionContext>();
   private parallelFlows = new Map<string, ParallelFlow>();
@@ -384,6 +393,15 @@ export class RoomModeManager {
   private emitFlowUpdate(roomId: string): void {
     const flow = this.getFlow(roomId);
     this.broadcast("room.flowUpdate", { roomId, flow });
+    this.onFlowCard?.(roomId, flow);
+  }
+
+  flowCardRowId(roomId: string): number | undefined {
+    return this.conductor.flowCardRowId(roomId);
+  }
+
+  setFlowCardRowId(roomId: string, rowId: number): void {
+    this.conductor.setFlowCardRowId(roomId, rowId);
   }
 
   getFlow(roomId: string): Record<string, unknown> | undefined {
@@ -423,6 +441,8 @@ export class RoomModeManager {
     const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId,
+      flowId: flow.id,
+      startedAt: flow.startedAt,
       phase: flow.done
         ? "done"
         : flow.summarizing || (running === 0 && done + failed === tasks.length)
@@ -465,6 +485,8 @@ export class RoomModeManager {
     const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId,
+      flowId: flow.id,
+      startedAt: flow.startedAt,
       phase: flow.done ? "done" : flow.stage >= flow.order.length ? "summarizing" : "working",
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
@@ -527,6 +549,8 @@ export class RoomModeManager {
     const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId,
+      flowId: flow.id,
+      startedAt: flow.startedAt,
       phase: flow.done ? "done" : completed >= total ? "summarizing" : "working",
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
@@ -1312,6 +1336,8 @@ export class RoomModeManager {
       return { sent, mentioned: [], skipped };
     }
     const flow: ParallelFlow = {
+      id: newFlowId(),
+      startedAt: Date.now(),
       pending,
       members: sent,
       results: new Map(),
@@ -1410,6 +1436,8 @@ export class RoomModeManager {
       return { sent: [], mentioned: [], skipped: [first] };
     }
     const flow: PipelineFlow = {
+      id: newFlowId(),
+      startedAt: Date.now(),
       order,
       stage: 0,
       outputs: [],
@@ -1513,6 +1541,8 @@ export class RoomModeManager {
       return { sent: [], mentioned: [], skipped: [sideA] };
     }
     const flow: DebateFlow = {
+      id: newFlowId(),
+      startedAt: Date.now(),
       sides: [sideA, sideB],
       judge: judge ?? sideA,
       rounds,

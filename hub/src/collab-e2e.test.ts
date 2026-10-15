@@ -6,6 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { RoomModeManager, type AgentOps } from "./room-modes.js";
 import { RoomManager } from "./room.js";
+import { Store } from "./store.js";
+import { makeFlowCardSync, sweepOrphanFlowCards } from "./flow-card.js";
 import { workspaceSnapshotHash, type IsolatedCheckResult } from "./conductor.js";
 
 type Prompt = { sessionId: string; text: string };
@@ -2438,5 +2440,277 @@ describe("collab-e2e", () => {
       "t2",
       "t2 派发后 tester 回合关联 t2",
     );
+  });
+
+  const wireFlowCards = (
+    h: ReturnType<typeof makeHarness>,
+    store: Store,
+    broadcasts: Broadcast[],
+  ) => {
+    h.manager.setStore(store);
+    h.manager.onFlowCard = makeFlowCardSync({
+      store,
+      rooms: h.rooms,
+      broadcast: (method, params) => broadcasts.push({ method, params }),
+      cardRowId: (id) => h.manager.flowCardRowId(id),
+      setCardRowId: (id, row) => h.manager.setFlowCardRowId(id, row),
+    });
+  };
+  const flowCardEntries = (broadcasts: Broadcast[]) =>
+    broadcasts
+      .filter(
+        (b) =>
+          b.method === "room.process" &&
+          (b.params.entry as Record<string, unknown> | undefined)?.kind === "flow",
+      )
+      .map((b) => b.params.entry as { id: number; at: number; text: string });
+
+  it("编排卡：建卡一次、原位更新 at 不变、done 定稿、重启恢复继续覆写", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-flowcard-"));
+    const store = new Store(dir);
+    try {
+      const h = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+      );
+      wireFlowCards(h, store, h.broadcasts);
+
+      // 1. flow 创建 → 恰好一张 kind:"flow" 卡
+      await h.manager.handle(h.room, "实现排序模块", {});
+      assert.equal(flowCardEntries(h.broadcasts).length, 1, "flow 创建时恰好建一张卡");
+      const entry0 = flowCardEntries(h.broadcasts)[0]!;
+      const meta0 = JSON.parse(entry0.text) as Record<string, unknown>;
+      assert.match(String(meta0.flowId), /^fl-\d+-\d+$/);
+      assert.equal(meta0.phase, "planning");
+      assert.equal(meta0.mode, "conductor");
+      assert.equal(h.manager.flowCardRowId(h.room.roomId), entry0.id, "cardRowId 写回 Flow");
+
+      // 2. 派工 → 原位覆写：同一 rowId、同一 at
+      await h.done(
+        "s1",
+        '```json\n{"goal":"交付排序","tasks":[{"id":"t1","to":"coder","task":"实现排序模块"}]}\n```',
+      );
+      await tick();
+      const entries = flowCardEntries(h.broadcasts);
+      assert.ok(entries.length >= 2, "派发后有更新广播");
+      assert.ok(
+        entries.every((e) => e.id === entry0.id && e.at === entry0.at),
+        "更新复用同一房史条目且 at 锚点不变",
+      );
+      const rows = () => store.read("room", h.room.roomId).filter((e) => e.kind === "flow");
+      assert.equal(rows().length, 1, "房史只有一条 flow 卡条目");
+      const metaMid = JSON.parse(rows()[0]!.text) as Record<string, unknown>;
+      assert.equal(metaMid.flowId, meta0.flowId);
+      const tasks = metaMid.tasks as Record<string, unknown>[];
+      assert.equal(tasks.length, 1);
+      assert.equal(tasks[0]!.id, "t1");
+      assert.ok(
+        !("backendRuns" in tasks[0]!) &&
+          !("verifyStdout" in tasks[0]!) &&
+          !("baseline" in tasks[0]!) &&
+          !("diff" in tasks[0]!),
+        "卡片剔除 backendRuns/verifyStdout/baseline/diff",
+      );
+
+      // 3. 白名单截断：长任务描述/输出被裁剪
+      assert.ok(String(tasks[0]!.task).length <= 300);
+
+      // 4. 走完评审/汇总 → done 终态快照
+      await h.done("s2", '```json\n{"text":"完成","artifacts":[]}\n```');
+      await tick();
+      assert.equal(h.flow()?.phase, "reviewing");
+      await h.done("s1", '```json\n{"decision":"complete","reason":"达标"}\n```');
+      assert.equal(h.flow()?.phase, "summarizing");
+      await h.done("s1", "最终答复：已完成");
+      assert.equal(h.flow()?.phase, "done");
+      const metaDone = JSON.parse(rows()[0]!.text) as Record<string, unknown>;
+      assert.equal(metaDone.phase, "done");
+      assert.ok(typeof metaDone.finishedAt === "number" && metaDone.finishedAt > 0);
+      assert.equal(
+        store.read("room", h.room.roomId).filter((e) => e.kind === "flow").length,
+        1,
+        "done 后仍只有一条卡条目",
+      );
+
+      // 5. 模拟重启：export → 新 manager import（共享同一 store）→ 卡继续原位覆写
+      const state = h.manager.exportRuntime();
+      const h2 = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+      );
+      h2.rooms.import(JSON.parse(JSON.stringify(h.room)));
+      wireFlowCards(h2, store, h2.broadcasts);
+      await h2.manager.importRuntime(state as Record<string, unknown>);
+      assert.equal(
+        store.read("room", h.room.roomId).filter((e) => e.kind === "flow").length,
+        1,
+        "重启恢复不产生第二张卡",
+      );
+      const restored = flowCardEntries(h2.broadcasts);
+      assert.ok(restored.length >= 1, "恢复时应广播卡更新");
+      assert.ok(
+        restored.every((e) => e.id === entry0.id && e.at === entry0.at),
+        "恢复后继续覆写同一条目",
+      );
+      const metaRestored = JSON.parse(restored.at(-1)!.text) as Record<string, unknown>;
+      assert.equal(metaRestored.flowId, meta0.flowId, "flowId 跨重启稳定");
+      assert.equal(metaRestored.phase, "done");
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("编排卡：运行中重启降级 awaiting-retry 并定稿快照", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-flowcard-"));
+    const store = new Store(dir);
+    try {
+      const h = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+      );
+      wireFlowCards(h, store, h.broadcasts);
+      await h.manager.handle(h.room, "实现排序模块", {});
+      await h.done(
+        "s1",
+        '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现排序模块"}]}\n```',
+      );
+      await tick();
+      assert.equal(h.flow()?.phase, "working");
+      const entry0 = flowCardEntries(h.broadcasts)[0]!;
+
+      // 运行中导出 → 新实例恢复：running 任务降级 failed、流程 awaiting-retry
+      const state = h.manager.exportRuntime();
+      const h2 = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+      );
+      h2.rooms.import(JSON.parse(JSON.stringify(h.room)));
+      wireFlowCards(h2, store, h2.broadcasts);
+      await h2.manager.importRuntime(state as Record<string, unknown>);
+
+      const rows = store.read("room", h.room.roomId).filter((e) => e.kind === "flow");
+      assert.equal(rows.length, 1);
+      const meta = JSON.parse(rows[0]!.text) as Record<string, unknown>;
+      assert.equal(meta.phase, "awaiting-retry", "重启降级状态应定稿进卡快照");
+      assert.equal(meta.flowId, JSON.parse(entry0.text).flowId);
+      const restored = flowCardEntries(h2.broadcasts);
+      assert.ok(
+        restored.every((e) => e.id === entry0.id && e.at === entry0.at),
+        "降级定稿仍覆写同一条目",
+      );
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("编排卡：parallel 流同样建卡，孤儿 sweep 不误杀活跃 flow", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-flowcard-"));
+    const store = new Store(dir);
+    try {
+      const rooms = new RoomManager();
+      const room = rooms.create(
+        "p-card",
+        [
+          { sessionId: "s1", name: "a" },
+          { sessionId: "s2", name: "b" },
+          { sessionId: "s3", name: "sum" },
+        ],
+        "parallel",
+        { parallelSummarizerId: "s3" },
+      );
+      const broadcasts: Broadcast[] = [];
+      const busy = new Set<string>();
+      const manager = new RoomModeManager(
+        {
+          prompt: async (sid) => {
+            busy.add(sid);
+          },
+          isBusy: (sid) => busy.has(sid),
+          cancel: async (sid) => {
+            busy.delete(sid);
+          },
+        },
+        rooms,
+        (method, params) => broadcasts.push({ method, params }),
+        0,
+      );
+      manager.setStore(store);
+      manager.onFlowCard = makeFlowCardSync({
+        store,
+        rooms,
+        broadcast: (method, params) => broadcasts.push({ method, params }),
+        cardRowId: (id) => manager.flowCardRowId(id),
+        setCardRowId: (id, row) => manager.setFlowCardRowId(id, row),
+      });
+
+      await manager.handle(room, "主题", { params: { targets: ["s1", "s2"] } });
+      const entries = flowCardEntries(broadcasts);
+      assert.equal(entries.length, 1, "parallel 流创建时也应建一张 kind:flow 卡");
+      const meta0 = JSON.parse(entries[0]!.text) as Record<string, unknown>;
+      assert.match(String(meta0.flowId), /^fl-\d+-\d+$/);
+      assert.equal(meta0.mode, "parallel");
+      assert.equal(meta0.phase, "working");
+
+      // 孤儿收尾：活跃 flow 的卡必须原样保留
+      sweepOrphanFlowCards({
+        store,
+        liveFlowId: (id) => {
+          const live = manager.getFlow(id) as Record<string, unknown> | undefined;
+          return typeof live?.flowId === "string" ? live.flowId : undefined;
+        },
+        broadcast: (method, params) => broadcasts.push({ method, params }),
+      });
+      const liveMeta = JSON.parse(
+        store.read("room", room.roomId).find((e) => e.kind === "flow")!.text,
+      ) as Record<string, unknown>;
+      assert.equal(liveMeta.phase, "working", "sweep 不得定稿活跃 flow 的卡");
+      assert.equal(
+        flowCardEntries(broadcasts).length,
+        1,
+        "sweep 跳过活跃卡，不重播",
+      );
+
+      // 另一房间的孤儿卡 → 定稿 cancelled 并重播
+      const orphanAt = Date.now() - 1000;
+      const orphanId = store.append("room", "orphan-room", {
+        at: orphanAt,
+        kind: "flow",
+        author: "",
+        text: JSON.stringify({ v: 1, flowId: "fl-dead-1", phase: "working", goal: "x" }),
+      });
+      sweepOrphanFlowCards({
+        store,
+        liveFlowId: (id) => {
+          const live = manager.getFlow(id) as Record<string, unknown> | undefined;
+          return typeof live?.flowId === "string" ? live.flowId : undefined;
+        },
+        broadcast: (method, params) => broadcasts.push({ method, params }),
+      });
+      const orphanRow = store.read("room", "orphan-room").find((e) => e.id === orphanId)!;
+      const orphanMeta = JSON.parse(orphanRow.text) as Record<string, unknown>;
+      assert.equal(orphanMeta.phase, "cancelled", "孤儿卡定稿 cancelled");
+      assert.ok(typeof orphanMeta.finishedAt === "number");
+      assert.equal(orphanRow.at, orphanAt, "定稿不改 at");
+      const orphanBc = flowCardEntries(broadcasts).at(-1)!;
+      assert.equal(orphanBc.id, orphanId);
+      assert.equal(orphanBc.at, orphanAt);
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

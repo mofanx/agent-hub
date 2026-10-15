@@ -190,6 +190,17 @@ sealed class ChatItem {
     ) : ChatItem() {
         override val text: String get() = steps.joinToString("\n") { it.title ?: it.text.orEmpty() }
     }
+    /** 编排卡：kind:"flow" 房史条目，snapshot 为可独立渲染的终态/快照数据 */
+    data class Flow(
+        override val id: Long,
+        val flowId: String,
+        val snapshot: FlowInfo,
+        override val author: String = "",
+        override val at: Long = 0L,
+    ) : ChatItem() {
+        override val text: String get() =
+            snapshot.goal ?: snapshot.tasks.joinToString("\n") { "@${it.name} ${it.task}" }
+    }
 }
 
 /** 聊天列表里的可显示项：单个消息会按 Markdown 块展开为多个 ChatListItem.Message。 */
@@ -235,6 +246,16 @@ sealed class ChatListItem {
         val items: List<ChatItem>,
         override val isFirst: Boolean = true,
     ) : ChatListItem()
+
+    /** 编排消息卡：key 用 flow:<flowId>，保证 LazyColumn 中稳定复用 */
+    data class FlowCard(val item: ChatItem.Flow) : ChatListItem() {
+        override val id: String get() = "flow:${item.flowId.ifEmpty { item.id.toString() }}"
+        override val originalId: Long get() = item.id
+        override val author: String get() = item.author
+        override val text: String get() = item.text
+        override val at: Long get() = item.at
+        override val isFirst: Boolean get() = true
+    }
 }
 
 data class ConnectionInfo(
@@ -411,6 +432,10 @@ data class FlowInfo(
     val phase: String,
     val progress: FlowProgress,
     val tasks: List<FlowTask>,
+    val flowId: String = "",
+    val startedAt: Long = 0,
+    val finishedAt: Long = 0,
+    val mode: String = "",
     val goal: String? = null,
     val acceptanceCriteria: List<String> = emptyList(),
     val iteration: Int = 0,
@@ -2252,13 +2277,50 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 编排卡兜底：flow 存在但时间线里还没有对应卡片时
+     * （旧 Hub 无 flowId、房史条目尚未广播/加载），尾部补一张 live 合成卡。
+     * "__live" 占位卡在拿到真实 flowId 后就地升级为正式卡，随后由房史条目接管。
+     */
+    private fun ensureFlowCard(f: FlowInfo?) {
+        if (f == null) return
+        val flowId = f.flowId.ifEmpty { "__live" }
+        if (chatItems.any { it is ChatItem.Flow && it.flowId == flowId }) return
+        if (f.flowId.isNotEmpty()) {
+            val liveIdx = chatItems.indexOfLast { it is ChatItem.Flow && it.flowId == "__live" }
+            if (liveIdx >= 0) {
+                val prev = chatItems[liveIdx]
+                chatItems[liveIdx] = ChatItem.Flow(
+                    prev.id,
+                    flowId,
+                    f,
+                    prev.author,
+                    f.startedAt.takeIf { it > 0 } ?: prev.at,
+                )
+                return
+            }
+        }
+        chatItems.add(
+            ChatItem.Flow(
+                ++itemSeq,
+                flowId,
+                f,
+                "",
+                f.startedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+            )
+        )
+    }
+
     private suspend fun refreshFlow(roomId: String) {
         try {
             val result = hub.call("room.flow", buildJsonObject { put("roomId", roomId) })
             val flowObj = result["flow"]?.jsonObject
             val parsed = parseFlow(flowObj)
             flowCache[roomId] = parsed
-            if (currentRoom?.roomId == roomId) flow = parsed
+            if (currentRoom?.roomId == roomId) {
+                flow = parsed
+                ensureFlowCard(parsed)
+            }
         } catch (e: Exception) {
             // ignore
         }
@@ -2418,15 +2480,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    private fun parseFlow(obj: JsonObject?): FlowInfo? {
+    /** roomIdFallback：房史 kind:"flow" 快照不含 roomId，由所在房间上下文补上 */
+    private fun parseFlow(obj: JsonObject?, roomIdFallback: String = ""): FlowInfo? {
         if (obj == null) return null
-        val roomId = obj["roomId"]?.jsonPrimitive?.content ?: return null
+        val roomId = obj["roomId"]?.jsonPrimitive?.contentOrNull ?: roomIdFallback
+        if (roomId.isEmpty()) return null
         val phase = obj["phase"]?.jsonPrimitive?.content ?: return null
         val progress = obj["progress"]?.jsonObject
         val tasks = obj["tasks"]?.jsonArray
         return FlowInfo(
             roomId = roomId,
             phase = phase,
+            flowId = obj["flowId"]?.jsonPrimitive?.contentOrNull ?: "",
+            startedAt = obj["startedAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0,
+            finishedAt = obj["finishedAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0,
+            mode = obj["mode"]?.jsonPrimitive?.contentOrNull ?: "",
             progress = FlowProgress(
                 done = progress?.get("done")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 running = progress?.get("running")?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
@@ -2621,7 +2689,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun parseHistoryItem(o: JsonObject, itemId: Long): ChatItem? {
+    private fun parseHistoryItem(o: JsonObject, itemId: Long, roomId: String? = null): ChatItem? {
         val kind = o["kind"]!!.jsonPrimitive.content
         val author = o["author"]!!.jsonPrimitive.content
         val text = o["text"]!!.jsonPrimitive.content
@@ -2655,6 +2723,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "process" -> {
                 try {
                     parseProcessMeta(itemId, Json.parseToJsonElement(text).jsonObject, author, at)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            "flow" -> {
+                try {
+                    val snap = parseFlow(Json.parseToJsonElement(text).jsonObject, roomId ?: "")
+                        ?: return null
+                    if (snap.flowId.isEmpty()) return null
+                    ChatItem.Flow(itemId, snap.flowId, snap, author, at)
                 } catch (_: Exception) {
                     null
                 }
@@ -2719,6 +2797,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     hist.none { it is ChatItem.Error && sameWindow(it, t) && sameAuthor(it, t) && it.text == t.text }
                 is ChatItem.Process ->
                     hist.none { it is ChatItem.Process && t.processId.isNotEmpty() && it.processId == t.processId }
+                is ChatItem.Flow ->
+                    hist.none { it is ChatItem.Flow && (it.id == t.id || (t.flowId.isNotEmpty() && it.flowId == t.flowId)) }
                 else -> true
             }
         }
@@ -2739,12 +2819,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val o = e.jsonObject
                     val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
                     val itemId = if (historyId != null) -historyId else ++itemSeq
-                    parseHistoryItem(o, itemId)?.let { items.add(it) }
+                    parseHistoryItem(o, itemId, if (method == "room.history") id else null)?.let { items.add(it) }
                 }
                 if (anchorAt != null) {
                     // 搜索跳转加载锚点窗口：按历史 id 去重并按时间排序，避免重复/乱序
                     val existingIds = chatItems.mapTo(HashSet()) { it.id }
-                    chatItems.addAll(items.filter { it.id !in existingIds })
+                    val existingFlowIds =
+                        chatItems.mapNotNullTo(HashSet()) { (it as? ChatItem.Flow)?.flowId }
+                    chatItems.addAll(
+                        items.filter {
+                            it.id !in existingIds &&
+                                (it as? ChatItem.Flow)?.flowId.let { fid ->
+                                    fid == null || fid !in existingFlowIds
+                                }
+                        },
+                    )
                     chatItems.sortBy { if (it.at <= 0L) Long.MAX_VALUE else it.at }
                     val scopeKey = if (method == "room.history") "room:$id" else "session:$id"
                     chatCache[scopeKey] = chatItems.toList()
@@ -2787,10 +2876,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val o = e.jsonObject
                     val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
                     val itemId = if (historyId != null) -historyId else ++itemSeq
-                    parseHistoryItem(o, itemId)?.let { items.add(it) }
+                    parseHistoryItem(o, itemId, if (method == "room.history") id else null)?.let { items.add(it) }
                 }
                 val existingIds = chatItems.map { it.id }.toSet()
-                chatItems.addAll(0, items.filter { it.id !in existingIds })
+                val existingFlowIds =
+                    chatItems.mapNotNull { (it as? ChatItem.Flow)?.flowId }.toSet()
+                chatItems.addAll(
+                    0,
+                    items.filter {
+                        it.id !in existingIds &&
+                            (it as? ChatItem.Flow)?.flowId.let { fid ->
+                                fid == null || fid !in existingFlowIds
+                            }
+                    },
+                )
                 scopeKey()?.let { key -> chatCache[key] = chatItems.toList() }
             } catch (_: Exception) {
             } finally {
@@ -3221,6 +3320,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 hub.call("room.retryTasks", buildJsonObject {
                     put("roomId", room.roomId)
                     put("taskIds", taskIds)
+                })
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, stringsFor(lang).retryFailedFmt.format(e.message)))
+            }
+        }
+    }
+
+    fun retryFailedTasks() {
+        val room = currentRoom ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("room.retryTasks", buildJsonObject {
+                    put("roomId", room.roomId)
                 })
             } catch (e: Exception) {
                 chatItems.add(ChatItem.Error(++itemSeq, stringsFor(lang).retryFailedFmt.format(e.message)))
@@ -4052,12 +4164,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val eid = entry["id"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                     val author = entry["author"]?.jsonPrimitive?.contentOrNull ?: ""
                     val at = entry["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+                    val kind = entry["kind"]?.jsonPrimitive?.contentOrNull
                     val meta = try {
                         Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
                     } catch (_: Exception) {
                         null
                     }
-                    if (meta != null) {
+                    if (meta != null && kind == "flow") {
+                        val snap = parseFlow(meta, roomId)
+                        if (snap != null && snap.flowId.isNotEmpty()) {
+                            val card = ChatItem.Flow(if (eid != null) -eid else ++itemSeq, snap.flowId, snap, author, at)
+                            val idx = chatItems.indexOfLast {
+                                it.id == card.id ||
+                                    (it is ChatItem.Flow && it.flowId.isNotEmpty() && it.flowId == card.flowId)
+                            }
+                            if (idx >= 0) chatItems[idx] = card else chatItems.add(card)
+                        }
+                    } else if (meta != null) {
                         val card = parseProcessMeta(if (eid != null) -eid else ++itemSeq, meta, author, at)
                         val idx = chatItems.indexOfLast {
                             it.id == card.id ||
@@ -4088,6 +4211,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 flowCache[roomId] = parseFlow(p["flow"]?.jsonObject)
                 if (currentRoom?.roomId == roomId) {
                     flow = flowCache[roomId]
+                    ensureFlowCard(flow)
                     viewModelScope.launch { refreshArtifacts(roomId) }
                 }
             }
@@ -4268,6 +4392,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     when (item) {
                         is ChatItem.User -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = true) }
                         is ChatItem.Assistant -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
+                        is ChatItem.Flow -> listOf(ChatListItem.FlowCard(item))
                         else -> listOf(ChatListItem.Other(item))
                     },
                 )

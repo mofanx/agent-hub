@@ -301,6 +301,14 @@ interface Strings {
     val phaseSummarizing: String
     val phaseAwaitingRetry: String
     val phaseDone: String
+    val phaseCancelled: String
+    val elapsedSecFmt: String
+    val elapsedMinFmt: String
+    val elapsedHourFmt: String
+    val flowElapsedFmt: String
+    val flowInterruptedRetry: String
+    val retryAllFailed: String
+    val flowCardPendingFmt: String
     val helpWanted: String
     val flowProgressFmt: String
     val flowProgressFailed: String
@@ -309,9 +317,6 @@ interface Strings {
     val capsuleBlackboard: String
     val capsuleArtifact: String
     val capsuleEvent: String
-    val capsuleFlow: String
-    val capsuleFlowPhase: String
-    val capsuleFlowProgress: String
     val artifactsTitle: String
     val eventsTitle: String
     val sharedBlackboard: String
@@ -763,6 +768,14 @@ object ZhStrings : Strings {
     override val phaseSummarizing = "汇总中"
     override val phaseAwaitingRetry = "等待重试"
     override val phaseDone = "已完成"
+    override val phaseCancelled = "已中断"
+    override val elapsedSecFmt = "%s 秒"
+    override val elapsedMinFmt = "%s 分 %s 秒"
+    override val elapsedHourFmt = "%s 小时 %s 分"
+    override val flowElapsedFmt = "用时 %s"
+    override val flowInterruptedRetry = "已中断 · 可重试"
+    override val retryAllFailed = "重试失败任务"
+    override val flowCardPendingFmt = "%s 个任务待执行"
     override val helpWanted = "向你求助"
     override val flowProgressFmt = "%d/%d 完成 · %d 进行中 · %d 待执行"
     override val flowProgressFailed = " · %d 失败"
@@ -771,9 +784,6 @@ object ZhStrings : Strings {
     override val capsuleBlackboard = "黑板 %d"
     override val capsuleArtifact = "产物 %d"
     override val capsuleEvent = "事件 %d"
-    override val capsuleFlow = "编排"
-    override val capsuleFlowPhase = "编排 · %s"
-    override val capsuleFlowProgress = "编排 %d/%d"
     override val artifactsTitle = "产物"
     override val eventsTitle = "事件"
     override val sharedBlackboard = "共享黑板"
@@ -1233,6 +1243,14 @@ object EnStrings : Strings {
     override val phaseSummarizing = "Summarizing"
     override val phaseAwaitingRetry = "Awaiting retry"
     override val phaseDone = "Done"
+    override val phaseCancelled = "Interrupted"
+    override val elapsedSecFmt = "%ss"
+    override val elapsedMinFmt = "%sm %ss"
+    override val elapsedHourFmt = "%sh %sm"
+    override val flowElapsedFmt = "took %s"
+    override val flowInterruptedRetry = "Interrupted · retry available"
+    override val retryAllFailed = "Retry failed tasks"
+    override val flowCardPendingFmt = "%s pending"
     override val helpWanted = "Needs you"
     override val flowProgressFmt = "%d/%d done · %d running · %d pending"
     override val flowProgressFailed = " · %d failed"
@@ -1241,9 +1259,6 @@ object EnStrings : Strings {
     override val capsuleBlackboard = "Board %d"
     override val capsuleArtifact = "Artifacts %d"
     override val capsuleEvent = "Events %d"
-    override val capsuleFlow = "Flow"
-    override val capsuleFlowPhase = "Flow · %s"
-    override val capsuleFlowProgress = "Flow %d/%d"
     override val artifactsTitle = "Artifacts"
     override val eventsTitle = "Events"
     override val sharedBlackboard = "Blackboard"
