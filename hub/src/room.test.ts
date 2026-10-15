@@ -875,3 +875,19 @@ describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {
     });
   });
 });
+
+describe("nameTaken 归档名占坑", () => {
+  it("连续两次归档同名：归档后名字释放可复用，取消归档恢复占用", () => {
+    const rooms = new RoomManager();
+    const r1 = rooms.create("team", [{ sessionId: "s1", name: "a" }]);
+    assert.equal(rooms.nameTaken("team"), true);
+    rooms.archive(r1.roomId, true);
+    assert.equal(rooms.nameTaken("team"), false, "归档后原名释放");
+    const r2 = rooms.create("team", [{ sessionId: "s2", name: "b" }]);
+    rooms.archive(r2.roomId, true);
+    assert.equal(rooms.nameTaken("team"), false, "第二次归档后同名仍可用");
+    rooms.archive(r1.roomId, false);
+    assert.equal(rooms.nameTaken("team"), true, "取消归档恢复占用");
+    assert.equal(rooms.nameTaken("team", r1.roomId), false, "自身排除");
+  });
+});

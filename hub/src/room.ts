@@ -509,6 +509,16 @@ export class RoomManager {
     return room;
   }
 
+  /** 名字是否被非归档房间占用（归档对象释放原名供新房间复用） */
+  nameTaken(name: string, excludeRoomId?: string): boolean {
+    for (const room of this.rooms.values()) {
+      if (room.roomId === excludeRoomId) continue;
+      if (room.archived) continue;
+      if (room.name === name) return true;
+    }
+    return false;
+  }
+
   update(
     roomId: string,
     name: string,

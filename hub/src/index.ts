@@ -256,17 +256,14 @@ function persistState(): void {
 function isSessionNameTaken(name: string, excludeSessionId?: string): boolean {
   for (const meta of sessionMetas.values()) {
     if (meta.sessionId === excludeSessionId) continue;
+    if (meta.archived) continue;
     if (meta.name === name) return true;
   }
   return false;
 }
 
 function isRoomNameTaken(name: string, excludeRoomId?: string): boolean {
-  for (const room of rooms.list()) {
-    if (room.roomId === excludeRoomId) continue;
-    if (room.name === name) return true;
-  }
-  return false;
+  return rooms.nameTaken(name, excludeRoomId);
 }
 
 async function cloneSessionWithName(
@@ -1150,7 +1147,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       const baseName = source.name;
       const existingNames = new Set(
-        [...sessionMetas.values()].map((m) => m.name),
+        [...sessionMetas.values()]
+          .filter((m) => !m.archived)
+          .map((m) => m.name),
       );
       let newName = `${baseName} (2)`;
       let counter = 2;
