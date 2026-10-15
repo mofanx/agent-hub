@@ -106,6 +106,14 @@ export function setPromptAckTimeoutMs(v: number): void {
   promptAckTimeoutMs = v;
 }
 const ELICITATION_TIMEOUT_MS = 600_000;
+const TURN_UPDATE_KINDS = new Set([
+  "agent_message_chunk",
+  "agent_message",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+]);
 const OUTPUT_CAPTURE_LEN = 800;
 const AUTH_REQUIRED_CODE = acp.RequestError.authRequired().code;
 let permissionBypass = process.env.HUB_PERMISSION_BYPASS === "1";
@@ -514,7 +522,6 @@ export class AcpAgent {
   private routeUpdate(params: { sessionId: string; update: unknown }): void {
     const entry = this.sessions.get(params.sessionId);
     if (!entry || entry.loading) return;
-    entry.turnGotUpdate = true;
     const u = params.update as {
       sessionUpdate?: string;
       content?: { type: string; text?: string };
@@ -523,6 +530,11 @@ export class AcpAgent {
       cost?: { amount: number; currency: string };
       configOptions?: unknown[];
     };
+    // 非在途时的内容型 update 视为僵尸流量丢弃（cancel/watchdog 后迟到的回合残片）；
+    // usage/config_option 属会话级更新，不受回合约束放行。
+    // 已知边界：新回合已启动后旧回合迟到的 update 无法区分——ACP session/update 不携带回合标识。
+    if (!entry.busy && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) return;
+    if (entry.busy) entry.turnGotUpdate = true;
     if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
       this.recordConfigOptions(params.sessionId, u.configOptions);
     }
@@ -937,14 +949,7 @@ export class AcpAgent {
       if (!isCurrentTurn()) return;
       entry.watchdog = undefined;
       if (!entry.busy || entry.turnGotUpdate) return;
-      // 尽力取消僵尸回合，避免会话被重派时同一 ACP 会话叠两个在途 prompt
-      this.cancel(sessionId).catch(() => {});
-      entry.busy = false;
-      entry.stoppable = false;
-      this.emit({
-        method: "session.generating",
-        params: { sessionId, stoppable: false },
-      });
+      // 先以超时语义广播+拒 waiter，再做取消清理——cancel 会以 cancelled 语义收尾剩余 waiter
       const err = new Error(
         `agent ${this.name} produced no output within ${promptAckTimeoutMs / 1000}s — request may have been rejected at transport level`,
       );
@@ -957,6 +962,8 @@ export class AcpAgent {
         this.promptOnceWaiters.delete(sessionId);
         waiter.reject(err);
       }
+      // 尽力取消僵尸回合（内部清 busy/stoppable、换代、onTurnEnd 收尾），避免重派叠 prompt
+      this.cancel(sessionId).catch(() => {});
     }, promptAckTimeoutMs);
     entry.watchdog.unref?.();
     this.ctx!.request(acp.methods.agent.session.prompt, {

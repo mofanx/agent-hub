@@ -451,6 +451,30 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+  it("watchdog 与 cancel 的 promptOnce 拒因可区分（timeout vs cancelled）", async () => {
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    setPromptAckTimeoutMs(60);
+    try {
+      await hub.createSession("/tmp", "s");
+      const p1 = hub.promptOnce("s1", "hi", 0);
+      const rej1 = assert.rejects(p1, /no output|transport/);
+      // unref 看门狗期间需活跃句柄保活事件循环
+      await waitFor(() => events.find((e) => e.method === "prompt.error"));
+      await rej1;
+      const p2 = hub.promptOnce("s1", "next", 0);
+      const rej2 = assert.rejects(p2, /cancelled/);
+      await waitFor(() => (hub.isBusy("s1") ? true : undefined));
+      await hub.cancel("s1");
+      await rej2;
+    } finally {
+      setPromptAckTimeoutMs(180_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
   it("cancel 换代后旧 prompt 迟到 settle 被丢弃", async () => {
     const resolvers: ((r: acp.PromptResponse) => void)[] = [];
     const { hub, agentConn, events } = setup({

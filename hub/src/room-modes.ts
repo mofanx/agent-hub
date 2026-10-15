@@ -861,6 +861,29 @@ export class RoomModeManager {
     return false;
   }
 
+  /**
+   * 成员级取消（用户 /stop、session.cancel）：收敛该会话在编排中的悬挂状态。
+   * conductor 任务标 failed 终态（不自动重派）；auto 决策中止；其余模式复用 onPromptError 的终态收敛。
+   */
+  onSessionCancelled(sessionId: string): void {
+    const autoCtx = this.autoDecisions.get(sessionId);
+    if (autoCtx) {
+      this.autoDecisions.delete(sessionId);
+      this.promptRooms.delete(sessionId);
+      this.clearSubMode(autoCtx.roomId);
+      this.emitFlowUpdate(autoCtx.roomId);
+      return;
+    }
+    const conductorRoom = this.conductor.onSessionCancelled(sessionId);
+    if (conductorRoom) {
+      if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
+      this.emitFlowUpdate(conductorRoom);
+      return;
+    }
+    // parallel/pipeline/debate 的成员中断收敛本就为终态，直接复用
+    this.onPromptError(sessionId);
+  }
+
   /** prompt 异常/取消时的回调 */
   onPromptError(sessionId: string): boolean {
     const autoCtx = this.autoDecisions.get(sessionId);

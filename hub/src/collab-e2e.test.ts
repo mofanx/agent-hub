@@ -20,6 +20,7 @@ type FlowTaskView = {
   waitingFor?: string;
   waitingQuestion?: string;
   waitingHelpId?: string;
+  failureMessage?: string;
   verifications?: { by: string; verdict: string; evidence: string; evidenceDetail?: Record<string, unknown>; backendToolCallId?: string }[];
   verificationStatus?: string;
   automaticCheck?: {
@@ -2339,6 +2340,40 @@ describe("collab-e2e", () => {
     await tick();
     assert.equal(h3.flow()?.phase, "awaiting-input");
     assert.deepEqual(h3.flow()?.clarificationQuestions, ["还剩一个问题？"]);
+  });
+
+  it("成员 cancel 后 running 子任务收敛为 failed 并传播依赖，不悬挂", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "实现排序", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证","dependsOn":["t1"]}]}\n```',
+    );
+    await tick();
+    assert.equal(h.flow()!.tasks.find((t) => t.id === "t1")!.status, "running");
+
+    // 等价于 index.ts：agent.cancel(sid) 成功后 → roomModeManager.onSessionCancelled
+    h.busy.delete("s2");
+    h.manager.onSessionCancelled("s2");
+    await tick();
+
+    const t1 = h.flow()!.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.status, "failed", "被停止成员的 running 任务应收敛为终态而非悬挂");
+    assert.match(t1.failureMessage ?? "", /停止|中断/);
+    assert.ok(t1.finishedAt, "终态任务应有 finishedAt");
+    const t2 = h.flow()!.tasks.find((t) => t.id === "t2")!;
+    assert.equal(t2.status, "failed", "依赖失败应传播到下游 pending 任务");
+    assert.ok(
+      h.notices().some((m) => /中断|重试/.test(m)),
+      "应有成员中断 notice",
+    );
   });
 
   it("子任务暴露 dispatchedAt/finishedAt，taskIdForTurn 按回合窗口匹配（含已完成）", async () => {

@@ -800,6 +800,52 @@ export class ConductorOrchestrator {
     return hit?.id;
   }
 
+  /**
+   * 成员被用户主动停止/会话取消：名下 running 任务收敛为 failed 终态（"重试"可恢复）。
+   * 与 onPromptError 的 pending+自动重派不同，主动取消不立即重派，避免用户刚停又弹起。
+   */
+  onSessionCancelled(sessionId: string): string | undefined {
+    this.pendingToolCalls.delete(sessionId);
+    for (const [roomId, flow] of this.flows) {
+      const room = this.rooms.get(roomId);
+      if (!room || flow.phase !== "working") continue;
+      // 该会话正被求助方等待回复：按无响应收敛，唤醒原任务
+      const pendingReply = [...flow.help.values()].find(
+        (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
+      );
+      if (pendingReply) {
+        pendingReply.status = "answered";
+        pendingReply.answer = "（对方已停止/中断，未能提供回复）";
+        this.repromptAsker(flow, room, pendingReply);
+        this.emitFlow?.(roomId);
+        return roomId;
+      }
+      const hits = [...flow.tasks.values()].filter(
+        (t) => t.sessionId === sessionId && t.status === "running",
+      );
+      if (hits.length === 0) continue;
+      const name =
+        room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+      for (const t of hits) {
+        t.status = "failed";
+        t.failureMessage = "成员被停止/中断";
+        t.finishedAt = Date.now();
+        delete t.waitingForHelp;
+      }
+      this.emitFlow?.(roomId);
+      this.notice({
+        roomId,
+        message: `@${name} 的子任务已中断并标记失败（发送"重试"可重新派发）`,
+      });
+      // 走一遍调度收敛依赖传播与阶段判定（全部终态时会自动进入汇总/awaiting-retry）
+      void this.scheduleTasks(flow, room).catch((e) =>
+        logError("conductor schedule after cancel", e),
+      );
+      return roomId;
+    }
+    return undefined;
+  }
+
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */
   onPromptError(sessionId: string): string | undefined {
     this.pendingToolCalls.delete(sessionId);

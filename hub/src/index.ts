@@ -965,6 +965,7 @@ async function handleSessionSlash(sessionId: string, slash: SlashCmd): Promise<u
     throw new Error("session not generating");
   }
   await agent.cancel(sessionId);
+  roomModeManager.onSessionCancelled(sessionId);
   return { stopped: [sessionId] };
 }
 
@@ -1007,6 +1008,7 @@ async function handleRoomSlash(
     }
     try {
       await agent.cancel(sid);
+      roomModeManager.onSessionCancelled(sid);
       stopped.push(sid);
     } catch (err) {
       errors.push(String(err));
@@ -2065,6 +2067,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       await ownerOf(String(req.params?.sessionId ?? "")).cancel(
         String(req.params?.sessionId ?? ""),
       );
+      roomModeManager.onSessionCancelled(String(req.params?.sessionId ?? ""));
       return { cancelled: true };
     case "permission.respond": {
       const requestId = String(req.params?.requestId ?? "");
