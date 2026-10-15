@@ -146,6 +146,10 @@ type FlowTask = {
   verifications?: TaskVerification[];
   backendRuns?: BackendToolRun[];
   automaticCheck?: AutomaticCheck;
+  /** 最近一次派发时刻（重试/恢复会刷新），用于过程钻取的时间窗下界 */
+  dispatchedAt?: number;
+  /** 进入终态（done/failed）的时刻，作为过程钻取窗口上界 */
+  finishedAt?: number;
 };
 
 type Flow = {
@@ -175,7 +179,12 @@ type Flow = {
   planFormatRetries: number;
 };
 
-export type ConductorNotice = { roomId: string; message: string };
+export type ConductorNotice = {
+  roomId: string;
+  message: string;
+  /** 结构化卡片 meta（如派工任务清单），随 room.notice 下发供 Hub 落 process 条目 */
+  meta?: Record<string, unknown>;
+};
 
 const PLAN_RESULT_LEN = 4000;
 const MAX_ITERATIONS = 3;
@@ -649,6 +658,8 @@ export class ConductorOrchestrator {
         task: t.task,
         dependsOn: t.dependsOn,
         iteration: t.iteration,
+        ...(t.dispatchedAt !== undefined ? { dispatchedAt: t.dispatchedAt } : {}),
+        ...(t.finishedAt !== undefined ? { finishedAt: t.finishedAt } : {}),
         verificationStatus,
         automaticCheck: (() => {
           const ac = t.automaticCheck ?? { status: "not_run" };
@@ -762,6 +773,31 @@ export class ConductorOrchestrator {
       }
     }
     return undefined;
+  }
+
+  /** 某会话当前回合对应的子任务 id（过程聚合卡归属用）；flush 时任务已收尾，按执行窗口与回合窗口重叠匹配 */
+  taskIdForSession(
+    sessionId: string,
+    roomId: string,
+    turnStartAt?: number,
+    turnEndAt?: number,
+  ): string | undefined {
+    const flow = this.flows.get(roomId);
+    if (!flow) return undefined;
+    const tasks = [...flow.tasks.values()].filter((t) => t.sessionId === sessionId);
+    if (turnStartAt === undefined) {
+      return tasks.find((t) => t.status === "running")?.id;
+    }
+    const end = turnEndAt ?? Number.MAX_SAFE_INTEGER;
+    const hit = tasks
+      .filter(
+        (t) =>
+          t.dispatchedAt !== undefined &&
+          t.dispatchedAt <= end &&
+          (t.finishedAt ?? Number.MAX_SAFE_INTEGER) >= turnStartAt,
+      )
+      .sort((a, b) => b.dispatchedAt! - a.dispatchedAt!)[0];
+    return hit?.id;
   }
 
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */
@@ -1078,6 +1114,7 @@ export class ConductorOrchestrator {
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
 
           running.status = "done";
+          running.finishedAt = Date.now();
           this.notice({
             roomId: flow.roomId,
             message: `@${name} 已完成子任务 ${running.id}（剩 ${pendingCount} 项）${extra}`,
@@ -1341,6 +1378,7 @@ export class ConductorOrchestrator {
       if (task.retries >= 3) {
         task.status = "failed";
         task.failureMessage = msg;
+        task.finishedAt = Date.now();
         this.emitFlow?.(flow.roomId);
         this.scheduleTasks(flow, room).catch((e2) =>
           logError("conductor schedule after help fail", e2),
@@ -1601,6 +1639,7 @@ export class ConductorOrchestrator {
         if ((t.status === "pending" || t.status === "running") && !this.agent.has(t.sessionId)) {
           t.status = "failed";
           t.failureMessage = "成员会话已失效";
+          t.finishedAt = Date.now();
           marked = true;
         }
       }
@@ -1622,6 +1661,7 @@ export class ConductorOrchestrator {
           if (t.dependsOn.some((d) => failedIds.has(d))) {
             t.status = "failed";
             t.failureMessage = "前置依赖任务失败";
+            t.finishedAt = Date.now();
             failedIds.add(id);
             changed = true;
             propagated = true;
@@ -1662,6 +1702,7 @@ export class ConductorOrchestrator {
     }
 
     const assignments: string[] = [];
+    const dispatchedTasks: { id: string; to: string; task: string }[] = [];
     let skippedBusy = false;
     for (const t of tasks) {
       if (this.agent.isBusy(t.sessionId)) {
@@ -1669,11 +1710,14 @@ export class ConductorOrchestrator {
         continue;
       }
       t.status = "running";
+      t.dispatchedAt = Date.now();
+      delete t.finishedAt;
       delete t.backendRuns;
       delete t.automaticCheck;
       this.pendingToolCalls.delete(t.sessionId);
       const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
       assignments.push(`@${name}：${t.task}`);
+      dispatchedTasks.push({ id: t.id, to: name, task: t.task });
       const taskRefs = this.rooms.parseArtifactRefs(room.roomId, t.task);
       const refs =
         taskRefs.length > 0
@@ -1765,6 +1809,7 @@ export class ConductorOrchestrator {
         if (t.retries >= 3) {
           t.status = "failed";
           t.failureMessage = msg;
+          t.finishedAt = Date.now();
         } else {
           t.status = "pending";
         }
@@ -1782,7 +1827,15 @@ export class ConductorOrchestrator {
     }
 
     if (assignments.length > 0) {
-      this.notice({ roomId: flow.roomId, message: `指挥家派工：${assignments.join("；")}` });
+      this.notice({
+        roomId: flow.roomId,
+        message: `指挥家派工：已派发 ${assignments.length} 个子任务`,
+        meta: {
+          type: "dispatch",
+          sessionId: room.conductorId ?? "",
+          tasks: dispatchedTasks,
+        },
+      });
     }
 
     // Bug 4: 有 runnable task 因 isBusy 被跳过时，定时轮询重试
@@ -2164,6 +2217,7 @@ export class ConductorOrchestrator {
     for (const t of failed) {
       t.status = "pending";
       delete t.failureMessage;
+      delete t.finishedAt;
       t.retries = 0;
     }
     flow.phase = "working";
@@ -2190,6 +2244,8 @@ export class ConductorOrchestrator {
         dependsOn: t.dependsOn,
         status: t.status,
         iteration: t.iteration,
+        ...(t.dispatchedAt !== undefined ? { dispatchedAt: t.dispatchedAt } : {}),
+        ...(t.finishedAt !== undefined ? { finishedAt: t.finishedAt } : {}),
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(t.retries !== undefined ? { retries: t.retries } : {}),
         ...(t.helpRounds !== undefined ? { helpRounds: t.helpRounds } : {}),
@@ -2325,6 +2381,12 @@ export class ConductorOrchestrator {
             : [],
           status,
           iteration: typeof o.iteration === "number" && o.iteration > 0 ? o.iteration : 1,
+          ...(typeof o.dispatchedAt === "number" ? { dispatchedAt: o.dispatchedAt } : {}),
+          ...(memberGone && rawStatus !== "done"
+            ? { finishedAt: Date.now() }
+            : typeof o.finishedAt === "number"
+              ? { finishedAt: o.finishedAt }
+              : {}),
           ...(memberGone && rawStatus !== "done"
             ? { failureMessage: "成员已离开房间" }
             : typeof o.failureMessage === "string"
@@ -2462,6 +2524,7 @@ export class ConductorOrchestrator {
           if (t.status === "running" && !t.waitingForHelp) {
             t.status = "failed";
             t.failureMessage = "Hub 重启时执行状态未知，请检查工作区后重试";
+            t.finishedAt = Date.now();
             delete t.automaticCheck;
             flow.results.delete(t.id);
             interrupted.push(t.id);

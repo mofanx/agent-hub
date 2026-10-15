@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { TurnProcessRecorder } from "./process-log.js";
+import { buildProcessMeta, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 import { Store } from "./store.js";
 
 describe("TurnProcessRecorder", () => {
@@ -63,6 +63,56 @@ describe("TurnProcessRecorder", () => {
     assert.equal(data.title, "执行命令");
   });
 
+  it("缓冲区超过上限时丢弃最旧，仅保留最近 50 条", () => {
+    const rec = new TurnProcessRecorder();
+    for (let i = 1; i <= 60; i++) {
+      rec.record("s1", {
+        sessionUpdate: "tool_call",
+        toolCallId: `tc${i}`,
+        title: `step ${i}`,
+        status: "completed",
+      }, "bot");
+    }
+    const items = rec.take("s1");
+    assert.equal(items.length, 50);
+    assert.equal(items[0]!.toolCallId, "tc11", "最旧的 10 条被截断");
+    assert.equal(items.at(-1)!.toolCallId, "tc60");
+  });
+
+  it("peek 返回当前缓冲但不消费，可供 running 任务钻取", () => {
+    const rec = new TurnProcessRecorder();
+    rec.record("s1", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "想" } }, "bot");
+    rec.record("s1", { sessionUpdate: "tool_call", toolCallId: "t1", title: "改文件" }, "bot");
+    const first = rec.peek("s1");
+    assert.equal(first.length, 2);
+    assert.equal(rec.peek("s1").length, 2, "peek 不消费缓冲区");
+    first.push({ at: 0, kind: "thought", author: "x", text: "污染" });
+    assert.equal(rec.peek("s1").length, 2, "peek 返回副本，外部修改不污染内部");
+    assert.equal(rec.take("s1").length, 2);
+    assert.equal(rec.peek("s1").length, 0, "take 后缓冲区清空");
+  });
+
+  it("buildProcessMeta 聚合 buf 为单条过程卡 meta，processId 稳定", () => {
+    const rec = new TurnProcessRecorder();
+    rec.record("s1", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "分析中" } }, "coder");
+    rec.record("s1", { sessionUpdate: "tool_call", toolCallId: "t1", title: "编辑 x.ts", status: "completed" }, "coder");
+    const buf = rec.take("s1");
+    const meta = buildProcessMeta("room1", "s1", buf, "t7", "done");
+    assert.equal(meta.sessionId, "s1");
+    assert.equal(meta.turnStartAt, buf[0]!.at);
+    assert.equal(meta.status, "done");
+    assert.equal(meta.taskId, "t7");
+    assert.equal(meta.steps.length, 2);
+    assert.deepEqual(meta.steps.map((s) => s.kind), ["thought", "tool"]);
+    assert.equal(meta.steps[0]!.text, "分析中");
+    assert.equal(meta.steps[1]!.title, "编辑 x.ts");
+    const meta2 = buildProcessMeta("room1", "s1", buf, "t7", "done");
+    assert.equal(meta2.processId, meta.processId, "同 room/session/turnStartAt 的 processId 稳定");
+    const meta3 = buildProcessMeta("room2", "s1", buf, undefined, "interrupted");
+    assert.notEqual(meta3.processId, meta.processId);
+    assert.equal(meta3.taskId, undefined);
+  });
+
   it("不同 session 的过程消息互相隔离", () => {
     const rec = new TurnProcessRecorder();
     rec.record("s1", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "a" } }, "bot");
@@ -98,6 +148,60 @@ describe("process history persistence", () => {
       assert.equal(toolData.toolCallId, "t1");
       assert.equal(toolData.status, "completed");
       assert.equal(entries[2]!.text, "完成");
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("回合 flush：session 保留全部过程项，room 历史仅一条 process 聚合卡", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    try {
+      const rec = new TurnProcessRecorder();
+      rec.record("s1", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "想" } }, "coder");
+      rec.record("s1", { sessionUpdate: "tool_call", toolCallId: "t1", title: "改文件", status: "completed" }, "coder");
+      rec.record("s1", { sessionUpdate: "plan", entries: [{ status: "in_progress", content: "步骤" }] }, "coder");
+      const buf = rec.take("s1");
+      // 与 index.ts flushTurnProcess 相同的写入序列
+      for (const item of buf) {
+        store.append("session", "s1", { at: item.at, kind: item.kind, author: item.author, text: item.text });
+      }
+      const meta = buildProcessMeta("room1", "s1", buf, "t1", "done");
+      const at = Date.now();
+      const id = store.append("room", "room1", { at, kind: "process", author: "coder", text: JSON.stringify(meta) });
+      assert.ok(id > 0, "append 返回行号供广播携带");
+
+      const roomEntries = store.read("room", "room1");
+      assert.equal(roomEntries.length, 1, "room 历史仅一条聚合卡");
+      assert.equal(roomEntries[0]!.kind, "process");
+      const parsed = JSON.parse(roomEntries[0]!.text) as ProcessCardMeta;
+      assert.equal(parsed.steps.length, 3);
+      assert.equal(parsed.taskId, "t1");
+      assert.equal(parsed.status, "done");
+      assert.ok(
+        !roomEntries.some((e) => e.kind === "thought" || e.kind === "tool" || e.kind === "plan"),
+        "房史不出现 worker 散装过程项",
+      );
+
+      const sessionEntries = store.read("session", "s1");
+      assert.deepEqual(sessionEntries.map((e) => e.kind), ["thought", "tool", "plan"], "session 保留全部明细");
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("readAfter 返回下界（含）之后的条目，用于任务时间窗钻取", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    try {
+      store.append("session", "s1", { at: 100, kind: "assistant", author: "bot", text: "旧" });
+      store.append("session", "s1", { at: 200, kind: "thought", author: "bot", text: "窗内1" });
+      store.append("session", "s1", { at: 300, kind: "tool", author: "bot", text: "窗内2" });
+      const entries = store.readAfter("session", "s1", 200);
+      assert.deepEqual(entries.map((e) => e.at), [200, 300], "含下界、按时间升序");
+      assert.equal(store.readAfter("session", "s1", 400).length, 0);
     } finally {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });

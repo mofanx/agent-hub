@@ -15,6 +15,8 @@ type FlowTaskView = {
   id: string;
   name: string;
   status: string;
+  dispatchedAt?: number;
+  finishedAt?: number;
   waitingFor?: string;
   waitingQuestion?: string;
   waitingHelpId?: string;
@@ -2337,5 +2339,55 @@ describe("collab-e2e", () => {
     await tick();
     assert.equal(h3.flow()?.phase, "awaiting-input");
     assert.deepEqual(h3.flow()?.clarificationQuestions, ["还剩一个问题？"]);
+  });
+
+  it("子任务暴露 dispatchedAt/finishedAt，taskIdForTurn 按回合窗口匹配（含已完成）", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "实现排序", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"tester","task":"验证","dependsOn":["t1"]}]}\n```',
+    );
+    await tick();
+    const t1 = h.flow()!.tasks.find((t) => t.id === "t1")!;
+    assert.ok(t1.dispatchedAt && t1.dispatchedAt > 0, "派发时记录 dispatchedAt");
+    assert.equal(t1.finishedAt, undefined, "进行中尚无 finishedAt");
+    assert.equal(h.manager.taskIdForTurn("s2", h.room.roomId), "t1", "running 中直接命中");
+    assert.equal(
+      h.manager.taskIdForTurn("s3", h.room.roomId),
+      undefined,
+      "t2 未派发，tester 不应关联任务",
+    );
+
+    await h.done("s2", "实现完成");
+    await tick();
+    const t1Done = h.flow()!.tasks.find((t) => t.id === "t1")!;
+    assert.ok(t1Done.finishedAt && t1Done.finishedAt >= t1Done.dispatchedAt!, "完成时记录 finishedAt");
+
+    // flush 时任务已收尾：按窗口重叠仍可命中（buf 首项时间戳必落在 [dispatchedAt, finishedAt] 内）
+    const turnStart = t1Done.dispatchedAt!;
+    const turnEnd = t1Done.finishedAt!;
+    assert.equal(
+      h.manager.taskIdForTurn("s2", h.room.roomId, turnStart, turnEnd),
+      "t1",
+      "已完成任务按执行窗口命中",
+    );
+    assert.equal(
+      h.manager.taskIdForTurn("s2", h.room.roomId, t1Done.dispatchedAt! - 10_000, t1Done.dispatchedAt! - 1),
+      undefined,
+      "回合早于派发窗口则不误关联",
+    );
+    assert.equal(
+      h.manager.taskIdForTurn("s3", h.room.roomId, turnStart, turnEnd),
+      "t2",
+      "t2 派发后 tester 回合关联 t2",
+    );
   });
 });

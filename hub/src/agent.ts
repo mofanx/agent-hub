@@ -69,6 +69,7 @@ export type HubEvent =
       };
     }
   | { method: "room.notice"; params: { roomId: string; message: string } }
+  | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string } } }
   | { method: "room.artifact"; params: { roomId: string; artifact?: unknown } }
   | { method: "session.artifact"; params: { sessionId: string } }
   | { method: "room.blackboardUpdate"; params: { roomId: string; blackboard: { id: string; from: string; text: string; detail: string; at: number }[] } }

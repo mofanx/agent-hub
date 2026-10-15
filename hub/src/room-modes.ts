@@ -16,7 +16,11 @@ export interface AgentOps {
   runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
 }
 
-type ConductorNotice = { roomId: string; message: string };
+type ConductorNotice = {
+  roomId: string;
+  message: string;
+  meta?: Record<string, unknown>;
+};
 type ModeSelectedEvent = {
   roomId: string;
   mode: RuntimeMode | null;
@@ -978,6 +982,16 @@ export class RoomModeManager {
           (flow.sides.includes(sessionId) || flow.judge === sessionId) &&
           (current === sessionId || !this.agent.isBusy(sessionId));
       })?.[0];
+  }
+
+  /** 该会话在此房间当前执行的子任务 id（conductor worker 回合；其他模式为 undefined） */
+  taskIdForTurn(
+    sessionId: string,
+    roomId: string,
+    turnStartAt?: number,
+    turnEndAt?: number,
+  ): string | undefined {
+    return this.conductor.taskIdForSession(sessionId, roomId, turnStartAt, turnEndAt);
   }
 
   /** 这次输出是否属于某个房间回合（含隐藏编排） */

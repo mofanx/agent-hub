@@ -30,7 +30,7 @@ export type SessionMeta = {
 
 export type HistoryEntry = {
   at: number;
-  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error";
+  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process";
   author: string;
   text: string;
 };
@@ -438,15 +438,17 @@ export class Store {
       .run(JSON.stringify(state));
   }
 
-  append(scope: "session" | "room", id: string, entry: HistoryEntry): void {
+  append(scope: "session" | "room", id: string, entry: HistoryEntry): number {
     try {
-      this.db
+      const r = this.db
         .prepare(
           "INSERT INTO history(scope, scope_id, at, kind, author, text) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
+      return Number(r.lastInsertRowid);
     } catch (err) {
       logWarn("store", `append failed: ${String(err)}`);
+      return -1;
     }
   }
 
@@ -596,6 +598,21 @@ export class Store {
       )
       .all(scope, id, at, at, beforeId ?? -1, limit) as HistoryItem[];
     return rows.reverse();
+  }
+
+  readAfter(
+    scope: "session" | "room",
+    id: string,
+    at: number,
+    limit = 200,
+  ): HistoryItem[] {
+    return this.db
+      .prepare(
+        `SELECT id, at, kind, author, text FROM history
+         WHERE scope = ? AND scope_id = ? AND at >= ?
+         ORDER BY at ASC, id ASC LIMIT ?`,
+      )
+      .all(scope, id, at, limit) as HistoryItem[];
   }
 
   hasMoreBefore(scope: "session" | "room", id: string, at: number, beforeId?: number): boolean {

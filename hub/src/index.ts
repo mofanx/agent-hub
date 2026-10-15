@@ -30,7 +30,7 @@ import { getDevinQuota } from "./quota.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
-import { TurnProcessRecorder } from "./process-log.js";
+import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -311,10 +311,17 @@ function ensureDefaultLocalConnections(): void {
   let created = false;
   for (const agent of Object.keys(AGENT_DEFS)) {
     const id = `local-${agent}`;
-    if (existing.some((c) => c.id === id)) continue;
+    const conn = existing.find((c) => c.id === id);
+    if (conn) {
+      // 迁移旧命名："本地 x" 前缀与客户端 local 徽章重复
+      if (conn.local && conn.name === `本地 ${agent}`) {
+        store.updateConnection(id, { name: agent });
+      }
+      continue;
+    }
     store.addConnection({
       id,
-      name: `本地 ${agent}`,
+      name: agent,
       agent,
       token: randomBytes(16).toString("hex"),
       local: true,
@@ -475,7 +482,7 @@ const roomModeManager = new RoomModeManager(
   (method, params) => {
     const p = params as Record<string, unknown>;
     if (method === "room.notice") {
-      broadcastRoomNotice(String(p.roomId ?? ""), String(p.message ?? ""));
+      broadcastRoomNotice(String(p.roomId ?? ""), String(p.message ?? ""), p.meta);
       return;
     }
     broadcast({ method, params } as HubEvent);
@@ -591,11 +598,10 @@ function listAllSessions(): {
 const turnDrafts = new Map<string, { sessionDraftId?: number; roomDraftId?: number }>();
 const turnProcess = new TurnProcessRecorder();
 
-function flushTurnProcess(sessionId: string): void {
+function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interrupted" = "done"): void {
   const buf = turnProcess.take(sessionId);
   if (buf.length === 0) return;
   const roomId = roomModeManager.roomIdForTurn(sessionId);
-  const writeRoom = roomId != null && !roomModeManager.isHiddenSession(sessionId);
   for (const item of buf) {
     store.append("session", sessionId, {
       at: item.at,
@@ -603,15 +609,22 @@ function flushTurnProcess(sessionId: string): void {
       author: item.author,
       text: item.text,
     });
-    if (writeRoom && roomId) {
-      store.append("room", roomId, {
-        at: item.at,
-        kind: item.kind,
-        author: item.author,
-        text: item.text,
-      });
-    }
   }
+  if (!roomId) return;
+  // 房间历史只写一条聚合过程卡（不逐条散装），meta 供客户端钻取/展开
+  const turnStartAt = buf[0]!.at;
+  const turnEndAt = buf[buf.length - 1]!.at;
+  const taskId = roomModeManager.taskIdForTurn(sessionId, roomId, turnStartAt, turnEndAt);
+  const meta = buildProcessMeta(roomId, sessionId, buf, taskId, status);
+  const at = Date.now();
+  const text = JSON.stringify(meta);
+  const author = displayNameFor(sessionId);
+  const id = store.append("room", roomId, { at, kind: "process", author, text });
+  if (id < 0) return;
+  broadcast({
+    method: "room.process",
+    params: { roomId, entry: { id, at, kind: "process", author, text } },
+  } as HubEvent);
 }
 
 function displayNameFor(sessionId: string): string {
@@ -657,7 +670,7 @@ function onTurnProgress(sessionId: string, fullText: string): void {
 }
 
 function interruptTurnDrafts(sessionId: string): void {
-  flushTurnProcess(sessionId);
+  flushTurnProcess(sessionId, "interrupted");
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
   turnDrafts.delete(sessionId);
@@ -671,7 +684,7 @@ function interruptTurnDrafts(sessionId: string): void {
 
 function onTurnEnd(sessionId: string, text: string): void {
   const displayName = displayNameFor(sessionId);
-  flushTurnProcess(sessionId);
+  flushTurnProcess(sessionId, "done");
   const draft = turnDrafts.get(sessionId);
   turnDrafts.delete(sessionId);
   if (text.trim()) {
@@ -805,7 +818,7 @@ function onAgentEvent(event: HubEvent): void {
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
-      flushTurnProcess(sessionId);
+      flushTurnProcess(sessionId, "failed");
       const errorRoomId = roomModeManager.roomIdForTurn(sessionId);
       interruptTurnDrafts(sessionId);
       const message = String(event.params.message ?? "");
@@ -845,11 +858,17 @@ function onAgentEvent(event: HubEvent): void {
 }
 
 
-function broadcastRoomNotice(roomId: string, message: string): void {
+function broadcastRoomNotice(roomId: string, message: string, meta?: unknown): void {
   if (!roomId || !message) return;
-  // 恢复 flow 会重放派工等通知；与最后一条历史相同时跳过写入，避免重启后重复
-  const last = store.read("room", roomId, 1).at(-1);
-  if (!(last && last.kind === "system" && last.text === message)) {
+  // 恢复 flow 会重放派工等通知；与最后一条历史相同时跳过写入，避免重启后重复。
+  // 派工类通知会在 system 条目后再落一张 process 卡，尾部为 [system, process] 对时同样视为已写入
+  const tail = store.read("room", roomId, 2);
+  const last = tail.at(-1);
+  const wrote = !(
+    (last?.kind === "system" && last.text === message) ||
+    (last?.kind === "process" && tail.at(-2)?.kind === "system" && tail.at(-2)?.text === message)
+  );
+  if (wrote) {
     store.append("room", roomId, {
       at: Date.now(),
       kind: "system",
@@ -858,6 +877,45 @@ function broadcastRoomNotice(roomId: string, message: string): void {
     });
   }
   broadcast({ method: "room.notice", params: { roomId, message } });
+  // 结构化通知（如派工清单）：系统文本之外再落一条 process 卡并广播，恢复重放去重时不重复落卡
+  const m = meta as { type?: unknown; sessionId?: unknown; tasks?: unknown } | undefined;
+  if (wrote && m?.type === "dispatch" && Array.isArray(m.tasks)) {
+    const sessionId = typeof m.sessionId === "string" ? m.sessionId : "";
+    const tasks = m.tasks
+      .map((t) => {
+        const o = t as Record<string, unknown>;
+        return {
+          id: typeof o.id === "string" ? o.id : undefined,
+          to: typeof o.to === "string" ? o.to : undefined,
+          task: typeof o.task === "string" ? o.task : undefined,
+        };
+      })
+      .filter((t) => t.task !== undefined);
+    const at = Date.now();
+    const cardMeta: ProcessCardMeta = {
+      processId: newProcessId(
+        roomId,
+        `dispatch:${sessionId || roomId}:${tasks.map((t) => t.id ?? "?").join("+")}`,
+        at,
+      ),
+      sessionId,
+      turnStartAt: at,
+      turnEndAt: at,
+      steps: [],
+      status: "done",
+      type: "dispatch",
+      count: tasks.length,
+      tasks,
+    };
+    const text = JSON.stringify(cardMeta);
+    const author = sessionId ? displayNameFor(sessionId) : "";
+    const id = store.append("room", roomId, { at, kind: "process", author, text });
+    if (id < 0) return;
+    broadcast({
+      method: "room.process",
+      params: { roomId, entry: { id, at, kind: "process", author, text } },
+    } as HubEvent);
+  }
 }
 
 function broadcast(event: HubEvent): void {
@@ -1480,21 +1538,32 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         ),
       };
     }
+    case "session.process": {
+      const sessionId = String(req.params?.sessionId ?? "");
+      return { items: turnProcess.peek(sessionId) };
+    }
     case "session.history": {
       const sessionId = String(req.params?.sessionId ?? "");
       const limit = Number(req.params?.limit ?? 200);
       const anchorAt = req.params?.anchorAt;
       const beforeAt = req.params?.before;
+      const afterAt = req.params?.after;
       const beforeId = req.params?.beforeId;
       const boundaryId =
         typeof beforeId === "number" && Number.isFinite(beforeId) ? beforeId : undefined;
+      const afterBound = typeof afterAt === "number" && Number.isFinite(afterAt) ? afterAt : undefined;
       let entries;
       if (typeof beforeAt === "number" && Number.isFinite(beforeAt)) {
         entries = store.readBefore("session", sessionId, beforeAt, limit, boundaryId);
       } else if (typeof anchorAt === "number" && Number.isFinite(anchorAt)) {
         entries = store.readAround("session", sessionId, anchorAt, limit);
+      } else if (afterBound !== undefined) {
+        entries = store.readAfter("session", sessionId, afterBound, limit);
       } else {
         entries = store.read("session", sessionId, limit);
+      }
+      if (afterBound !== undefined && entries.length > 0 && entries[0]!.at < afterBound) {
+        entries = entries.filter((e) => e.at >= afterBound);
       }
       const hasMore = entries.length > 0 ? store.hasMoreBefore("session", sessionId, entries[0]!.at, entries[0]!.id) : false;
       return { entries, hasMore };
