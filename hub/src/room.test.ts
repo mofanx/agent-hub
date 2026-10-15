@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { RoomManager, type Room } from "./room.js";
+import { RoomManager, remapRoomModeConfig, type Room } from "./room.js";
 import { lostReplyAction, Store } from "./store.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
@@ -810,5 +810,68 @@ describe("lostReplyAction", () => {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {
+  it("全部会话引用按 idMap 换成新 sessionId，不携带旧 id", () => {
+    const idMap = new Map([
+      ["s1", "n1"],
+      ["s2", "n2"],
+      ["s3", "n3"],
+    ]);
+    const cfg = remapRoomModeConfig(
+      {
+        conductorId: "s1",
+        parallelSummarizerId: "s2",
+        pipelineOrder: ["s1", "s2", "s3"],
+        debateSides: ["s1", "s3"],
+        debateJudge: "s2",
+        debateRounds: 3,
+        memberRoles: { s1: "leader", s2: "coder" },
+      },
+      idMap,
+    );
+    assert.equal(cfg.conductorId, "n1");
+    assert.equal(cfg.parallelSummarizerId, "n2");
+    assert.deepEqual(cfg.pipelineOrder, ["n1", "n2", "n3"]);
+    assert.deepEqual(cfg.debateSides, ["n1", "n3"]);
+    assert.equal(cfg.debateJudge, "n2");
+    assert.equal(cfg.debateRounds, 3);
+    assert.deepEqual(cfg.memberRoles, { n1: "leader", n2: "coder" });
+    const flat = JSON.stringify(cfg);
+    for (const old of ["s1", "s2", "s3"]) {
+      assert.ok(!flat.includes(`"${old}"`), `旧 sessionId ${old} 不得泄漏进新配置`);
+    }
+  });
+
+  it("未映射成员引用丢弃而非残留旧 id", () => {
+    const idMap = new Map([["s1", "n1"]]);
+    const cfg = remapRoomModeConfig(
+      {
+        conductorId: "s9",
+        pipelineOrder: ["s1", "s9"],
+        debateSides: ["s1", "s9"],
+        memberRoles: { s1: "a", s9: "b" },
+      },
+      idMap,
+    );
+    assert.equal(cfg.conductorId, undefined);
+    assert.deepEqual(cfg.pipelineOrder, ["n1"]);
+    assert.deepEqual(cfg.debateSides, ["n1"]);
+    assert.deepEqual(cfg.memberRoles, { n1: "a" });
+  });
+
+  it("空配置返回全 undefined，不产生空对象残留", () => {
+    const cfg = remapRoomModeConfig({}, new Map());
+    assert.deepEqual(cfg, {
+      conductorId: undefined,
+      parallelSummarizerId: undefined,
+      pipelineOrder: undefined,
+      debateSides: undefined,
+      debateJudge: undefined,
+      debateRounds: undefined,
+      memberRoles: undefined,
+    });
   });
 });

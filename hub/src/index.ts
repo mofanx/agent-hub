@@ -16,7 +16,7 @@ import {
   type ElicitationValue,
   type HubEvent,
 } from "./agent.js";
-import { RoomManager, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
+import { RoomManager, remapRoomModeConfig, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
@@ -272,6 +272,7 @@ function isRoomNameTaken(name: string, excludeRoomId?: string): boolean {
 async function cloneSessionWithName(
   source: SessionMeta,
   targetName: string,
+  opts?: { fresh?: boolean },
 ): Promise<{ sessionId: string; name: string }> {
   const connectionId = source.connectionId;
   if (!connectionId) throw new Error("source session has no connection");
@@ -281,6 +282,7 @@ async function cloneSessionWithName(
   const agent = agents.get(connection.id);
   if (!agent) throw new Error("agent 未连接");
 
+  // 始终 createSession 新建（不走 cloneSession/session.fork——fork 会把旧上下文搬进新会话）
   const s = await agent.createSession(source.cwd, targetName);
   sessionMetas.set(s.sessionId, {
     sessionId: s.sessionId,
@@ -292,6 +294,18 @@ async function cloneSessionWithName(
   });
   owners.set(s.sessionId, connection.id);
   persistState();
+
+  // fresh（群聊重置）：继承模型偏好与非模型 config（thought_level/mode 等），不继承对话内容
+  if (opts?.fresh && connection.agent) {
+    const backend = connection.agent as ModelBackend;
+    modelManager.copySessionPreference(source.sessionId, s.sessionId);
+    modelManager.copySessionConfig(source.sessionId, s.sessionId);
+    const current = modelManager.current(backend, source.sessionId);
+    await setSessionModel(agent, backend, s.sessionId, current.uid).catch((err) =>
+      logWarn("room.clone", `sync model failed: ${String(err)}`),
+    );
+    await syncSessionConfigPrefs(agent, s.sessionId);
+  }
 
   if (source.roleId) {
     const role = store.listRoles().find((r) => r.id === source.roleId);
@@ -1145,6 +1159,17 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         newName = `${baseName} (${counter})`;
       }
 
+      // fresh=true：不 fork 上下文，仅新建会话并继承模型/config/persona（与 room.clone fresh 同语义）
+      if (req.params?.fresh === true) {
+        const s = await cloneSessionWithName(source, newName, { fresh: true });
+        return {
+          ...s,
+          agent: connection.agent,
+          connectionId: connection.id,
+          roleId: source.roleId,
+        };
+      }
+
       const s = await agent.cloneSession(sourceSessionId, source.cwd, newName);
       sessionMetas.set(s.sessionId, {
         sessionId: s.sessionId,
@@ -1458,37 +1483,19 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!newName) throw new Error("name required");
       if (isRoomNameTaken(newName)) throw new Error("room name already exists");
 
+      const fresh = req.params?.fresh === true;
       const idMap = new Map<string, string>();
       const newMembers: { sessionId: string; name: string }[] = [];
       for (const m of source.members) {
         const meta = sessionMetas.get(m.sessionId);
         if (!meta) throw new Error(`unknown session: ${m.sessionId}`);
         const sessionName = `${newName}-${meta.name}`;
-        const s = await cloneSessionWithName(meta, sessionName);
+        const s = await cloneSessionWithName(meta, sessionName, { fresh });
         idMap.set(m.sessionId, s.sessionId);
         newMembers.push({ sessionId: s.sessionId, name: m.name });
       }
 
-      const remap = (sid?: string) => (sid ? idMap.get(sid) : undefined);
-      const config: RoomModeConfig = {
-        conductorId: remap(source.conductorId),
-        parallelSummarizerId: remap(source.parallelSummarizerId),
-        pipelineOrder: source.pipelineOrder
-          ?.map(remap)
-          .filter((sid): sid is string => !!sid),
-        debateSides: source.debateSides
-          ? (source.debateSides.map(remap).filter((sid): sid is string => !!sid) as [string, string])
-          : undefined,
-        debateJudge: remap(source.debateJudge),
-        debateRounds: source.debateRounds,
-        memberRoles: source.memberRoles
-          ? Object.fromEntries(
-              Object.entries(source.memberRoles)
-                .map(([sid, persona]) => [idMap.get(sid), persona])
-                .filter(([sid]) => !!sid),
-            )
-          : undefined,
-      };
+      const config = remapRoomModeConfig(source, idMap);
       const room = rooms.create(newName, newMembers, source.mode, config);
       persistState();
       return { room: enrichRoom(room) };

@@ -53,6 +53,33 @@ export type RoomModeConfig = {
 
 export type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
 
+/** room.clone：把源房间的会话级配置按新旧 sessionId 映射表重映射；未映射的旧 id 一律丢弃 */
+export function remapRoomModeConfig(
+  source: RoomModeConfig,
+  idMap: ReadonlyMap<string, string>,
+): RoomModeConfig {
+  const remap = (sid?: string) => (sid ? idMap.get(sid) : undefined);
+  return {
+    conductorId: remap(source.conductorId),
+    parallelSummarizerId: remap(source.parallelSummarizerId),
+    pipelineOrder: source.pipelineOrder
+      ?.map(remap)
+      .filter((sid): sid is string => !!sid),
+    debateSides: source.debateSides
+      ? (source.debateSides.map(remap).filter((sid): sid is string => !!sid) as [string, string])
+      : undefined,
+    debateJudge: remap(source.debateJudge),
+    debateRounds: source.debateRounds,
+    memberRoles: source.memberRoles
+      ? Object.fromEntries(
+          Object.entries(source.memberRoles)
+            .map(([sid, persona]) => [idMap.get(sid), persona])
+            .filter(([sid]) => !!sid),
+        )
+      : undefined,
+  };
+}
+
 const BLACKBOARD_LIMIT = 10;
 const BLACKBOARD_OUTPUT_LEN = 400;
 
