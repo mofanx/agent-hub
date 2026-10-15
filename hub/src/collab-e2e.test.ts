@@ -1677,6 +1677,148 @@ describe("collab-e2e", () => {
     }
   });
 
+  it("parallel 收尾保留 done 快照：任务不缩水、新回合清理", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "p-snap",
+      [
+        { sessionId: "s1", name: "a" },
+        { sessionId: "s2", name: "b" },
+        { sessionId: "s3", name: "sum" },
+      ],
+      "parallel",
+      { parallelSummarizerId: "s3" },
+    );
+    const busy = new Set<string>();
+    const prompts: Prompt[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, content) => {
+        prompts.push({ sessionId: sid, text: String(content) });
+        busy.add(sid);
+      },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => {
+        busy.delete(sid);
+      },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {}, 0);
+    const view = () => manager.getFlow(room.roomId) as (FlowView & { progress?: { total: number } }) | undefined;
+
+    await manager.handle(room, "主题", { params: { targets: ["s1", "s2"] } });
+    assert.equal(view()?.tasks.length, 2);
+    assert.equal(view()?.progress?.total, 2);
+
+    // 成员完成 → 列表不缩水、total 稳定
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "回答一");
+    assert.equal(view()?.tasks.length, 2, "成员完成后任务列表不得缩水");
+    assert.equal(view()?.tasks.find((t) => t.id === "s1")?.status, "done");
+
+    // 全部成员完成 → 汇总中仍算活跃快照
+    busy.delete("s2");
+    await manager.onPromptDone("s2", "回答二");
+    assert.equal(view()?.phase, "summarizing", "汇总者答复前不得提前标 done");
+    assert.equal(manager.hasActiveFlow(room.roomId), true);
+
+    // 汇总者完成 → done 快照保留
+    busy.delete("s3");
+    await manager.onPromptDone("s3", "汇总结果");
+    assert.equal(view()?.phase, "done");
+    assert.equal(view()?.tasks.length, 2);
+    assert.equal(manager.hasActiveFlow(room.roomId), false, "done 快照不算活跃流程");
+
+    // 新回合启动 → 旧快照被清理替换
+    await manager.handle(room, "新主题", { params: { targets: ["s1"] } });
+    assert.equal(view()?.phase, "working");
+    assert.equal(view()?.tasks.length, 1, "新回合应替换旧 done 快照");
+  });
+
+  it("parallel 成员中断标记 failed 且保留在任务视图", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "p-fail",
+      [
+        { sessionId: "s1", name: "a" },
+        { sessionId: "s2", name: "b" },
+      ],
+      "parallel",
+      {},
+    );
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid) => {
+        busy.add(sid);
+      },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => {
+        busy.delete(sid);
+      },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {}, 0);
+    await manager.handle(room, "主题", {});
+    busy.delete("s1");
+    manager.onPromptError("s1");
+    const flow = manager.getFlow(room.roomId) as FlowView | undefined;
+    assert.equal(flow?.tasks.length, 2);
+    assert.equal(flow?.tasks.find((t) => t.id === "s1")?.status, "failed");
+    assert.equal(flow?.tasks.find((t) => t.id === "s2")?.status, "running");
+  });
+
+  it("conductor import：非成员任务保留为 failed，缺 conductor 降级为 awaiting-retry", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "gone" },
+      ],
+      { conductorId: "s1" },
+    );
+    await h.manager.handle(h.room, "做个任务", {});
+    await h.done(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现"},{"id":"t2","to":"gone","task":"测试"},{"id":"t3","to":"gone","task":"收尾"}]}\n```',
+    );
+    await tick();
+    assert.equal(h.flow()?.phase, "working");
+    const state = h.manager.exportRuntime();
+    // 模拟 t2 已在成员离开前完成：import 不得把 done 抹成 failed
+    const flows = (state as { conductor: { flows: { roomId: string; tasks: { id: string; status: string }[] }[] } })
+      .conductor.flows;
+    const expFlow = flows.find((f) => f.roomId === h.room.roomId)!;
+    expFlow.tasks.find((t) => t.id === "t2")!.status = "done";
+
+    // 成员离开 + 房间丢失指挥家
+    h.room.members = h.room.members.filter((m) => m.sessionId !== "s3");
+    h.room.conductorId = undefined;
+
+    const prompts2: Prompt[] = [];
+    const manager2 = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts2.push({ sessionId, text: String(content) });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      h.rooms,
+      () => {},
+      0,
+    );
+    await manager2.importRuntime(state);
+    await tick();
+    const restored = manager2.getFlow(h.room.roomId) as FlowView | undefined;
+    assert.ok(restored, "缺 conductor 的流程不得整体丢弃");
+    assert.equal(restored?.phase, "awaiting-retry", "缺 conductor 应降级暂停而非续跑");
+    const t2 = restored?.tasks.find((t) => t.id === "t2");
+    const t3 = restored?.tasks.find((t) => t.id === "t3");
+    assert.ok(t2 && t3, "非成员 sessionId 的任务不得被静默丢弃");
+    assert.equal(t2?.status, "done", "成员离开前已完成的任务不得抹成 failed");
+    assert.equal(t3?.status, "failed", "未完成的任务应标记 failed");
+    manager2.resumeFlows();
+    await tick();
+    assert.equal(prompts2.length, 0, "降级流程不得自动派发 prompt");
+  });
+
   it("规划前澄清：questions 暂停派工，显式答复后恰重规划一次", async () => {
     const h = makeHarness(
       [

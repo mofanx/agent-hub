@@ -19,7 +19,7 @@ export interface AgentOps {
 type ConductorNotice = { roomId: string; message: string };
 type ModeSelectedEvent = {
   roomId: string;
-  mode: RuntimeMode;
+  mode: RuntimeMode | null;
   activeSpeaker?: string | undefined;
   reason?: string | undefined;
 };
@@ -131,6 +131,14 @@ type AutoDecision = {
 
 type ParallelFlow = {
   pending: Set<string>;
+  /** 出错/中断的成员，保留在任务视图中显示 failed */
+  failed?: Set<string> | undefined;
+  /** 派发时的成员顺序，用于任务视图（pending ∪ results ∪ failed 的全集） */
+  members?: string[] | undefined;
+  /** 收尾/中断后保留快照，下回合启动时清理 */
+  done?: boolean | undefined;
+  /** 汇总者 prompt 已派发、等待最终答复（此期间快照仍算活跃） */
+  summarizing?: boolean | undefined;
   results: Map<string, string>;
   summarizer?: string | undefined;
   topic: string;
@@ -146,6 +154,10 @@ type PipelineFlow = {
   order: string[];
   stage: number;
   outputs: string[];
+  /** 收尾/中断后保留快照，下回合启动时清理 */
+  done?: boolean | undefined;
+  /** 中断时当前阶段标记为 failed */
+  failed?: boolean | undefined;
   topic: string;
   note?: string | undefined;
   quote?: { author: string; text: string } | undefined;
@@ -164,6 +176,12 @@ type DebateOutput = {
 type DebateFlow = {
   sides: [string, string];
   judge: string;
+  /** 收尾/中断后保留快照，下回合启动时清理 */
+  done?: boolean | undefined;
+  /** 裁判总结 prompt 已派发、等待最终答复 */
+  summarizing?: boolean | undefined;
+  /** 中断时当前发言标记为 failed */
+  failed?: boolean | undefined;
   rounds: number;
   currentRound: number;
   sideIndex: number;
@@ -378,11 +396,19 @@ export class RoomModeManager {
     const flow = this.parallelFlows.get(roomId);
     if (!flow) return undefined;
     const room = this.rooms.get(roomId);
-    const tasks = [...flow.pending].map((sid) => ({
+    // 任务视图枚举全部已派发成员（pending ∪ results ∪ failed），不随完成缩水
+    const all = flow.members ?? [...flow.results.keys(), ...flow.pending, ...(flow.failed ?? [])];
+    const tasks = all.map((sid) => ({
       id: sid,
       sessionId: sid,
       name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
-      status: flow.results.has(sid) ? "done" : this.agent.isBusy(sid) ? "running" : "pending",
+      status: flow.failed?.has(sid)
+        ? "failed"
+        : flow.results.has(sid)
+          ? "done"
+          : this.agent.isBusy(sid)
+            ? "running"
+            : "pending",
       task: flow.topic,
       dependsOn: [] as string[],
       artifacts: [] as { type: string; path?: string; summary: string }[],
@@ -390,10 +416,15 @@ export class RoomModeManager {
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
     const pending = tasks.filter((t) => t.status === "pending").length;
+    const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId,
-      phase: running > 0 ? "working" : done === tasks.length ? "summarizing" : "working",
-      progress: { done, running, pending, failed: 0, total: tasks.length },
+      phase: flow.done
+        ? "done"
+        : flow.summarizing || (running === 0 && done + failed === tasks.length)
+          ? "summarizing"
+          : "working",
+      progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
     };
@@ -410,7 +441,15 @@ export class RoomModeManager {
         id: `p${i + 1}`,
         sessionId: sid,
         name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
-        status: isDone ? "done" : isCurrent ? (this.agent.isBusy(sid) ? "running" : "pending") : "pending",
+        status: isDone
+          ? "done"
+          : isCurrent
+            ? flow.failed
+              ? "failed"
+              : this.agent.isBusy(sid)
+                ? "running"
+                : "pending"
+            : "pending",
         task: isCurrent ? flow.topic : (isDone ? `已完成：${flow.outputs[i]?.slice(0, 80) ?? ""}` : `等待前序完成`),
         dependsOn: i > 0 ? [`p${i}`] : [],
         artifacts: [] as { type: string; path?: string; summary: string }[],
@@ -419,10 +458,11 @@ export class RoomModeManager {
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
     const pending = tasks.filter((t) => t.status === "pending").length;
+    const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId,
-      phase: flow.stage >= flow.order.length ? "summarizing" : "working",
-      progress: { done, running, pending, failed: 0, total: tasks.length },
+      phase: flow.done ? "done" : flow.stage >= flow.order.length ? "summarizing" : "working",
+      progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
     };
@@ -446,7 +486,15 @@ export class RoomModeManager {
         id: `r${round}s${side + 1}`,
         sessionId: sid,
         name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
-        status: output ? "done" : isCurrent ? (this.agent.isBusy(sid) ? "running" : "pending") : "pending",
+        status: output
+          ? "done"
+          : isCurrent
+            ? flow.failed
+              ? "failed"
+              : this.agent.isBusy(sid)
+                ? "running"
+                : "pending"
+            : "pending",
         task: `${flow.topic}（第 ${round}/${flow.rounds} 轮 · ${side === 0 ? "正方" : "反方"}）`,
         dependsOn: [] as string[],
         artifacts: [] as { type: string; path?: string; summary: string }[],
@@ -456,7 +504,15 @@ export class RoomModeManager {
       id: "judge",
       sessionId: flow.judge,
       name: room?.members.find((m) => m.sessionId === flow.judge)?.name ?? flow.judge,
-      status: completed >= total ? (this.agent.isBusy(flow.judge) ? "running" : "pending") : "pending",
+      status: completed >= total
+        ? flow.failed
+          ? "failed"
+          : this.agent.isBusy(flow.judge)
+            ? "running"
+            : flow.done
+              ? "done"
+              : "pending"
+        : "pending",
       task: `裁判总结：${flow.topic}`,
       dependsOn: flow.sides.map((_, i) => `r${flow.rounds}s${i + 1}`),
       artifacts: [] as { type: string; path?: string; summary: string }[],
@@ -464,21 +520,25 @@ export class RoomModeManager {
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
     const pending = tasks.filter((t) => t.status === "pending").length;
+    const failed = tasks.filter((t) => t.status === "failed").length;
     return {
       roomId,
-      phase: completed >= total ? "summarizing" : "working",
-      progress: { done, running, pending, failed: 0, total: tasks.length },
+      phase: flow.done ? "done" : completed >= total ? "summarizing" : "working",
+      progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
     };
   }
 
-  /** 当前房间是否有进行中的编排流 */
+  /** 当前房间是否有进行中的编排流（已收尾的 done 快照不算） */
   hasActiveFlow(roomId: string): boolean {
     if (this.conductor.hasActiveFlow(roomId)) return true;
-    if (this.parallelFlows.has(roomId)) return true;
-    if (this.pipelineFlows.has(roomId)) return true;
-    if (this.debateFlows.has(roomId)) return true;
+    const p = this.parallelFlows.get(roomId);
+    if (p && !p.done) return true;
+    const pipe = this.pipelineFlows.get(roomId);
+    if (pipe && !pipe.done) return true;
+    const d = this.debateFlows.get(roomId);
+    if (d && !d.done) return true;
     if (this.autoDecisions.has(this.hostFor(roomId))) return true;
     return false;
   }
@@ -490,7 +550,10 @@ export class RoomModeManager {
     const touched = this.conductor.cancel(roomId, reason);
     for (const sid of touched) toCancel.add(sid);
     const pFlow = this.parallelFlows.get(roomId);
-    if (pFlow) for (const sid of pFlow.pending) toCancel.add(sid);
+    if (pFlow) {
+      for (const sid of pFlow.pending) toCancel.add(sid);
+      if (pFlow.summarizing && pFlow.summarizer) toCancel.add(pFlow.summarizer);
+    }
     const pipe = this.pipelineFlows.get(roomId);
     if (pipe) toCancel.add(pipe.order[pipe.stage]!);
     const debate = this.debateFlows.get(roomId);
@@ -501,7 +564,7 @@ export class RoomModeManager {
     this.parallelFlows.delete(roomId);
     this.pipelineFlows.delete(roomId);
     this.debateFlows.delete(roomId);
-    this.roomSubMode.delete(roomId);
+    this.clearSubMode(roomId);
     const host = this.hostFor(roomId);
     if (this.autoDecisions.has(host)) {
       this.autoDecisions.delete(host);
@@ -600,21 +663,21 @@ export class RoomModeManager {
       return [];
     }
 
-    // 3. 其他编排模式：作为 extras 注入后续 prompt
+    // 3. 其他编排模式：作为 extras 注入后续 prompt（done 快照不再吸收）
     const pFlow = this.parallelFlows.get(roomId);
-    if (pFlow) {
+    if (pFlow && !pFlow.done && !pFlow.summarizing) {
       (pFlow.extras ??= []).push(text);
       this.notice({ roomId, message: `📝 补充信息已记录，将在汇总时纳入：${text.slice(0, 80)}` });
       return [];
     }
     const pipe = this.pipelineFlows.get(roomId);
-    if (pipe) {
+    if (pipe && !pipe.done) {
       (pipe.extras ??= []).push(text);
       this.notice({ roomId, message: `📝 补充信息已记录，将在后续阶段纳入：${text.slice(0, 80)}` });
       return [];
     }
     const debate = this.debateFlows.get(roomId);
-    if (debate) {
+    if (debate && !debate.done && !debate.summarizing) {
       (debate.extras ??= []).push(text);
       this.notice({ roomId, message: `📝 补充信息已记录，将在后续发言中纳入：${text.slice(0, 80)}` });
       return [];
@@ -743,6 +806,7 @@ export class RoomModeManager {
     // conductor 编排
     const conductorRoom = await this.conductor.onPromptDone(sessionId, output);
     if (conductorRoom) {
+      if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
       this.emitFlowUpdate(conductorRoom);
       return true;
     }
@@ -765,7 +829,31 @@ export class RoomModeManager {
     }
 
     // mention / 普通点名 / 汇总者等：统一提取 artifact 写入房间 registry
+    const endedRoomId = this.roomIdForTurn(sessionId);
     this.captureArtifacts(sessionId, output);
+    // 汇总者/裁判的最终答复完成 → 快照转 done（此前保持 summarizing 供面板查看进度）
+    for (const [rid, f] of this.parallelFlows) {
+      if (f.summarizing && f.summarizer === sessionId) {
+        f.done = true;
+        delete f.summarizing;
+        this.emitFlowUpdate(rid);
+      }
+    }
+    for (const [rid, f] of this.debateFlows) {
+      if (f.summarizing && f.judge === sessionId) {
+        f.done = true;
+        delete f.summarizing;
+        this.emitFlowUpdate(rid);
+      }
+    }
+    // 房间回合结束（无剩余流、无在途 prompt）→ 清除子模式徽标
+    if (
+      endedRoomId &&
+      !this.hasActiveFlow(endedRoomId) &&
+      ![...this.promptRooms.values()].includes(endedRoomId)
+    ) {
+      this.clearSubMode(endedRoomId);
+    }
     return false;
   }
 
@@ -793,13 +881,15 @@ export class RoomModeManager {
 
     const conductorRoom = this.conductor.onPromptError(sessionId);
     if (conductorRoom) {
+      if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
       this.emitFlowUpdate(conductorRoom);
       return true;
     }
 
     for (const [roomId, flow] of this.parallelFlows) {
-      if (flow.pending.has(sessionId)) {
+      if (!flow.done && flow.pending.has(sessionId)) {
         flow.pending.delete(sessionId);
+        (flow.failed ??= new Set()).add(sessionId);
         this.notice({
           roomId,
           message: `@${this.nameFor(roomId, sessionId)} 并行回答中断`,
@@ -811,26 +901,49 @@ export class RoomModeManager {
     }
 
     for (const [roomId, flow] of this.pipelineFlows) {
-      if (flow.order[flow.stage] === sessionId) {
-        this.pipelineFlows.delete(roomId);
-        this.setSubMode(roomId, "pipeline", undefined, undefined);
+      if (!flow.done && flow.order[flow.stage] === sessionId) {
+        flow.done = true;
+        flow.failed = true;
+        this.clearSubMode(roomId);
         this.notice({ roomId, message: `流水线第 ${flow.stage + 1} 阶段中断` });
         this.emitFlowUpdate(roomId);
         return true;
       }
     }
 
+    for (const [roomId, flow] of this.parallelFlows) {
+      if (flow.summarizing && flow.summarizer === sessionId) {
+        flow.done = true;
+        if (!flow.results.has(sessionId)) (flow.failed ??= new Set()).add(sessionId);
+        delete flow.summarizing;
+        this.clearSubMode(roomId);
+        this.notice({ roomId, message: "并行汇总中断" });
+        this.emitFlowUpdate(roomId);
+        return true;
+      }
+    }
+
     for (const [roomId, flow] of this.debateFlows) {
-      if (flow.sides.includes(sessionId) || flow.judge === sessionId) {
-        this.debateFlows.delete(roomId);
-        this.setSubMode(roomId, "debate", undefined, undefined);
+      if (!flow.done && (flow.sides.includes(sessionId) || flow.judge === sessionId)) {
+        flow.done = true;
+        flow.failed = true;
+        delete flow.summarizing;
+        this.clearSubMode(roomId);
         this.notice({ roomId, message: "辩论流程中断" });
         this.emitFlowUpdate(roomId);
         return true;
       }
     }
 
+    const erroredRoomId = this.promptRooms.get(sessionId);
     this.promptRooms.delete(sessionId);
+    if (
+      erroredRoomId &&
+      !this.hasActiveFlow(erroredRoomId) &&
+      ![...this.promptRooms.values()].includes(erroredRoomId)
+    ) {
+      this.clearSubMode(erroredRoomId);
+    }
     return false;
   }
 
@@ -850,9 +963,21 @@ export class RoomModeManager {
     return this.promptRooms.get(sessionId)
       ?? this.autoDecisions.get(sessionId)?.roomId
       ?? this.conductor.getFlowForSession(sessionId)?.roomId
-      ?? [...this.parallelFlows.entries()].find(([, flow]) => flow.pending.has(sessionId))?.[0]
-      ?? [...this.pipelineFlows.entries()].find(([, flow]) => flow.order[flow.stage] === sessionId)?.[0]
-      ?? [...this.debateFlows.entries()].find(([, flow]) => flow.sides.includes(sessionId) || flow.judge === sessionId)?.[0];
+      // 成员归属覆盖已完成/失败成员的迟到事件，但已完成成员忙新 turn 时不误归本房间
+      ?? [...this.parallelFlows.entries()].find(([, flow]) =>
+        !flow.done &&
+        (flow.members ?? [...flow.pending]).includes(sessionId) &&
+        (flow.pending.has(sessionId) || !this.agent.isBusy(sessionId)))?.[0]
+      ?? [...this.pipelineFlows.entries()].find(([, flow]) =>
+        !flow.done &&
+        flow.order.includes(sessionId) &&
+        (flow.order[flow.stage] === sessionId || !this.agent.isBusy(sessionId)))?.[0]
+      ?? [...this.debateFlows.entries()].find(([, flow]) => {
+        const current = flow.summarizing ? flow.judge : flow.sides[flow.sideIndex];
+        return !flow.done &&
+          (flow.sides.includes(sessionId) || flow.judge === sessionId) &&
+          (current === sessionId || !this.agent.isBusy(sessionId));
+      })?.[0];
   }
 
   /** 这次输出是否属于某个房间回合（含隐藏编排） */
@@ -874,6 +999,12 @@ export class RoomModeManager {
   /** 用于 room.list 返回当前房间的子模式和当前发言人 */
   subModeFor(roomId: string): { mode: RuntimeMode; activeSpeaker?: string | undefined; reason?: string | undefined } | undefined {
     return this.roomSubMode.get(roomId);
+  }
+
+  /** 流程结束/取消时清除子模式徽标，并广播 mode: null 让客户端实时隐藏 */
+  private clearSubMode(roomId: string): void {
+    if (!this.roomSubMode.delete(roomId)) return;
+    this.emitModeSelected({ roomId, mode: null, activeSpeaker: undefined, reason: undefined });
   }
 
   private setSubMode(
@@ -915,12 +1046,20 @@ export class RoomModeManager {
     }
   }
 
+  /** 新回合启动时清理已收尾（done）的 flow 快照 */
+  private cleanupDoneFlows(roomId: string): void {
+    if (this.parallelFlows.get(roomId)?.done) this.parallelFlows.delete(roomId);
+    if (this.pipelineFlows.get(roomId)?.done) this.pipelineFlows.delete(roomId);
+    if (this.debateFlows.get(roomId)?.done) this.debateFlows.delete(roomId);
+  }
+
   private async executeMode(
     room: Room,
     mode: RuntimeMode,
     text: string,
     options?: PromptOptions,
   ): Promise<ModeResult> {
+    this.cleanupDoneFlows(room.roomId);
     switch (mode) {
       case "mention":
         return this.handleMention(room, text, options);
@@ -1137,6 +1276,7 @@ export class RoomModeManager {
     }
     const flow: ParallelFlow = {
       pending,
+      members: sent,
       results: new Map(),
       summarizer,
       topic: text,
@@ -1152,8 +1292,9 @@ export class RoomModeManager {
       this.sendPrompt(room.roomId, sid, prompt).catch((err) => {
         logError("room-modes parallel prompt", err);
         const f = this.parallelFlows.get(room.roomId);
-        if (!f) return;
+        if (!f || f.done) return;
         f.pending.delete(sid);
+        (f.failed ??= new Set()).add(sid);
         if (f.pending.size === 0) this.summarizeParallel(room.roomId, f);
       });
     }
@@ -1165,6 +1306,7 @@ export class RoomModeManager {
 
   private onParallelDone(sessionId: string, output: string): string | undefined {
     for (const [roomId, flow] of this.parallelFlows) {
+      if (flow.done) continue;
       if (!flow.pending.has(sessionId)) continue;
       flow.pending.delete(sessionId);
       flow.results.set(sessionId, output);
@@ -1185,7 +1327,9 @@ export class RoomModeManager {
     }
     this.setSubMode(roomId, "parallel", flow.summarizer, undefined);
     if (!flow.summarizer || !room.members.some((m) => m.sessionId === flow.summarizer)) {
-      this.parallelFlows.delete(roomId);
+      flow.done = true;
+      this.emitFlowUpdate(roomId);
+      this.clearSubMode(roomId);
       this.notice({ roomId, message: "并行模式：所有成员已完成回答" });
       return;
     }
@@ -1197,10 +1341,19 @@ export class RoomModeManager {
       : "";
     const promptText = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}${extrasText}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
     const prompt = this.buildPromptContent(room, promptText, flow.summarizer, { artifactContext: flow.artifactContext });
-    this.parallelFlows.delete(roomId);
+    // 汇总期间保留活跃快照（summarizing），汇总者完成后才转 done
+    flow.summarizing = true;
+    this.emitFlowUpdate(roomId);
     this.notice({ roomId, message: "并行回答完成，汇总者正在整理…" });
     this.sendPrompt(room.roomId, flow.summarizer, prompt).catch((err) => {
       logError("room-modes parallel summarize", err);
+      const f = this.parallelFlows.get(room.roomId);
+      if (f === flow && f.summarizing) {
+        f.done = true;
+        if (!f.results.has(flow.summarizer!)) (f.failed ??= new Set()).add(flow.summarizer!);
+        delete f.summarizing;
+        this.emitFlowUpdate(room.roomId);
+      }
     });
   }
 
@@ -1242,6 +1395,7 @@ export class RoomModeManager {
 
   private onPipelineDone(sessionId: string, output: string): string | undefined {
     for (const [roomId, flow] of this.pipelineFlows) {
+      if (flow.done) continue;
       if (flow.order[flow.stage] !== sessionId) continue;
       const room = this.rooms.get(roomId);
       if (!room) {
@@ -1252,8 +1406,10 @@ export class RoomModeManager {
       this.captureArtifacts(sessionId, output);
       const nextStage = flow.stage + 1;
       if (nextStage >= flow.order.length) {
-        this.pipelineFlows.delete(roomId);
-        this.setSubMode(roomId, "pipeline", undefined, undefined);
+        flow.stage = nextStage;
+        flow.done = true;
+        this.clearSubMode(roomId);
+        this.emitFlowUpdate(roomId);
         this.notice({ roomId, message: "流水线模式：全部阶段完成" });
         return roomId;
       }
@@ -1355,6 +1511,7 @@ export class RoomModeManager {
         this.debateFlows.delete(roomId);
         return roomId;
       }
+      if (flow.done) continue;
       const currentSid = flow.sides[flow.sideIndex]!;
       if (sessionId !== currentSid) continue;
       flow.outputs.push({ round: flow.currentRound, side: flow.sideIndex, text: output });
@@ -1383,13 +1540,21 @@ export class RoomModeManager {
         return roomId;
       }
 
-      // 辩论结束，裁判总结
-      this.debateFlows.delete(roomId);
+      // 辩论结束，裁判总结；裁判完成前保持 summarizing 快照
+      flow.summarizing = true;
+      this.emitFlowUpdate(roomId);
       this.setSubMode(roomId, "debate", flow.judge, undefined);
       this.notice({ roomId, message: "辩论结束，裁判总结中…" });
       const judgePrompt = this.buildJudgePrompt(room, flow);
       this.sendPrompt(room.roomId, flow.judge, judgePrompt).catch((err) => {
         logError("room-modes judge prompt", err);
+        const f = this.debateFlows.get(room.roomId);
+        if (f === flow && f.summarizing) {
+          f.done = true;
+          f.failed = true;
+          delete f.summarizing;
+          this.emitFlowUpdate(room.roomId);
+        }
       });
       return roomId;
     }

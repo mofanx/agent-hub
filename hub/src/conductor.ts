@@ -1596,12 +1596,15 @@ export class ConductorOrchestrator {
 
     // 成员会话已删除的任务直接标记失败，避免无限重试
     if (this.agent.has) {
+      let marked = false;
       for (const t of flow.tasks.values()) {
         if ((t.status === "pending" || t.status === "running") && !this.agent.has(t.sessionId)) {
           t.status = "failed";
           t.failureMessage = "成员会话已失效";
+          marked = true;
         }
       }
+      if (marked) this.emitFlow?.(flow.roomId);
     }
 
     // 依赖失败传播：任何 failed task 的下游 pending task 标记为 failed
@@ -2241,7 +2244,12 @@ export class ConductorOrchestrator {
       const f = raw as Record<string, unknown>;
       const roomId = String(f.roomId ?? "");
       const room = this.rooms.get(roomId);
-      if (!room || !room.conductorId) continue;
+      if (!room) {
+        logWarn("conductor import", `跳过流程：房间不存在 roomId=${roomId}`);
+        continue;
+      }
+      // 缺指挥家时保留 flow 快照供面板查看，降级为 awaiting-retry 不再自动续跑
+      const noConductor = !room.conductorId;
       const refsArr = Array.isArray((f.artifactContext as Record<string, unknown>)?.refs)
         ? ((f.artifactContext as Record<string, unknown>).refs as unknown[]).map((s) => String(s)).filter(Boolean)
         : [];
@@ -2299,12 +2307,15 @@ export class ConductorOrchestrator {
         const taskId = String(o.id ?? "");
         if (!taskId) continue;
         const sessionId = String(o.sessionId ?? "");
-        if (!room.members.some((m) => m.sessionId === sessionId)) continue;
+        // 成员已离开：未完成的任务标记 failed（已完成的保持 done，离开不抹掉产出）
+        const memberGone = !room.members.some((m) => m.sessionId === sessionId);
         const rawStatus = String(o.status ?? "pending");
         const status: FlowTask["status"] =
-          rawStatus === "done" || rawStatus === "failed" || rawStatus === "running"
-            ? rawStatus
-            : "pending";
+          memberGone && rawStatus !== "done"
+            ? "failed"
+            : rawStatus === "done" || rawStatus === "failed" || rawStatus === "running"
+              ? rawStatus
+              : "pending";
         flow.tasks.set(taskId, {
           id: taskId,
           sessionId,
@@ -2314,7 +2325,11 @@ export class ConductorOrchestrator {
             : [],
           status,
           iteration: typeof o.iteration === "number" && o.iteration > 0 ? o.iteration : 1,
-          ...(typeof o.failureMessage === "string" ? { failureMessage: o.failureMessage } : {}),
+          ...(memberGone && rawStatus !== "done"
+            ? { failureMessage: "成员已离开房间" }
+            : typeof o.failureMessage === "string"
+              ? { failureMessage: o.failureMessage }
+              : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
           ...(typeof o.helpRounds === "number" ? { helpRounds: o.helpRounds } : {}),
           ...(Array.isArray(o.verifications)
@@ -2457,6 +2472,8 @@ export class ConductorOrchestrator {
           flow.phase = "awaiting-retry";
         }
       }
+      // 无指挥家的房间无法规划/验收/汇总：降级为暂停态保留快照
+      if (noConductor && flow.phase !== "done") flow.phase = "awaiting-retry";
       this.flows.set(roomId, flow);
       if (flow.phase === "done") {
         this.emitFlow?.(roomId);
@@ -2464,8 +2481,9 @@ export class ConductorOrchestrator {
       }
       this.notice({
         roomId,
-        message:
-          flow.phase === "awaiting-retry"
+        message: noConductor
+          ? "已恢复编排快照：该房间当前没有指挥家（conductorId），流程已暂停；恢复指挥家后可发送“重试”继续。"
+          : flow.phase === "awaiting-retry"
             ? interrupted.length > 0
               ? `Hub 重启时任务执行状态未知：任务 ${interrupted.join(", ")} 已暂停，检查工作区后发送“重试”再派发；未自动重复执行。`
               : "已恢复暂停中的流程：存在待重试任务，检查工作区后发送“重试”再派发。"
