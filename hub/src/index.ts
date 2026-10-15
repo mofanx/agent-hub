@@ -682,11 +682,25 @@ function interruptTurnDrafts(sessionId: string): void {
   }
 }
 
-function onTurnEnd(sessionId: string, text: string): void {
+function onTurnEnd(
+  sessionId: string,
+  text: string,
+  status: "done" | "interrupted" = "done",
+): void {
   const displayName = displayNameFor(sessionId);
-  flushTurnProcess(sessionId, "done");
+  flushTurnProcess(sessionId, status);
   const draft = turnDrafts.get(sessionId);
   turnDrafts.delete(sessionId);
+  if (status === "interrupted") {
+    // 取消/中断回合：过程卡标 interrupted，流式草稿保留已出文本但标记中断
+    if (draft?.sessionDraftId !== undefined) {
+      store.interruptReplyDraft(draft.sessionDraftId);
+    }
+    if (draft?.roomDraftId !== undefined) {
+      store.interruptReplyDraft(draft.roomDraftId);
+    }
+    return;
+  }
   if (text.trim()) {
     if (draft?.sessionDraftId !== undefined) {
       store.completeReplyDraft(draft.sessionDraftId, text);
@@ -1008,19 +1022,21 @@ async function handleRoomSlash(
     }
     try {
       await agent.cancel(sid);
-      roomModeManager.onSessionCancelled(sid);
       stopped.push(sid);
     } catch (err) {
       errors.push(String(err));
     }
   }
 
-  // 中断当前房间所有编排流（含 auto、pipeline、debate 等）
+  // 中断当前房间所有编排流（含 auto、pipeline、debate 等）。
+  // 先于逐会话收敛执行：onSessionCancelled 会经 scheduleTasks 重派其他成员的空闲任务，
+  // 若在批量取消循环内调用会产生"派发→立即取消"的抖动
   const hadFlow = roomModeManager.hasActiveFlow(room.roomId);
   if (hadFlow) {
     await roomModeManager.cancelActive(room.roomId, "用户停止");
   }
   persistState();
+  for (const sid of stopped) roomModeManager.onSessionCancelled(sid);
 
   const stoppedNames = stopped.map(
     (sid) => room.members.find((m) => m.sessionId === sid)?.name ?? sid,
@@ -2063,12 +2079,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       await agentOps.prompt(sessionId, promptContent);
       return { accepted: true };
     }
-    case "session.cancel":
-      await ownerOf(String(req.params?.sessionId ?? "")).cancel(
-        String(req.params?.sessionId ?? ""),
-      );
-      roomModeManager.onSessionCancelled(String(req.params?.sessionId ?? ""));
+    case "session.cancel": {
+      const sid = String(req.params?.sessionId ?? "");
+      const agent = ownerOf(sid);
+      // 仅在确有在途回合被中断时才做编排收敛，避免空闲/不可停会话把 running 任务误标 failed
+      const interrupted = agent.isStoppable(sid);
+      await agent.cancel(sid);
+      if (interrupted) roomModeManager.onSessionCancelled(sid);
       return { cancelled: true };
+    }
     case "permission.respond": {
       const requestId = String(req.params?.requestId ?? "");
       const optionId = String(req.params?.optionId ?? "");

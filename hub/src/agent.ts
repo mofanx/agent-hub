@@ -282,7 +282,11 @@ export class AcpAgent {
     private readonly emit: (event: HubEvent) => void,
     private readonly onClose?: () => void,
     private readonly process?: ChildProcess,
-    private readonly onTurnEnd?: (sessionId: string, text: string) => void,
+    private readonly onTurnEnd?: (
+      sessionId: string,
+      text: string,
+      status: "done" | "interrupted",
+    ) => void,
     private readonly onFileWrite?: (sessionId: string, relPath: string, existed: boolean, content?: string) => void,
     private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
     private readonly localDevinAuth = false,
@@ -572,7 +576,7 @@ export class AcpAgent {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     const fullText = entry.turnText;
-    this.onTurnEnd?.(sessionId, fullText);
+    this.onTurnEnd?.(sessionId, fullText, "done");
     entry.busy = false;
     entry.stoppable = false;
     this.emit({
@@ -1054,7 +1058,7 @@ export class AcpAgent {
     // 本地收尾：已流出的部分文本与过程缓冲照常落库（watchdog 场景 buf 为空，无过程卡）
     entry.stoppable = false;
     entry.busy = false;
-    this.onTurnEnd?.(sessionId, entry.turnText);
+    this.onTurnEnd?.(sessionId, entry.turnText, "interrupted");
     entry.turnText = "";
     // 换代：取消后迟到的 settle 不得触碰新回合/复活本回合任务
     entry.turnEpoch = (entry.turnEpoch ?? 0) + 1;

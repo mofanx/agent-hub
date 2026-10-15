@@ -182,7 +182,11 @@ describe("AcpAgent integration (in-memory stream)", () => {
     loadAuthGated?: boolean;
     loadStayGated?: boolean;
     localDevinAuth?: boolean;
-    onTurnEnd?: (sessionId: string, text: string) => void;
+    onTurnEnd?: (
+      sessionId: string,
+      text: string,
+      status: "done" | "interrupted",
+    ) => void;
     onTurnProgress?: (sessionId: string, fullText: string) => void;
   }) {
     const c2a = memPipe();
@@ -477,17 +481,24 @@ describe("AcpAgent integration (in-memory stream)", () => {
 
   it("cancel 换代后旧 prompt 迟到 settle 被丢弃", async () => {
     const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const turnEnds: { sessionId: string; status?: string }[] = [];
     const { hub, agentConn, events } = setup({
       promptHandler: () =>
         new Promise<acp.PromptResponse>((r) => {
           resolvers.push(r);
         }),
+      onTurnEnd: (sessionId, _text, status) => turnEnds.push({ sessionId, status }),
     });
     try {
       await hub.createSession("/tmp", "s");
       await hub.prompt("s1", "first");
       await waitFor(() => (resolvers.length >= 1 ? resolvers.length : undefined));
       await hub.cancel("s1");
+      assert.deepEqual(
+        turnEnds.map((t) => t.status),
+        ["interrupted"],
+        "cancel 本地收尾的过程状态应为 interrupted 而非 done",
+      );
       resolvers[0]!({ stopReason: "end_turn" });
       for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
       assert.equal(
@@ -501,6 +512,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       resolvers[1]!({ stopReason: "end_turn" });
       await waitFor(() => events.find((e) => e.method === "prompt.done"));
       assert.equal(events.filter((e) => e.method === "prompt.done").length, 1);
+      assert.equal(turnEnds.at(-1)?.status, "done", "正常 settle 的过程状态为 done");
     } finally {
       hub.close();
       agentConn.close();

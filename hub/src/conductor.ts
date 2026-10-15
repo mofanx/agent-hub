@@ -835,7 +835,7 @@ export class ConductorOrchestrator {
       this.emitFlow?.(roomId);
       this.notice({
         roomId,
-        message: `@${name} 的子任务已中断并标记失败（发送"重试"可重新派发）`,
+        message: `@${name} 的子任务已中断并标记失败（发送"重试"重新派发，或发送新消息继续）`,
       });
       // 走一遍调度收敛依赖传播与阶段判定（全部终态时会自动进入汇总/awaiting-retry）
       void this.scheduleTasks(flow, room).catch((e) =>

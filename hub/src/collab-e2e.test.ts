@@ -2360,6 +2360,7 @@ describe("collab-e2e", () => {
     assert.equal(h.flow()!.tasks.find((t) => t.id === "t1")!.status, "running");
 
     // 等价于 index.ts：agent.cancel(sid) 成功后 → roomModeManager.onSessionCancelled
+    const s2PromptsBefore = h.prompts.filter((p) => p.sessionId === "s2").length;
     h.busy.delete("s2");
     h.manager.onSessionCancelled("s2");
     await tick();
@@ -2373,6 +2374,19 @@ describe("collab-e2e", () => {
     assert.ok(
       h.notices().some((m) => /中断|重试/.test(m)),
       "应有成员中断 notice",
+    );
+
+    // 主动取消不得静默重派：失败任务停留终态，且无新 prompt 发给被停止会话
+    await tick(20);
+    assert.equal(
+      h.flow()!.tasks.find((t) => t.id === "t1")!.status,
+      "failed",
+      "取消收敛后任务应停留 failed 而非被重派",
+    );
+    assert.equal(
+      h.prompts.filter((p) => p.sessionId === "s2").length,
+      s2PromptsBefore,
+      "不得向被停止会话补发 prompt",
     );
   });
 
