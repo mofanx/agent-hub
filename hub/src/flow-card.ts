@@ -116,6 +116,9 @@ export function toCardSnapshot(
     goal: String(flow.goal ?? "").slice(0, GENERIC_MAX),
     mode,
     startedAt: Number(flow.startedAt ?? 0),
+    ...(clip(flow.waitingFor, 32) ? { waitingFor: clip(flow.waitingFor, 32) } : {}),
+    ...(typeof flow.rounds === "number" ? { rounds: flow.rounds } : {}),
+    ...(typeof flow.maxRounds === "number" ? { maxRounds: flow.maxRounds } : {}),
     ...((phase === "done" || phase === "awaiting-retry") && finishedAt > 0
       ? { finishedAt }
       : {}),

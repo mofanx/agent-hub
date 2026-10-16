@@ -896,6 +896,8 @@ describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {
       debateSides: undefined,
       debateJudge: undefined,
       debateRounds: undefined,
+      maxRounds: undefined,
+      relevanceFilter: undefined,
       memberRoles: undefined,
     });
   });

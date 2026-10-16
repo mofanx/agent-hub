@@ -10,6 +10,8 @@ export type ProcessCardMeta = {
   turnEndAt: number;
   steps: ProcessStep[];
   taskId?: string;
+  /** 所属编排实例 id：客户端据此把过程卡归入对应 flow 卡 */
+  flowId?: string;
   status: ProcessStatus;
   /** 结构化通知卡类型；type="dispatch" 时 count/tasks 承载派工清单 */
   type?: string;
@@ -27,6 +29,7 @@ export function buildProcessMeta(
   buf: TurnProcessItem[],
   taskId: string | undefined,
   status: ProcessStatus,
+  flowId?: string,
 ): ProcessCardMeta {
   const steps = buf.map((i) => {
     const step: ProcessStep = { kind: i.kind };
@@ -51,6 +54,7 @@ export function buildProcessMeta(
     status,
   };
   if (taskId) meta.taskId = taskId;
+  if (flowId) meta.flowId = flowId;
   return meta;
 }
 

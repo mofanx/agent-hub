@@ -127,4 +127,5 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 - **Flow 状态**：`room.flow` API + `room.flowUpdate` 事件，前后端同步编排进度。
 - **Artifact 自动捕获**：从子任务输出中扫描 ````bash` 块、diff 块、文件路径和显式文件声明。
 - **ACP fs 能力**：Hub 声明 `fs.readTextFile` / `fs.writeTextFile`，直接感知 agent 文件写入并同步产物与事件。
+- **回合治理**：turn 提交不变量——外发 prompt 时记录房史"最后一条用户条目"游标，prompt.done 消费前若游标被新用户消息推进，输出作废并按原 prompt 重跑（上限 1 次，重跑仍过期则强制接受；被 cancel 的 turn 不重跑）。`OperationLedger`（内存 5000 LRU）按 opId 去重外发副作用（assistant 条目、过程卡、文件写入），防断连重放/重试重发重复提交，重跑生成新 opId 不受影响。mention 只向被 @ 成员派发（未点名零成本静默；无 @ 回退全体成员）。conductor 跟进派发轮次上限 `flow.maxRounds`（默认 8，`room.maxRounds` 覆盖），超限置 `awaiting-retry`/`waitingFor=user` 交还用户。worker 过程输出聚合为带 `flowId`/`taskId` 的 process 卡，为客户端归卡铺路。
 - **tool_call 捕获**：解析 `session/update` 中的 `tool_call` / `tool_call_update`，记录 edit/delete/move/execute 等关键动

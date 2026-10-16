@@ -164,6 +164,10 @@ type Flow = {
   acceptanceCriteria: string[];
   iteration: number;
   maxIterations: number;
+  /** 已派发任务批次数（初始派工 + 每次验收 continue），上限 maxRounds */
+  rounds: number;
+  /** 跟进派发轮次上限：超限置 awaiting-retry 交还用户 */
+  maxRounds: number;
   /** 任务以 taskId 为 key */
   tasks: Map<string, FlowTask>;
   /** 结果以 taskId 为 key */
@@ -193,6 +197,7 @@ export type ConductorNotice = {
 
 const PLAN_RESULT_LEN = 4000;
 const MAX_ITERATIONS = 3;
+const DEFAULT_MAX_ROUNDS = 8;
 const MAX_HELP_ROUNDS = 2;
 const DEFAULT_ACCEPTANCE_CRITERIA = ["交付结果满足用户目标，并包含必要的实现与验证证据"];
 const BUSY_RETRY_MS = 5000;
@@ -421,6 +426,18 @@ export class ConductorOrchestrator {
 
   setStore(store: Store): void {
     this.store = store;
+  }
+
+  /** turn 游标登记钩子（RoomModeManager 注入）：每次外发 prompt 前记录上下文游标 */
+  private turnGuard?: (sessionId: string, roomId: string, content: string | PromptContent) => void;
+
+  setTurnGuard(fn: (sessionId: string, roomId: string, content: string | PromptContent) => void): void {
+    this.turnGuard = fn;
+  }
+
+  private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
+    this.turnGuard?.(sessionId, roomId, content);
+    return this.agent.prompt(sessionId, content);
   }
 
   hasActiveFlow(roomId: string): boolean {
@@ -742,6 +759,9 @@ export class ConductorOrchestrator {
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
       maxIterations: flow.maxIterations,
+      rounds: flow.rounds,
+      maxRounds: flow.maxRounds,
+      ...(flow.phase === "awaiting-retry" ? { waitingFor: "user" } : {}),
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.phase === "awaiting-input" && flow.clarification
@@ -928,7 +948,12 @@ export class ConductorOrchestrator {
     return `{"goal":"用一句话重述最终目标","acceptanceCriteria":["可验证标准1"],"tasks":[${sample.join(",")}]}`;
   }
 
-  private newFlow(roomId: string, goal: string, artifactContext?: { refs?: string[] }): Flow {
+  private newFlow(
+    roomId: string,
+    goal: string,
+    artifactContext?: { refs?: string[] },
+    maxRounds?: number,
+  ): Flow {
     const startedAt = Date.now();
     return {
       id: newFlowId(),
@@ -939,6 +964,8 @@ export class ConductorOrchestrator {
       acceptanceCriteria: [...DEFAULT_ACCEPTANCE_CRITERIA],
       iteration: 1,
       maxIterations: MAX_ITERATIONS,
+      rounds: 0,
+      maxRounds: maxRounds ?? DEFAULT_MAX_ROUNDS,
       tasks: new Map(),
       results: new Map(),
       artifactContext,
@@ -1042,8 +1069,7 @@ export class ConductorOrchestrator {
     const promptText =
       this.buildPlanningPrompt(room, flow.goal, flow.artifactContext, qa) +
       (flow.planFormatRetries > 0 ? `\n\n${PLAN_FORMAT_FIX_PROMPT}` : "");
-    this.agent.prompt(room.conductorId, promptText).catch((err: unknown) => {
-      logError("conductor planning prompt", err);
+    this.sendPrompt(flow.roomId, room.conductorId, promptText).catch((err: unknown) => {
       const cur = this.flows.get(flow.roomId);
       if (cur !== flow || cur.phase !== "planning") return;
       this.planningInFlight.delete(flow.roomId);
@@ -1065,20 +1091,20 @@ export class ConductorOrchestrator {
     this.planningInFlight.delete(room.roomId);
     if (initialTasks && initialTasks.length > 0) {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
-      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext));
+      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds));
       const flow = this.flows.get(room.roomId)!;
       this.emitFlow?.(room.roomId);
       await this.dispatchFromTasks(flow, room, initialTasks, text);
       return;
     }
     const promptText = this.buildPlanningPrompt(room, text, artifactContext);
-    const flow = this.newFlow(room.roomId, text, artifactContext);
+    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds);
     this.flows.set(room.roomId, flow);
     this.emitFlow?.(room.roomId);
     this.planningInFlight.add(room.roomId);
     this.notice({ roomId: room.roomId, message: "指挥家拆解任务中…" });
     try {
-      await this.agent.prompt(room.conductorId, promptText);
+      await this.sendPrompt(room.roomId, room.conductorId, promptText);
     } catch (err) {
       if (this.flows.get(room.roomId) === flow) {
         this.planningInFlight.delete(room.roomId);
@@ -1383,7 +1409,7 @@ export class ConductorOrchestrator {
       const prompt = this.rooms.buildPrompt(room.roomId, body, e.to, undefined, undefined, {
         taskId: e.taskId,
       });
-      this.agent.prompt(e.to, prompt).catch((err: unknown) => {
+      this.sendPrompt(flow.roomId, e.to, prompt).catch((err: unknown) => {
         e.dispatched = false;
         logError("conductor help dispatch", err);
         this.notice({
@@ -1437,7 +1463,7 @@ export class ConductorOrchestrator {
       taskId: task.id,
       dependsOn: task.dependsOn,
     });
-    this.agent.prompt(task.sessionId, prompt).catch((err: unknown) => {
+    this.sendPrompt(flow.roomId, task.sessionId, prompt).catch((err: unknown) => {
       task.retries = (task.retries ?? 0) + 1;
       const msg = String(err);
       if (task.retries >= 3) {
@@ -1591,6 +1617,7 @@ export class ConductorOrchestrator {
       return;
     }
     flow.phase = "working";
+    flow.rounds += 1;
 
     const idMap = new Map<string, string>();
     for (let i = 0; i < tasks.length; i++) {
@@ -1868,7 +1895,7 @@ export class ConductorOrchestrator {
         undefined,
         artifactContext,
       );
-      this.agent.prompt(t.sessionId, prompt).catch((err: unknown) => {
+      this.sendPrompt(flow.roomId, t.sessionId, prompt).catch((err: unknown) => {
         t.retries = (t.retries ?? 0) + 1;
         const msg = String(err);
         if (t.retries >= 3) {
@@ -2089,7 +2116,7 @@ export class ConductorOrchestrator {
       `可派工的成员：${this.buildMemberList(room)}。`,
     ].join("\n");
     try {
-      await this.agent.prompt(room.conductorId!, prompt);
+      await this.sendPrompt(flow.roomId, room.conductorId!, prompt);
     } catch (err) {
       logError("conductor review prompt", err);
       this.notice({ roomId: flow.roomId, message: `指挥家验收派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
@@ -2108,12 +2135,25 @@ export class ConductorOrchestrator {
       await this.summarize(flow, room);
       return;
     }
+    if (decision?.decision === "continue" && decision.tasks.length > 0) {
+      // 跟进轮次预算：超限不再派新批次，置 awaiting-retry 交还用户
+      if (flow.rounds >= flow.maxRounds) {
+        flow.phase = "awaiting-retry";
+        this.emitFlow?.(flow.roomId);
+        this.notice({
+          roomId: flow.roomId,
+          message: `跟进轮次已达上限（${flow.rounds}/${flow.maxRounds}），编排已暂停等待你接手：发送新消息继续处理`,
+        });
+        return;
+      }
+    }
     if (
       decision?.decision === "continue" &&
       decision.tasks.length > 0 &&
       flow.iteration < flow.maxIterations
     ) {
       flow.iteration += 1;
+      flow.rounds += 1;
       flow.reviewReason = decision.reason;
       const added = this.appendTasks(flow, room, decision.tasks);
       if (added > 0) {
@@ -2231,7 +2271,7 @@ export class ConductorOrchestrator {
       message: hasFailures ? "子任务部分完成，指挥家降级汇总中…" : "子任务全部完成，指挥家汇总中…",
     });
     try {
-      await this.agent.prompt(room.conductorId!, prompt);
+      await this.sendPrompt(flow.roomId, room.conductorId!, prompt);
     } catch (err) {
       logError("conductor summarize prompt", err);
       this.notice({ roomId: flow.roomId, message: `指挥家汇总派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
@@ -2314,6 +2354,8 @@ export class ConductorOrchestrator {
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
       maxIterations: flow.maxIterations,
+      rounds: flow.rounds,
+      maxRounds: flow.maxRounds,
       ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
       tasks: [...flow.tasks.values()].map((t) => ({
         id: t.id,
@@ -2408,6 +2450,11 @@ export class ConductorOrchestrator {
           typeof f.maxIterations === "number" && f.maxIterations > 0
             ? f.maxIterations
             : MAX_ITERATIONS,
+        rounds: typeof f.rounds === "number" && f.rounds >= 0 ? f.rounds : 0,
+        maxRounds:
+          typeof f.maxRounds === "number" && f.maxRounds > 0
+            ? f.maxRounds
+            : (room.maxRounds ?? DEFAULT_MAX_ROUNDS),
         tasks: new Map(),
         results: new Map(),
         artifactContext,
