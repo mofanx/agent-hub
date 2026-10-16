@@ -258,6 +258,109 @@ describe("conductor maxRounds 轮次预算", () => {
   });
 });
 
+describe("turnGuards 生命周期", () => {
+  const guardsOf = (m: RoomModeManager) =>
+    (m as unknown as { turnGuards: Map<string, unknown> }).turnGuards;
+
+  const setup = () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ]);
+    const prompts: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid) => {
+        prompts.push(sid);
+      },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    manager.setStore(store);
+    return { store, rooms, room, prompts, agent, manager };
+  };
+
+  it("正常完成轮后 turnGuards 无残留", async () => {
+    const { store, room, manager } = setup();
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+    assert.equal(guardsOf(manager).size, 1);
+    await manager.onPromptDone("s1", "正常回答");
+    assert.equal(guardsOf(manager).size, 0, "正常消费后不得残留游标");
+    // stale → 重跑 → 强制接受的终态同样清零
+    appendUser(store, room.roomId, "@coder 再来");
+    await manager.handle(room, "@coder 再来", {});
+    appendUser(store, room.roomId, "补充");
+    await manager.onPromptDone("s1", "作废");
+    assert.equal(guardsOf(manager).size, 1, "重跑期间保留游标");
+    await manager.onPromptDone("s1", "重跑回答");
+    assert.equal(guardsOf(manager).size, 0);
+  });
+
+  it("prompt 发送即失败：turnGuards/promptRooms 登记即时回收", async () => {
+    const { store, room, agent, manager } = setup();
+    agent.prompt = async () => {
+      throw new Error("session busy");
+    };
+    appendUser(store, room.roomId, "@coder 干活");
+    await manager.handle(room, "@coder 干活", {});
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(guardsOf(manager).size, 0, "发送失败不得留下游标");
+    assert.equal(manager.isRoomTurn("s1"), false, "发送失败不得留下在途房间归属");
+  });
+
+  it("stale 重跑发送失败：走 prompt.error 终态收敛", async () => {
+    const { store, room, agent, manager } = setup();
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+    appendUser(store, room.roomId, "补充");
+    agent.prompt = async () => {
+      throw new Error("session gone");
+    };
+    const dropped = await manager.onPromptDone("s1", "旧输出");
+    assert.equal(dropped, true);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(guardsOf(manager).size, 0, "重跑发送失败应清理游标");
+    assert.equal(manager.isRoomTurn("s1"), false);
+  });
+
+  it("onRoomRemoved：清掉该房间的游标/在途登记/flow", async () => {
+    const { store, room, manager } = setup();
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+    assert.equal(guardsOf(manager).size, 1);
+    assert.equal(manager.isRoomTurn("s1"), true);
+    manager.onRoomRemoved(room.roomId);
+    assert.equal(guardsOf(manager).size, 0);
+    assert.equal(manager.isRoomTurn("s1"), false);
+    assert.equal(manager.getFlow(room.roomId), undefined);
+  });
+
+  it("onRoomRemoved：conductor flow 一并回收", async () => {
+    const { rooms, manager } = setup();
+    const croom = rooms.create(
+      "cond-team",
+      [
+        { sessionId: "host", name: "leader" },
+        { sessionId: "w1", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "host" },
+    );
+    await manager.handle(croom, "/task @coder 干活", {});
+    assert.ok(manager.getFlow(croom.roomId), "conductor flow 应已建立");
+    assert.ok(guardsOf(manager).has("w1"), "派工 prompt 已登记游标");
+    manager.onRoomRemoved(croom.roomId);
+    assert.equal(manager.getFlow(croom.roomId), undefined);
+    assert.equal(guardsOf(manager).has("w1"), false);
+  });
+});
+
 describe("worker 过程输出归卡", () => {
   it("buildProcessMeta 携带 flowId/taskId，供客户端把过程卡归入 flow 卡", () => {
     const buf: TurnProcessItem[] = [

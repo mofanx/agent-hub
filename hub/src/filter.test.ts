@@ -48,15 +48,42 @@ describe("RelevanceFilter", () => {
     const u = await f.isRelevant("今天天气挺不错的吧");
     assert.equal(u.relevant, true);
     assert.equal(u.reason, "uncertain-pass");
-    // 配置了模型但端点不可达 → fail-open 放行
+    // 模型端点报错 → fail-open 放行（注入假 fetch，不发真实网络）
     const fm = new RelevanceFilter({
       enabled: true,
       model: "nano",
       baseUrl: "http://127.0.0.1:1/v1",
+      fetchImpl: async () => {
+        throw new Error("connect ECONNREFUSED");
+      },
     });
     const r = await fm.isRelevant("今天天气挺不错的吧");
     assert.equal(r.relevant, true);
     assert.equal(r.reason, "model-error");
+    // 非 2xx 响应同样 fail-open
+    const fm500 = new RelevanceFilter({
+      enabled: true,
+      model: "nano",
+      fetchImpl: async () => new Response("boom", { status: 500 }),
+    });
+    assert.equal((await fm500.isRelevant("今天天气挺不错的吧")).reason, "model-error");
+  });
+
+  it("模型档判定：YES → relevant，NO → filtered", async () => {
+    const reply = (content: string): typeof fetch =>
+      async () =>
+        new Response(
+          JSON.stringify({ choices: [{ message: { content } }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+    const yes = new RelevanceFilter({ enabled: true, model: "nano", fetchImpl: reply("YES") });
+    const ry = await yes.isRelevant("今天天气挺不错的吧");
+    assert.equal(ry.relevant, true);
+    assert.equal(ry.reason, "model:relevant");
+    const no = new RelevanceFilter({ enabled: true, model: "nano", fetchImpl: reply("NO") });
+    const rn = await no.isRelevant("今天天气挺不错的吧");
+    assert.equal(rn.relevant, false);
+    assert.equal(rn.reason, "model:filtered");
   });
 });
 

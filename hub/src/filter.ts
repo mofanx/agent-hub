@@ -47,6 +47,7 @@ export class RelevanceFilter {
       model?: string | undefined;
       baseUrl?: string | undefined;
       apiKey?: string | undefined;
+      fetchImpl?: typeof fetch;
     } = {},
   ) {}
 
@@ -84,7 +85,8 @@ export class RelevanceFilter {
     const base = (this.opts.baseUrl ?? "http://127.0.0.1:8317/v1").replace(/\/+$/, "");
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.opts.apiKey) headers.authorization = `Bearer ${this.opts.apiKey}`;
-    const resp = await fetch(`${base}/chat/completions`, {
+    const doFetch = this.opts.fetchImpl ?? fetch;
+    const resp = await doFetch(`${base}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify({
