@@ -353,6 +353,10 @@ function findLastIndex<T>(arr: T[], pred: (it: T) => boolean): number {
   return -1;
 }
 
+const attachTextLike = (mime: string) =>
+  mime.startsWith("text/") || mime === "application/json" || mime === "application/xml" ||
+  mime.endsWith("+json") || mime.endsWith("+xml");
+
 export const useHubStore = create<State & Actions>((set, get) => {
   const ensurePermission = async () => {
     try {
@@ -2059,10 +2063,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const content: Record<string, unknown>[] = [];
       if (text) content.push({ type: "text", text: q ? `${stringsFor(get().lang).quoteHeaderFmt.replace("%s", q[0]).replace("%s", q[1].slice(0, 300))}\n${text}` : text });
       for (const a of atts) {
-        content.push({
-          type: "image",
-          source: { type: "base64", media_type: a.mimeType, data: a.base64 },
-        });
+        if (a.mimeType.startsWith("image/")) {
+          content.push({ type: "image", source: { type: "base64", media_type: a.mimeType, data: a.base64 } });
+        } else if (attachTextLike(a.mimeType)) {
+          let text = "";
+          try { text = decodeURIComponent(escape(atob(a.base64))); } catch { /* 非 UTF-8 时按资源发送 */ }
+          content.push(text ? { type: "text", text: `\n（附件 ${a.name}）\n${text.slice(0, 200000)}` }
+                            : { type: "resource", resource: { mimeType: a.mimeType, uri: a.name, blob: a.base64 } });
+        } else {
+          content.push({ type: "resource", resource: { mimeType: a.mimeType, uri: a.name, blob: a.base64 } });
+        }
       }
       if (!content.length) return;
       set({ busyIds: [...get().busyIds, session.sessionId] });
@@ -2100,10 +2110,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const content: Record<string, unknown>[] = [];
       if (text) content.push({ type: "text", text });
       for (const a of atts) {
-        content.push({
-          type: "image",
-          source: { type: "base64", media_type: a.mimeType, data: a.base64 },
-        });
+        if (a.mimeType.startsWith("image/")) {
+          content.push({ type: "image", source: { type: "base64", media_type: a.mimeType, data: a.base64 } });
+        } else if (attachTextLike(a.mimeType)) {
+          let text = "";
+          try { text = decodeURIComponent(escape(atob(a.base64))); } catch { /* 非 UTF-8 时按资源发送 */ }
+          content.push(text ? { type: "text", text: `\n（附件 ${a.name}）\n${text.slice(0, 200000)}` }
+                            : { type: "resource", resource: { mimeType: a.mimeType, uri: a.name, blob: a.base64 } });
+        } else {
+          content.push({ type: "resource", resource: { mimeType: a.mimeType, uri: a.name, blob: a.base64 } });
+        }
       }
 
       const params: Record<string, unknown> = { roomId: room.roomId, text: text || stringsFor(get().lang).imageMessage, content };

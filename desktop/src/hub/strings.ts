@@ -450,6 +450,7 @@ export interface Strings {
   topicOpenTag: string;
   topicResolvedTag: string;
   topicResolveLabel: string;
+  attachRejectedFmt: string;
   followUpQueuedHint: string;
   stopGenerateTitle: string;
   sendTitleFmt: string;
@@ -992,6 +993,7 @@ const zh: Strings = {
   topicOpenTag: "进行中",
   topicResolvedTag: "已结",
   topicResolveLabel: "标记完成",
+  attachRejectedFmt: "已跳过不支持的附件：%s（限 5 个/10MB）",
   followUpQueuedHint: "已排队，回合结束后按序发送",
   stopGenerateTitle: "停止生成",
   sendTitleFmt: "发送 (%s)",
@@ -1534,6 +1536,7 @@ const en: Strings = {
   topicOpenTag: "open",
   topicResolvedTag: "resolved",
   topicResolveLabel: "Resolve",
+  attachRejectedFmt: "Skipped unsupported attachments: %s (max 5/10MB)",
   followUpQueuedHint: "Queued — will send in order when idle",
   stopGenerateTitle: "Stop generating",
   sendTitleFmt: "Send (%s)",

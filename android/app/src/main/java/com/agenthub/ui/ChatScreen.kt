@@ -292,6 +292,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
     val sessionKey = vm.currentRoom?.roomId ?: vm.currentSession?.sessionId ?: ""
     var input by remember(sessionKey) { mutableStateOf(vm.draftFor(sessionKey)) }
+    val context = LocalContext.current
     val listState = remember(sessionKey) { LazyListState(0, 0) }
     val activeSessionId = vm.currentRoom?.activeSpeaker ?: vm.currentSession?.sessionId
     val contextUsage = activeSessionId?.let { vm.sessionUsage[it] }
@@ -351,6 +352,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.addAttachment(it) }
+    }
+    val attachErrorMsg = vm.attachError
+    LaunchedEffect(attachErrorMsg) {
+        if (attachErrorMsg != null) {
+            Toast.makeText(context, attachErrorMsg, Toast.LENGTH_LONG).show()
+            vm.clearAttachError()
+        }
     }
 
     LaunchedEffect(matchPositions) {
@@ -1263,7 +1271,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     }
                 }
-                IconButton(onClick = { pickImage.launch("image/*") }) {
+                IconButton(onClick = { pickImage.launch("*/*") }) {
                     Icon(
                         imageVector = Icons.Filled.Add,
                         contentDescription = S.uploadImage,
@@ -1648,7 +1656,7 @@ private fun MessageBlock(
     if (item.isUser) {
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer
             val quoteColor = textColor.copy(alpha = 0.7f)
             MessageBubbleBox(
                 copyText = item.content,
@@ -1707,7 +1715,7 @@ private fun MessageBlock(
         Column(Modifier.padding(top = blockTop, bottom = blockBottom)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.content,
                 fullText = item.text,
@@ -1759,7 +1767,7 @@ private fun ProcessGroupBlock(
 ) {
     val S = LocalStrings.current
     var expanded by remember { mutableStateOf(false) }
-    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    val textColor = MaterialTheme.colorScheme.onSurfaceVariant
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
     Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
@@ -1816,7 +1824,7 @@ private fun ProcessCardBlock(
     val running = item.turnEndAt <= 0L || item.status == "running"
     val isDispatch = item.cardType == "dispatch" || item.dispatchTasks.isNotEmpty() || item.dispatchCount > 0
     val dispatchCount = item.dispatchTasks.size.takeIf { it > 0 } ?: item.dispatchCount
-    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    val textColor = MaterialTheme.colorScheme.onSurfaceVariant
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
     Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
@@ -1975,9 +1983,16 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
             vm.loadTaskProcess(roomId, task)
         }
     }
-    Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+    val procScroll = rememberScrollState()
+    LaunchedEffect(items?.size) { procScroll.animateScrollTo(procScroll.maxValue) }
+    Column(
+        Modifier
+            .padding(start = 20.dp, top = 2.dp)
+            .heightIn(max = 280.dp)
+            .verticalScroll(procScroll),
+    ) {
         when {
-            !items.isNullOrEmpty() -> items.reversed().forEach { child ->
+            !items.isNullOrEmpty() -> items.forEach { child ->
                 RawChatBubble(child, vm, showAuthor = false)
             }
             unavailable -> Text(
@@ -2042,7 +2057,7 @@ private fun RawChatBubble(
                 contentAlignment = Alignment.Center,
             ) {
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
                 quote = null,
@@ -2070,7 +2085,7 @@ private fun RawChatBubble(
 
         is ChatItem.User -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer
             val quoteColor = textColor.copy(alpha = 0.7f)
             MessageBubbleBox(
                 copyText = item.text,
@@ -2128,7 +2143,7 @@ private fun RawChatBubble(
         is ChatItem.Assistant -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
                 quote = item.author to item.text,
@@ -2167,7 +2182,7 @@ private fun RawChatBubble(
 
         is ChatItem.Thought -> {
             var expanded by remember(isCurrentMatch) { mutableStateOf(isCurrentMatch) }
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
                 quote = null,
@@ -2217,7 +2232,7 @@ private fun RawChatBubble(
         is ChatItem.Tool -> Column(Modifier.padding(top = if (grouped) 1.dp else 3.dp, bottom = 3.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = "[${item.title}] ${toolStatusLabel(S, item.status)}",
                 quote = null,
@@ -2261,7 +2276,7 @@ private fun RawChatBubble(
         is ChatItem.Plan -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
             MessageBubbleBox(
                 copyText = "${S.plan}\n${item.entries.joinToString("\n") { planEntryLabel(S, it) }}",
                 quote = null,
@@ -2300,7 +2315,7 @@ private fun RawChatBubble(
         is ChatItem.Error -> {
             val text = (if (item.author.isNotBlank()) "[${item.author}] " else "") +
                 "${S.errorTag}: ${item.text}"
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.error
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
             MessageBubbleBox(
                 copyText = text,
                 quote = null,
@@ -2334,8 +2349,8 @@ private fun RawChatBubble(
         is ChatItem.Permission -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
-            val answeredColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+            val answeredColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.title,
                 quote = null,
@@ -2384,8 +2399,8 @@ private fun RawChatBubble(
         is ChatItem.Elicitation -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
-            val answeredColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+            val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+            val answeredColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.message,
                 quote = null,
@@ -2624,7 +2639,7 @@ private fun FlowCardBlock(
     val phaseTagTextColor = when (flow.phase) {
         "done" -> MaterialTheme.colorScheme.onPrimaryContainer
         "cancelled" -> MaterialTheme.colorScheme.onErrorContainer
-        "awaiting-retry" -> MaterialTheme.colorScheme.onTertiaryContainer
+        "awaiting-retry" -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val showRetry = isLive && flow.phase == "awaiting-retry"
@@ -2798,29 +2813,24 @@ private fun FlowCardBlock(
                     Spacer(Modifier.height(4.dp))
                 }
                 if (flow.phase == "done") {
-                    Spacer(Modifier.height(6.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.padding(12.dp)) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    Column(Modifier.fillMaxWidth()) {
                             Text(
                                 S.finalSummary,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(2.dp))
                             Text(
                                 S.summaryCompleted.format(progress.done, progress.total),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             if (flow.supplements.isNotEmpty()) {
                                 Text(
                                     S.summaryAdopted.format(flow.supplements.size),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             val verificationCount = flow.tasks.sumOf { it.verifications.size }
@@ -2828,11 +2838,10 @@ private fun FlowCardBlock(
                                 Text(
                                     S.summaryVerified.format(verificationCount),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
-                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 flow.tasks.forEach { task ->
@@ -2908,7 +2917,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
         task.dependsOn.isNotEmpty() || task.retries > 0 || task.waitingFor != null ||
         task.verifications.isNotEmpty() || task.backendRuns.isNotEmpty()
     val showRetryBtn = showRetry && task.status == "failed"
-    Column(Modifier.padding(vertical = 3.dp)) {
+    Column(Modifier.padding(vertical = 1.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = if (hasDetail) Modifier.clickable { expanded = !expanded } else Modifier,
@@ -3154,7 +3163,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                             else -> r.status
                         }
                         Text(
-                            "${r.toolCallId} · $statusText · ${r.exitCode?.let { "${S.evidenceExitCodeLabel}$it" } ?: S.backendExitUnknown}",
+                            listOf(r.toolCallId, statusText, r.exitCode?.let { "${S.evidenceExitCodeLabel}$it" }).filter { it != null }.joinToString(" · "),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -3961,7 +3970,7 @@ private fun FlowProgressStrip(
         else -> MaterialTheme.colorScheme.surface
     }
     val phaseTagTextColor = when (flow.phase) {
-        "awaiting-retry" -> MaterialTheme.colorScheme.onTertiaryContainer
+        "awaiting-retry" -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val containerColor = if (waitingOnUser) {
@@ -4102,7 +4111,7 @@ private fun DecisionCardBlock(
 ) {
     val S = LocalStrings.current
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
     MessageBubbleBox(
         copyText = item.title,
         quote = null,

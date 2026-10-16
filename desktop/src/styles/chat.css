@@ -272,8 +272,10 @@
   align-self: center;
   color: var(--muted);
   font-size: 0.76rem;
-  padding: 0.15rem 0.5rem;
+  padding: 0.1rem 0.4rem;
   text-align: center;
+  background: none;
+  border-radius: 0;
 }
 
 /* 错误与审批 */
@@ -1330,14 +1332,14 @@
 .flow-tasks {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.2rem;
 }
 
 .flow-task {
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
-  padding: 0.45rem 0.55rem;
+  padding: 0.3rem 0.55rem;
   border-radius: var(--r-md);
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -2620,3 +2622,6 @@ div.turn-tail {
   border-color: var(--muted);
   color: var(--muted);
 }
+
+/* 任务过程区展开的外层滚动容器：限高 18rem，超高部分在此滚动；展开时由 useEffect 自动滚到底部 */
+.proc-scroll { min-width: 0; max-height: 18rem; overflow-y: auto; }

@@ -627,17 +627,29 @@ export function ChatScreen() {
     inputRef.current?.focus();
   };
 
+  // 附件白名单与限制（与 Android 对称）：图片/常见文档，≤10MB，≤5 个
+  const ATTACH_OK = (t: string, name = "") =>
+    t.startsWith("image/") || t.startsWith("text/") ||
+    ["application/pdf", "application/zip", "application/x-zip-compressed", "application/json"].includes(t) ||
+    (t === "application/octet-stream" && /\.(pdf|zip|json|md|txt|log|csv|ya?ml|toml|xml)$/i.test(name));
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
+    const rejected: string[] = [];
+    let accepted = 0;
     for (const f of files) {
-      if (!f.type.startsWith("image/")) continue;
+      if (!ATTACH_OK(f.type, f.name) || f.size > 10 * 1024 * 1024 ||
+          store.pendingAttachments.length + accepted >= 5) { rejected.push(f.name); continue; }
+      accepted++;
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = String(reader.result ?? "").split(",")[1] ?? "";
         if (base64) store.addAttachment({ mimeType: f.type, base64, name: f.name });
       };
       reader.readAsDataURL(f);
+    }
+    if (rejected.length) {
+      (store as unknown as { notify?: (m: string) => void }).notify?.(S.attachRejectedFmt.replace("%s", rejected.join(", ")));
     }
     e.target.value = "";
   };
@@ -1349,7 +1361,7 @@ export function ChatScreen() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/*,text/*,.pdf,.zip,.json,.md"
                   multiple
                   style={{ display: "none" }}
                   onChange={onFileChange}
@@ -3290,6 +3302,13 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     );
     setProcLoading(false);
   };
+  const procScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!procOpen || !procScrollRef.current) return;
+    const el = procScrollRef.current.firstElementChild as HTMLElement | null;
+    const target = el && el.scrollHeight > 0 ? el : procScrollRef.current;
+    target.scrollTop = target.scrollHeight;
+  }, [procOpen, procItems]);
   // running 任务：展开期间 2s 轮询内存缓冲，收起/收尾/卸载即停
   useEffect(() => {
     if (!procOpen || task.status !== "running") return;
@@ -3436,7 +3455,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                     {r.toolCallId} ·{" "}
                     {r.status === "completed" ? S.backendRunCompleted : r.status === "failed" ? S.backendRunFailed : r.status}
                     {" · "}
-                    {r.exitCode !== undefined ? `${S.evidenceExitCodeLabel}${r.exitCode}` : S.backendExitUnknown}
+                    {r.exitCode !== undefined ? `${S.evidenceExitCodeLabel}${r.exitCode}` : (r.status === "completed" ? "" : S.backendExitUnknown)}
                   </div>
                 ))}
                 {backendStatusText !== undefined ? (
@@ -3471,7 +3490,9 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
               {task.status === "running" ? S.processRunning : S.processUnavailable}
             </div>
           ) : (
-            <ProcessSteps items={procItems} />
+            <div ref={procScrollRef} className="proc-scroll">
+              <ProcessSteps items={procItems} />
+            </div>
           ))}
         {showRetryBtn && (
           <button className="flow-task-retry-btn" onClick={handleRetry}>

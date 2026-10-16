@@ -113,6 +113,13 @@ interface Strings {
     val personaFieldExamples: String
     val aliasGroupTag: String
     val topicResolve: String
+    val scanFromGallery: String
+    val qrDecodeFailed: String
+    val attachTypeNotAllowed: String
+    val attachTooLarge: String
+    val attachTooMany: String
+    val attachTotalTooLarge: String
+    val attachFailed: String
     val decisionScopeOnce: String
     val decisionScopeTask: String
     val decisionScopeAlways: String
@@ -604,6 +611,13 @@ object ZhStrings : Strings {
     override val personaFieldExamples = "示例"
     override val aliasGroupTag = "别名组"
     override val topicResolve = "标记已结"
+    override val scanFromGallery = "从相册选择"
+    override val qrDecodeFailed = "未识别到二维码，请重试"
+    override val attachTypeNotAllowed = "不支持的附件类型"
+    override val attachTooLarge = "附件过大（上限 10MB）"
+    override val attachTooMany = "附件过多（最多 %d 个）"
+    override val attachTotalTooLarge = "附件总大小超限"
+    override val attachFailed = "附件添加失败"
     override val decisionScopeOnce = "仅一次"
     override val decisionScopeTask = "本任务"
     override val decisionScopeAlways = "始终"
@@ -1103,6 +1117,13 @@ object EnStrings : Strings {
     override val personaFieldExamples = "Examples"
     override val aliasGroupTag = "alias group"
     override val topicResolve = "Mark done"
+    override val scanFromGallery = "Choose from gallery"
+    override val qrDecodeFailed = "No QR code detected, please retry"
+    override val attachTypeNotAllowed = "Unsupported attachment type"
+    override val attachTooLarge = "Attachment too large (max 10MB)"
+    override val attachTooMany = "Too many attachments (max %d)"
+    override val attachTotalTooLarge = "Attachments exceed total size limit"
+    override val attachFailed = "Failed to add attachment"
     override val decisionScopeOnce = "Once"
     override val decisionScopeTask = "This task"
     override val decisionScopeAlways = "Always"

@@ -3505,11 +3505,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             })
                         }
                         attachments.forEach { a ->
-                            add(buildJsonObject {
-                                put("type", "image")
-                                put("mimeType", a.mimeType)
-                                put("data", a.base64)
-                            })
+                            when {
+                                a.mimeType.startsWith("image/") -> add(buildJsonObject {
+                                    put("type", "image")
+                                    put("mimeType", a.mimeType)
+                                    put("data", a.base64)
+                                })
+                                a.mimeType == "application/pdf" -> add(buildJsonObject {
+                                    put("type", "resource")
+                                    put("resource", buildJsonObject {
+                                        put("mimeType", a.mimeType)
+                                        put("uri", a.name)
+                                        put("blob", a.base64)
+                                    })
+                                })
+                                attachTextLike(a.mimeType, a.name) -> add(buildJsonObject {
+                                    put("type", "text")
+                                    put("text", "\n（附件 ${'$'}{a.name}）\n" +
+                                        String(Base64.decode(a.base64, Base64.NO_WRAP)).take(200_000))
+                                })
+                                else -> add(buildJsonObject {
+                                    put("type", "resource")
+                                    put("resource", buildJsonObject {
+                                        put("mimeType", a.mimeType)
+                                        put("uri", a.name)
+                                        put("blob", a.base64)
+                                    })
+                                })
+                            }
                         }
                     })
                 })
@@ -3590,11 +3613,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         })
                     }
                     attachments.forEach { a ->
-                        add(buildJsonObject {
-                            put("type", "image")
-                            put("mimeType", a.mimeType)
-                            put("data", a.base64)
-                        })
+                        when {
+                            a.mimeType.startsWith("image/") -> add(buildJsonObject {
+                                put("type", "image")
+                                put("mimeType", a.mimeType)
+                                put("data", a.base64)
+                            })
+                            a.mimeType == "application/pdf" -> add(buildJsonObject {
+                                put("type", "resource")
+                                put("resource", buildJsonObject {
+                                    put("mimeType", a.mimeType)
+                                    put("uri", a.name)
+                                    put("blob", a.base64)
+                                })
+                            })
+                            attachTextLike(a.mimeType, a.name) -> add(buildJsonObject {
+                                put("type", "text")
+                                put("text", "\n（附件 ${'$'}{a.name}）\n" +
+                                    String(Base64.decode(a.base64, Base64.NO_WRAP)).take(200_000))
+                            })
+                            else -> add(buildJsonObject {
+                                put("type", "resource")
+                                put("resource", buildJsonObject {
+                                    put("mimeType", a.mimeType)
+                                    put("uri", a.name)
+                                    put("blob", a.base64)
+                                })
+                            })
+                        }
                     }
                 }
                 val result = hub.call("room.message", buildJsonObject {
@@ -4199,23 +4245,60 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (currentRoom != null) sendRoomMessage(text) else if (currentSession != null) sendPrompt(text)
     }
 
+    private val attachAllowedExt = setOf(
+        "ts","tsx","js","jsx","mjs","cjs","py","kt","kts","java","go","rs","c","cc","cpp","h","hpp",
+        "cs","rb","php","swift","scala","sh","bash","zsh","ps1","bat","sql","md","markdown","txt",
+        "log","json","yaml","yml","toml","xml","ini","cfg","conf","properties","csv","html","css",
+        "vue","lua","r","m","pl","dockerfile","gitignore","env","pdf",
+        "png","jpg","jpeg","gif","webp","svg","bmp",
+    )
+    private val attachMaxBytes = 10 * 1024 * 1024L
+    private val attachMaxTotal = 20 * 1024 * 1024L
+    private val attachMaxCount = 5
+
+    // 发送分流：仅可判文本型走 text 内联，二进制/未知走 resource blob（防乱码注入）
+    private fun attachTextLike(mime: String, name: String): Boolean =
+        mime.startsWith("text/") || mime == "application/json" || mime == "application/xml" ||
+            mime.endsWith("+json") || mime.endsWith("+xml") ||
+            (mime.isEmpty() && name.substringAfterLast('.', "").lowercase() in attachAllowedExt)
+    var attachError by mutableStateOf<String?>(null)
+        private set
+
     fun addAttachment(uri: Uri) {
+        val S = stringsFor(lang)
         viewModelScope.launch {
             try {
                 val cr = getApplication<Application>().contentResolver
+                val name = uri.lastPathSegment ?: ""
+                val ext = name.substringAfterLast('.', "").lowercase()
                 val mime = cr.getType(uri) ?: inferMimeType(uri)
+                val allowed = ext in attachAllowedExt ||
+                    mime.startsWith("image/") || mime.startsWith("text/") ||
+                    mime == "application/pdf"
+                if (!allowed) { attachError = S.attachTypeNotAllowed; return@launch }
+                if (pendingAttachments.size >= attachMaxCount) {
+                    attachError = S.attachTooMany.format(attachMaxCount); return@launch
+                }
+                val size = withContext(Dispatchers.IO) {
+                    cr.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+                }
+                if (size > attachMaxBytes) { attachError = S.attachTooLarge; return@launch }
                 val bytes = withContext(Dispatchers.IO) {
                     cr.openInputStream(uri)?.use { it.readBytes() } ?: byteArrayOf()
                 }
                 if (bytes.isEmpty()) throw Exception("empty file")
-                val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                val name = uri.lastPathSegment ?: ""
-                pendingAttachments.add(Attachment(mime, base64, name))
+                if (bytes.size > attachMaxBytes) { attachError = S.attachTooLarge; return@launch }
+                val total = pendingAttachments.sumOf { it.base64.length * 3L / 4 } + bytes.size
+                if (total > attachMaxTotal) { attachError = S.attachTotalTooLarge; return@launch }
+                pendingAttachments.add(Attachment(mime, Base64.encodeToString(bytes, Base64.NO_WRAP), name))
+                attachError = null
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "attach failed"))
+                attachError = e.message ?: S.attachFailed
             }
         }
     }
+
+    fun clearAttachError() { attachError = null }
 
     fun removeAttachment(attachment: Attachment) {
         pendingAttachments.remove(attachment)
