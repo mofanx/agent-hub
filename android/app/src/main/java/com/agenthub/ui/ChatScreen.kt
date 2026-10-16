@@ -5,7 +5,9 @@ import android.util.Base64
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.Date
 import java.util.Locale
+import java.text.DateFormat
 import java.text.SimpleDateFormat
 
 import android.content.ClipData
@@ -197,6 +199,88 @@ internal fun formatArtifactTime(at: Long): String {
     val formatter = SimpleDateFormat(pattern, Locale.getDefault())
     formatter.timeZone = java.util.TimeZone.getTimeZone(zone)
     return formatter.format(java.util.Date.from(instant))
+}
+
+private val AUTHOR_PALETTE = listOf(
+    Color(0xFF8B5CF6), Color(0xFFF59E0B), Color(0xFF10B981), Color(0xFF3B82F6),
+    Color(0xFFEC4899), Color(0xFF14B8A6), Color(0xFFF97316), Color(0xFF6366F1),
+)
+
+internal fun authorColor(author: String): Color {
+    var h = 0
+    for (c in author) h = h * 31 + c.code
+    return AUTHOR_PALETTE[Math.floorMod(h, AUTHOR_PALETTE.size)]
+}
+
+@Composable
+private fun AuthorAvatar(author: String, modifier: Modifier = Modifier) {
+    val color = authorColor(author)
+    Box(
+        modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .background(color.copy(alpha = 0.16f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            author.trim().firstOrNull()?.uppercase() ?: "?",
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun DateSeparator(at: Long) {
+    val S = LocalStrings.current
+    val zone = ZoneId.systemDefault()
+    val date = Instant.ofEpochMilli(at).atZone(zone).toLocalDate()
+    val now = LocalDate.now(zone)
+    val label = when (date) {
+        now -> S.dateToday
+        now.minusDays(1) -> S.dateYesterday
+        else -> DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault()).format(Date(at))
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HorizontalDivider(
+            Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        )
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 12.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider(
+            Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        )
+    }
+}
+
+private fun sameDay(a: Long, b: Long): Boolean {
+    if (a <= 0 || b <= 0) return false
+    val zone = ZoneId.systemDefault()
+    return Instant.ofEpochMilli(a).atZone(zone).toLocalDate() ==
+        Instant.ofEpochMilli(b).atZone(zone).toLocalDate()
+}
+
+private fun sameChatAuthor(a: String, b: String): Boolean =
+    a == b || a.startsWith("$b (") || b.startsWith("$a (")
+
+private fun ChatListItem.groupableAuthor(): Boolean = when (this) {
+    is ChatListItem.FlowCard -> false
+    is ChatListItem.ProcessGroup -> author.isNotBlank()
+    is ChatListItem.Message -> author.isNotBlank()
+    is ChatListItem.Other -> when (item) {
+        is ChatItem.System, is ChatItem.Error -> false
+        else -> author.isNotBlank()
+    }
 }
 
 private fun TokenUsage.format(S: Strings): String = buildString {
@@ -617,20 +701,33 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         messages,
                         key = { _, item -> item.id },
                     ) { index, item ->
-                        val nextAuthor = messages.getOrNull(index + 1)?.author
+                        // reverseLayout：index+1 是时间上更早的一条
+                        val prev = messages.getOrNull(index + 1)
+                        val grouped = prev != null &&
+                            prev.groupableAuthor() && item.groupableAuthor() &&
+                            sameChatAuthor(prev.author, item.author) &&
+                            prev.at > 0 && item.at > 0 &&
+                            kotlin.math.abs(item.at - prev.at) < 120_000L &&
+                            sameDay(prev.at, item.at)
                         val currentMatchIndex = matchPositions.getOrNull(vm.chatSearchMatchIndex)
                         val isQuoted = vm.quote?.let { (author, text) ->
                             author == item.author && item.text.startsWith(text)
                         } ?: false
-                        ChatBubble(
-                            item,
-                            vm,
-                            showAuthor = isRoom && item.isFirst && nextAuthor != item.author,
-                            highlight = vm.inChatSearchQuery,
-                            isCurrentMatch = currentMatchIndex == index,
-                            isQuoted = isQuoted,
-                            onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
-                        )
+                        Column {
+                            if (item.at > 0 && (prev == null || !sameDay(prev.at, item.at))) {
+                                DateSeparator(item.at)
+                            }
+                            ChatBubble(
+                                item,
+                                vm,
+                                showAuthor = isRoom && item.isFirst && !grouped,
+                                grouped = grouped,
+                                highlight = vm.inChatSearchQuery,
+                                isCurrentMatch = currentMatchIndex == index,
+                                isQuoted = isQuoted,
+                                onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
+                            )
+                        }
                     }
                     if (vm.historyLoading) {
                         item {
@@ -1235,7 +1332,7 @@ fun AuthorLabel(author: String) {
         Text(
             author,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
+            color = authorColor(author),
         )
     }
 }
@@ -1380,10 +1477,45 @@ fun ChatBubble(
     item: ChatListItem,
     vm: ChatViewModel,
     showAuthor: Boolean,
+    grouped: Boolean = false,
     highlight: String = "",
     isCurrentMatch: Boolean = false,
     isQuoted: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
+) {
+    val S = LocalStrings.current
+    val isUserItem = (item as? ChatListItem.Message)?.isUser == true ||
+        ((item as? ChatListItem.Other)?.item is ChatItem.User)
+    val authored = !isUserItem && item.author.isNotBlank() &&
+        item.author != S.authorMe && item.author != "我" &&
+        item.groupableAuthor()
+    if (!authored) {
+        ChatBubbleContent(item, vm, showAuthor, grouped, highlight, isCurrentMatch, isQuoted, onMatchKeywordY)
+        return
+    }
+    Row(Modifier.fillMaxWidth()) {
+        if (item.isFirst && !grouped) {
+            AuthorAvatar(item.author)
+        } else {
+            Spacer(Modifier.width(30.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            ChatBubbleContent(item, vm, showAuthor, grouped, highlight, isCurrentMatch, isQuoted, onMatchKeywordY)
+        }
+    }
+}
+
+@Composable
+private fun ChatBubbleContent(
+    item: ChatListItem,
+    vm: ChatViewModel,
+    showAuthor: Boolean,
+    grouped: Boolean,
+    highlight: String,
+    isCurrentMatch: Boolean,
+    isQuoted: Boolean,
+    onMatchKeywordY: ((Float) -> Unit)?,
 ) {
     when (item) {
         is ChatListItem.Other -> RawChatBubble(
@@ -1394,11 +1526,13 @@ fun ChatBubble(
             isCurrentMatch = isCurrentMatch,
             isQuoted = isQuoted,
             onMatchKeywordY = onMatchKeywordY,
+            grouped = grouped,
         )
         is ChatListItem.Message -> MessageBlock(
             item,
             vm,
             showAuthor = showAuthor,
+            grouped = grouped,
             highlight = highlight,
             isCurrentMatch = isCurrentMatch,
             isQuoted = isQuoted,
@@ -1408,6 +1542,7 @@ fun ChatBubble(
             item,
             vm,
             showAuthor = showAuthor,
+            grouped = grouped,
             highlight = highlight,
             isCurrentMatch = isCurrentMatch,
             onMatchKeywordY = onMatchKeywordY,
@@ -1425,6 +1560,7 @@ private fun MessageBlock(
     item: ChatListItem.Message,
     vm: ChatViewModel,
     showAuthor: Boolean,
+    grouped: Boolean = false,
     highlight: String = "",
     isCurrentMatch: Boolean = false,
     isQuoted: Boolean = false,
@@ -1453,7 +1589,7 @@ private fun MessageBlock(
         else -> listOf(0.dp, 0.dp, 0.dp, 0.dp)
     }
     val shape = RoundedCornerShape(topStart, topEnd, bottomEnd, bottomStart)
-    val blockTop = if (item.isFirst) 4.dp else 0.dp
+    val blockTop = if (item.isFirst) (if (grouped) 1.dp else 4.dp) else 0.dp
     val blockBottom = if (item.isLast) 4.dp else 0.dp
 
     if (item.isUser) {
@@ -1563,6 +1699,7 @@ private fun ProcessGroupBlock(
     item: ChatListItem.ProcessGroup,
     vm: ChatViewModel,
     showAuthor: Boolean,
+    grouped: Boolean = false,
     highlight: String = "",
     isCurrentMatch: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
@@ -1572,7 +1709,7 @@ private fun ProcessGroupBlock(
     val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
-    Column(Modifier.padding(vertical = 4.dp)) {
+    Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
         if (showAuthor) AuthorLabel(item.author)
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1611,6 +1748,7 @@ private fun ProcessCardBlock(
     item: ChatItem.Process,
     vm: ChatViewModel,
     showAuthor: Boolean,
+    grouped: Boolean = false,
     highlight: String = "",
     isCurrentMatch: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
@@ -1628,7 +1766,7 @@ private fun ProcessCardBlock(
     val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
-    Column(Modifier.padding(vertical = 4.dp)) {
+    Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
         if (showAuthor) AuthorLabel(item.author)
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1831,6 +1969,7 @@ private fun RawChatBubble(
     isCurrentMatch: Boolean = false,
     isQuoted: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
+    grouped: Boolean = false,
 ) {
     val S = LocalStrings.current
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
@@ -1849,7 +1988,7 @@ private fun RawChatBubble(
                 Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 contentAlignment = Alignment.Center,
             ) {
-            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
                 copyText = item.text,
@@ -1860,14 +1999,14 @@ private fun RawChatBubble(
                 modifier = bubbleModifier,
             ) {
                 Surface(
-                    shape = RoundedCornerShape(12.dp),
+                    shape = CircleShape,
                     color = bgColor,
                 ) {
                     HighlightText(
                         text = item.text,
                         highlight = highlight,
                         onMatchKeywordY = keywordCallback,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
                         color = textColor,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                     )
@@ -1886,7 +2025,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = true,
-                modifier = bubbleModifier.padding(vertical = 4.dp),
+                modifier = bubbleModifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp),
             ) {
                 Surface(
                     shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
@@ -1933,7 +2072,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Assistant -> Column(Modifier.padding(vertical = 4.dp)) {
+        is ChatItem.Assistant -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
@@ -1982,7 +2121,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = true,
-                modifier = bubbleModifier.padding(vertical = 2.dp),
+                modifier = bubbleModifier.padding(top = if (grouped) 1.dp else 2.dp, bottom = 2.dp),
             ) {
                 Column {
                     TextButton(onClick = { expanded = !expanded }) {
@@ -2022,7 +2161,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Tool -> Column(Modifier.padding(vertical = 3.dp)) {
+        is ChatItem.Tool -> Column(Modifier.padding(top = if (grouped) 1.dp else 3.dp, bottom = 3.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
@@ -2066,7 +2205,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Plan -> Column(Modifier.padding(vertical = 4.dp)) {
+        is ChatItem.Plan -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
@@ -2134,7 +2273,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Permission -> Column(Modifier.padding(vertical = 4.dp)) {
+        is ChatItem.Permission -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
@@ -2184,7 +2323,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Elicitation -> Column(Modifier.padding(vertical = 4.dp)) {
+        is ChatItem.Elicitation -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
@@ -2357,6 +2496,7 @@ private fun RawChatBubble(
             item,
             vm,
             showAuthor = showAuthor,
+            grouped = grouped,
             highlight = highlight,
             isCurrentMatch = isCurrentMatch,
             onMatchKeywordY = keywordCallback,

@@ -53,6 +53,14 @@ export type RoomModeConfig = {
 
 export type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
 
+/** 展示名消歧：重名时自动追加 (2)/(3) 后缀而非拒绝——id 才是唯一键 */
+export function dedupeName(name: string, taken: (n: string) => boolean): string {
+  if (!taken(name)) return name;
+  let n = 2;
+  while (taken(`${name} (${n})`)) n++;
+  return `${name} (${n})`;
+}
+
 /** room.clone：把源房间的会话级配置按新旧 sessionId 映射表重映射；未映射的旧 id 一律丢弃 */
 export function remapRoomModeConfig(
   source: RoomModeConfig,

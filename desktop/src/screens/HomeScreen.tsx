@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowRight, Bot, Plus, Users } from "lucide-react";
+import { Archive, ArrowRight, Bot, Plus, Users } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor, type Strings } from "../hub/strings";
 import { modeLabel, truncatePath } from "./session-shared";
@@ -33,6 +33,14 @@ export function HomeScreen() {
     [store.sessions, store.pinnedIds],
   );
   const recentRooms = useMemo(() => store.rooms.filter((r) => !r.archived).slice(0, 2), [store.rooms]);
+  const archivedItems = useMemo(
+    () => [
+      ...store.sessions.filter((s) => s.archived).map((s) => ({ kind: "session" as const, s })),
+      ...store.rooms.filter((r) => r.archived).map((r) => ({ kind: "room" as const, r })),
+    ],
+    [store.sessions, store.rooms],
+  );
+  const [showArchived, setShowArchived] = useState(false);
 
   return (
     <div className="home">
@@ -118,6 +126,69 @@ export function HomeScreen() {
                 </div>
               ))}
             </div>
+          </>
+        )}
+
+        {archivedItems.length > 0 && (
+          <>
+            <button
+              className="home-section-title archived-toggle"
+              onClick={() => setShowArchived(!showArchived)}
+            >
+              {S.archivedGroupFmt.replace("%s", String(archivedItems.length))}
+            </button>
+            {showArchived && (
+              <div className="home-recent archived">
+                {archivedItems.map((it) =>
+                  it.kind === "session" ? (
+                    <div
+                      key={it.s.sessionId}
+                      className="home-recent-item archived"
+                      onClick={() => store.openChat(it.s)}
+                    >
+                      <div className="nav-text">
+                        <span className="nav-title">{store.displayName(it.s)}</span>
+                        <span className="nav-sub">
+                          {truncatePath(it.s.cwd, 40)} · {it.s.agent}
+                        </span>
+                      </div>
+                      <button
+                        className="icon-btn"
+                        title={S.unarchiveTitle}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void store.archiveSession(it.s, false);
+                        }}
+                      >
+                        <Archive size={13} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      key={it.r.roomId}
+                      className="home-recent-item archived"
+                      onClick={() => store.openRoom(it.r)}
+                    >
+                      <Users size={13} style={{ color: "var(--muted)", flexShrink: 0 }} />
+                      <div className="nav-text">
+                        <span className="nav-title">{it.r.name}</span>
+                        <span className="nav-sub">{modeLabel(S, it.r.mode)}</span>
+                      </div>
+                      <button
+                        className="icon-btn"
+                        title={S.unarchiveTitle}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void store.archiveRoom(it.r, false);
+                        }}
+                      >
+                        <Archive size={13} />
+                      </button>
+                    </div>
+                  ),
+                )}
+              </div>
+            )}
           </>
         )}
 

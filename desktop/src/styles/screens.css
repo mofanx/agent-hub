@@ -497,3 +497,54 @@ html[data-theme="dark"] .seg-control button.active {
   padding: 0.1rem 0.5rem;
   display: inline-block;
 }
+
+/* 分享连接 / 远程后端接入 */
+.connect-share-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.connect-share-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.connect-share-card .qr-img {
+  border-radius: 4px;
+  background: #fff;
+  flex: none;
+}
+.connect-share-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.connect-share-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.connect-share-sub {
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connect-share-sub.join-cmd {
+  white-space: normal;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+}
+
+.conn-lastseen {
+  color: var(--muted);
+}

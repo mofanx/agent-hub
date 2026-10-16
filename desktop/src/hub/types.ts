@@ -24,6 +24,8 @@ export interface ConnectionInfo {
   online: boolean;
   local: boolean;
   error?: string;
+  /** 远端后端最近心跳/接入时刻（Hub 写入，离线排障用） */
+  lastSeen?: number;
 }
 
 export interface SessionInfo {

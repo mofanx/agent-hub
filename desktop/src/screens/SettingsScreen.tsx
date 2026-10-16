@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bot, Copy, Drama, ExternalLink, LogOut, RefreshCw, Settings2 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor } from "../hub/strings";
 import type { ConnectionInfo, RoleInfo } from "../hub/types";
+import QRCode from "qrcode";
 import { version } from "../../package.json";
 import { FormRow } from "../components/FormRow";
 
@@ -125,6 +126,174 @@ function GeneralSettings() {
   );
 }
 
+function QrImage({ text, size = 120 }: { text: string; size?: number }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    let dead = false;
+    void QRCode.toDataURL(text, { width: size * 2, margin: 1 })
+      .then((u) => { if (!dead) setUrl(u); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [text, size]);
+  return (
+    <img className="qr-img" src={url || undefined} width={size} height={size} alt="QR" />
+  );
+}
+
+type ConnectInfo = {
+  lanIps: string[];
+  port: number;
+  gateway?: { publicUrl: string };
+  uris: { lan: string[]; gateway?: string };
+};
+
+function ConnectCards({ uri, title, sub }: { uri: string; title: string; sub: string }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  return (
+    <div className="connect-share-card">
+      <QrImage text={uri} />
+      <div className="connect-share-meta">
+        <div className="connect-share-title">{title}</div>
+        <div className="connect-share-sub" title={sub}>{sub}</div>
+        <button
+          className="secondary tiny"
+          onClick={() => void navigator.clipboard.writeText(uri)}
+        >
+          <Copy size={11} /> {S.copyUriLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 分享连接：调 hub.connectInfo，渲染 LAN / Gateway 两张接入卡（QR + 一键复制） */
+function ShareConnectCard() {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [info, setInfo] = useState<ConnectInfo | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let dead = false;
+    void store.client
+      ?.call("hub.connectInfo")
+      .then((r) => { if (!dead) setInfo(r as ConnectInfo); })
+      .catch(() => { if (!dead) setErr(S.connectInfoError); });
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.client]);
+  const lanUris = info?.uris?.lan ?? [];
+  const gwUri = info?.uris?.gateway;
+  const gwUrl = info?.gateway?.publicUrl ?? "";
+  return (
+    <div className="card">
+      <h3>{S.shareConnectTitle}</h3>
+      <div className="subtitle">{S.shareConnectHint}</div>
+      {err && <div className="error">{err}</div>}
+      <div className="connect-share-grid">
+        {lanUris.length === 0 ? (
+          <div className="connect-share-card">
+            <div className="connect-share-meta">
+              <div className="connect-share-title">{S.lanCardTitle}</div>
+              <div className="connect-share-sub">{S.lanLocalOnly}</div>
+            </div>
+          </div>
+        ) : (
+          lanUris.map((uri) => {
+            const u = new URLSearchParams(uri.split("?")[1]).get("u") ?? "";
+            return (
+              <ConnectCards key={uri} uri={uri} title={S.lanCardTitle} sub={u} />
+            );
+          })
+        )}
+        {gwUri ? (
+          <ConnectCards uri={gwUri} title={S.gatewayCardTitle} sub={gwUrl} />
+        ) : (
+          <div className="connect-share-card">
+            <div className="connect-share-meta">
+              <div className="connect-share-title">{S.gatewayCardTitle}</div>
+              <div className="connect-share-sub">{S.gatewayNotReady}</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 远程后端接入：生成 CONNECTION_TOKEN 与一键命令，LAN/Gateway 各一条命令 + QR */
+function RemoteBackendJoin() {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [name, setName] = useState("");
+  const [agent, setAgent] = useState("devin");
+  const [join, setJoin] = useState<{ lan: string[]; gateway?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const generate = async () => {
+    const nm = name.trim() || `remote-${agent}`;
+    setBusy(true);
+    try {
+      const r = (await store.client?.call("connection.create", {
+        name: nm,
+        agent,
+      })) as { join?: { lan: string[]; gateway?: string } } | undefined;
+      setJoin(r?.join ?? null);
+      await store.refreshAll();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  return (
+    <div className="card">
+      <h3>{S.remoteBackendTitle}</h3>
+      <div className="subtitle">{S.remoteBackendHint}</div>
+      <div className="connect-share-grid">
+        <FormRow label={S.nameLabel}>
+          <input
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            placeholder={`remote-${agent}`}
+          />
+        </FormRow>
+        <FormRow label={S.typeLabel}>
+          <select value={agent} onChange={(e) => setAgent(e.currentTarget.value)}>
+            {["devin", "claude", "codex", "opencode", "openclaw"].map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+        </FormRow>
+      </div>
+      <div className="form-actions">
+        <button className="primary" onClick={() => void generate()} disabled={busy}>
+          {S.genJoinCmd}
+        </button>
+      </div>
+      {join && (
+        <>
+          <div className="subtitle">{S.joinCmdReady}</div>
+          <div className="connect-share-grid">
+            {[...join.lan, ...(join.gateway ? [join.gateway] : [])].map((cmd) => (
+              <div key={cmd} className="connect-share-card">
+                <QrImage text={cmd} />
+                <div className="connect-share-meta">
+                  <div className="connect-share-sub join-cmd" title={cmd}>{cmd}</div>
+                  <button
+                    className="secondary tiny"
+                    onClick={() => void navigator.clipboard.writeText(cmd)}
+                  >
+                    <Copy size={11} /> {S.copyUriLabel}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ConnectionsSettings() {
   const store = useHubStore();
   const S = stringsFor(store.lang);
@@ -144,6 +313,8 @@ function ConnectionsSettings() {
 
   return (
     <>
+      <ShareConnectCard />
+      <RemoteBackendJoin />
       {store.connections.map((c) => (
         <ConnectionCard key={c.id} c={c} />
       ))}
@@ -226,6 +397,12 @@ function ConnectionCard({ c }: { c: ConnectionInfo }) {
         {c.local ? S.localLaunch : `Token: ${c.token}`}
         {c.address && ` · ${c.address}`}
         {c.cwd && ` · ${c.cwd}`}
+        {!c.local && c.lastSeen !== undefined && (
+          <span className={c.online ? "" : "conn-lastseen"}>
+            {" · "}
+            {S.lastSeenFmt.replace("%s", new Date(c.lastSeen).toLocaleString())}
+          </span>
+        )}
       </div>
       {c.error && <div className="error">{S.startFailedFmt.replace("%s", c.error)}</div>}
       {!c.local && (

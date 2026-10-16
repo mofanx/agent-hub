@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { RoomManager, remapRoomModeConfig, type Room } from "./room.js";
+import { RoomManager, dedupeName, remapRoomModeConfig, type Room } from "./room.js";
 import { lostReplyAction, Store } from "./store.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
@@ -914,5 +914,20 @@ describe("nameTaken 归档名占坑", () => {
     rooms.archive(r1.roomId, false);
     assert.equal(rooms.nameTaken("team"), true, "取消归档恢复占用");
     assert.equal(rooms.nameTaken("team", r1.roomId), false, "自身排除");
+  });
+
+  it("归档保留原名不改写；重名展示名自动加 (n) 后缀消歧", () => {
+    const rooms = new RoomManager();
+    const r1 = rooms.create("team", [{ sessionId: "s1", name: "a" }]);
+    rooms.archive(r1.roomId, true);
+    assert.equal(rooms.get(r1.roomId)!.name, "team", "归档不改名");
+    // 归档名已释放 → 新建同名直接得到原名
+    const taken = (n: string) => rooms.nameTaken(n);
+    assert.equal(dedupeName("team", taken), "team");
+    const r2 = rooms.create("team", [{ sessionId: "s2", name: "b" }]);
+    assert.equal(dedupeName("team", taken), "team (2)", "占用时自动后缀");
+    rooms.create("team (2)", [{ sessionId: "s3", name: "c" }]);
+    assert.equal(dedupeName("team", taken), "team (3)", "递增直到空位");
+    assert.equal(dedupeName("team", (n) => rooms.nameTaken(n, r2.roomId)), "team", "自身排除时原名可用");
   });
 });

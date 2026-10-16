@@ -593,6 +593,32 @@ fun buildWsUrl(address: String, token: String): String {
     }
 }
 
+/**
+ * 解析 agenthub://connect?u=<地址>&t=<token>&mode=<lan|gateway> 接入链接。
+ * mode=gateway 时 t 为网关 publicToken；缺省按地址是否含 /hub/ 推断。
+ */
+fun parseConnectUri(raw: String): ConnProfile? {
+    val uri = try {
+        Uri.parse(raw.trim())
+    } catch (_: Exception) {
+        return null
+    } ?: return null
+    if (uri.scheme != "agenthub" || uri.host != "connect") return null
+    var u = uri.getQueryParameter("u")?.trim().orEmpty()
+    val t = uri.getQueryParameter("t")?.trim().orEmpty()
+    if (u.isEmpty() || t.isEmpty()) return null
+    if (!u.startsWith("ws://") && !u.startsWith("wss://")) u = "ws://$u"
+    val gateway = uri.getQueryParameter("mode").let { m ->
+        if (m == "gateway" || m == "lan") m == "gateway" else u.contains("/hub/")
+    }
+    val name = if (u.contains("/hub/")) {
+        u.substringAfterLast("/").substringBefore("?")
+    } else {
+        Uri.parse(u).host ?: u
+    }
+    return if (gateway) ConnProfile(name, u, "", t) else ConnProfile(name, u, t, "")
+}
+
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val hub = HubClient(viewModelScope) { stringsFor(lang) }
     private val prefs = app.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
@@ -657,6 +683,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var roomListFilter by mutableStateOf(RoomListFilter())
     var connecting by mutableStateOf(false)
     var connectError by mutableStateOf<String?>(null)
+    /** deep link / 粘贴导入的待确认连接 profile：非空时弹出预填对话框 */
+    var pendingImport by mutableStateOf<ConnProfile?>(null)
+
+    /** agenthub://connect 链接导入：解析成功置 pendingImport，失败 toast 并返回 false */
+    fun importConnectUri(raw: String): Boolean {
+        val profile = parseConnectUri(raw)
+        if (profile == null) {
+            Toast.makeText(getApplication(), stringsFor(lang).connectUriInvalid, Toast.LENGTH_SHORT).show()
+            return false
+        }
+        pendingImport = profile
+        return true
+    }
     var agentStatus by mutableStateOf("offline")
     var currentProfile by mutableStateOf<ConnProfile?>(null)
 

@@ -234,3 +234,46 @@ X-Public-Token: <PUBLIC_TOKEN>
 - `GATEWAY_TOKEN` 和 `PUBLIC_TOKEN` 不要写进命令行历史；生产部署用 systemd `EnvironmentFile` 或 PM2 `env`。
 - `.env`、`ecosystem.config.cjs`、systemd `.env` 文件已加入 `.gitignore`，权限设为 `600`。
 - 如需更高安全，可在 Nginx `/admin/` 上加 IP 白名单，或把 Gateway 管理端口拆分到独立内网接口。
+
+## 扫码快速接入（agenthub://connect）
+
+推荐路径：不在客户端手填地址/Token，而是用统一接入链接 `agenthub://connect?u=<url>&t=<token>&mode=lan|gateway` 一码连接。
+
+### 出码方式
+
+| 端 | 操作 |
+|---|---|
+| Hub 终端 | `npx tsx src/index.ts --qr` 或 `HUB_QR=1` 启动时打印局域网接入二维码 |
+| Desktop | 设置 → 连接页签 → 「分享连接」卡：局域网 / Gateway 各一张 QR + 一键复制链接 |
+| Gateway 远端 | `hub-gateway up` 成功后在终端打印 public url/token；Desktop 分享卡同步展示 gateway URI |
+
+### 手机接入
+
+Android：连接卡片右上角「扫码」→ 相机对准 QR（CameraX + ML Kit，首次弹 CAMERA 权限，拒绝后可退回手动粘贴）；也可直接粘贴 `agenthub://connect?...` 链接自动预填地址与 Token。扫码/粘贴后自动直连；应用也注册了 `agenthub://` deep link，可从任意二维码 App 拉起。
+
+### relayed 连接的安全边界
+
+经 gateway 中继接入的客户端（`via=gateway`）调用 `hub.connectInfo` 时，Hub 自动脱敏：不回传 `HUB_TOKEN`，LAN 卡显示「仅本机可见」。公网客户端只能拿到 gateway 卡，不会把内网地址和管理 token 扩散出去。
+
+## 远程后端经 Gateway 接入
+
+远程机器上的 agent（devin/claude/codex…）不再要求直连 Hub 的 8787 端口，可走 gateway 的 `/worker` 通道回连——一个 Hub 可挂多台远端机器的后端。
+
+### 生成接入命令
+
+Desktop：设置 → 连接页签 → 「远程后端接入」→ 选名字与 agent 类型 → 「生成接入命令」。Hub 会创建一条 connection 记录并返回 `CONNECTION_TOKEN`，页面展示：
+
+- **LAN 直连命令**（同网段时）：`HUB_URL=ws://<hub-ip>:8787/worker CONNECTION_TOKEN=<token> npx tsx src/multiplex-worker.ts`
+- **Gateway 命令**（已上报接入点时）：`HUB_URL=wss://gw域名/hub/<hubId>/worker PUBLIC_TOKEN=<PUBLIC_TOKEN> CONNECTION_TOKEN=<token> npx tsx src/multiplex-worker.ts`
+
+命令串本身也编码为 QR，远端管理员可截图带走。
+
+### 远端执行
+
+在远程机器上（需已 clone 仓库或拷贝 hub/ 目录）执行生成的命令即可；`multiplex-worker` 一条连接可承载该机器上多个 agent 通道。连接状态回显在 Desktop 连接列表：online 徽标 + 「最近在线 <时间>」（Hub 在 worker 接入/断开时写入 `lastSeen`）。
+
+### 鉴权与边界
+
+- `PUBLIC_TOKEN` 走 `X-Public-Token` 头过网关校验；`CONNECTION_TOKEN` 经 `?token=` 透传至 Hub 校验——两层各自独立。
+- Gateway 不会话复用：每条 `/worker` 连接独立鉴权、独立 channel 集合；同一 hubId 下多后端互不可见。
+- 如需吊销某个远端后端：Desktop 连接列表删除该 connection 即可（token 随之失效）。

@@ -7,6 +7,12 @@ interface HubState {
   agent: WebSocket;
   publicToken: string;
   clients: Set<WebSocket>;
+  workers: Set<WebSocket>;
+  /** ch -> 公网侧连接（client 与 worker 通道共用编号空间） */
+  channels: Map<number, WebSocket>;
+  nextCh: number;
+  /** 协议握手完成标记：control 首帧必须是 {v:1,type:'hello'} */
+  hello: boolean;
   since: string;
 }
 
@@ -19,6 +25,10 @@ interface RateLimit {
 
 const HUB_ID_RE = /^[a-zA-Z0-9_-]{16,64}$/;
 const TOKEN_RE = /^[a-zA-Z0-9_-]{32,128}$/;
+/** 通道化信封协议版本：server/agent 必须一致，否则控制帧被拒 */
+const PROTO_V = 1;
+
+const envelope = (msg: Record<string, unknown>) => JSON.stringify({ v: PROTO_V, ...msg });
 
 export function startServer(options: {
   port: number;
@@ -48,6 +58,7 @@ export function startServer(options: {
           hubId: id,
           connected: state.agent.readyState === WebSocket.OPEN,
           clients: state.clients.size,
+          workers: state.workers.size,
           publicToken: state.publicToken,
           since: state.since,
         }));
@@ -58,7 +69,7 @@ export function startServer(options: {
         const hubId = parts[2];
         const state = hubs.get(hubId);
         if (state) {
-          for (const client of state.clients) client.close();
+          for (const ws of state.channels.values()) ws.close();
           state.agent.close();
           hubs.delete(hubId);
           res.statusCode = 204;
@@ -79,6 +90,44 @@ export function startServer(options: {
   });
 
   const wss = new WebSocketServer({ server: httpServer });
+
+  /** 公网侧连接（client/worker 共用）：验 publicToken → 建 ch → 发 open 帧 */
+  const handlePublic = (
+    ws: WebSocket,
+    state: HubState,
+    kind: 'client' | 'worker',
+    path: string,
+    ip: string,
+  ): void => {
+    const set = kind === 'client' ? state.clients : state.workers;
+    if (set.size >= maxClientsPerHub) {
+      ws.close(1008, `Too many ${kind}s`);
+      return;
+    }
+    const ch = state.nextCh++;
+    set.add(ws);
+    state.channels.set(ch, ws);
+    console.log(`[gateway] ${kind} connected: ch=${ch}`);
+    state.agent.send(envelope({ type: 'open', ch, path }));
+
+    ws.on('message', (data) => {
+      // agent 隧道不可用时不静默吞消息：断开让对端走重连/失败路径
+      if (state.agent.readyState === WebSocket.OPEN) {
+        state.agent.send(envelope({ type: 'data', ch, payload: toText(data) }));
+      } else {
+        ws.close(1013, 'Hub reconnecting');
+      }
+    });
+    ws.on('close', () => {
+      set.delete(ws);
+      state.channels.delete(ch);
+      if (state.agent.readyState === WebSocket.OPEN) {
+        state.agent.send(envelope({ type: 'close', ch }));
+      }
+    });
+    ws.on('error', () => {});
+    void ip;
+  };
 
   wss.on('connection', (ws, req) => {
     const ip = getIp(req);
@@ -119,6 +168,10 @@ export function startServer(options: {
         agent: ws,
         publicToken,
         clients: new Set(),
+        workers: new Set(),
+        channels: new Map(),
+        nextCh: 1,
+        hello: false,
         since: new Date().toISOString(),
       };
       hubs.set(hubId, state);
@@ -134,17 +187,47 @@ export function startServer(options: {
           hubId,
           publicToken,
           publicUrl,
+          proto: PROTO_V,
         }),
       );
 
       ws.on('message', (data) => {
         const text = toText(data);
-        for (const client of state.clients) {
-          if (client.readyState === WebSocket.OPEN) client.send(text);
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          ws.close(1008, 'Protocol mismatch: agent upgrade required');
+          return;
+        }
+        // 协议握手：旧版 agent 直接转发客户端原文（非信封），明确拒绝并提示升级
+        if (!state.hello) {
+          if (msg.v === PROTO_V && msg.type === 'hello') {
+            state.hello = true;
+            return;
+          }
+          ws.close(1008, 'Protocol mismatch: agent upgrade required');
+          return;
+        }
+        if (msg.v !== PROTO_V) {
+          ws.close(1008, 'Protocol mismatch: agent upgrade required');
+          return;
+        }
+        const ch = typeof msg.ch === 'number' ? msg.ch : -1;
+        const target = state.channels.get(ch);
+        if (msg.type === 'data' && typeof msg.payload === 'string') {
+          if (target && target.readyState === WebSocket.OPEN) target.send(msg.payload);
+        } else if (msg.type === 'close') {
+          if (target) {
+            state.channels.delete(ch);
+            state.clients.delete(target);
+            state.workers.delete(target);
+            target.close();
+          }
         }
       });
       ws.on('close', () => {
-        for (const client of state.clients) client.close();
+        for (const client of state.channels.values()) client.close();
         // 仅当槽位仍是本连接时删除并记日志，避免误删/误报重注册后的新 state
         if (hubs.get(hubId) !== state) return;
         hubs.delete(hubId);
@@ -156,9 +239,10 @@ export function startServer(options: {
 
     if (parts[0] === 'hub' && parts[1]) {
       const hubId = parts[1];
-      if (!HUB_ID_RE.test(hubId)) {
+      const isWorker = parts[2] === 'worker';
+      if (!HUB_ID_RE.test(hubId) || (parts[2] !== undefined && !isWorker)) {
         checkRateLimit(ip, limits, true);
-        ws.close(1008, 'Invalid hubId');
+        ws.close(1008, 'Invalid path');
         return;
       }
       const state = hubs.get(hubId);
@@ -166,29 +250,34 @@ export function startServer(options: {
         ws.close(1011, 'Hub not connected');
         return;
       }
+      // 握手门控：agent 未完成 v:1 hello 前不放行公网连接，
+      // 避免 open/data 信封被旧版 agent 当作客户端原文泄进本地 Hub
+      if (!state.hello) {
+        ws.close(1013, 'Agent handshake pending');
+        return;
+      }
       if (providedPublicToken !== state.publicToken) {
         checkRateLimit(ip, limits, true);
         ws.close(1008, 'Invalid public token');
         return;
       }
-      if (state.clients.size >= maxClientsPerHub) {
-        ws.close(1008, 'Too many clients');
+      if (isWorker) {
+        // 远程后端：X-Public-Token 验网关层；CONNECTION_TOKEN 不透给网关判断，原样透传到 hub 校验
+        const connToken = String(parsed.query.token || '');
+        if (!connToken || connToken.length > 256) {
+          ws.close(1008, 'Invalid connection token');
+          return;
+        }
+        const q = new URLSearchParams();
+        q.set('token', connToken);
+        const multiplex = String(parsed.query.multiplex || '');
+        if (multiplex === '1' || multiplex === 'true') q.set('multiplex', '1');
+        const agentName = String(parsed.query.agent || '');
+        if (agentName && /^[a-zA-Z0-9_-]{1,64}$/.test(agentName)) q.set('agent', agentName);
+        handlePublic(ws, state, 'worker', `/worker?${q.toString()}`, ip);
         return;
       }
-      state.clients.add(ws);
-      console.log(`[gateway] public client connected to ${hubId}`);
-
-      ws.on('message', (data) => {
-        // agent 隧道不可用时不静默吞消息：断开客户端让其走重连/失败路径，
-        // 避免消息本地已显示但 Hub 从未收到导致历史缺漏
-        if (state.agent.readyState === WebSocket.OPEN) {
-          state.agent.send(toText(data));
-        } else {
-          ws.close(1013, 'Hub reconnecting');
-        }
-      });
-      ws.on('close', () => state.clients.delete(ws));
-      ws.on('error', () => {});
+      handlePublic(ws, state, 'client', '/', ip);
       return;
     }
 

@@ -13,6 +13,8 @@ export type Connection = {
   address?: string | undefined;
   cwd?: string | undefined;
   local?: boolean | undefined;
+  /** 远端 worker 最近一次接入/断开时刻（毫秒时间戳） */
+  lastSeen?: number | undefined;
 };
 
 export type SessionMeta = {
@@ -247,6 +249,7 @@ export class Store {
       { table: "connections", column: "cwd", def: "TEXT" },
       { table: "connections", column: "token", def: "TEXT" },
       { table: "connections", column: "local", def: "INTEGER NOT NULL DEFAULT 0" },
+      { table: "connections", column: "lastSeen", def: "INTEGER" },
       { table: "roles", column: "agent", def: "TEXT" },
       { table: "roles", column: "address", def: "TEXT" },
       { table: "roles", column: "connectionId", def: "TEXT" },
@@ -328,8 +331,8 @@ export class Store {
 
   listConnections(): Connection[] {
     const rows = this.db
-      .prepare("SELECT id, name, agent, token, address, cwd, local FROM connections ORDER BY rowid")
-      .all() as { id: string; name: string; agent: string; token: string; address: string | null; cwd: string | null; local: number }[];
+      .prepare("SELECT id, name, agent, token, address, cwd, local, lastSeen FROM connections ORDER BY rowid")
+      .all() as { id: string; name: string; agent: string; token: string; address: string | null; cwd: string | null; local: number; lastSeen: number | null }[];
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
@@ -338,6 +341,7 @@ export class Store {
       address: r.address ?? undefined,
       cwd: r.cwd ?? undefined,
       local: r.local === 1,
+      lastSeen: r.lastSeen ?? undefined,
     }));
   }
 
@@ -356,6 +360,7 @@ export class Store {
     if (patch.address !== undefined) { sets.push("address = ?"); vals.push(patch.address ?? null); }
     if (patch.cwd !== undefined) { sets.push("cwd = ?"); vals.push(patch.cwd ?? null); }
     if (patch.local !== undefined) { sets.push("local = ?"); vals.push(patch.local ? 1 : 0); }
+    if (patch.lastSeen !== undefined) { sets.push("lastSeen = ?"); vals.push(patch.lastSeen ?? null); }
     if (sets.length === 0) return;
     vals.push(id);
     this.db.prepare(`UPDATE connections SET ${sets.join(", ")} WHERE id = ?`).run(...vals);

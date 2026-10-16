@@ -22,6 +22,7 @@ import com.agenthub.ui.AgentHubTheme
 import com.agenthub.ui.ChatScreen
 import com.agenthub.ui.FileTreeScreen
 import com.agenthub.ui.HubDrawer
+import com.agenthub.ui.HubProfileDialog
 import com.agenthub.ui.LocalStrings
 import com.agenthub.ui.SessionListScreen
 import com.agenthub.ui.SettingsScreen
@@ -39,6 +40,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        handleConnectIntent(intent)
         setContent {
             AgentHubTheme(vm.themeMode) {
                 CompositionLocalProvider(LocalStrings provides stringsFor(vm.lang)) {
@@ -58,6 +60,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleConnectIntent(intent)
+    }
+
+    private fun handleConnectIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme == "agenthub") vm.importConnectUri(data.toString())
     }
 
     override fun onResume() {
@@ -92,5 +104,8 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         }
         Screen.Settings -> SettingsScreen(vm, onMenuClick)
         Screen.Schedule -> ScheduleScreen(vm, onMenuClick)
+    }
+    vm.pendingImport?.let { profile ->
+        HubProfileDialog(vm, profile = profile, onDismiss = { vm.pendingImport = null })
     }
 }

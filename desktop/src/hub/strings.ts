@@ -198,6 +198,9 @@ export interface Strings {
   cloneTitle: string;
   archiveTitle: string;
   unarchiveTitle: string;
+  archivedGroupFmt: string;
+  dateToday: string;
+  dateYesterday: string;
   resumeTitle: string;
   editRoomTitle: string;
   copySuffixFmt: string;
@@ -319,6 +322,19 @@ export interface Strings {
   aboutDescFmt: string;
   openRepo: string;
   addAgentSource: string;
+  shareConnectTitle: string;
+  shareConnectHint: string;
+  lanCardTitle: string;
+  gatewayCardTitle: string;
+  gatewayNotReady: string;
+  copyUriLabel: string;
+  remoteBackendTitle: string;
+  remoteBackendHint: string;
+  genJoinCmd: string;
+  joinCmdReady: string;
+  connectInfoError: string;
+  lanLocalOnly: string;
+  lastSeenFmt: string;
   typeLabel: string;
   localStartLabel: string;
   noLabel: string;
@@ -701,6 +717,9 @@ const zh: Strings = {
   cloneTitle: "克隆",
   archiveTitle: "归档",
   unarchiveTitle: "取消归档",
+  archivedGroupFmt: "已归档（%s）",
+  dateToday: "今天",
+  dateYesterday: "昨天",
   resumeTitle: "恢复",
   editRoomTitle: "编辑群聊",
   copySuffixFmt: "%s (副本)",
@@ -822,6 +841,19 @@ const zh: Strings = {
   aboutDescFmt: "Agent Hub 桌面端 · 版本 %s",
   openRepo: "打开仓库",
   addAgentSource: "＋ 添加 Agent 来源",
+  shareConnectTitle: "分享连接",
+  shareConnectHint: "扫码或复制链接，即可让其他设备接入本 Hub",
+  lanCardTitle: "局域网直连",
+  gatewayCardTitle: "远程接入 (Gateway)",
+  gatewayNotReady: "暂未上报 Gateway 接入点",
+  copyUriLabel: "复制链接",
+  remoteBackendTitle: "远程后端接入",
+  remoteBackendHint: "生成接入命令，在远程机器上执行即可挂入本 Hub",
+  genJoinCmd: "生成接入命令",
+  joinCmdReady: "复制后在远程机器终端执行",
+  connectInfoError: "获取连接信息失败",
+  lanLocalOnly: "仅本机可见",
+  lastSeenFmt: "最近在线 %s",
   typeLabel: "类型",
   localStartLabel: "本地启动",
   noLabel: "否",
@@ -1204,6 +1236,9 @@ const en: Strings = {
   cloneTitle: "Clone",
   archiveTitle: "Archive",
   unarchiveTitle: "Unarchive",
+  archivedGroupFmt: "Archived (%s)",
+  dateToday: "Today",
+  dateYesterday: "Yesterday",
   resumeTitle: "Resume",
   editRoomTitle: "Edit room",
   copySuffixFmt: "%s (copy)",
@@ -1325,6 +1360,19 @@ const en: Strings = {
   aboutDescFmt: "Agent Hub Desktop · v%s",
   openRepo: "Open repository",
   addAgentSource: "＋ Add agent source",
+  shareConnectTitle: "Share connection",
+  shareConnectHint: "Scan the QR or copy the link to connect another device to this hub",
+  lanCardTitle: "LAN direct",
+  gatewayCardTitle: "Remote access (Gateway)",
+  gatewayNotReady: "No gateway endpoint reported yet",
+  copyUriLabel: "Copy link",
+  remoteBackendTitle: "Remote backend",
+  remoteBackendHint: "Generate a join command and run it on the remote machine to attach it to this hub",
+  genJoinCmd: "Generate join command",
+  joinCmdReady: "Copy and run in the remote machine's terminal",
+  connectInfoError: "Failed to load connection info",
+  lanLocalOnly: "Visible on this device only",
+  lastSeenFmt: "Last seen %s",
   typeLabel: "Type",
   localStartLabel: "Local launch",
   noLabel: "No",

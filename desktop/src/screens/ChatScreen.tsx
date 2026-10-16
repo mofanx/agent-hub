@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import {
   Activity,
@@ -167,6 +167,8 @@ export function ChatScreen() {
   const [inChatSearchQuery, setInChatSearchQuery] = useState("");
   const [chatSearchMatchIndex, setChatSearchMatchIndex] = useState(-1);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [suggestOpen, setSuggestOpen] = useState(true);
   const [suggestIndex, setSuggestIndex] = useState(0);
@@ -190,6 +192,26 @@ export function ChatScreen() {
 
   const isRoom = !!store.currentRoom;
   const title = store.currentRoom?.name || store.currentSession?.name || S.chatFallback;
+
+  const renamingRef = useRef(false);
+  const submitRename = async () => {
+    setEditingTitle(false);
+    const name = titleDraft.trim();
+    if (!name || name === title || renamingRef.current) return;
+    renamingRef.current = true;
+    try {
+      if (store.currentRoom) {
+        await store.client?.call("room.rename", { roomId: store.currentRoom.roomId, name });
+      } else if (store.currentSession) {
+        await store.client?.call("session.rename", { sessionId: store.currentSession.sessionId, name });
+      }
+      await store.refreshAll();
+    } catch (err) {
+      console.warn("rename failed:", err);
+    } finally {
+      renamingRef.current = false;
+    }
+  };
   const roomModeLabel = store.currentRoom ? modeLabel(S, store.currentRoom.mode) : undefined;
   const subModeLabel =
     store.currentRoom?.subMode && store.currentRoom.subMode !== store.currentRoom.mode
@@ -734,7 +756,33 @@ export function ChatScreen() {
         {!searchOpen ? (
           <div className="title-block">
             <div className="chat-title">
-              <span className="chat-title-name">{title}</span>
+              {editingTitle ? (
+                <input
+                  className="chat-title-input"
+                  autoFocus
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitRename();
+                    if (e.key === "Escape") {
+                      setTitleDraft("");
+                      setEditingTitle(false);
+                    }
+                  }}
+                  onBlur={submitRename}
+                />
+              ) : (
+                <span
+                  className="chat-title-name"
+                  title={S.renameTitle}
+                  onClick={() => {
+                    setTitleDraft(title);
+                    setEditingTitle(true);
+                  }}
+                >
+                  {title}
+                </span>
+              )}
               {isRoom && <span className="chat-title-count"> ({store.currentRoom?.members.length})</span>}
             </div>
             {isRoom ? (
@@ -853,11 +901,46 @@ export function ChatScreen() {
                     "text" in item &&
                     item.text.startsWith(store.quote[1])
                   : false;
+                const prev = i > 0 ? store.chatItems[i - 1] : undefined;
+                const sameDay =
+                  !!prev &&
+                  new Date(item.at ?? 0).toDateString() ===
+                    new Date(prev.at ?? 0).toDateString();
+                const gap = (item.at ?? 0) - (prev?.at ?? 0);
+                const grouped =
+                  sameDay &&
+                  gap >= 0 &&
+                  gap < 120_000 &&
+                  item.kind === prev!.kind &&
+                  (item.author ?? "") === (prev!.author ?? "") &&
+                  (item.kind === "assistant" || item.kind === "thought");
+                const inTurn = TURN_KINDS.has(item.kind);
+                const prevInTurn = !!prev && TURN_KINDS.has(prev.kind);
+                const nextInTurn =
+                  i < store.chatItems.length - 1 &&
+                  TURN_KINDS.has(store.chatItems[i + 1].kind);
+                const turnPos = !inTurn
+                  ? undefined
+                  : !prevInTurn
+                    ? nextInTurn
+                      ? "head"
+                      : "solo"
+                    : nextInTurn
+                      ? "mid"
+                      : "tail";
+                const dateSep = !prev || !sameDay;
                 return (
+                  <Fragment key={i}>
+                    {dateSep && (
+                      <div className="date-sep">
+                        <span>{dateLabel(S, item.at)}</span>
+                      </div>
+                    )}
                   <ChatMessage
-                    key={i}
                     item={item}
                     showAuthor={isRoom}
+                    grouped={grouped}
+                    turnPos={turnPos}
                     expanded={showThought[i] ?? false}
                     isQuoted={isQuoted}
                     onToggleThought={() =>
@@ -868,6 +951,7 @@ export function ChatScreen() {
                     onImageClick={(src, name) => setLightbox({ src, name })}
                     onFilePillClick={handleFilePillClick}
                   />
+                  </Fragment>
                 );
               })}
               <div ref={bottomRef} />
@@ -1383,9 +1467,22 @@ function getItemText(item: ChatItem, S: Strings): string {
   return "";
 }
 
+const TURN_KINDS = new Set(["thought", "tool", "plan", "process"]);
+
+function dateLabel(S: Strings, at: number | undefined): string {
+  const d = new Date(at ?? 0);
+  const today = new Date();
+  const yest = new Date(today.getTime() - 86400000);
+  if (d.toDateString() === today.toDateString()) return S.dateToday;
+  if (d.toDateString() === yest.toDateString()) return S.dateYesterday;
+  return d.toLocaleDateString();
+}
+
 function ChatMessage({
   item,
   showAuthor,
+  grouped = false,
+  turnPos,
   expanded,
   isQuoted,
   onToggleThought,
@@ -1396,6 +1493,8 @@ function ChatMessage({
 }: {
   item: ChatItem;
   showAuthor: boolean;
+  grouped?: boolean;
+  turnPos?: "head" | "mid" | "tail" | "solo";
   expanded: boolean;
   isQuoted: boolean;
   onToggleThought: () => void;
@@ -1528,10 +1627,10 @@ function ChatMessage({
 
     case "assistant":
       return (
-        <div className={`message assistant ${agentColorClass(item.author || "AI")} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          <Avatar name={item.author || "AI"} />
+        <div className={`message assistant ${agentColorClass(item.author || "AI")} ${grouped ? "grouped" : ""} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
+          {grouped ? <div className="avatar-spacer" /> : <Avatar name={item.author || "AI"} />}
           <div className="msg-body">
-            {item.author && <div className="author">{item.author}</div>}
+            {item.author && !grouped && <div className="author">{item.author}</div>}
             {item.quoteAuthor && (
               <div className="quote-preview">
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
@@ -1547,7 +1646,7 @@ function ChatMessage({
 
     case "thought":
       return (
-        <div className={`message thought ${agentColorClass(item.author || "AI")} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
+        <div className={`message thought ${agentColorClass(item.author || "AI")} ${turnPos ? `turn-${turnPos}` : ""} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
             {showAuthor && item.author && <div className="author">{item.author}</div>}
             {item.quoteAuthor && (
@@ -1569,7 +1668,7 @@ function ChatMessage({
 
     case "tool":
       return (
-        <div className={`message tool ${currentMatchClass}`} onContextMenu={onContextMenu}>
+        <div className={`message tool ${turnPos ? `turn-${turnPos}` : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
             {showAuthor && item.author && <div className="author">{item.author}</div>}
             <div className="tool-row">
@@ -1587,7 +1686,7 @@ function ChatMessage({
 
     case "plan":
       return (
-        <div className={`message plan ${currentMatchClass}`} onContextMenu={onContextMenu}>
+        <div className={`message plan ${turnPos ? `turn-${turnPos}` : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
             {showAuthor && item.author && <div className="author">{item.author}</div>}
             <div className="plan-head">
@@ -1662,7 +1761,7 @@ function ChatMessage({
 
     case "process":
       return (
-        <ProcessCard item={item} showAuthor={showAuthor} currentMatchClass={currentMatchClass} />
+        <div className={turnPos ? `turn-${turnPos}` : ""}><ProcessCard item={item} showAuthor={showAuthor} currentMatchClass={currentMatchClass} /></div>
       );
 
     case "flow":

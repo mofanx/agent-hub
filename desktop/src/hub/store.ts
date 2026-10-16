@@ -983,6 +983,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     online: o.online === true,
     local: o.local === true,
     error: o.error ? String(o.error) : undefined,
+    lastSeen: typeof o.lastSeen === "number" ? o.lastSeen : undefined,
   });
 
   const parseSession = (o: Record<string, unknown>): SessionInfo => ({
@@ -1392,7 +1393,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const list = ((sList.sessions as unknown[] | undefined) ?? []).map((it) =>
           parseSession(it as Record<string, unknown>),
         );
-        set({ sessions: list });
+        const curS = get().currentSession;
+        set({
+          sessions: list,
+          ...(curS
+            ? { currentSession: list.find((s) => s.sessionId === curS.sessionId) ?? curS }
+            : {}),
+        });
         get().syncBusyIdsFromList(list);
       } catch {}
 

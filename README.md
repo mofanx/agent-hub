@@ -108,6 +108,8 @@ pnpm tauri build
 
 打开 App，**连接**页填入 Hub IP、端口 `8787`、token `dev-token`（即 `HUB_TOKEN`）。
 
+> **更省事的方式是扫码**：Hub 启动加 `--qr`（或 `HUB_QR=1`）会在终端打印接入二维码；Desktop「设置 → 连接」页签的「分享连接」卡同时展示局域网与 Gateway 接入码。Android 连接页点「扫码」（相机扫 QR）或直接粘贴 `agenthub://connect?u=...&t=...&mode=lan|gateway` 链接自动预填。经 gateway 中继接入的客户端拿不到 `HUB_TOKEN` 和 LAN 地址（自动脱敏）。远程后端也可以走 gateway 的 `/worker` 通道挂入——在「远程后端接入」卡一键生成命令/QR。完整指引见 `deploy/README.md`「扫码快速接入」「远程后端经 Gateway 接入」两节。
+
 连接成功后进入 **设置 → Agent 来源**，点击**添加来源**：
 
 - 输入名称、选择 Agent 类型。

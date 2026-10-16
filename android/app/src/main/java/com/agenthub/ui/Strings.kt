@@ -285,6 +285,8 @@ interface Strings {
     val fileLabel: String
     val loadMoreHistory: String
     val jumpToBottom: String
+    val dateToday: String
+    val dateYesterday: String
     val uploadImage: String
     val removeAttachment: String
     val multiSelect: String
@@ -355,6 +357,10 @@ interface Strings {
     val lostReply: String
     val retryFailedFmt: String
     val cancelFlowFailedFmt: String
+    val connectUriInvalid: String
+    val scanQrTitle: String
+    val scanQrCode: String
+    val cameraPermissionHint: String
     val copiedMessagesFmt: String
     val noDownloadableFile: String
     val fileNotReadable: String
@@ -752,6 +758,8 @@ object ZhStrings : Strings {
     override val fileLabel = "文件"
     override val loadMoreHistory = "加载更多历史…"
     override val jumpToBottom = "跳转到最下方"
+    override val dateToday = "今天"
+    override val dateYesterday = "昨天"
     override val uploadImage = "上传图片"
     override val removeAttachment = "移除"
     override val multiSelect = "多选"
@@ -822,6 +830,10 @@ object ZhStrings : Strings {
     override val lostReply = "上一条回复在 Hub 重启中丢失"
     override val retryFailedFmt = "重试失败: %s"
     override val cancelFlowFailedFmt = "取消编排失败: %s"
+    override val connectUriInvalid = "无效的接入链接"
+    override val scanQrTitle = "扫码接入"
+    override val scanQrCode = "扫码"
+    override val cameraPermissionHint = "需要相机权限才能扫码；也可以手动粘贴接入链接"
     override val copiedMessagesFmt = "已复制 %d 条消息"
     override val noDownloadableFile = "该产物没有可下载文件"
     override val fileNotReadable = "文件不存在或无法读取"
@@ -1227,6 +1239,8 @@ object EnStrings : Strings {
     override val fileLabel = "File"
     override val loadMoreHistory = "Load more history…"
     override val jumpToBottom = "Jump to bottom"
+    override val dateToday = "Today"
+    override val dateYesterday = "Yesterday"
     override val uploadImage = "Upload image"
     override val removeAttachment = "Remove"
     override val multiSelect = "Select"
@@ -1297,6 +1311,10 @@ object EnStrings : Strings {
     override val lostReply = "Previous reply lost during Hub restart"
     override val retryFailedFmt = "Retry failed: %s"
     override val cancelFlowFailedFmt = "Cancel flow failed: %s"
+    override val connectUriInvalid = "Invalid connect link"
+    override val scanQrTitle = "Scan to connect"
+    override val scanQrCode = "Scan QR"
+    override val cameraPermissionHint = "Camera permission is required to scan; you can also paste the connect link manually"
     override val copiedMessagesFmt = "Copied %d messages"
     override val noDownloadableFile = "No downloadable file for this artifact"
     override val fileNotReadable = "File missing or unreadable"

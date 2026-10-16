@@ -2335,3 +2335,73 @@
   0%, 60% { box-shadow: 0 0 0 2px var(--accent); }
   100% { box-shadow: none; }
 }
+
+/* ── 消息分组 / 日期分隔 / turn 归属 ── */
+.date-sep {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.9rem 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.date-sep::before,
+.date-sep::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* 同作者相邻消息（<2min）归组：组内收紧间距、隐藏头像与作者名 */
+.message.grouped {
+  padding-top: 0.1rem;
+  margin-top: -0.3rem;
+}
+.message .avatar-spacer {
+  width: 30px;
+  flex-shrink: 0;
+}
+
+/* 成员消息左侧同色条（确定性成员色） */
+.message.assistant,
+.message.thought {
+  border-left: 2px solid color-mix(in srgb, var(--agent, var(--muted)) 45%, transparent);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+/* turn 归属：thought/tool/plan/process 连续段共用左侧轨道 */
+.message.turn-head,
+.message.turn-mid,
+.message.turn-tail,
+div.turn-head,
+div.turn-mid,
+div.turn-tail {
+  border-left: 2px solid color-mix(in srgb, var(--agent, var(--muted)) 35%, transparent);
+}
+.turn-head,
+.turn-mid {
+  margin-bottom: -0.3rem;
+}
+
+/* 标题栏 inline 重命名 */
+.chat-title-name {
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: 0 0.25rem;
+}
+.chat-title-name:hover {
+  background: var(--hover);
+}
+.chat-title-input {
+  font: inherit;
+  font-weight: 650;
+  background: var(--surface-variant, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.05rem 0.35rem;
+  color: var(--fg);
+  outline: none;
+  min-width: 12ch;
+}

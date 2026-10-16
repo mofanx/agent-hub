@@ -2,6 +2,7 @@ package com.agenthub.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.KeyboardActions
@@ -33,6 +34,8 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -74,6 +77,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -213,6 +217,23 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             selectedRoomIds.addAll(vm.rooms.map { it.roomId })
         }
         Unit
+    }
+
+    val enterBatchWithSession: (SessionInfo) -> Unit = { s ->
+        if (!inBatchMode) {
+            inBatchMode = true
+            selectedSessionIds.clear()
+            selectedRoomIds.clear()
+        }
+        selectedSessionIds.add(s.sessionId)
+    }
+    val enterBatchWithRoom: (RoomInfo) -> Unit = { r ->
+        if (!inBatchMode) {
+            inBatchMode = true
+            selectedSessionIds.clear()
+            selectedRoomIds.clear()
+        }
+        selectedRoomIds.add(r.roomId)
     }
 
     val invertSelection = {
@@ -370,6 +391,29 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             }
             val flatSessions by remember(sessionGroups) { derivedStateOf { sessionGroups.flatMap { it.sessions } } }
             val flatRooms by remember(roomGroups) { derivedStateOf { roomGroups.flatMap { it.rooms } } }
+            val activeSessionGroups by remember(sessionGroups) {
+                derivedStateOf {
+                    sessionGroups.mapNotNull { g ->
+                        g.copy(sessions = g.sessions.filter { !it.archived }).takeIf { it.sessions.isNotEmpty() }
+                    }
+                }
+            }
+            val archivedSessions by remember(sessionGroups) {
+                derivedStateOf { sessionGroups.flatMap { it.sessions }.filter { it.archived } }
+            }
+            val activeRoomGroups by remember(roomGroups) {
+                derivedStateOf {
+                    roomGroups.mapNotNull { g ->
+                        g.copy(rooms = g.rooms.filter { !it.archived }).takeIf { it.rooms.isNotEmpty() }
+                    }
+                }
+            }
+            val archivedRooms by remember(roomGroups) {
+                derivedStateOf { roomGroups.flatMap { it.rooms }.filter { it.archived } }
+            }
+            var sessionArchivedExpanded by rememberSaveable { mutableStateOf(false) }
+            val showArchivedSessions = sessionArchivedExpanded ||
+                vm.sessionListFilter.statuses.contains(SessionStatus.Archived)
 
             val searchSessionMatches by remember(vm.searchQuery) { derivedStateOf { vm.sessionSearchMatches(vm.searchQuery) } }
             val searchRoomMatches by remember(vm.searchQuery) { derivedStateOf { vm.roomSearchMatches(vm.searchQuery) } }
@@ -406,7 +450,8 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     inBatchMode = false,
                                     selected = false,
                                     onClick = { vm.openChat(s) },
-                                    onLongClick = { },
+                                    onLongClick = { renameTarget = s },
+                                    onSelect = null,
                                     onEdit = { renameTarget = s },
                                     onClone = { vm.cloneSession(s) { renameTarget = it } },
                                     onDelete = { confirmDelete = s },
@@ -424,7 +469,8 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     inBatchMode = false,
                                     selected = false,
                                     onClick = { vm.openRoom(r) },
-                                    onLongClick = { },
+                                    onLongClick = { roomRenameTarget = r },
+                                    onSelect = null,
                                     onRename = { roomRenameTarget = r },
                                     onEdit = { roomEditTarget = r },
                                     onClone = { roomCloneTarget = r },
@@ -551,21 +597,15 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         vm.openChat(s)
                                     }
                                 },
-                                onLongClick = {
-                                    if (!inBatchMode) {
-                                        inBatchMode = true
-                                        selectedSessionIds.clear()
-                                        selectedRoomIds.clear()
-                                    }
-                                    selectedSessionIds.add(s.sessionId)
-                                },
+                                onLongClick = { enterBatchWithSession(s) },
+                                onSelect = { enterBatchWithSession(s) },
                                 onEdit = { renameTarget = s },
                                 onClone = { vm.cloneSession(s) { renameTarget = it } },
                                 onDelete = { confirmDelete = s },
                             )
                         }
                     } else {
-                        for (group in sessionGroups) {
+                        for (group in activeSessionGroups) {
                             if (group.title.isNotBlank()) {
                                 item {
                                     GroupHeader(
@@ -594,18 +634,71 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                             vm.openChat(s)
                                         }
                                     },
-                                    onLongClick = {
-                                        if (!inBatchMode) {
-                                            inBatchMode = true
-                                            selectedSessionIds.clear()
-                                            selectedRoomIds.clear()
-                                        }
-                                        selectedSessionIds.add(s.sessionId)
-                                    },
+                                    onLongClick = { renameTarget = s },
+                                    onSelect = { enterBatchWithSession(s) },
                                     onEdit = { renameTarget = s },
                                     onClone = { vm.cloneSession(s) { renameTarget = it } },
                                     onDelete = { confirmDelete = s },
                                 )
+                            }
+                        }
+                        if (archivedSessions.isNotEmpty()) {
+                            item {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.background),
+                                ) {
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clickable { sessionArchivedExpanded = !sessionArchivedExpanded }
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(
+                                            if (showArchivedSessions) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        Spacer(Modifier.size(4.dp))
+                                        Text(
+                                            "${S.archived} (${archivedSessions.size})",
+                                            Modifier.weight(1f),
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                }
+                            }
+                            if (showArchivedSessions) {
+                                items(archivedSessions.size) { i ->
+                                    val s = archivedSessions[i]
+                                    SessionCard(
+                                        s = s,
+                                        vm = vm,
+                                        S = S,
+                                        inBatchMode = inBatchMode,
+                                        selected = selectedSessionIds.contains(s.sessionId),
+                                        onClick = {
+                                            if (inBatchMode) {
+                                                if (selectedSessionIds.contains(s.sessionId)) selectedSessionIds.remove(s.sessionId)
+                                                else selectedSessionIds.add(s.sessionId)
+                                            } else {
+                                                vm.openChat(s)
+                                            }
+                                        },
+                                        onLongClick = { renameTarget = s },
+                                        onSelect = { enterBatchWithSession(s) },
+                                        onEdit = { renameTarget = s },
+                                        onClone = { vm.cloneSession(s) { renameTarget = it } },
+                                        onDelete = { confirmDelete = s },
+                                    )
+                                }
                             }
                         }
                     }
@@ -648,14 +741,8 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         vm.openRoom(r)
                                     }
                                 },
-                                onLongClick = {
-                                    if (!inBatchMode) {
-                                        inBatchMode = true
-                                        selectedSessionIds.clear()
-                                        selectedRoomIds.clear()
-                                    }
-                                    selectedRoomIds.add(r.roomId)
-                                },
+                                onLongClick = { enterBatchWithRoom(r) },
+                                onSelect = { enterBatchWithRoom(r) },
                                 onRename = { roomRenameTarget = r },
                                 onEdit = { roomEditTarget = r },
                                 onClone = { roomCloneTarget = r },
@@ -690,7 +777,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 }
                             }
                         }
-                        for (group in roomGroups) {
+                        for (group in activeRoomGroups) {
                             if (group.title.isNotBlank()) {
                                 item {
                                     GroupHeader(
@@ -715,14 +802,36 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                             vm.openRoom(r)
                                         }
                                     },
-                                    onLongClick = {
-                                        if (!inBatchMode) {
-                                            inBatchMode = true
-                                            selectedSessionIds.clear()
-                                            selectedRoomIds.clear()
+                                    onLongClick = { roomRenameTarget = r },
+                                    onSelect = { enterBatchWithRoom(r) },
+                                    onRename = { roomRenameTarget = r },
+                                    onEdit = { roomEditTarget = r },
+                                    onClone = { roomCloneTarget = r },
+                                    onArchive = { vm.archiveRoom(r, !r.archived) },
+                                    onDelete = { roomDeleteTarget = r },
+                                )
+                            }
+                        }
+                        if (archivedRooms.isNotEmpty()) {
+                            item { GroupHeader(S.archived, archivedRooms.size) }
+                            items(archivedRooms.size) { i ->
+                                val r = archivedRooms[i]
+                                RoomCard(
+                                    r = r,
+                                    vm = vm,
+                                    S = S,
+                                    inBatchMode = inBatchMode,
+                                    selected = selectedRoomIds.contains(r.roomId),
+                                    onClick = {
+                                        if (inBatchMode) {
+                                            if (selectedRoomIds.contains(r.roomId)) selectedRoomIds.remove(r.roomId)
+                                            else selectedRoomIds.add(r.roomId)
+                                        } else {
+                                            vm.openRoom(r)
                                         }
-                                        selectedRoomIds.add(r.roomId)
                                     },
+                                    onLongClick = { roomRenameTarget = r },
+                                    onSelect = { enterBatchWithRoom(r) },
                                     onRename = { roomRenameTarget = r },
                                     onEdit = { roomEditTarget = r },
                                     onClone = { roomCloneTarget = r },
@@ -1643,6 +1752,7 @@ private fun SessionCard(
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onSelect: (() -> Unit)?,
     onEdit: () -> Unit,
     onClone: () -> Unit,
     onDelete: () -> Unit,
@@ -1695,7 +1805,12 @@ private fun SessionCard(
                         )
                         Spacer(Modifier.size(4.dp))
                     }
-                    Text(s.name, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        s.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (s.archived) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurface,
+                    )
                     if (!inBatchMode && s.offline) {
                         Text(
                             "  ${S.offline}",
@@ -1737,6 +1852,15 @@ private fun SessionCard(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false },
                     ) {
+                        if (onSelect != null) {
+                            DropdownMenuItem(
+                                text = { Text(S.multiSelect) },
+                                onClick = {
+                                    onSelect()
+                                    showMenu = false
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(if (pinned) S.unpin else S.pin) },
                             onClick = {
@@ -1789,6 +1913,7 @@ private fun RoomCard(
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onSelect: (() -> Unit)?,
     onRename: () -> Unit,
     onEdit: () -> Unit,
     onClone: () -> Unit,
@@ -1806,7 +1931,9 @@ private fun RoomCard(
             ),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(
+                alpha = if (r.archived) 0.2f else 0.5f,
+            ),
         ),
     ) {
         Row(
@@ -1819,7 +1946,12 @@ private fun RoomCard(
             }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(r.name, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        r.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (r.archived) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurface,
+                    )
                     val modeLabel = when (r.mode) {
                         "mention" -> S.modeMention
                         "conductor" -> S.modeConductor
@@ -1851,6 +1983,12 @@ private fun RoomCard(
                         expanded = showMenu.value,
                         onDismissRequest = { showMenu.value = false },
                     ) {
+                        if (onSelect != null) {
+                            DropdownMenuItem(
+                                text = { Text(S.multiSelect) },
+                                onClick = { onSelect(); showMenu.value = false },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(S.rename) },
                             onClick = { onRename(); showMenu.value = false },

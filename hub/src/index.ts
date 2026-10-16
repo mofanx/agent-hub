@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
-import { networkInterfaces } from "node:os";
 import { randomBytes } from "node:crypto";
+import qrcode from "qrcode-terminal";
 import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import fs from "node:fs";
@@ -16,7 +16,7 @@ import {
   type ElicitationValue,
   type HubEvent,
 } from "./agent.js";
-import { RoomManager, remapRoomModeConfig, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
+import { RoomManager, dedupeName, remapRoomModeConfig, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
@@ -32,6 +32,7 @@ import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
+import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
@@ -266,6 +267,11 @@ function isSessionNameTaken(name: string, excludeSessionId?: string): boolean {
 function isRoomNameTaken(name: string, excludeRoomId?: string): boolean {
   return rooms.nameTaken(name, excludeRoomId);
 }
+
+const dedupeSessionName = (name: string, excludeSessionId?: string) =>
+  dedupeName(name, (n) => isSessionNameTaken(n, excludeSessionId));
+const dedupeRoomName = (name: string, excludeRoomId?: string) =>
+  dedupeName(name, (n) => isRoomNameTaken(n, excludeRoomId));
 
 async function cloneSessionWithName(
   source: SessionMeta,
@@ -1099,7 +1105,7 @@ type RequestMessage = {
   params?: Record<string, unknown>;
 };
 
-async function handleRequest(req: RequestMessage): Promise<unknown> {
+async function handleRequest(req: RequestMessage, relayed = false): Promise<unknown> {
   switch (req.method) {
     case "agent.info":
       return {
@@ -1123,8 +1129,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const agent = agents.get(connection.id);
       if (!agent) throw new Error("agent 未连接");
       const cwd = String(req.params?.cwd ?? connection.cwd ?? role?.cwd ?? "");
-      const name = req.params?.name ? String(req.params.name) : role?.name;
-      if (name && isSessionNameTaken(name)) throw new Error("session name already exists");
+      const name = req.params?.name ? dedupeSessionName(String(req.params.name)) : role?.name;
       const s = await agent.createSession(cwd, name);
       const finalRoleId = role?.id ?? roleId ?? undefined;
       sessionMetas.set(s.sessionId, {
@@ -1172,21 +1177,18 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       if (!agent) throw new Error("agent 未连接");
 
       const baseName = source.name;
-      const existingNames = new Set(
-        [...sessionMetas.values()]
-          .filter((m) => !m.archived)
-          .map((m) => m.name),
-      );
-      let newName = `${baseName} (2)`;
-      let counter = 2;
-      while (existingNames.has(newName)) {
-        counter++;
-        newName = `${baseName} (${counter})`;
-      }
+      const newName = dedupeSessionName(`${baseName} (2)`);
 
       // fresh=true：不 fork 上下文，仅新建会话并继承模型/config/persona（与 room.clone fresh 同语义）
       if (req.params?.fresh === true) {
         const s = await cloneSessionWithName(source, newName, { fresh: true });
+        // /new 断点条目：客户端据此渲染边界，携带来源会话引用
+        store.append("session", s.sessionId, {
+          at: Date.now(),
+          kind: "system",
+          author: "",
+          text: `已开启新会话（来源：${source.name} · ${source.sessionId}）`,
+        });
         return {
           ...s,
           agent: connection.agent,
@@ -1372,12 +1374,12 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const meta = sessionMetas.get(sessionId);
       if (!meta) throw new Error(`unknown session: ${sessionId}`);
       if (!name) throw new Error("name required");
-      if (isSessionNameTaken(name, sessionId)) throw new Error("session name already exists");
-      meta.name = name;
-      agentForSession(sessionId)?.renameSession(sessionId, name);
-      const roomIds = rooms.updateMemberName(sessionId, name);
+      const finalName = dedupeSessionName(name, sessionId);
+      meta.name = finalName;
+      agentForSession(sessionId)?.renameSession(sessionId, finalName);
+      const roomIds = rooms.updateMemberName(sessionId, finalName);
       persistState();
-      return { renamed: true, name, roomIds };
+      return { renamed: true, name: finalName, roomIds };
     }
     case "session.archive": {
       const sessionId = String(req.params?.sessionId ?? "");
@@ -1468,8 +1470,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
       if (!name) throw new Error("name required");
-      if (isRoomNameTaken(name, roomId)) throw new Error("room name already exists");
-      rooms.rename(roomId, name);
+      rooms.rename(roomId, dedupeRoomName(name, roomId));
       persistState();
       return { room: enrichRoom(rooms.get(roomId)!) };
     }
@@ -1486,7 +1487,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
-      const name = String(req.params?.name ?? "").trim() || room.name;
+      const name = dedupeRoomName(String(req.params?.name ?? "").trim() || room.name, roomId);
       const ids = (req.params?.sessionIds as string[]) ?? [];
       const mode = parseRoomMode(req.params?.mode);
       const all = listAllSessions();
@@ -1502,11 +1503,9 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
     }
     case "room.clone": {
       const roomId = String(req.params?.roomId ?? "");
-      const newName = String(req.params?.newName ?? "").trim();
       const source = rooms.get(roomId);
       if (!source) throw new Error(`unknown room: ${roomId}`);
-      if (!newName) throw new Error("name required");
-      if (isRoomNameTaken(newName)) throw new Error("room name already exists");
+      const newName = dedupeRoomName(String(req.params?.newName ?? "").trim() || `${source.name} (2)`);
 
       const fresh = req.params?.fresh === true;
       const idMap = new Map<string, string>();
@@ -1514,7 +1513,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       for (const m of source.members) {
         const meta = sessionMetas.get(m.sessionId);
         if (!meta) throw new Error(`unknown session: ${m.sessionId}`);
-        const sessionName = `${newName}-${meta.name}`;
+        const sessionName = dedupeSessionName(`${newName}-${meta.name}`);
         const s = await cloneSessionWithName(meta, sessionName, { fresh });
         idMap.set(m.sessionId, s.sessionId);
         newMembers.push({ sessionId: s.sessionId, name: m.name });
@@ -1522,6 +1521,15 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
 
       const config = remapRoomModeConfig(source, idMap);
       const room = rooms.create(newName, newMembers, source.mode, config);
+      // 群聊 /new（fresh）断点条目：标注来源房间，供客户端渲染会话边界
+      if (fresh) {
+        store.append("room", room.roomId, {
+          at: Date.now(),
+          kind: "system",
+          author: "",
+          text: `已开启新会话（来源：${source.name} · ${source.roomId}）`,
+        });
+      }
       persistState();
       return { room: enrichRoom(room) };
     }
@@ -1534,6 +1542,18 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
           error: localAgentErrors.get(c.id),
         })),
       };
+    case "hub.connectInfo": {
+      // 连接信息下发：仅认证连接可达此分支；relayed（via=gateway）客户端
+      // 不回传 HUB_TOKEN 与 LAN 明文卡，只保留 gateway 卡
+      return buildConnectInfo({ port: PORT, token: TOKEN, relayed });
+    }
+    case "hub.gatewayAnnounce": {
+      // gateway agent 上报公网接入点；仅认证 WS 可达（/worker 通道走独立处理器）
+      const info = validateGatewayAnnounce(req.params);
+      setGatewayInfo(info);
+      console.log(`[hub] gateway announced: ${info.publicUrl}`);
+      return { ok: true };
+    }
     case "connection.create": {
       const name = String(req.params?.name ?? "").trim();
       const agent = String(req.params?.agent ?? "devin").trim();
@@ -1552,7 +1572,21 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
         rawLocal === "1" ||
         rawLocal === 1;
       store.addConnection({ id, name, agent, token, address, cwd, local });
-      return { id, token, name, agent, address, cwd, local };
+      // 远程后端接入命令：LAN 直连 + gateway 通道（若已上报）
+      const gw = getGatewayInfo();
+      const join = {
+        lan: lanIps().map((ip) =>
+          workerJoinCommand({ url: `ws://${ip}:${PORT}${WORKER_PATH}`, connToken: token }),
+        ),
+        gateway: gw
+          ? workerJoinCommand({
+              url: `${gw.publicUrl.replace(/\/+$/, "")}${WORKER_PATH}`,
+              connToken: token,
+              publicToken: gw.publicToken,
+            })
+          : undefined,
+      };
+      return { id, token, name, agent, address, cwd, local, join };
     }
     case "connection.delete": {
       const id = String(req.params?.id ?? "");
@@ -1638,8 +1672,7 @@ async function handleRequest(req: RequestMessage): Promise<unknown> {
       return { entries, hasMore };
     }
     case "room.create": {
-      const name = String(req.params?.name ?? "群聊").trim() || "群聊";
-      if (isRoomNameTaken(name)) throw new Error("room name already exists");
+      const name = dedupeRoomName(String(req.params?.name ?? "群聊").trim() || "群聊");
       const ids = (req.params?.sessionIds as string[]) ?? [];
       const mode = parseRoomMode(req.params?.mode);
       const all = listAllSessions();
@@ -2326,6 +2359,10 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
     ws.close(4001, "unauthorized");
     return;
   }
+  store.updateConnection(connection.id, { lastSeen: Date.now() });
+  ws.on("close", () =>
+    store.updateConnection(connection.id, { lastSeen: Date.now() }),
+  );
 
   if (multiplex) {
     handleMultiplexWorker(ws, connection);
@@ -2490,6 +2527,8 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
 }
 
 const wss = new WebSocketServer({ port: PORT, host: "0.0.0.0" });
+/** 经 gateway 中继的客户端连接（via=gateway）：connectInfo 不下发明文凭据 */
+const relayedClients = new Set<WebSocket>();
 
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -2501,9 +2540,13 @@ wss.on("connection", (ws, req) => {
     ws.close(4001, "unauthorized");
     return;
   }
+  if (url.searchParams.get("via") === "gateway") relayedClients.add(ws);
   clients.add(ws);
   console.log(`[hub] client connected (${clients.size} total)`);
-  ws.on("close", () => clients.delete(ws));
+  ws.on("close", () => {
+    clients.delete(ws);
+    relayedClients.delete(ws);
+  });
   ws.on("message", async (raw) => {
     let req2: RequestMessage;
     try {
@@ -2513,7 +2556,7 @@ wss.on("connection", (ws, req) => {
       return;
     }
     try {
-      const result = await handleRequest(req2);
+      const result = await handleRequest(req2, relayedClients.has(ws));
       send(ws, { id: req2.id, result });
     } catch (err) {
       logError(`request ${req2.method}`, err);
@@ -2523,10 +2566,7 @@ wss.on("connection", (ws, req) => {
 });
 
 wss.on("listening", () => {
-  const addrs = Object.values(networkInterfaces())
-    .flat()
-    .filter((a) => a && a.family === "IPv4" && !a.internal)
-    .map((a) => a!.address);
+  const addrs = lanIps();
   console.log(`[hub] ws listening on port ${PORT}`);
   console.log(`[hub] agent types: ${Object.keys(AGENT_DEFS).join(", ")}`);
   console.log(`[hub] data dir: ${store.dir}`);
@@ -2536,6 +2576,18 @@ wss.on("listening", () => {
   for (const addr of addrs) {
     console.log(`[hub] phone connect: ws://${addr}:${PORT}/?token=${TOKEN}`);
     console.log(`[hub] worker connect: ws://${addr}:${PORT}${WORKER_PATH}?token=<CONNECTION_TOKEN>`);
+  }
+  // --qr 或 HUB_QR=1：终端打印 LAN 接入二维码 + 统一 URI
+  if (process.argv.includes("--qr") || process.env.HUB_QR === "1") {
+    for (const addr of addrs) {
+      const uri = buildConnectUri({
+        url: `ws://${addr}:${PORT}`,
+        token: TOKEN,
+        mode: "lan",
+      });
+      console.log(`[hub] scan to connect: ${uri}`);
+      qrcode.generate(uri, { small: true }, (qr) => console.log(qr));
+    }
   }
   if (process.env.HUB_TUNNEL === "1") {
     startTunnel(PORT, TOKEN);

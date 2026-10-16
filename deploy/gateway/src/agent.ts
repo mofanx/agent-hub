@@ -5,6 +5,10 @@ import { dirname, join } from 'node:path';
 
 const TOKEN_RE = /^[a-zA-Z0-9_-]{32,128}$/;
 const HUB_ID_RE = /^[a-zA-Z0-9_-]{16,64}$/;
+/** 通道化信封协议版本，须与 gateway server 一致 */
+const PROTO_V = 1;
+
+const envelope = (msg: Record<string, unknown>) => JSON.stringify({ v: PROTO_V, ...msg });
 
 export function startAgent(options: {
   hubId: string;
@@ -21,35 +25,80 @@ export function startAgent(options: {
   const base = gatewayUrl.replace(/\/$/, '');
   const controlUrl = `${base}/control/${encodeURIComponent(hubId)}`;
   const publicToken = resolvePublicToken(hubId, options.publicToken);
+  const localBase = localHubUrl.replace(/\/$/, '');
 
   let remote: WebSocket | null = null;
-  let local: WebSocket | null = null;
-  const localPending: string[] = [];
+  /** ch -> 本地 hub 连接：客户端开 /?token=hubToken，远程后端开 /worker?...（透传 query） */
+  const localConns = new Map<number, WebSocket>();
+  /** ch -> 本地连接就绪前缓冲的下行帧（有界） */
+  const pending = new Map<number, string[]>();
 
-  const connectLocal = () => {
-    const sep = localHubUrl.includes('?') ? '&' : '?';
-    const localUrl = `${localHubUrl}${sep}token=${encodeURIComponent(hubToken)}`;
-    local = new WebSocket(localUrl);
-    localPending.length = 0;
-
-    local.on('open', () => {
-      console.log(`[agent] connected to local Hub`);
-      const sock = local;
-      for (const m of localPending.splice(0)) sock?.send(m);
+  /** 注册成功后向本地 hub 上报 gatewayAnnounce（配合 hub 侧 connectInfo；t2 提供方法） */
+  const announceToHub = (params: { publicUrl: string; publicToken: string }) => {
+    const url = `${localBase}/?token=${encodeURIComponent(hubToken)}`;
+    const ws = new WebSocket(url);
+    const timer = setTimeout(() => ws.close(), 5000);
+    ws.on('open', () => {
+      ws.send(
+        JSON.stringify({
+          id: 'gw-announce',
+          method: 'gatewayAnnounce',
+          params,
+        }),
+      );
     });
-
-    local.on('message', (data) => {
-      if (remote && remote.readyState === WebSocket.OPEN) remote.send(toText(data));
+    ws.on('message', () => {
+      clearTimeout(timer);
+      ws.close();
     });
-
-    local.on('close', () => {
-      console.log('[agent] local Hub disconnected');
-      if (remote) remote.close();
+    ws.on('close', () => clearTimeout(timer));
+    ws.on('error', (err) => {
+      clearTimeout(timer);
+      console.warn(`[agent] gatewayAnnounce failed: ${err.message}`);
     });
+  };
 
-    local.on('error', (err) => {
-      console.error('[agent] local Hub error:', err.message);
+  /** open 帧 → 建立对应的本地 hub 连接 */
+  const openLocal = (ch: number, path: string) => {
+    const isWorker = path.startsWith('/worker');
+    // via 参数标记中继来源：客户端通道 via=gateway，worker 通道 via=gateway-worker
+    const localUrl = isWorker
+      ? `${localBase}${path}${path.includes('?') ? '&' : '?'}via=gateway-worker`
+      : `${localBase}/?token=${encodeURIComponent(hubToken)}&via=gateway`;
+    const conn = new WebSocket(localUrl);
+    localConns.set(ch, conn);
+    pending.set(ch, []);
+
+    conn.on('open', () => {
+      const buf = pending.get(ch) ?? [];
+      pending.delete(ch);
+      for (const m of buf) conn.send(m);
     });
+    conn.on('message', (data) => {
+      if (remote && remote.readyState === WebSocket.OPEN) {
+        remote.send(envelope({ type: 'data', ch, payload: toText(data) }));
+      }
+    });
+    const cleanup = () => {
+      if (localConns.get(ch) !== conn) return;
+      localConns.delete(ch);
+      pending.delete(ch);
+      if (remote && remote.readyState === WebSocket.OPEN) {
+        remote.send(envelope({ type: 'close', ch }));
+      }
+    };
+    conn.on('close', cleanup);
+    conn.on('error', (err) => {
+      console.warn(`[agent] local conn ch=${ch} error: ${err.message}`);
+      conn.close();
+    });
+  };
+
+  const closeLocal = (ch: number) => {
+    const conn = localConns.get(ch);
+    localConns.delete(ch);
+    pending.delete(ch);
+    conn?.close();
   };
 
   remote = new WebSocket(controlUrl, {
@@ -61,39 +110,64 @@ export function startAgent(options: {
 
   remote.on('open', () => {
     console.log(`[agent] connected to gateway as ${hubId}`);
-    connectLocal();
+    // 协议握手：server 要求 control 首帧为 hello，否则按旧版拒绝
+    remote?.send(envelope({ type: 'hello', proto: PROTO_V }));
   });
 
   remote.on('message', (data) => {
-    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
+    const text = toText(data);
+    let msg: Record<string, unknown>;
     try {
-      const msg = JSON.parse(text);
-      if (msg.type === 'registered') {
-        console.log(`[agent] public url: ${msg.publicUrl}`);
-        console.log(`[agent] public token: ${msg.publicToken}`);
-        return;
-      }
+      msg = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      // not JSON, forward to local
+      console.warn('[agent] protocol mismatch: non-JSON control frame (gateway upgrade required)');
+      remote?.close(1008, 'protocol mismatch');
+      return;
     }
-    // 本地 Hub socket 尚在握手时缓冲（有界），避免静默吞掉客户端请求
-    if (local && local.readyState === WebSocket.OPEN) {
-      local.send(toText(data));
-    } else if (!local || local.readyState === WebSocket.CONNECTING) {
-      if (localPending.length < 500) {
-        localPending.push(toText(data));
-      } else {
-        remote?.close(1011, 'local hub unavailable');
+    if (msg.type === 'registered') {
+      console.log(`[agent] public url: ${msg.publicUrl}`);
+      console.log(`[agent] public token: ${msg.publicToken}`);
+      if (typeof msg.publicUrl === 'string' && typeof msg.publicToken === 'string') {
+        announceToHub({ publicUrl: msg.publicUrl, publicToken: msg.publicToken });
       }
-    } else {
-      // local 正在关闭/已关闭：不吞消息，立即断隧道走进程重启
-      remote?.close(1011, 'local hub closing');
+      return;
+    }
+    // 信封帧：v:1 + open/data/close
+    if (msg.v !== PROTO_V) {
+      console.warn('[agent] protocol mismatch: non-envelope frame (gateway upgrade required)');
+      remote?.close(1008, 'protocol mismatch');
+      return;
+    }
+    const ch = typeof msg.ch === 'number' ? msg.ch : -1;
+    if (msg.type === 'open' && typeof msg.path === 'string') {
+      openLocal(ch, msg.path);
+      return;
+    }
+    if (msg.type === 'data' && typeof msg.payload === 'string') {
+      const conn = localConns.get(ch);
+      if (conn && conn.readyState === WebSocket.OPEN) {
+        conn.send(msg.payload);
+      } else if (conn && conn.readyState === WebSocket.CONNECTING) {
+        const buf = pending.get(ch);
+        if (buf && buf.length < 500) buf.push(msg.payload);
+      }
+      // 本地连接已不存在/正在关闭：丢弃并回 close，让 server 侧释放该通道
+      else if (!conn) {
+        remote?.send(envelope({ type: 'close', ch }));
+      }
+      return;
+    }
+    if (msg.type === 'close') {
+      closeLocal(ch);
+      return;
     }
   });
 
   remote.on('close', (code) => {
     console.log(`[agent] gateway disconnected (code ${code})`);
-    if (local) local.close();
+    for (const conn of localConns.values()) conn.close();
+    localConns.clear();
+    pending.clear();
     process.exit(code === 1000 ? 0 : 1);
   });
 

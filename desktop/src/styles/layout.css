@@ -626,3 +626,20 @@
   align-items: center;
   gap: 0.35rem;
 }
+
+/* 已归档分组 */
+.archived-toggle {
+  cursor: pointer;
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+.home-recent.archived .home-recent-item,
+.home-recent-item.archived {
+  opacity: 0.55;
+}
+.home-recent-item.archived:hover {
+  opacity: 0.85;
+}

@@ -37,8 +37,25 @@ fun HubProfileDialog(
     var token by remember { mutableStateOf(profile?.token ?: "dev-token") }
     var publicToken by remember { mutableStateOf(profile?.publicToken ?: "") }
 
+    var showScan by remember { mutableStateOf(false) }
+
     val isCurrent = profile != null && vm.currentProfile == profile
     val hostChanged = profile != null && profile.address != host.trim()
+
+    if (showScan) {
+        QrScanDialog(
+            onResult = { raw ->
+                showScan = false
+                com.agenthub.parseConnectUri(raw)?.let { p ->
+                    host = p.address
+                    if (name.isBlank()) name = p.name
+                    token = p.token.ifBlank { token }
+                    publicToken = p.publicToken
+                } ?: vm.importConnectUri(raw)
+            },
+            onDismiss = { showScan = false },
+        )
+    }
 
     val title = if (profile == null) S.addHub else S.editHub
 
@@ -60,7 +77,19 @@ fun HubProfileDialog(
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = host,
-                    onValueChange = { host = it },
+                    onValueChange = { v ->
+                        // 粘贴 agenthub://connect 链接自动拆分填充
+                        if (v.trim().startsWith("agenthub://")) {
+                            com.agenthub.parseConnectUri(v)?.let { p ->
+                                host = p.address
+                                if (name.isBlank()) name = p.name
+                                token = p.token.ifBlank { token }
+                                publicToken = p.publicToken
+                                return@OutlinedTextField
+                            }
+                        }
+                        host = v
+                    },
                     label = { Text(S.hubAddress) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -84,6 +113,9 @@ fun HubProfileDialog(
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
                 )
+                TextButton(onClick = { showScan = true }) {
+                    Text(S.scanQrCode)
+                }
                 vm.connectError?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(
