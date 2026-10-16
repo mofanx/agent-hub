@@ -3345,10 +3345,13 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
         </div>
         {expanded && hasDetail && (
           <div className="flow-task-detail">
+            <div className="flow-task-full">{task.task}</div>
             {task.status === "done" && (
               <>
                 <div className="flow-task-meta">{S.verificationStatusLabel}{verificationText}</div>
-                <div className="flow-task-meta">{S.automaticCheckLabel}{automaticCheckText}</div>
+                {(ac?.status !== "exited_zero" || automaticCheckExtra || ac?.snapshotCurrent === false) && (
+                  <div className="flow-task-meta">{S.automaticCheckLabel}{automaticCheckText}</div>
+                )}
                 {automaticCheckExtra && (
                   <div className="flow-task-meta">{automaticCheckExtra}</div>
                 )}
@@ -3450,7 +3453,7 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
               (task.verifyCommand !== undefined && backendStatusText !== undefined)) && (
               <div className="flow-verify-detail">
                 <div className="flow-task-meta">{S.backendRunsLabel}</div>
-                {(task.backendRuns ?? []).map((r, i) => (
+                {(task.backendRuns ?? []).filter((r) => !(r.status === "completed" && r.exitCode === undefined)).map((r, i) => (
                   <div key={i} className="flow-verify-line">
                     {r.toolCallId} ·{" "}
                     {r.status === "completed" ? S.backendRunCompleted : r.status === "failed" ? S.backendRunFailed : r.status}

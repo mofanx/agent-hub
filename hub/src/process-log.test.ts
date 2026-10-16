@@ -168,7 +168,7 @@ describe("process history persistence", () => {
         store.append("session", "s1", { at: item.at, kind: item.kind, author: item.author, text: item.text });
       }
       const meta = buildProcessMeta("room1", "s1", buf, "t1", "done");
-      const at = Date.now();
+      const at = buf[buf.length - 1]!.at;
       const id = store.append("room", "room1", { at, kind: "process", author: "coder", text: JSON.stringify(meta) });
       assert.ok(id > 0, "append 返回行号供广播携带");
 
@@ -186,6 +186,34 @@ describe("process history persistence", () => {
 
       const sessionEntries = store.read("session", "s1");
       assert.deepEqual(sessionEntries.map((e) => e.kind), ["thought", "tool", "plan"], "session 保留全部明细");
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("过程卡锚定最后过程事件时刻：延迟 flush 也不排在结论之后", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    try {
+      const buf = [
+        { at: 100, kind: "thought" as const, author: "bot", text: "想" },
+        { at: 200, kind: "tool" as const, author: "bot", text: "工具" },
+      ];
+      const meta = buildProcessMeta("room1", "s1", buf, "t1", "done");
+      assert.equal(meta.turnStartAt, 100);
+      assert.equal(meta.turnEndAt, 200, "turnEndAt 锚定最后过程事件而非落库时刻");
+      // 结论以完成时刻先落库（at=300），过程卡延迟 flush 后落库但 at 仍为事件时刻
+      store.append("room", "room1", { at: 300, kind: "assistant", author: "bot", text: "结论" });
+      const cardAt = buf[buf.length - 1]!.at; // 与 flushTurnProcess 相同的锚点取法
+      store.append("room", "room1", { at: cardAt, kind: "process", author: "bot", text: JSON.stringify(meta) });
+      const entries = store.read("room", "room1");
+      assert.deepEqual(
+        entries.map((e) => e.kind),
+        ["process", "assistant"],
+        "过程卡 at ≤ 结论 at，按 at 升序排在结论之前",
+      );
+      assert.ok(entries[0]!.at <= entries[1]!.at);
     } finally {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });

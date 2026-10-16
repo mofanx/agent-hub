@@ -745,7 +745,9 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
     roomModeManager.flowIdForRoom(roomId),
   );
   if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return;
-  const at = Date.now();
+  // 卡锚定最后一条过程事件的时刻而非落库时刻：结论条目以完成时刻落库必然在其后；
+  // 延迟 flush（僵尸/取消/异常收尾）也不会把卡钉到时间线末尾
+  const at = buf[buf.length - 1]!.at;
   const text = JSON.stringify(meta);
   const author = displayNameFor(sessionId);
   const id = store.append("room", roomId, { at, kind: "process", author, text });

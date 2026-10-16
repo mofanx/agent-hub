@@ -2994,6 +2994,15 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
         }
         if (expanded && hasDetail) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+                Text(
+                    task.task,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 240.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
                 if (task.status == "done") {
                     val statusText = when (task.verificationStatus) {
                         "member_pass" -> S.verificationStatusMemberPass
@@ -3009,7 +3018,8 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                         }
                     }
                     Text("${S.verificationStatusLabel}$statusText", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    val acText = when (task.automaticCheckStatus) {
+                    val acHasExtra = task.automaticCheckSnapshot != null || task.automaticCheckTruncated || task.automaticCheckSnapshotCurrent == false
+                    val acText = if (task.automaticCheckStatus == "exited_zero" && !acHasExtra) null else when (task.automaticCheckStatus) {
                         "exited_zero" -> S.automaticCheckExitedZero
                         "exited_nonzero" -> task.automaticCheckExitCode
                             ?.let { S.automaticCheckExitedNonzero.format(it) }
@@ -3023,11 +3033,13 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                         "timed_out" -> S.automaticCheckTimedOut
                         else -> S.automaticCheckNotRun
                     }
-                    Text(
-                        "${S.automaticCheckLabel}$acText",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (acText != null) {
+                        Text(
+                            "${S.automaticCheckLabel}$acText",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     val acExtra = listOfNotNull(
                         task.automaticCheckSnapshot?.take(12)?.let { S.automaticCheckSnapshot.format(it) },
                         if (task.automaticCheckSnapshotCurrent == true) S.snapshotCurrentTrue else null,
@@ -3158,6 +3170,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                     Spacer(Modifier.height(2.dp))
                     Text(S.backendRunsLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                     task.backendRuns.forEach { r ->
+                        if (r.status == "completed" && r.exitCode == null) return@forEach
                         val statusText = when (r.status) {
                             "completed" -> S.backendRunCompleted
                             "failed" -> S.backendRunFailed
@@ -3231,7 +3244,14 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                 }
                 task.output?.let {
                     Spacer(Modifier.height(2.dp))
-                    Text(it.take(500), style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
                 }
                 task.failureMessage?.let {
                     Spacer(Modifier.height(2.dp))

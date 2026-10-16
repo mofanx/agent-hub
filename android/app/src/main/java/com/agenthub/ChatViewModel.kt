@@ -2910,6 +2910,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         upsertDecision(item)
     }
 
+    /**
+     * 已落库条目（room.process 推送的房史行）的插入位：
+     * 越过尾部两类条目以对齐房史持久化序——
+     * 1) at 大于卡时间的条目（卡是迟到补写，应回到自己的时间位）；
+     * 2) 未落库的在途回合流式条目（assistant/thought/tool/plan，其 live at 是回合开始时刻，
+     *    持久化 at 才是完成时刻）——否则过程卡会被追加到正在流式/刚完成的结论之后。
+     */
+    private fun persistedInsertIndex(at: Long): Int {
+        if (at <= 0L) return chatItems.size
+        var i = chatItems.size
+        while (i > 0) {
+            val it = chatItems[i - 1]
+            val inFlight = it.id > 0 &&
+                (it is ChatItem.Assistant || it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan)
+            if (it.at > at || inFlight) i-- else break
+        }
+        return i
+    }
+
     private fun parseProcessMeta(itemId: Long, data: JsonObject, author: String, at: Long): ChatItem.Process =
         ChatItem.Process(
             itemId,
@@ -4542,7 +4561,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 it.id == card.id ||
                                     (it is ChatItem.Flow && it.flowId.isNotEmpty() && it.flowId == card.flowId)
                             }
-                            if (idx >= 0) chatItems[idx] = card else chatItems.add(card)
+                            if (idx >= 0) chatItems[idx] = card else chatItems.add(persistedInsertIndex(card.at), card)
                         }
                     } else if (meta != null) {
                         val card = parseProcessMeta(if (eid != null) -eid else ++itemSeq, meta, author, at)
@@ -4550,7 +4569,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             it.id == card.id ||
                                 (it is ChatItem.Process && it.processId.isNotEmpty() && it.processId == card.processId)
                         }
-                        if (idx >= 0) chatItems[idx] = card else chatItems.add(card)
+                        if (idx >= 0) chatItems[idx] = card else chatItems.add(persistedInsertIndex(card.at), card)
                     }
                 }
             }

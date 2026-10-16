@@ -902,7 +902,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
               ? items.findIndex((it) => it.kind === "flow" && it.flowId === item.flowId)
               : -1;
         if (idx >= 0) items[idx] = { ...item, at: items[idx]!.at ?? item.at };
-        else items.push(item);
+        else {
+          // 迟到补写卡（过程卡/flow 卡）按 at 锚定插入，越过尾部 at 更大项与在途流式条目
+          const at = item.at ?? Number.MAX_SAFE_INTEGER;
+          let insertAt = items.length;
+          for (let i = items.length - 1; i >= 0; i--) {
+            const t = items[i]!;
+            const inFlight = t.historyId == null &&
+              (t.kind === "assistant" || t.kind === "thought" || t.kind === "tool" || t.kind === "plan");
+            if ((t.at ?? Infinity) > at || inFlight) insertAt = i; else break;
+          }
+          items.splice(insertAt, 0, item);
+        }
         set({ chatItems: items });
         break;
       }

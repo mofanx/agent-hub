@@ -49,7 +49,7 @@ export function buildProcessMeta(
     processId: newProcessId(roomId, sessionId, turnStartAt),
     sessionId,
     turnStartAt,
-    turnEndAt: Date.now(),
+    turnEndAt: buf[buf.length - 1]!.at,
     steps,
     status,
   };

@@ -2091,6 +2091,16 @@
   color: var(--muted);
 }
 
+.flow-task-full {
+  font-size: 0.75rem;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 10rem;
+  overflow-y: auto;
+  margin-bottom: 0.3rem;
+}
+
 .flow-task-output {
   font-size: 0.75rem;
   color: var(--fg);
