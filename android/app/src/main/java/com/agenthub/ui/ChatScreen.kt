@@ -1770,7 +1770,7 @@ private fun ProcessGroupBlock(
     val textColor = MaterialTheme.colorScheme.onSurfaceVariant
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
-    Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+    Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (grouped) 1.dp else 4.dp)) {
         if (showAuthor) AuthorLabel(item.author)
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1827,7 +1827,7 @@ private fun ProcessCardBlock(
     val textColor = MaterialTheme.colorScheme.onSurfaceVariant
     val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
-    Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+    Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (grouped) 1.dp else 4.dp)) {
         if (showAuthor) AuthorLabel(item.author)
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1993,7 +1993,7 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
     ) {
         when {
             !items.isNullOrEmpty() -> items.forEach { child ->
-                RawChatBubble(child, vm, showAuthor = false)
+                RawChatBubble(child, vm, showAuthor = false, grouped = true, compact = true)
             }
             unavailable -> Text(
                 S.processUnavailable,
@@ -2038,6 +2038,7 @@ private fun RawChatBubble(
     isQuoted: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
     grouped: Boolean = false,
+    compact: Boolean = false,
 ) {
     val S = LocalStrings.current
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
@@ -2053,7 +2054,7 @@ private fun RawChatBubble(
     when (item) {
         is ChatItem.System -> {
             Box(
-                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                Modifier.fillMaxWidth().padding(vertical = if (compact) 1.dp else 6.dp),
                 contentAlignment = Alignment.Center,
             ) {
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
@@ -2067,7 +2068,7 @@ private fun RawChatBubble(
                 modifier = bubbleModifier,
             ) {
                 Surface(
-                    shape = CircleShape,
+                    shape = RoundedCornerShape(12.dp),
                     color = bgColor,
                 ) {
                     HighlightText(
@@ -2076,7 +2077,7 @@ private fun RawChatBubble(
                         onMatchKeywordY = keywordCallback,
                         style = MaterialTheme.typography.labelSmall,
                         color = textColor,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
                     )
                 }
             }
@@ -2093,7 +2094,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = true,
-                modifier = bubbleModifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp),
+                modifier = bubbleModifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (compact) 1.dp else 4.dp),
             ) {
                 Surface(
                     shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
@@ -2140,7 +2141,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Assistant -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+        is ChatItem.Assistant -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (compact) 1.dp else 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
             val textColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2189,7 +2190,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = true,
-                modifier = bubbleModifier.padding(top = if (grouped) 1.dp else 2.dp, bottom = 2.dp),
+                modifier = bubbleModifier.padding(top = if (grouped) 1.dp else 2.dp, bottom = if (compact) 1.dp else 2.dp),
             ) {
                 Column {
                     TextButton(onClick = { expanded = !expanded }) {
@@ -2229,7 +2230,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Tool -> Column(Modifier.padding(top = if (grouped) 1.dp else 3.dp, bottom = 3.dp)) {
+        is ChatItem.Tool -> Column(Modifier.padding(top = if (grouped) 1.dp else 3.dp, bottom = if (compact) 1.dp else 3.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
             val textColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2273,7 +2274,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Plan -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+        is ChatItem.Plan -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (compact) 1.dp else 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
@@ -2322,7 +2323,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = false,
-                modifier = bubbleModifier.padding(vertical = 4.dp),
+                modifier = bubbleModifier.padding(vertical = if (compact) 1.dp else 4.dp),
             ) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -2341,12 +2342,12 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Decision -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+        is ChatItem.Decision -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (compact) 1.dp else 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             DecisionCardBlock(item, vm, isCurrentMatch, highlight, onMatchKeywordY, bubbleModifier)
         }
 
-        is ChatItem.Permission -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+        is ChatItem.Permission -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (compact) 1.dp else 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
@@ -2396,7 +2397,7 @@ private fun RawChatBubble(
             }
         }
 
-        is ChatItem.Elicitation -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+        is ChatItem.Elicitation -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = if (compact) 1.dp else 4.dp)) {
             if (showAuthor) AuthorLabel(item.author)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
