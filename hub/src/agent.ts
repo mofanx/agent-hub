@@ -68,6 +68,42 @@ export type HubEvent =
         options: { optionId: string; name: string; kind: string }[];
       };
     }
+  | {
+      /** 决策卡协议：permission/elicitation 发起（hub 内部消费，不直接广播客户端） */
+      method: "decision.request";
+      params: {
+        requestId: string;
+        sessionId: string;
+        type: "permission" | "elicitation";
+        title: string;
+        options: { id: string; label: string; kind?: string }[];
+        toolCall?: unknown;
+        fields?: unknown;
+        message?: string;
+        grantKey?: string;
+        grantScope?: "task" | "always";
+        auto?: boolean;
+        autoOptionId?: string;
+      };
+    }
+  | {
+      method: "decision.resolve";
+      params: {
+        requestId: string;
+        outcome: "answered" | "expired" | "revoked";
+        optionId?: string;
+        action?: string;
+      };
+    }
+  | {
+      method: "member.status";
+      params: {
+        scope: "room" | "session";
+        id: string;
+        member: string;
+        status: "online" | "generating" | "offline";
+      };
+    }
   | { method: "room.notice"; params: { roomId: string; message: string } }
   | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string } } }
   | { method: "room.artifact"; params: { roomId: string; artifact?: unknown } }
@@ -223,6 +259,38 @@ export function setPermissionBypass(v: boolean): void {
   permissionBypass = v;
 }
 
+/**
+ * permission 授权键：toolCall 的 kind + name/title 首行。
+ * 同类请求（同 kind 同工具名）命中 always/task 授权时自动放行。
+ */
+export function permissionKeyOf(toolCall: unknown): string {
+  const o =
+    typeof toolCall === "object" && toolCall !== null
+      ? (toolCall as Record<string, unknown>)
+      : {};
+  const kind = typeof o.kind === "string" && o.kind ? o.kind : "other";
+  const name =
+    typeof o.name === "string" && o.name
+      ? o.name
+      : typeof o.title === "string" && o.title
+        ? o.title.split("\n")[0]!.slice(0, 80)
+        : "";
+  return name ? `${kind}:${name}` : kind;
+}
+
+export function permissionTitleOf(toolCall: unknown): string {
+  const o =
+    typeof toolCall === "object" && toolCall !== null
+      ? (toolCall as Record<string, unknown>)
+      : {};
+  if (typeof o.title === "string" && o.title) return o.title;
+  if (typeof o.name === "string" && o.name) return o.name;
+  if (typeof o.kind === "string" && o.kind) return o.kind;
+  return "permission";
+}
+
+export type PermissionGrantScope = "task" | "always";
+
 function findAutoAllowOption(options: PermissionOption[]): PermissionOption | undefined {
   // 优先“始终允许”，让 agent 自己下次不再询问
   const always = options.find(
@@ -254,9 +322,14 @@ export class AcpAgent {
   }
   private pendingPermissions = new Map<
     string,
-    { optionIds: Set<string>; respond: (optionId: string) => void }
+    { optionIds: Set<string>; respond: (optionId: string, outcome?: "answered" | "expired" | "revoked") => void }
   >();
-  private pendingElicitations = new Map<string, (resp: acp.CreateElicitationResponse) => void>();
+  private pendingElicitations = new Map<
+    string,
+    (resp: acp.CreateElicitationResponse, outcome?: "answered" | "expired" | "revoked") => void
+  >();
+  /** 决策卡授权登记：sessionId → grantKey → scope（always 持久，task 随回合结束清除） */
+  private permissionGrants = new Map<string, Map<string, PermissionGrantScope>>();
   private starting: Promise<void> | null = null;
   private ready = false;
   private authMethods: acp.AuthMethod[] = [];
@@ -505,13 +578,14 @@ export class AcpAgent {
     }
     this.promptOnceWaiters.clear();
     for (const resolve of this.pendingElicitations.values()) {
-      resolve({ action: "cancel" });
+      resolve({ action: "cancel" }, "revoked");
     }
     this.pendingElicitations.clear();
     for (const pending of this.pendingPermissions.values()) {
-      pending.respond("");
+      pending.respond("", "revoked");
     }
     this.pendingPermissions.clear();
+    this.permissionGrants.clear();
     if (!wasReady && this.onClose) {
       this.onClose();
       return;
@@ -575,6 +649,7 @@ export class AcpAgent {
   ): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    this.clearTaskGrants(sessionId);
     const fullText = entry.turnText;
     this.onTurnEnd?.(sessionId, fullText, "done");
     entry.busy = false;
@@ -609,27 +684,64 @@ export class AcpAgent {
   }): Promise<{ outcome: { outcome: "selected"; optionId: string } }> {
     const requestId = randomUUID();
     this.markTurnAlive(params.sessionId);
+    const grantKey = permissionKeyOf(params.toolCall);
+    const title = permissionTitleOf(params.toolCall);
+    const decisionOptions = params.options.map((o) => ({
+      id: o.optionId,
+      label: o.name,
+      kind: o.kind,
+    }));
+    const emitDecisionRequest = (extra?: {
+      grantScope?: PermissionGrantScope;
+      auto?: boolean;
+      autoOptionId?: string;
+    }) =>
+      this.emit({
+        method: "decision.request",
+        params: {
+          requestId,
+          sessionId: params.sessionId,
+          type: "permission",
+          title,
+          options: decisionOptions,
+          toolCall: params.toolCall,
+          grantKey,
+          ...extra,
+        },
+      });
 
     if (permissionBypass) {
       const chosen =
         findAutoAllowOption(params.options) ??
         params.options[params.options.length - 1];
       const optionId = chosen?.optionId ?? "";
-      const toolName =
-        typeof params.toolCall === "object" &&
-        params.toolCall != null &&
-        "name" in params.toolCall
-          ? String(params.toolCall.name)
-          : "?";
       logWarn(
         "permission",
-        `bypass=${permissionBypass}, auto-selecting "${chosen?.name ?? optionId}" for ${toolName} in session ${params.sessionId}`,
+        `bypass=${permissionBypass}, auto-selecting "${chosen?.name ?? optionId}" for ${title} in session ${params.sessionId}`,
       );
       return Promise.resolve({
         outcome: { outcome: "selected", optionId },
       });
     }
 
+    // 决策卡 scope=always/task 授权命中：同类请求自动放行（落一张已答卡留痕）
+    const grantScope = this.permissionGrants.get(params.sessionId)?.get(grantKey);
+    if (grantScope) {
+      const chosen =
+        findAutoAllowOption(params.options) ??
+        params.options[params.options.length - 1];
+      const optionId = chosen?.optionId ?? "";
+      emitDecisionRequest({ grantScope, auto: true, autoOptionId: optionId });
+      logWarn(
+        "permission",
+        `grant(scope=${grantScope}) hit for ${grantKey} in session ${params.sessionId} -> "${chosen?.name ?? optionId}"`,
+      );
+      return Promise.resolve({
+        outcome: { outcome: "selected", optionId },
+      });
+    }
+
+    emitDecisionRequest();
     this.emit({
       method: "permission.request",
       params: {
@@ -645,6 +757,11 @@ export class AcpAgent {
         const fallback =
           params.options.find((o) => o.kind.startsWith("reject")) ??
           params.options[params.options.length - 1];
+        const optionId = fallback?.optionId ?? "";
+        this.emit({
+          method: "decision.resolve",
+          params: { requestId, outcome: "expired", ...(optionId ? { optionId } : {}) },
+        });
         if (!fallback) {
           resolve({ outcome: { outcome: "selected", optionId: "" } });
           return;
@@ -654,9 +771,13 @@ export class AcpAgent {
       }, PERMISSION_TIMEOUT_MS);
       this.pendingPermissions.set(requestId, {
         optionIds: new Set(params.options.map((o) => o.optionId)),
-        respond: (optionId) => {
+        respond: (optionId, outcome = "answered") => {
           clearTimeout(timer);
           this.pendingPermissions.delete(requestId);
+          this.emit({
+            method: "decision.resolve",
+            params: { requestId, outcome, ...(optionId ? { optionId } : {}) },
+          });
           resolve({ outcome: { outcome: "selected", optionId } });
         },
       });
@@ -668,6 +789,45 @@ export class AcpAgent {
     if (!pending || !optionId.trim() || !pending.optionIds.has(optionId)) return false;
     pending.respond(optionId);
     return true;
+  }
+
+  /** decision.revoke：终止挂起的 permission 请求（以空 optionId 取消语义收尾） */
+  revokePermission(requestId: string): boolean {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) return false;
+    pending.respond("", "revoked");
+    return true;
+  }
+
+  /** 登记会话级授权：scope=always 持久，scope=task 随当前回合结束清除 */
+  grantPermission(sessionId: string, grantKey: string, scope: PermissionGrantScope): void {
+    let m = this.permissionGrants.get(sessionId);
+    if (!m) {
+      m = new Map();
+      this.permissionGrants.set(sessionId, m);
+    }
+    m.set(grantKey, scope);
+  }
+
+  /** 撤销授权（key 省略时撤销该会话全部授权），返回是否有授权被移除 */
+  revokePermissionGrant(sessionId: string, grantKey?: string): boolean {
+    const m = this.permissionGrants.get(sessionId);
+    if (!m) return false;
+    if (grantKey === undefined) {
+      const n = m.size;
+      this.permissionGrants.delete(sessionId);
+      return n > 0;
+    }
+    const ok = m.delete(grantKey);
+    if (m.size === 0) this.permissionGrants.delete(sessionId);
+    return ok;
+  }
+
+  private clearTaskGrants(sessionId: string): void {
+    const m = this.permissionGrants.get(sessionId);
+    if (!m) return;
+    for (const [k, v] of m) if (v === "task") m.delete(k);
+    if (m.size === 0) this.permissionGrants.delete(sessionId);
   }
 
   private handleElicitation(
@@ -683,23 +843,48 @@ export class AcpAgent {
     }
     this.markTurnAlive(sessionId);
     const requestId = randomUUID();
+    const fields = normalizeElicitationFields(schema);
+    this.emit({
+      method: "decision.request",
+      params: {
+        requestId,
+        sessionId,
+        type: "elicitation",
+        title: String(params.message ?? "").slice(0, 300) || "elicitation",
+        options: [
+          { id: "accept", label: "accept" },
+          { id: "decline", label: "decline" },
+          { id: "cancel", label: "cancel" },
+        ],
+        fields,
+        message: params.message,
+      },
+    });
     this.emit({
       method: "elicitation.request",
       params: {
         requestId,
         sessionId,
         message: params.message,
-        fields: normalizeElicitationFields(schema),
+        fields,
       },
     });
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingElicitations.delete(requestId);
+        this.emit({
+          method: "decision.resolve",
+          params: { requestId, outcome: "expired", action: "cancel" },
+        });
         resolve({ action: "cancel" });
       }, ELICITATION_TIMEOUT_MS);
-      this.pendingElicitations.set(requestId, (resp) => {
+      this.pendingElicitations.set(requestId, (resp, outcome = "answered") => {
         clearTimeout(timer);
         this.pendingElicitations.delete(requestId);
+        this.emit({
+          method: "decision.resolve",
+          params: { requestId, outcome, action: resp.action },
+        });
         resolve(resp);
       });
     });
@@ -717,6 +902,14 @@ export class AcpAgent {
     } else {
       resolve({ action });
     }
+    return true;
+  }
+
+  /** decision.revoke：终止挂起的 elicitation（cancel 语义收尾） */
+  revokeElicitation(requestId: string): boolean {
+    const resolve = this.pendingElicitations.get(requestId);
+    if (!resolve) return false;
+    resolve({ action: "cancel" }, "revoked");
     return true;
   }
 
@@ -1058,6 +1251,7 @@ export class AcpAgent {
     // 本地收尾：已流出的部分文本与过程缓冲照常落库（watchdog 场景 buf 为空，无过程卡）
     entry.stoppable = false;
     entry.busy = false;
+    this.clearTaskGrants(sessionId);
     this.onTurnEnd?.(sessionId, entry.turnText, "interrupted");
     entry.turnText = "";
     // 换代：取消后迟到的 settle 不得触碰新回合/复活本回合任务
@@ -1107,6 +1301,7 @@ export class AcpAgent {
   /** 本地摘除会话（不通知 agent，用于删除） */
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.permissionGrants.delete(sessionId);
     this.contextUsage.delete(sessionId);
     this.sessionConfigOptions.delete(sessionId);
   }
