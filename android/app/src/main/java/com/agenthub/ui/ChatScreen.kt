@@ -133,6 +133,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -1381,7 +1382,8 @@ fun AuthorLabel(author: String) {
     if (author.isNotBlank() && author != S.authorMe && author != "我") {
         Text(
             buildAnnotatedString {
-                withStyle(SpanStyle(color = authorColor(author), fontWeight = FontWeight.SemiBold)) {
+                // 成员色向主题 onSurfaceVariant 靠拢降饱和，深浅色模式自适应
+                withStyle(SpanStyle(color = lerp(authorColor(author), MaterialTheme.colorScheme.onSurfaceVariant, 0.38f), fontWeight = FontWeight.SemiBold)) {
                     append(author)
                 }
                 withStyle(SpanStyle(color = MaterialTheme.colorScheme.outline)) {
@@ -1692,10 +1694,6 @@ private fun MessageBlock(
     } else {
         Column(Modifier.padding(top = blockTop, bottom = blockBottom)) {
             if (showAuthor) AuthorLabel(item.author)
-            // 指挥家/主持人的编排产物消息（汇总、求助）与过程卡同宽
-            // author 是 displayNameFor 的 "name (conn)" 形态，sessionName 返回裸名，用容错比较
-            val hostName = vm.currentRoom?.conductorId?.let { vm.sessionName(it) }
-            val hostMsg = hostName != null && sameChatAuthor(item.author, hostName)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
@@ -1705,7 +1703,7 @@ private fun MessageBlock(
                 vm = vm,
                 itemId = item.id,
                 canSelect = true,
-                modifier = bubbleModifier.fillMaxWidth(if (hostMsg) 1f else 0.9f),
+                modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -2125,7 +2123,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = true,
-                modifier = bubbleModifier.fillMaxWidth(0.9f),
+                modifier = bubbleModifier.fillMaxWidth(),
             ) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -4106,7 +4104,7 @@ private fun DecisionCardBlock(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = bgColor),
         ) {
-            Column(Modifier.padding(12.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
                 HighlightText(
                     (if (item.decisionType == "elicitation") S.elicitationTitle else S.permissionRequest) + ": ${item.title}",
                     highlight,

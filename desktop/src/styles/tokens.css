@@ -99,11 +99,12 @@ html[data-theme="dark"] {
 }
 
 /* Agent 头像/标识色板（按名字哈希取色，两主题通用） */
-.agent-c0 { --agent: #8b5cf6; }
-.agent-c1 { --agent: #f59e0b; }
-.agent-c2 { --agent: #10b981; }
-.agent-c3 { --agent: #3b82f6; }
-.agent-c4 { --agent: #ec4899; }
-.agent-c5 { --agent: #14b8a6; }
-.agent-c6 { --agent: #f97316; }
-.agent-c7 { --agent: #6366f1; }
+/* 成员色：主题 token 派生，降饱和，明暗主题自适应 */
+.agent-c0 { --agent: var(--accent); }
+.agent-c1 { --agent: var(--warn); }
+.agent-c2 { --agent: var(--success); }
+.agent-c3 { --agent: var(--info); }
+.agent-c4 { --agent: var(--danger); }
+.agent-c5 { --agent: color-mix(in srgb, var(--accent) 55%, var(--success)); }
+.agent-c6 { --agent: color-mix(in srgb, var(--warn) 55%, var(--danger)); }
+.agent-c7 { --agent: color-mix(in srgb, var(--info) 55%, var(--accent)); }
