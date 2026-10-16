@@ -6,6 +6,20 @@ import * as path from "node:path";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
+import {
+  PLAN_FORMAT_FIX_PROMPT,
+  conductorMemberList,
+  conductorPlanningPrompt,
+  conductorReviewPrompt,
+  conductorSummarizePrompt,
+  describeAutomaticCheck,
+  helpRequestPrompt,
+  helpResumePrompt,
+  peerReviewTaskDescription,
+  planExample,
+  workerTaskPrompt,
+  type OpenTopicInput,
+} from "./prompts.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -186,6 +200,8 @@ type Flow = {
   challengeScheduled?: boolean;
   challengeTaskId?: string;
   planFormatRetries: number;
+  /** 进入 done 终态的时刻；话题归档窗口（startedAt, finishedAt] 上界 */
+  finishedAt?: number;
 };
 
 export type ConductorNotice = {
@@ -212,8 +228,6 @@ const MAX_PENDING_TOOL_CALLS = 20;
 const ISOLATED_CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const ISOLATED_CHECK_MAX = 32;
 const PLAN_FORMAT_RETRY_LIMIT = 1;
-const PLAN_FORMAT_FIX_PROMPT =
-  "上一次规划无法解析为任务计划，尚未派工。请只输出一个 JSON code block，顶层包含 goal（字符串）、acceptanceCriteria（字符串数组）和 tasks（数组）；每项任务的 to 必须是现有成员且 task 非空。若确实需要用户先决定，请输出 questions（最多 4 条）并将 tasks 设为 []。不要解释或调用工具。";
 
 export function parseIsolatedChecks(
   raw: string | undefined,
@@ -301,13 +315,6 @@ function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
     finishedAt,
     ...(reason ? { reason } : {}),
   };
-}
-
-function describeAutomaticCheck(c: AutomaticCheck, snapshotCurrent?: boolean): string {
-  const exitCode = "exitCode" in c ? c.exitCode : undefined;
-  const snapshot = "snapshotHash" in c ? c.snapshotHash : undefined;
-  const detail = "detail" in c && c.detail ? `,detail=${c.detail.slice(0, 200)}` : "";
-  return `隔离检查：${c.status},exitCode=${exitCode ?? "unknown"},snapshotHash=${snapshot?.slice(0, 12) ?? "none"}${detail}${snapshotCurrent === false ? "，当前工作区已变化或无法核对，旧隔离检查仅对应历史快照，不得据此宣称当前版本通过。" : ""}`;
 }
 
 type BackendClaimStatus =
@@ -428,16 +435,26 @@ export class ConductorOrchestrator {
     this.store = store;
   }
 
-  /** turn 游标登记钩子（RoomModeManager 注入）：每次外发 prompt 前记录上下文游标 */
-  private turnGuard?: (sessionId: string, roomId: string, content: string | PromptContent) => void;
+  /** turn 游标登记钩子（RoomModeManager 注入）：每次外发 prompt 前记录上下文游标；可返回发送失败时的清理函数 */
+  private turnGuard?: (
+    sessionId: string,
+    roomId: string,
+    content: string | PromptContent,
+  ) => (() => void) | void;
 
-  setTurnGuard(fn: (sessionId: string, roomId: string, content: string | PromptContent) => void): void {
+  setTurnGuard(
+    fn: (sessionId: string, roomId: string, content: string | PromptContent) => (() => void) | void,
+  ): void {
     this.turnGuard = fn;
   }
 
   private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
-    this.turnGuard?.(sessionId, roomId, content);
-    return this.agent.prompt(sessionId, content);
+    const unguard = this.turnGuard?.(sessionId, roomId, content);
+    return this.agent.prompt(sessionId, content).catch((err: unknown) => {
+      // 发送即失败（session 未知/忙碌）：不会有 prompt.done/error 事件兜底，回收游标登记
+      unguard?.();
+      throw err;
+    });
   }
 
   hasActiveFlow(roomId: string): boolean {
@@ -468,6 +485,17 @@ export class ConductorOrchestrator {
     this.emitFlow?.(roomId);
     if (reason) this.notice({ roomId, message: reason });
     return [...touched];
+  }
+
+  /** 房间删除/解散：无条件清掉该房间的 flow、planning 标记与 pendingToolCalls 残留 */
+  dropRoom(roomId: string): void {
+    const hadFlow = this.flows.delete(roomId);
+    const hadPlanning = this.planningInFlight.delete(roomId);
+    for (const [sid, m] of this.pendingToolCalls) {
+      for (const [tid, p] of m) if (p.roomId === roomId) m.delete(tid);
+      if (m.size === 0) this.pendingToolCalls.delete(sid);
+    }
+    if (hadFlow || hadPlanning) this.emitFlow?.(roomId);
   }
 
   observeToolUpdate(sessionId: string, update: unknown): void {
@@ -755,6 +783,7 @@ export class ConductorOrchestrator {
       flowId: flow.id,
       startedAt: flow.startedAt,
       phase: flow.phase,
+      ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
@@ -930,22 +959,12 @@ export class ConductorOrchestrator {
     return undefined;
   }
 
-  private buildMemberList(room: Room): string {
-    return room.members
-      .filter((m) => m.sessionId !== room.conductorId)
-      .map((m) => `${m.name} (id: ${m.sessionId})`)
-      .join("、") || "（无）";
-  }
-
-  private buildExample(room: Room): string {
-    const others = room.members.filter((m) => m.sessionId !== room.conductorId);
-    if (others.length === 0) {
-      return '{"goal":"用一句话重述最终目标","acceptanceCriteria":["可验证标准1"],"tasks":[]}';
-    }
-    const sample = others.slice(0, 2).map((m, i) =>
-      JSON.stringify({ to: m.sessionId, task: i === 0 ? "先处理第一个子任务" : "再处理第二个子任务" })
-    );
-    return `{"goal":"用一句话重述最终目标","acceptanceCriteria":["可验证标准1"],"tasks":[${sample.join(",")}]}`;
+  /** 未结话题 → prompt 注入条目：owner 按成员表解析为展示名 */
+  private openTopicsFor(room: Room): OpenTopicInput[] {
+    return this.rooms.openTopics(room.roomId).map((t) => ({
+      ownerName: t.owner ? this.rooms.memberName(room.roomId, t.owner) : undefined,
+      text: t.text,
+    }));
   }
 
   private newFlow(
@@ -983,70 +1002,25 @@ export class ConductorOrchestrator {
     artifactContext?: { refs?: string[] },
     qa?: { questions: string[]; answer: string; criteria: string[]; supplements: string[] },
   ): string {
-    const example = this.buildExample(room);
-    const prompt = [
-      `你是群聊「${room.name}」的指挥家（Conductor）。`,
-      `可派工的成员：${this.buildMemberList(room)}。`,
-      "",
-      `用户任务：${text}`,
-      "",
-      "请把任务拆解并派发给成员。",
-      "协作边界：成员可能本身运行 Devin Fusion 或内部子代理。Agent Hub 只按独立责任边界、不同专长或明确依赖拆分；不要把单个成员能端到端完成的工作切成多个重复/微小任务，也不要让多个写任务修改同一文件。",
-      "",
-      "输出格式要求（必须严格遵守）：",
-      "1. 必须输出一个 JSON code block；tasks 非空时 JSON 外不要有文字。",
-      "2. JSON 顶层字段必须包含 `goal`（用一句话重述最终目标）、`acceptanceCriteria`（数组，每条是可验证的验收标准）和 `tasks`（数组）。",
-      "3. 每个任务对象包含 `to`（接收成员）、`task`（具体子任务描述），可选 `id`（任务标识）和 `dependsOn`（依赖的 id 数组）。",
-      "4. `to` 可以是：成员 ID（括号里的 `id:...`）、`@成员名` 或成员名。",
-      "5. `task` 必须具体、可执行，不要写占位符。",
-      "6. 如果任务有依赖关系，请用 `dependsOn` 指定前置任务 `id`。",
-      "7. `acceptanceCriteria` 每条都必须是可验证的标准，用于任务完成后验收是否达标。",
-      "8. 如果任务简单、无需分工，tasks 输出 `[]`；tasks 为空时允许在 code block 之前直接写出你的最终回答。",
-      "9. 仅当缺少必须由用户决定的关键信息、完全无法给出合理计划时，可同时输出 `questions` 数组（1-4 条、每条不超过 200 字、只问不可或缺的问题），此时 `tasks` 必须为 `[]`；Hub 会把问题转给用户，答复后会再请你规划一次，届时不得再次提问。可自主判断的细节不要提问，也不要请求用户批准执行任意命令。",
-      "",
-      "正确示例（请用实际成员 ID 替换）：",
-      "```json",
-      example,
-      "```",
-      "",
-      "错误示例（不要这样做）：",
-      '- to: "成员A"（不存在该成员）',
-      '- task: "处理一下"（不够具体）',
-      '- 输出多个 code block 或在 JSON 外加解释文字',
-    ];
-    if (qa) {
-      prompt.push(
-        "",
-        "你此前就本任务向用户提问，答复如下：",
-        ...qa.questions.map((q, i) => `${i + 1}. ${q}`),
-        `用户答复：${qa.answer.slice(0, 2000)}`,
-        ...(qa.criteria.length > 0
-          ? ["", "验收标准：", ...qa.criteria.map((c, i) => `${i + 1}. ${c}`)]
-          : []),
-        ...(qa.supplements.length > 0
-          ? [
-              "",
-              "用户在等待答复期间补充的要求（请一并纳入拆解与验收）：",
-              ...qa.supplements.map((s) => `- ${s.slice(0, 400)}`),
-            ]
-          : []),
-        "",
-        "已收集所需信息：请直接输出最终计划（tasks）或最终回答，不要再输出 questions。",
-      );
-    }
+    const artifactLines: string[] = [];
     if (artifactContext?.refs?.length) {
       const artifacts = this.rooms.getArtifactsForPrompt(room.roomId, room.conductorId!, artifactContext);
-      if (artifacts.length > 0) {
-        prompt.push("", "用户明确引用了以下产物，请把它们作为上下文：");
-        for (const a of artifacts) {
-          const parts = [`@${this.rooms.memberName(room.roomId, a.author)}`];
-          if (a.path) parts.push(a.path);
-          parts.push(a.summary);
-          prompt.push(`- ${parts.join(" ")}`);
-        }
+      for (const a of artifacts) {
+        const parts = [`@${this.rooms.memberName(room.roomId, a.author)}`];
+        if (a.path) parts.push(a.path);
+        parts.push(a.summary);
+        artifactLines.push(`- ${parts.join(" ")}`);
       }
     }
-    return prompt.join("\n");
+    return conductorPlanningPrompt({
+      roomName: room.name,
+      memberList: conductorMemberList(room.members, room.conductorId),
+      task: text,
+      example: planExample(room.members, room.conductorId),
+      qa,
+      artifactLines: artifactLines.length > 0 ? artifactLines : undefined,
+      openTopics: this.openTopicsFor(room),
+    });
   }
 
   private sendPlanningPrompt(flow: Flow, room: Room): void {
@@ -1152,6 +1126,7 @@ export class ConductorOrchestrator {
             });
           } else {
             flow.phase = "done";
+            flow.finishedAt = Date.now();
             this.emitFlow?.(roomId);
           }
           return roomId;
@@ -1398,14 +1373,13 @@ export class ConductorOrchestrator {
       e.dispatched = true;
       const fromName = room.members.find((m) => m.sessionId === e.from)?.name ?? e.from;
       const toName = room.members.find((m) => m.sessionId === e.to)?.name ?? e.to;
-      const body = [
-        `群聊「${room.name}」成员 @${fromName} 在执行子任务「${task.task.slice(0, 200)}」时向你求助：`,
-        "",
-        e.question,
-        ...(e.context ? ["", `相关上下文：${e.context}`] : []),
-        "",
-        "请直接给出结论与依据；这不是派工，无需执行完整任务。",
-      ].join("\n");
+      const body = helpRequestPrompt({
+        roomName: room.name,
+        fromName,
+        task: task.task,
+        question: e.question,
+        context: e.context,
+      });
       const prompt = this.rooms.buildPrompt(room.roomId, body, e.to, undefined, undefined, {
         taskId: e.taskId,
       });
@@ -1449,16 +1423,14 @@ export class ConductorOrchestrator {
         ? "用户"
         : `@${room.members.find((m) => m.sessionId === e.to)?.name ?? e.to}`;
     const remaining = MAX_HELP_ROUNDS - (task.helpRounds ?? 0);
-    const taskBody = [
-      `你此前在执行子任务（id: ${task.id}）时向 ${fromLabel} 求助。`,
-      `你的问题：${e.question}`,
-      `${fromLabel} 的回复：${(e.answer ?? "（未获得回复）").slice(0, 2000)}`,
-      "",
-      `请据此继续完成子任务：${task.task}`,
-      remaining > 0
-        ? `若仍有关键阻塞可再次求助（剩余 ${remaining} 次）；否则完成任务并输出 artifact 报告 JSON。`
-        : "请基于现有信息完成任务并输出 artifact 报告 JSON。",
-    ].join("\n");
+    const taskBody = helpResumePrompt({
+      taskId: task.id,
+      task: task.task,
+      fromLabel,
+      question: e.question,
+      answer: e.answer,
+      remaining,
+    });
     const prompt = this.rooms.buildPrompt(room.roomId, taskBody, task.sessionId, undefined, undefined, {
       taskId: task.id,
       dependsOn: task.dependsOn,
@@ -1595,6 +1567,7 @@ export class ConductorOrchestrator {
     }
     if (tasks.length === 0) {
       flow.phase = "done";
+      flow.finishedAt = Date.now();
       this.emitFlow?.(flow.roomId);
       const answer = conductorOutput.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
       this.notice({
@@ -1788,6 +1761,7 @@ export class ConductorOrchestrator {
           message: `所有子任务均失败（${names.join("、")}），无法汇总`,
         });
         flow.phase = "done";
+        flow.finishedAt = Date.now();
         this.emitFlow?.(flow.roomId);
       }
       return;
@@ -1848,45 +1822,13 @@ export class ConductorOrchestrator {
           );
         }
       }
-      const taskBody = [
-        ...(upstreamLines.length > 0
-          ? [
-              "前置任务结果（这是你的直接输入，请在此基础上继续）：",
-              ...upstreamLines,
-              "",
-            ]
-          : []),
-        `指挥家派发给你的子任务（id: ${t.id}）：${t.task}`,
-        ...this.clarificationQaLines(flow),
-        ...(flow.supplements.length > 0
-          ? [
-              "",
-              "用户在执行中补充了要求（请遵循）：",
-              ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
-            ]
-          : []),
-        "",
-        "你拥有该子任务的端到端责任；若当前 Agent 支持 Fusion 或内部子代理，可用于本任务内的探索、实现和验证，但不要把工作再次分派给群聊中的其他成员。",
-        "",
-        "协作约定：",
-        "- 如遇阻塞需要他人关键信息，在输出末尾附一个求助块并结束本轮，Hub 会把回复转回给你后继续；",
-        '  ```json',
-        '  {"help":{"to":"成员名/id 或 \\"user\\"（求助用户）","question":"具体问题"}}',
-        '  ```',
-        "- 若你的产出是对其他成员任务的独立验证，请在报告 JSON 中附加 verify 数组；evidence 必须基于被验证任务提交的 baseline/diff/verifyCommand 进行实际复核；command/exitCode/stdout 仅在你确实运行了命令且有工具输出反馈时填写，不要编造——该结论属于成员判断，不代表 Hub 自动执行了检查：",
-        '  ```json',
-        '  {"verify":[{"task":"tX","verdict":"pass|fail|partial","evidence":{"summary":"结论","baseline":"修改前代码","diff":"..."}}]}',
-        '  ```',
-        "",
-        "完成子任务后，请在自由文本总结后附带一个 JSON code block 报告你产生的 artifact（修改的文件、执行的命令、测试结果、以及用于他人复核的证据）：",
-        '```json',
-        '{"text":"你的总结","artifacts":[{"type":"file","path":"/path/to/file","summary":"改动摘要"},{"type":"command","summary":"运行的命令和结果"},{"type":"test","summary":"测试结果"}]}',
-        '```',
-        "",
-        "若子任务涉及代码修改，强烈建议在 JSON 中附加可验证字段：baseline（修改前代码/状态）、diff（实际修改）、reproSteps（复现步骤）、verifyCommand（验证命令）。这些会直接进入验收证据，供其他成员或用户复查。",
-        "若报告 verifyCommand，Hub 只会在命令与管理员已预设的检查完全匹配时尝试隔离运行；未提供 verifyCheckId 时还需文件产物。若知道预设 ID，可附加 verifyCheckId；ID 未获批准或与命令不一致不会回退为自动匹配。未获批准的命令仅保留成员自报，绝不自动运行。",
-        "如果没有 artifact，可以只输出文本，不必输出 JSON。",
-      ].join("\n");
+      const taskBody = workerTaskPrompt({
+        taskId: t.id,
+        task: t.task,
+        upstreamLines,
+        qaLines: this.clarificationQaLines(flow),
+        supplements: flow.supplements.map((s) => s.text),
+      });
       const prompt = this.rooms.buildPrompt(
         room.roomId,
         taskBody,
@@ -1996,7 +1938,7 @@ export class ConductorOrchestrator {
     flow.tasks.set(taskId, {
       id: taskId,
       sessionId: reviewer.sessionId,
-      task: `独立复核（质疑性验证）：请逐项审查已完成任务 ${doneIds.join("、")} 的交付内容与自报验证证据，主动挑战其假设、寻找遗漏的边界与负面用例；对每个被复核任务在报告 JSON 中输出结构化 verify 条目，evidence 必须基于该任务提交的 baseline/diff/verifyCommand 实际复核，仅当你确实运行过命令且有工具输出反馈时才填写 command/exitCode/stdout，不得编造执行记录或正向结论。`,
+      task: peerReviewTaskDescription(doneIds),
       dependsOn: doneIds,
       status: "pending",
       iteration: flow.iteration,
@@ -2027,6 +1969,7 @@ export class ConductorOrchestrator {
     if (room.conductorId && (!this.agent.has || this.agent.has(room.conductorId))) return false;
     this.notice({ roomId: flow.roomId, message: "主持人会话已失效，本次编排终止" });
     flow.phase = "done";
+    flow.finishedAt = Date.now();
     this.emitFlow?.(flow.roomId);
     return true;
   }
@@ -2072,49 +2015,20 @@ export class ConductorOrchestrator {
     }
     const hasChecks = [...flow.tasks.values()].some((t) => t.automaticCheck);
     const unverifiedDone = this.unverifiedDoneIds(flow);
-    const criteria = flow.acceptanceCriteria.length > 0
-      ? flow.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
-      : "（未提供，按用户目标自行判断）";
-    const prompt = [
-      `你是群聊「${room.name}」的指挥家。`,
-      "",
-      `原始目标：${flow.goal || "（未记录）"}`,
-      "",
-      "验收标准：",
-      criteria,
-      "",
-      `第 ${flow.iteration}/${flow.maxIterations} 轮子任务已全部完成，结果如下：`,
-      ...lines,
-      ...this.clarificationQaLines(flow),
-      ...(flow.supplements.length > 0
-        ? [
-            "",
-            "用户在执行中补充的要求（验收时请一并核查）：",
-            ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
-          ]
-        : []),
-      "",
-      hasChecks
-        ? "注意：成员自报字段不等于隔离检查；退出码0只表示进程退出0，不代表全部验收标准满足；依赖/运行时未包含在源码快照哈希内，请结合证据自行评估可信度。"
-        : "注意：以上结果中的命令、退出码、输出与「独立验证」条目均为成员自报，Hub 并未自动执行任何检查，不可称为自动检查通过，请结合证据自行评估可信度。",
-      ...(unverifiedDone.length > 0
-        ? [
-            `注意：以下任务没有任何独立成员复核记录（${unverifiedDone.join("、")}），其结果均来自任务执行者自报，不得声称已经过独立验证。`,
-          ]
-        : []),
-      "",
-      "请对照验收标准逐条核查以上结果是否已满足目标。",
-      "不要调用任何工具，只输出一个 JSON code block，二选一：",
-      '```json',
-      '{"decision":"complete","reason":"为什么已经满足全部验收标准"}',
-      '```',
-      "或",
-      '```json',
-      '{"decision":"continue","reason":"尚缺什么","tasks":[{"id":"可选","to":"成员 id/名称","task":"明确返工或补充任务","dependsOn":["已有或本轮任务 id"]}]}',
-      '```',
-      "要求：只针对验收缺口派最少的任务，不要重复已完成的工作。",
-      `可派工的成员：${this.buildMemberList(room)}。`,
-    ].join("\n");
+    const prompt = conductorReviewPrompt({
+      roomName: room.name,
+      goal: flow.goal,
+      criteria: flow.acceptanceCriteria,
+      iteration: flow.iteration,
+      maxIterations: flow.maxIterations,
+      resultLines: lines,
+      qaLines: this.clarificationQaLines(flow),
+      supplements: flow.supplements.map((s) => s.text),
+      hasChecks,
+      unverifiedDone,
+      memberList: conductorMemberList(room.members, room.conductorId),
+      openTopics: this.openTopicsFor(room),
+    });
     try {
       await this.sendPrompt(flow.roomId, room.conductorId!, prompt);
     } catch (err) {
@@ -2222,50 +2136,22 @@ export class ConductorOrchestrator {
     }
     const hasChecks = [...flow.tasks.values()].some((t) => t.automaticCheck);
     const unverifiedDone = this.unverifiedDoneIds(flow);
-    const promptLines: string[] = [
-      `你是群聊「${room.name}」的指挥家。`,
-      `原始目标：${flow.goal || "（未记录）"}`,
-      `验收标准：${flow.acceptanceCriteria.length > 0 ? flow.acceptanceCriteria.join("；") : "（未提供）"}`,
-      ...(flow.reviewReason ? [`验收结论：${flow.reviewReason}`] : []),
-      hasFailures
-        ? `你之前派发的子任务部分完成、部分失败，结果如下：`
-        : `你之前派发的子任务已全部完成，结果如下：`,
-      ...lines,
-      ...this.clarificationQaLines(flow),
-      ...(flow.supplements.length > 0
-        ? [
-            "",
-            "用户在执行中补充的要求：",
-            ...flow.supplements.map((s) => `- ${s.text.slice(0, 400)}`),
-          ]
-        : []),
-      hasChecks
-        ? "注意：成员自报字段不等于隔离检查；退出码0只表示进程退出0，不代表全部验收标准满足；依赖/运行时未包含在源码快照哈希内，汇总时不要称为自动检查通过。"
-        : "注意：以上结果中的命令、退出码、输出与「独立验证」条目均为成员自报，Hub 并未自动执行任何检查，汇总时不要称为自动检查通过。",
-      ...(unverifiedDone.length > 0
-        ? [
-            `注意：以下任务没有任何独立成员复核记录（${unverifiedDone.join("、")}），其结果均来自任务执行者自报，汇总时不得声称已经过独立验证。`,
-          ]
-        : []),
-      "",
-    ];
-    if (hasFailures) {
-      const failedNames = failedTasks
+    const prompt = conductorSummarizePrompt({
+      roomName: room.name,
+      goal: flow.goal,
+      criteria: flow.acceptanceCriteria,
+      reviewReason: flow.reviewReason,
+      hasFailures,
+      resultLines: lines,
+      qaLines: this.clarificationQaLines(flow),
+      supplements: flow.supplements.map((s) => s.text),
+      hasChecks,
+      unverifiedDone,
+      failedNames: failedTasks
         .map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId)
-        .join("、");
-      promptLines.push(
-        `以下子任务未能完成：${failedNames}。`,
-        "请在汇总中：",
-        "1. 基于已完成的子任务给出可交付的部分成果；",
-        "2. 明确标注哪些部分未完成及其影响；",
-        "3. 建议用户是否需要重新派发失败的部分。",
-        "",
-      );
-    }
-    promptLines.push(
-      "请用简短答复交付：先给结论（完成了什么、是否满足目标），再逐条列出每项验收标准、对应任务 id 及证据来源（成员自报／独立成员复核／Hub 隔离检查），没有明确对应证据时写「未覆盖」；再列未解决或待确认事项（没有则写「无」），最后说明实际复核情况。成员判断与 Hub 隔离检查必须分开表述，对未运行或受阻的检查如实说明；快照过期时也不得称当前版本通过。退出码0只说明该检查进程退出0，不代表该标准或整体目标达标，不得用任务完成数代替验收结论。技术细节和完整输出留在可展开的任务证据中；若修改文件，请引用相关路径。",
-    );
-    const prompt = promptLines.join("\n");
+        .join("、"),
+      openTopics: this.openTopicsFor(room),
+    });
     this.notice({
       roomId: flow.roomId,
       message: hasFailures ? "子任务部分完成，指挥家降级汇总中…" : "子任务全部完成，指挥家汇总中…",
@@ -2350,6 +2236,7 @@ export class ConductorOrchestrator {
       startedAt: flow.startedAt,
       ...(flow.cardRowId !== undefined ? { cardRowId: flow.cardRowId } : {}),
       phase: flow.phase,
+      ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
@@ -2472,6 +2359,9 @@ export class ConductorOrchestrator {
         ...(typeof f.challengeScheduled === "boolean" ? { challengeScheduled: f.challengeScheduled } : {}),
         ...(typeof f.challengeTaskId === "string" && f.challengeTaskId
           ? { challengeTaskId: f.challengeTaskId }
+          : {}),
+        ...(typeof f.finishedAt === "number" && f.finishedAt > 0
+          ? { finishedAt: f.finishedAt }
           : {}),
         planFormatRetries:
           f.planFormatRetries === 0 || f.planFormatRetries === 1

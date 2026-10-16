@@ -106,6 +106,13 @@ interface Strings {
     val send: String
     val queueCountFmt: String
     val queueClearHint: String
+    val personaCardLabel: String
+    val personaFieldPersona: String
+    val personaFieldTone: String
+    val personaFieldBoundaries: String
+    val personaFieldExamples: String
+    val aliasGroupTag: String
+    val topicResolve: String
     val decisionScopeOnce: String
     val decisionScopeTask: String
     val decisionScopeAlways: String
@@ -590,6 +597,13 @@ object ZhStrings : Strings {
     override val send = "发送"
     override val queueCountFmt = "排队 %d 条"
     override val queueClearHint = "点按清空"
+    override val personaCardLabel = "人设卡"
+    override val personaFieldPersona = "人设（persona）"
+    override val personaFieldTone = "语气风格"
+    override val personaFieldBoundaries = "边界/不做的事"
+    override val personaFieldExamples = "示例"
+    override val aliasGroupTag = "别名组"
+    override val topicResolve = "标记已结"
     override val decisionScopeOnce = "仅一次"
     override val decisionScopeTask = "本任务"
     override val decisionScopeAlways = "始终"
@@ -1082,6 +1096,13 @@ object EnStrings : Strings {
     override val send = "Send"
     override val queueCountFmt = "%d queued"
     override val queueClearHint = "tap to clear"
+    override val personaCardLabel = "Persona card"
+    override val personaFieldPersona = "Persona"
+    override val personaFieldTone = "Tone"
+    override val personaFieldBoundaries = "Boundaries"
+    override val personaFieldExamples = "Examples"
+    override val aliasGroupTag = "alias group"
+    override val topicResolve = "Mark done"
     override val decisionScopeOnce = "Once"
     override val decisionScopeTask = "This task"
     override val decisionScopeAlways = "Always"

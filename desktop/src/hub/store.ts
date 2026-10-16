@@ -10,6 +10,7 @@ import type {
   ContextUsage,
   ElicitationField,
   DecisionMeta,
+  PersonaCard,
   ElicitationValue,
   EventInfo,
   FlowArtifact,
@@ -171,7 +172,7 @@ interface Actions {
     memberIds: string[],
     mode: string,
     config?: RoomModeConfig,
-    memberRoles?: Record<string, string>,
+    memberRoles?: Record<string, string | PersonaCard>,
   ): Promise<void>;
   updateRoom(
     room: RoomInfo,
@@ -179,7 +180,7 @@ interface Actions {
     memberIds: string[],
     mode: string,
     config?: RoomModeConfig,
-    memberRoles?: Record<string, string>,
+    memberRoles?: Record<string, string | PersonaCard>,
   ): Promise<void>;
 
   openChat(session: SessionInfo, anchorAt?: number): void;
@@ -843,6 +844,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
               text: String(e.text ?? ""),
               detail: String(e.detail ?? ""),
               at: typeof e.at === "number" ? e.at : 0,
+              type: typeof e.type === "string" ? e.type : undefined,
+              owner: typeof e.owner === "string" ? e.owner : undefined,
+              status: typeof e.status === "string" ? e.status : undefined,
             } as BlackboardInfo;
           });
           const key = `room:${roomId}`;
@@ -1090,11 +1094,21 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!Array.isArray(v) || v.length < 2) return null;
       return [String(v[0]), String(v[1])] as [string, string];
     };
-    const parseMemberRoles = (v: unknown): Record<string, string> | null => {
+    const parseMemberRoles = (v: unknown): Record<string, string | PersonaCard> | null => {
       if (typeof v !== "object" || !v) return null;
-      const out: Record<string, string> = {};
+      const out: Record<string, string | PersonaCard> = {};
       for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-        if (typeof val === "string" && val.trim()) out[k] = val.trim();
+        if (typeof val === "string" && val.trim()) {
+          out[k] = val.trim();
+        } else if (val && typeof val === "object" && !Array.isArray(val)) {
+          const c = val as Record<string, unknown>;
+          const card: PersonaCard = { persona: "" };
+          for (const f of ["persona", "tone", "boundaries", "examples"] as const) {
+            const fv = c[f];
+            if (typeof fv === "string" && fv.trim()) card[f] = fv.trim();
+          }
+          if (card.persona) out[k] = card;
+        }
       }
       return Object.keys(out).length > 0 ? out : null;
     };
@@ -1109,6 +1123,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
       members,
       archived: o.archived === true,
       memberRoles: parseMemberRoles(o.memberRoles),
+      aliases: (() => {
+        const a = o.aliases;
+        if (typeof a !== "object" || !a) return null;
+        const out: Record<string, string[]> = {};
+        for (const [k, ids] of Object.entries(a as Record<string, unknown>)) {
+          if (Array.isArray(ids)) out[k] = ids.map(String).filter(Boolean);
+        }
+        return Object.keys(out).length ? out : null;
+      })(),
       parallelSummarizerId: stringOrNull(o.parallelSummarizerId),
       pipelineOrder: parsePipelineOrder(o.pipelineOrder),
       debateSides: parseDebateSides(o.debateSides),
@@ -2698,6 +2721,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
                 text: String(e.text ?? ""),
                 detail: String(e.detail ?? ""),
                 at: typeof e.at === "number" ? e.at : 0,
+                type: typeof e.type === "string" ? e.type : undefined,
+                owner: typeof e.owner === "string" ? e.owner : undefined,
+                status: typeof e.status === "string" ? e.status : undefined,
               } as BlackboardInfo;
             })
           : get().blackboard;

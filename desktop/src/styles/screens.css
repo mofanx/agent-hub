@@ -548,3 +548,28 @@ html[data-theme="dark"] .seg-control button.active {
 .conn-lastseen {
   color: var(--muted);
 }
+
+/* 成员人设卡编辑表单 */
+.persona-card-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface-2, var(--bg));
+}
+.persona-field {
+  width: 100%;
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface);
+  color: var(--fg);
+}
+.persona-field:focus {
+  border-color: var(--accent);
+  outline: none;
+}

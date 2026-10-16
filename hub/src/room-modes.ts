@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
 import { ConductorOrchestrator, extractTaskResult, newFlowId, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
+import {
+  SELF_MODE_NOTE,
+  autoDecisionPrompt,
+  autoHistorySection,
+  debateJudgePrompt,
+  debateTurnTask,
+  parallelSummarizerPrompt,
+  pipelineStage,
+  type OpenTopicInput,
+} from "./prompts.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
 
@@ -252,6 +262,9 @@ const MODE_LABELS: Record<RuntimeMode, string> = {
   deciding: "决策中",
 };
 
+/** turnGuards 容量上限：正常路径都会清理，超限兜底淘汰最旧（防悬挂会话线性增长） */
+const MAX_TURN_GUARDS = 2000;
+
 export class RoomModeManager {
   /** 编排卡同步钩子：每次 flowUpdate 后调用，参数为 getFlow 视图（可能为 undefined） */
   onFlowCard?: (roomId: string, flow: Record<string, unknown> | undefined) => void;
@@ -364,18 +377,36 @@ export class RoomModeManager {
 
   private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
     this.promptRooms.set(sessionId, roomId);
-    this.noteTurnGuard(sessionId, roomId, content);
-    return this.agent.prompt(sessionId, content);
+    const unguard = this.noteTurnGuard(sessionId, roomId, content);
+    return this.agent.prompt(sessionId, content).catch((err: unknown) => {
+      // 发送即失败（session 未知/忙碌）：不会有 prompt.done/error 事件兜底，就地清理
+      if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
+      unguard();
+      throw err;
+    });
   }
 
-  private noteTurnGuard(sessionId: string, roomId: string, content: string | PromptContent): void {
+  /** 登记回合游标；返回仅在登记未被覆盖时生效的清理函数（供发送失败路径回收） */
+  private noteTurnGuard(
+    sessionId: string,
+    roomId: string,
+    content: string | PromptContent,
+  ): () => void {
     const prev = this.turnGuards.get(sessionId);
-    this.turnGuards.set(sessionId, {
+    const entry = {
       roomId,
       content,
       cursor: this.store?.lastUserEntryId("room", roomId) ?? 0,
       retried: prev?.retried ?? false,
-    });
+    };
+    if (!prev && this.turnGuards.size >= MAX_TURN_GUARDS) {
+      const oldest = this.turnGuards.keys().next().value;
+      if (oldest !== undefined) this.turnGuards.delete(oldest);
+    }
+    this.turnGuards.set(sessionId, entry);
+    return () => {
+      if (this.turnGuards.get(sessionId) === entry) this.turnGuards.delete(sessionId);
+    };
   }
 
   /**
@@ -403,9 +434,11 @@ export class RoomModeManager {
         "room-modes stale",
         `${guard.roomId}:${sessionId} 回合期间上下文已更新，输出作废并按原 prompt 重跑一次`,
       );
-      this.agent.prompt(sessionId, guard.content).catch((err) =>
-        logError("room-modes stale retry", err),
-      );
+      this.agent.prompt(sessionId, guard.content).catch((err) => {
+        // 重跑发送失败不会有 prompt.error 事件兜底，按 prompt 异常收敛（含 turnGuards 清理）
+        logError("room-modes stale retry", err);
+        this.onPromptError(sessionId);
+      });
       return true;
     }
     this.turnGuards.delete(sessionId);
@@ -451,6 +484,18 @@ export class RoomModeManager {
     const flow = this.getFlow(roomId);
     this.broadcast("room.flowUpdate", { roomId, flow });
     this.onFlowCard?.(roomId, flow);
+    // flow 终态归档：本轮 flow 期间开启且仍 open 的话题自动 resolve（幂等，重复触发无副作用）
+    if (flow?.phase === "done" && typeof flow.startedAt === "number") {
+      const until = typeof flow.finishedAt === "number" ? flow.finishedAt : Date.now();
+      const resolved = this.rooms.resolveTopicsSince(roomId, flow.startedAt, until);
+      if (resolved > 0) {
+        this.broadcast("room.blackboardUpdate", {
+          roomId,
+          blackboard: this.rooms.getBlackboard(roomId),
+        });
+        this.notice({ roomId, message: `📌 本轮 ${resolved} 个未结话题已归档为已结` });
+      }
+    }
   }
 
   flowCardRowId(roomId: string): number | undefined {
@@ -965,6 +1010,29 @@ export class RoomModeManager {
       this.clearSubMode(endedRoomId);
     }
     return false;
+  }
+
+  /**
+   * 房间删除/解散：收敛该房间全部编排与回合状态（flow、游标、in-flight 派发登记）。
+   * 不清理 promptRooms/turnGuards 中指向其他房间的条目；在途 prompt 后续 done/error 仍会走正常路径。
+   */
+  onRoomRemoved(roomId: string): void {
+    this.roomSubMode.delete(roomId);
+    this.autoHistory.delete(roomId);
+    this.lastAuto.delete(roomId);
+    for (const [sid, ctx] of this.autoDecisions) {
+      if (ctx.roomId === roomId) this.autoDecisions.delete(sid);
+    }
+    for (const [sid, rid] of this.promptRooms) {
+      if (rid === roomId) this.promptRooms.delete(sid);
+    }
+    for (const [sid, g] of this.turnGuards) {
+      if (g.roomId === roomId) this.turnGuards.delete(sid);
+    }
+    this.parallelFlows.delete(roomId);
+    this.pipelineFlows.delete(roomId);
+    this.debateFlows.delete(roomId);
+    this.conductor.dropRoom(roomId);
   }
 
   /**
@@ -1489,10 +1557,7 @@ export class RoomModeManager {
     const lines = [...flow.results.entries()].map(([sid, out]) => {
       return `- @${this.nameFor(roomId, sid)}: ${out.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
-    const extrasText = flow.extras?.length
-      ? `\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`
-      : "";
-    const promptText = `你是群聊「${room.name}」的汇总者。多位成员就同一问题给出了独立回答：\n${lines.join("\n")}${extrasText}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
+    const promptText = parallelSummarizerPrompt({ roomName: room.name, lines, extras: flow.extras });
     const prompt = this.buildPromptContent(room, promptText, flow.summarizer, { artifactContext: flow.artifactContext });
     // 汇总期间保留活跃快照（summarizing），汇总者完成后才转 done
     flow.summarizing = true;
@@ -1589,16 +1654,15 @@ export class RoomModeManager {
     prevName?: string,
     prevOutput?: string,
   ): string | PromptContent {
-    let task = flow.topic;
-    if (flow.note && stage === 0) task = `${flow.note}\n\n${task}`;
-    let quote = flow.quote;
-    if (prevName && prevOutput !== undefined) {
-      quote = { author: prevName, text: prevOutput };
-      task = `请继续下一阶段处理原始任务：${task}`;
-    }
-    if (flow.extras?.length) {
-      task = `${task}\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`;
-    }
+    const { task, quote } = pipelineStage({
+      topic: flow.topic,
+      stage,
+      note: flow.note,
+      quote: flow.quote,
+      prevName,
+      prevOutput,
+      extras: flow.extras,
+    });
     return this.buildPromptContent(room, task, flow.order[stage]!, { quote, content: flow.content, artifactContext: flow.artifactContext });
   }
 
@@ -1724,17 +1788,17 @@ export class RoomModeManager {
     sideIndex: number,
     opponentOutput?: string,
   ): string | PromptContent {
-    const position = sideIndex === 0 ? "正方" : "反方";
     const author = this.nameFor(room.roomId, flow.sides[sideIndex ^ 1]!);
     const quote = opponentOutput ? { author, text: opponentOutput } : flow.quote;
-    const text = `这是辩论第 ${flow.currentRound}/${flow.rounds} 轮，你是${position}。请就辩题继续阐述观点${
-      opponentOutput ? "并回应对方" : ""
-    }。`;
-    let task = `${text}\n\n辩题：${flow.topic}`;
-    if (flow.note) task = `${flow.note}\n\n${task}`;
-    if (flow.extras?.length) {
-      task = `${task}\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`;
-    }
+    const task = debateTurnTask({
+      topic: flow.topic,
+      round: flow.currentRound,
+      rounds: flow.rounds,
+      sideIndex,
+      hasOpponentOutput: !!opponentOutput,
+      note: flow.note,
+      extras: flow.extras,
+    });
     return this.buildPromptContent(room, task, flow.sides[sideIndex]!, { quote, content: flow.content, artifactContext: flow.artifactContext });
   }
 
@@ -1743,10 +1807,7 @@ export class RoomModeManager {
       const side = o.side === 0 ? "正方" : "反方";
       return `- 第 ${o.round} 轮 ${side}：${o.text.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
-    const extrasText = flow.extras?.length
-      ? `\n\n用户补充要求：\n${flow.extras.map((e) => `- ${e.slice(0, 300)}`).join("\n")}`
-      : "";
-    const text = `你是辩论裁判。辩题：${flow.topic}\n\n辩论记录：\n${lines.join("\n")}${extrasText}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
+    const text = debateJudgePrompt({ topic: flow.topic, lines, extras: flow.extras });
     return this.buildPromptContent(room, text, flow.judge, { artifactContext: flow.artifactContext });
   }
 
@@ -1765,7 +1826,7 @@ export class RoomModeManager {
     }
     this.setSubMode(room.roomId, "self", room.conductorId, undefined);
     this.notice({ roomId: room.roomId, message: `🎙️ 自动选择：主持人独立作答` });
-    const selfNote = "本轮由你直接作答，请直接回复用户消息，不要输出任何 JSON 或模式选择。";
+    const selfNote = SELF_MODE_NOTE;
     const promptOptions: PromptOptions = {
       ...options,
       note: options?.note ? `${options.note}\n\n${selfNote}` : selfNote,
@@ -1794,8 +1855,9 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: `主持人 @${this.nameFor(room.roomId, room.conductorId)} 忙碌中` });
       return { sent: [], mentioned: [], skipped: [room.conductorId] };
     }
-    this.setSubMode(room.roomId, "deciding", room.conductorId, undefined);
-    this.autoDecisions.set(room.conductorId, {
+    const conductorId = room.conductorId;
+    this.setSubMode(room.roomId, "deciding", conductorId, undefined);
+    const autoCtx: AutoDecisionContext = {
       roomId: room.roomId,
       text,
       note: options?.note,
@@ -1803,26 +1865,18 @@ export class RoomModeManager {
       content: options?.content,
       sessionNote: options?.sessionNote,
       artifactContext: options?.artifactContext,
-    });
+    };
+    this.autoDecisions.set(conductorId, autoCtx);
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
-    this.sendPrompt(room.roomId, room.conductorId, prompt).catch((err) => {
+    this.sendPrompt(room.roomId, conductorId, prompt).catch((err) => {
       logError("room-modes auto decision", err);
+      // 发送失败不会有 prompt.done/error 兜底，清掉悬挂决策避免下次 done 误消费
+      if (this.autoDecisions.get(conductorId) === autoCtx) {
+        this.autoDecisions.delete(conductorId);
+      }
     });
-    return { sent: [room.conductorId], mentioned: [], skipped: [] };
-  }
-
-  private formatAutoHistory(roomId: string): string {
-    const list = this.autoHistory.get(roomId) ?? [];
-    if (list.length === 0) return "";
-    const decided = list.filter((e) => e.accepted !== undefined);
-    const accepted = decided.filter((e) => e.accepted).length;
-    const total = decided.length;
-    const recent = list.slice(-5).map((e) => {
-      const mark = e.accepted === true ? "✓" : e.accepted === false ? "✗" : "?";
-      return `- ${mark} ${e.mode}: ${e.reason}`;
-    }).join("\n");
-    return `\n最近 auto 决策反馈：共 ${total} 条，被接受 ${accepted} 条，被覆盖 ${total - accepted} 条。\n${recent}\n`;
+    return { sent: [conductorId], mentioned: [], skipped: [] };
   }
 
   private buildAutoPrompt(
@@ -1831,7 +1885,10 @@ export class RoomModeManager {
     options?: PromptOptions,
   ): string {
     const members = room.members.map((m) => `${m.name} (id: ${m.sessionId})`).join("、");
-    const recent = this.rooms.getBlackboard(room.roomId);
+    // topic 条目不进普通黑板摘要，单独走「未结话题」段
+    const recent = this.rooms
+      .getBlackboard(room.roomId)
+      .filter((e) => (e.type ?? "note") === "note");
     const boardText =
       recent.length > 0
         ? recent
@@ -1845,61 +1902,23 @@ export class RoomModeManager {
     const noteText = options?.note ? `注意：${options.note}\n` : "";
     const sessionNote = options?.sessionNote?.(room.conductorId!);
     const sessionNoteText = sessionNote ? `注意：${sessionNote}\n` : "";
-    return [
-      `你是群聊「${room.name}」的主持人。请根据用户消息和成员信息，选择本轮最合适的协作模式。`,
-      `成员：${members}`,
-      "",
-      "可用模式及含义：",
-      "- mention：用户明确@某人，或问题简单直接，应指定/全部成员独立回答",
-      "- conductor：任务复杂，需要拆解成子任务并派工给不同成员",
-      "- roundrobin：适合轮流发言、按顺序补充，每个问题一人作答",
-      "- parallel：需要多个成员独立给出观点后汇总，适合集思广益",
-      "- pipeline：任务需要按固定顺序串行处理，例如 编码 → 审查 → 测试",
-      "- debate：需要对某一观点进行正反方辩论，最后由裁判总结",
-      "- self：你自己就能直接回答，不需要其他成员",
-      "",
-      "选择原则：成员可能本身具备 Devin Fusion 或内部子代理。仅在需要跨成员独立责任、不同专长、真正并行观点或顺序交接时使用 Hub 多成员模式；单个成员可端到端完成时优先 self/mention，避免双重编排和重复成本。",
-      "",
-      "可拆分性判断（重要）：任务量大不是拆分的理由，子任务可独立执行才是。",
-      "- 可拆分 → parallel/conductor：子任务落在互不共享的文件/模块上、结果可独立验证；",
-      "- 不可拆 → 量大也 self/mention：共享文件/共享类型定义/统一词汇表是收敛点，并行只会产生合并冲突；",
-      "- 不确定 → 保守取 self/mention，并在 reason 中说明理由。",
-      "",
-      "⚠️ 输出要求（极其重要，违反将导致系统故障）：",
-      "1. 只能输出一个 JSON 代码块，不能有任何其他文字",
-      "2. 不要调用任何工具",
-      "3. 不要输出思考过程、解释、前言、总结",
-      "4. JSON 必须包含 mode 字段，值为上述七种模式之一",
-      "",
-      "示例（直接输出，不要模仿思考过程）：",
-      "简单问候 → ```json\n{ \"mode\": \"self\", \"reason\": \"简单对话，主持人直接回答\" }\n```",
-      "复杂编码任务 → ```json\n{ \"mode\": \"conductor\", \"reason\": \"需要拆解为编码和测试子任务\", \"params\": { \"tasks\": [{\"to\":\"成员名\",\"task\":\"具体任务\",\"id\":\"t1\",\"dependsOn\":[]}] } }\n```",
-      "征求意见 → ```json\n{ \"mode\": \"parallel\", \"reason\": \"需要多人独立给出方案后汇总\" }\n```",
-      "",
-      "params 说明（可选，不确定时可省略）：",
-      '- mention: { "targets": ["sessionId", ...] }',
-      '- roundrobin: { "speaker": "sessionId" }',
-      '- parallel: { "summarizer": "sessionId" }',
-      '- pipeline: { "order": ["sessionId", ...] }',
-      '- debate: { "sides": ["sessionId", "sessionId"], "judge": "sessionId", "rounds": 2 }',
-      '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":[],"files":["预计修改的文件，可选"]}] }',
-      '- self: { }',
-      "",
-      "conductor 模式 params 使用约束：",
-      "- `tasks` 中的 `to` 必须是除主持人（你自己）之外的成员 id 或名字；",
-      "- 不要写\"提交\"、\"汇总\"等主持人动作作为 worker task，这些由主持人自动完成；",
-      "- `dependsOn` 只能引用同一 `tasks` 列表里、且排在前面的任务 `id`，不要自引用或引用未定义的任务；",
-      "- 各任务之间应尽量文件级排他，可用 `files` 声明预计修改文件；若两个任务声明了相同文件，系统会自动合并为一个任务。",
-      "",
-      "最近上下文：",
+    const openTopics: OpenTopicInput[] = this.rooms
+      .openTopics(room.roomId)
+      .map((t) => ({
+        ownerName: t.owner ? this.nameFor(room.roomId, t.owner) : undefined,
+        text: t.text,
+      }));
+    return autoDecisionPrompt({
+      roomName: room.name,
+      members,
       boardText,
-      this.formatAutoHistory(room.roomId),
-      `${quoteText}用户消息：${text}`,
+      historyText: autoHistorySection(this.autoHistory.get(room.roomId) ?? []),
+      text,
+      quoteText,
       noteText,
       sessionNoteText,
-      "",
-      "现在请直接输出 JSON 代码块，不要有任何其他内容：",
-    ].join("\n");
+      openTopics,
+    });
   }
 
   private parseAutoDecision(output: string): AutoDecision {

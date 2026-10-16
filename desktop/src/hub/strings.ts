@@ -439,6 +439,17 @@ export interface Strings {
   presenceOnline: string;
   presenceGenerating: string;
   presenceOffline: string;
+  personaCardOption: string;
+  personaFieldPersona: string;
+  personaFieldTone: string;
+  personaFieldBoundaries: string;
+  personaFieldExamples: string;
+  aliasCountFmt: string;
+  topicsOpenLabel: string;
+  topicsResolvedFmt: string;
+  topicOpenTag: string;
+  topicResolvedTag: string;
+  topicResolveLabel: string;
   followUpQueuedHint: string;
   stopGenerateTitle: string;
   sendTitleFmt: string;
@@ -970,6 +981,17 @@ const zh: Strings = {
   presenceOnline: "在线",
   presenceGenerating: "生成中",
   presenceOffline: "离线",
+  personaCardOption: "自定义人设卡…",
+  personaFieldPersona: "人设（必填）",
+  personaFieldTone: "风格（可选）",
+  personaFieldBoundaries: "边界（可选）",
+  personaFieldExamples: "示例（可选）",
+  aliasCountFmt: "%s 名成员",
+  topicsOpenLabel: "未结话题",
+  topicsResolvedFmt: "已结话题 (%s)",
+  topicOpenTag: "进行中",
+  topicResolvedTag: "已结",
+  topicResolveLabel: "标记完成",
   followUpQueuedHint: "已排队，回合结束后按序发送",
   stopGenerateTitle: "停止生成",
   sendTitleFmt: "发送 (%s)",
@@ -1501,6 +1523,17 @@ const en: Strings = {
   presenceOnline: "Online",
   presenceGenerating: "Generating",
   presenceOffline: "Offline",
+  personaCardOption: "Custom persona card…",
+  personaFieldPersona: "Persona (required)",
+  personaFieldTone: "Tone (optional)",
+  personaFieldBoundaries: "Boundaries (optional)",
+  personaFieldExamples: "Examples (optional)",
+  aliasCountFmt: "%s members",
+  topicsOpenLabel: "Open topics",
+  topicsResolvedFmt: "Resolved (%s)",
+  topicOpenTag: "open",
+  topicResolvedTag: "resolved",
+  topicResolveLabel: "Resolve",
   followUpQueuedHint: "Queued — will send in order when idle",
   stopGenerateTitle: "Stop generating",
   sendTitleFmt: "Send (%s)",

@@ -16,7 +16,7 @@ import {
   type ElicitationValue,
   type HubEvent,
 } from "./agent.js";
-import { RoomManager, dedupeName, remapRoomModeConfig, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
+import { RoomManager, dedupeName, remapRoomModeConfig, normalizePersonaValue, parseAliasesParam, parseMemberRolesParam, serializePersonaCard, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
@@ -243,15 +243,10 @@ function parseRoomModeConfig(
     const on = !(rf === false || rf === "false" || rf === "off" || rf === "0" || rf === 0);
     config.relevanceFilter = on;
   }
-  if (params?.memberRoles != null && typeof params.memberRoles === "object") {
-    const roles: Record<string, string> = {};
-    for (const [sid, v] of Object.entries(params.memberRoles as Record<string, unknown>)) {
-      if (all.has(sid) && typeof v === "string" && v.trim()) {
-        roles[sid] = v.trim();
-      }
-    }
-    if (Object.keys(roles).length > 0) config.memberRoles = roles;
-  }
+  const roles = parseMemberRolesParam(params?.memberRoles, all);
+  if (roles) config.memberRoles = roles;
+  const aliases = parseAliasesParam(params?.aliases, all);
+  if (aliases) config.aliases = aliases;
   return config;
 }
 
@@ -1432,7 +1427,11 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     }
     case "role.create": {
       const name = String(req.params?.name ?? "").trim();
-      const persona = String(req.params?.persona ?? "").trim();
+      const rawPersona = req.params?.persona;
+      const parsed = rawPersona === undefined || rawPersona === null || rawPersona === ""
+        ? ""
+        : normalizePersonaValue(rawPersona);
+      const persona = typeof parsed === "string" ? parsed : serializePersonaCard(parsed);
       if (!name || !persona) throw new Error("name and persona required");
       const id = `custom-${Date.now().toString(36)}`;
       const connectionId = req.params?.connectionId
@@ -1564,7 +1563,10 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       modelManager.clearSessionConfig(sessionId);
       store.deleteHistory("session", sessionId);
       const dissolved = rooms.removeMember(sessionId);
-      for (const roomId of dissolved) store.deleteHistory("room", roomId);
+      for (const roomId of dissolved) {
+        roomModeManager.onRoomRemoved(roomId);
+        store.deleteHistory("room", roomId);
+      }
       persistState();
       return { deleted: true, dissolvedRooms: dissolved };
     }
@@ -1595,7 +1597,10 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         store.deleteHistory("session", sessionId);
         dissolved.push(...rooms.removeMember(sessionId));
       }
-      for (const roomId of new Set(dissolved)) store.deleteHistory("room", roomId);
+      for (const roomId of new Set(dissolved)) {
+        roomModeManager.onRoomRemoved(roomId);
+        store.deleteHistory("room", roomId);
+      }
       persistState();
       return { deleted: true, count: uniqueIds.length, dissolvedRooms: [...new Set(dissolved)] };
     }
@@ -1603,6 +1608,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       if (!rooms.get(roomId)) throw new Error(`unknown room: ${roomId}`);
       rooms.delete(roomId);
+      roomModeManager.onRoomRemoved(roomId);
       store.deleteHistory("room", roomId);
       persistState();
       return { deleted: true };
@@ -1617,6 +1623,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       }
       for (const roomId of uniqueIds) {
         rooms.delete(roomId);
+        roomModeManager.onRoomRemoved(roomId);
         store.deleteHistory("room", roomId);
       }
       persistState();
@@ -1897,6 +1904,38 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         params: { roomId, blackboard: rooms.getBlackboard(roomId) },
       } as HubEvent);
       return { cleared };
+    }
+    case "room.topic.open": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const text = String(req.params?.text ?? "").trim();
+      if (!text) throw new Error("text required");
+      const owner =
+        typeof req.params?.owner === "string" && req.params.owner.trim()
+          ? req.params.owner.trim()
+          : undefined;
+      const topic = rooms.openTopic(roomId, text, owner);
+      if (!topic) throw new Error("open topic failed");
+      broadcast({
+        method: "room.blackboardUpdate",
+        params: { roomId, blackboard: rooms.getBlackboard(roomId) },
+      } as HubEvent);
+      persistState();
+      return { topic };
+    }
+    case "room.topic.resolve": {
+      const roomId = String(req.params?.roomId ?? "");
+      const id = String(req.params?.id ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const resolved = rooms.resolveTopic(roomId, id);
+      broadcast({
+        method: "room.blackboardUpdate",
+        params: { roomId, blackboard: rooms.getBlackboard(roomId) },
+      } as HubEvent);
+      if (resolved) persistState();
+      return { resolved };
     }
     case "room.flow": {
       const roomId = String(req.params?.roomId ?? "");

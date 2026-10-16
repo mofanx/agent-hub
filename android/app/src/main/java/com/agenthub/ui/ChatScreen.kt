@@ -1083,6 +1083,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         val memberMatches = vm.currentRoom!!.members.filter {
                             it.second.startsWith(mentionQuery, ignoreCase = true)
                         }
+                        // @all/@全员 保留字 + 房间自定义别名（hub 侧展开，发送原文不变）
+                        val aliasMatches = (listOf("all", "全员") + vm.currentRoom!!.aliases).distinct()
+                            .filter { it.startsWith(mentionQuery, ignoreCase = true) }
                         val artifactMatches = if (memberMatches.isNotEmpty()) emptyList() else vm.currentArtifacts.filter {
                             it.id.startsWith(mentionQuery, ignoreCase = true) ||
                                     (!it.alias.isNullOrBlank() && it.alias.startsWith(mentionQuery, ignoreCase = true)) ||
@@ -1091,10 +1094,19 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                         val matches = memberMatches.isNotEmpty()
                         DropdownMenu(
-                            expanded = memberMatches.isNotEmpty() || artifactMatches.isNotEmpty(),
+                            expanded = memberMatches.isNotEmpty() || aliasMatches.isNotEmpty() || artifactMatches.isNotEmpty(),
                             onDismissRequest = { },
                             properties = PopupProperties(focusable = false),
                         ) {
+                            aliasMatches.forEach { alias ->
+                                DropdownMenuItem(
+                                    text = { Text("@$alias · ${S.aliasGroupTag}") },
+                                    onClick = {
+                                        val at = input.lastIndexOf('@')
+                                        input = input.substring(0, at) + "@$alias "
+                                    },
+                                )
+                            }
                             if (matches) {
                                 memberMatches.forEach { (sid, name) ->
                                     val display = vm.sessionName(sid)
@@ -4370,9 +4382,45 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                     )
                 }
             }
+            // 未结话题：type==topic 且 open 置顶可点关闭，resolved 置灰折叠
+            // open 在前，resolved 沉底置灰
+            val topicEntries = entries.filter { it.type == "topic" }
+                .sortedBy { it.status == "resolved" }
             if (!collapsed) {
                 Spacer(Modifier.height(4.dp))
-                entries.reversed().forEach { entry ->
+                if (topicEntries.isNotEmpty()) {
+                    topicEntries.forEach { t ->
+                        val resolved = t.status == "resolved"
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                        ) {
+                            Text(
+                                "${if (resolved) "✓" else "◌"} ${t.text}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (resolved) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                        else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (!resolved) {
+                                Text(
+                                    S.topicResolve,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clickable { vm.resolveTopic(t.id) }
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(2.dp))
+                }
+                entries.reversed().filter { it.type != "topic" }.forEach { entry ->
                     Column(
                         Modifier
                             .padding(vertical = 3.dp)

@@ -73,6 +73,12 @@ export interface BlackboardInfo {
   text: string;
   detail: string;
   at: number;
+  /** note（默认）/ topic（话题工作记忆） */
+  type?: string;
+  /** topic 开启者：成员 sessionId/展示名，"user" 表示用户 */
+  owner?: string;
+  /** topic 状态：open（默认）/ resolved */
+  status?: string;
 }
 
 export interface FileTreeRoot {
@@ -227,8 +233,10 @@ export interface RoomInfo {
   activeSpeaker?: string | null;
   subMode?: string | null;
   reason?: string | null;
-  /** 成员角色卡：sessionId -> persona */
-  memberRoles?: Record<string, string> | null;
+  /** 成员角色卡：sessionId -> persona（字符串或 PersonaCard 结构卡） */
+  memberRoles?: Record<string, string | PersonaCard> | null;
+  /** @mention 集合别名：别名 -> sessionId 列表（含内置保留字 @all/@全员 由 hub 展开） */
+  aliases?: Record<string, string[]> | null;
   /** 并行/集思广益：汇总者 sessionId */
   parallelSummarizerId?: string | null;
   /** 流水线：成员执行顺序 */
@@ -435,6 +443,14 @@ export type DecisionMeta = {
   grantKey?: string;
   auto?: boolean;
   at: number;
+};
+
+/** 成员人设结构卡（hub PersonaCard 镜像，persona 必填其余可选） */
+export type PersonaCard = {
+  persona: string;
+  tone?: string;
+  boundaries?: string;
+  examples?: string;
 };
 
 export type Screen = "connect" | "sessions" | "chat" | "room" | "settings" | "schedule";

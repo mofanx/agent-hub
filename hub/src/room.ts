@@ -12,14 +12,92 @@ export type RoomMode =
   | "debate"
   | "auto";
 
+export type PersonaCard = {
+  persona: string;
+  tone?: string | undefined;
+  boundaries?: string | undefined;
+  examples?: string | undefined;
+};
+
+export const PERSONA_PROMPT_LIMIT = 600;
+
+/** memberRoles 值解析：字符串直通；对象按 PersonaCard 字段白名单清洗；非法值抛错 */
+export function normalizePersonaValue(raw: unknown): string | PersonaCard {
+  if (typeof raw === "string") return raw.trim();
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>;
+    const card: PersonaCard = { persona: "" };
+    for (const f of ["persona", "tone", "boundaries", "examples"] as const) {
+      const v = o[f];
+      if (typeof v === "string" && v.trim()) card[f] = v.trim();
+    }
+    if (!card.persona) throw new Error("persona card requires a non-empty persona");
+    return card;
+  }
+  throw new Error("persona must be a string or a persona card object");
+}
+
+/** PersonaCard 序列化为注入 prompt 的文本：persona → 风格 → 边界 → 示例，总长 ≤600 逐段截断 */
+export function serializePersonaCard(card: PersonaCard): string {
+  const segs: string[] = [];
+  if (card.persona?.trim()) segs.push(card.persona.trim());
+  if (card.tone?.trim()) segs.push(`风格: ${card.tone.trim()}`);
+  if (card.boundaries?.trim()) segs.push(`边界: ${card.boundaries.trim()}`);
+  if (card.examples?.trim()) segs.push(`示例: ${card.examples.trim()}`);
+  let out = "";
+  for (const seg of segs) {
+    const budget = PERSONA_PROMPT_LIMIT - out.length - (out ? 1 : 0);
+    if (budget <= 0) break;
+    out += (out ? "\n" : "") + seg.slice(0, budget);
+  }
+  return out;
+}
+
+/** room.create/update 的 memberRoles 参数：同时接受字符串与 PersonaCard 对象形态 */
+export function parseMemberRolesParam(
+  raw: unknown,
+  memberIds: ReadonlySet<string>,
+): Record<string, string | PersonaCard> | undefined {
+  if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const roles: Record<string, string | PersonaCard> = {};
+  for (const [sid, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!memberIds.has(sid)) continue;
+    if (typeof v === "string" && !v.trim()) continue;
+    roles[sid] = normalizePersonaValue(v);
+  }
+  return Object.keys(roles).length > 0 ? roles : undefined;
+}
+
+/** room.create/update 的 aliases 参数：Record<别名, sessionId[]>，非成员 id 丢弃，单层不递归 */
+export function parseAliasesParam(
+  raw: unknown,
+  memberIds: ReadonlySet<string>,
+): Record<string, string[]> | undefined {
+  if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const aliases: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = k.replace(/^@+/, "").trim();
+    if (!key || !Array.isArray(v)) continue;
+    const ids = [...new Set(v.map((s) => String(s)).filter((sid) => memberIds.has(sid)))];
+    if (ids.length > 0) aliases[key] = ids;
+  }
+  return Object.keys(aliases).length > 0 ? aliases : undefined;
+}
+
 export type Room = {
   roomId: string;
   name: string;
   mode: RoomMode;
   conductorId?: string | undefined;
   members: { sessionId: string; name: string }[];
-  /** 成员角色卡：sessionId -> roleId 或自定义 persona */
-  memberRoles?: Record<string, string> | undefined;
+  /** 成员角色卡：sessionId -> roleId / persona 文本 / PersonaCard */
+  memberRoles?: Record<string, string | PersonaCard> | undefined;
+  /** @mention 集合别名：别名 -> sessionId 列表（内置保留字 @all/@全员 恒为全员） */
+  aliases?: Record<string, string[]> | undefined;
   /** 轮询模式：当前轮到第几个成员 */
   roundRobinIndex?: number | undefined;
   /** 流水线模式：成员执行顺序，未设置则按 members 顺序 */
@@ -53,11 +131,24 @@ export type RoomModeConfig = {
   debateJudge?: string | undefined;
   debateRounds?: number | undefined;
   maxRounds?: number | undefined;
-  memberRoles?: Record<string, string> | undefined;
+  memberRoles?: Record<string, string | PersonaCard> | undefined;
+  aliases?: Record<string, string[]> | undefined;
   relevanceFilter?: boolean | undefined;
 };
 
-export type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
+export type BlackboardEntry = {
+  id: string;
+  from: string;
+  text: string;
+  detail: string;
+  at: number;
+  /** note（默认，成员输出摘要）/ topic（话题工作记忆，供编排侧跟踪） */
+  type?: "note" | "topic" | undefined;
+  /** topic 开启者：成员 sessionId 或展示名，"user" 表示用户 */
+  owner?: string | undefined;
+  /** topic 状态：open（默认）/ resolved；note 不使用 */
+  status?: "open" | "resolved" | undefined;
+};
 
 /** 展示名消歧：重名时自动追加 (2)/(3) 后缀而非拒绝——id 才是唯一键 */
 export function dedupeName(name: string, taken: (n: string) => boolean): string {
@@ -91,6 +182,16 @@ export function remapRoomModeConfig(
           Object.entries(source.memberRoles)
             .map(([sid, persona]) => [idMap.get(sid), persona])
             .filter(([sid]) => !!sid),
+        )
+      : undefined,
+    aliases: source.aliases
+      ? Object.fromEntries(
+          Object.entries(source.aliases)
+            .map(([key, ids]) => [
+              key,
+              ids.map((sid) => idMap.get(sid)).filter((sid): sid is string => !!sid),
+            ] as [string, string[]])
+            .filter(([, ids]) => ids.length > 0),
         )
       : undefined,
   };
@@ -281,6 +382,7 @@ export class RoomManager {
       conductorId,
       members,
       memberRoles: config?.memberRoles,
+      aliases: config?.aliases,
       roundRobinIndex: 0,
       parallelSummarizerId: config?.parallelSummarizerId,
       pipelineOrder: config?.pipelineOrder,
@@ -390,6 +492,12 @@ export class RoomManager {
         room.blackboard = room.blackboard!.filter((b) => b.id !== id);
         return;
       }
+      if (p.op === "resolve") {
+        const id = String(p.id ?? "");
+        const entry = room.blackboard!.find((b) => b.id === id);
+        if (entry) entry.status = "resolved";
+        return;
+      }
       const entry = p.entry as Record<string, unknown> | undefined;
       if (entry) {
         const id = String(entry.id);
@@ -400,6 +508,15 @@ export class RoomManager {
           text: String(entry.text),
           detail: String(entry.detail),
           at: Number(entry.at),
+          ...(entry.type === "topic" || entry.type === "note"
+            ? { type: entry.type }
+            : {}),
+          ...(typeof entry.owner === "string" && entry.owner
+            ? { owner: entry.owner }
+            : {}),
+          ...(entry.status === "resolved" || entry.status === "open"
+            ? { status: entry.status }
+            : {}),
         });
         if (room.blackboard!.length > BLACKBOARD_LIMIT) room.blackboard!.shift();
       }
@@ -571,6 +688,7 @@ export class RoomManager {
     room.mode = mode;
     room.members = members;
     room.memberRoles = config?.memberRoles;
+    room.aliases = config?.aliases;
     room.conductorId = conductorId;
     room.parallelSummarizerId = config?.parallelSummarizerId;
     room.pipelineOrder = config?.pipelineOrder;
@@ -600,12 +718,35 @@ export class RoomManager {
     }
   }
 
-  /** 解析 @mention，返回目标 sessionId 列表；无 mention 时返回全部成员 */
+  /** 解析 @mention，返回目标 sessionId 列表；无 mention 时返回全部成员。
+   *  内置保留字 @all/@全员 与 room.aliases 自定义别名做单层展开，别名优先于同名成员名。 */
   route(roomId: string, text: string): { targets: string[]; mentioned: string[] } {
     const room = this.rooms.get(roomId);
     if (!room) return { targets: [], mentioned: [] };
+    const memberIds = new Set(room.members.map((m) => m.sessionId));
+    const matchedAliasNames = new Set<string>();
+    const expanded = new Set<string>();
+    if (/@all(?![\w-])|@全员(?![\w-])/i.test(text)) {
+      matchedAliasNames.add("all");
+      matchedAliasNames.add("全员");
+      for (const id of memberIds) expanded.add(id);
+    }
+    for (const [rawKey, ids] of Object.entries(room.aliases ?? {})) {
+      const key = rawKey.replace(/^@+/, "").trim();
+      if (!key) continue;
+      const re = new RegExp(`@${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "i");
+      if (!re.test(text)) continue;
+      matchedAliasNames.add(key.toLowerCase());
+      for (const id of ids) if (memberIds.has(id)) expanded.add(id);
+    }
+    const mentionedSet = new Set(expanded);
+    for (const m of room.members) {
+      if (matchedAliasNames.has(m.name.toLowerCase())) continue;
+      const re = new RegExp(`@${m.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+      if (re.test(text)) mentionedSet.add(m.sessionId);
+    }
     const mentioned = room.members
-      .filter((m) => new RegExp(`@${m.name}(?![\\w-])`).test(text))
+      .filter((m) => mentionedSet.has(m.sessionId))
       .map((m) => m.sessionId);
     return {
       targets: mentioned.length > 0 ? mentioned : room.members.map((m) => m.sessionId),
@@ -1404,14 +1545,20 @@ export class RoomManager {
     text: string,
     excludeSessionId: string,
     quote?: { author: string; text: string },
-    persona?: string,
+    persona?: string | PersonaCard,
     artifactContext?: { taskId?: string; dependsOn?: string[]; refs?: string[] },
   ): string {
     const room = this.rooms.get(roomId)!;
-    const roleId = room.memberRoles?.[excludeSessionId];
-    const resolved = persona ?? (roleId ? this.getPersona?.(roleId) : undefined) ?? roleId;
+    const roleValue = room.memberRoles?.[excludeSessionId];
+    const effective = persona ?? roleValue;
+    const resolved =
+      typeof effective === "object" && effective !== null
+        ? serializePersonaCard(effective)
+        : effective
+          ? (this.getPersona?.(effective) ?? effective)
+          : undefined;
     const board = (room.blackboard ?? [])
-      .filter((e) => e.from !== excludeSessionId)
+      .filter((e) => e.from !== excludeSessionId && (e.type ?? "note") === "note")
       .slice(-BLACKBOARD_LIMIT);
     const artifacts = this.getArtifactsForPrompt(roomId, excludeSessionId, artifactContext);
     const others = room.members
@@ -1511,10 +1658,78 @@ export class RoomManager {
             s === oldSessionId ? newSessionId : s,
           );
         }
+        if (room.aliases) {
+          for (const ids of Object.values(room.aliases)) {
+            for (let i = 0; i < ids.length; i++) {
+              if (ids[i] === oldSessionId) ids[i] = newSessionId;
+            }
+          }
+        }
+        if (room.memberRoles && room.memberRoles[oldSessionId] !== undefined) {
+          room.memberRoles[newSessionId] = room.memberRoles[oldSessionId];
+          delete room.memberRoles[oldSessionId];
+        }
         touched.push(room.roomId);
       }
     }
     return touched;
+  }
+
+  /** 开启一个话题条目（type:"topic"，默认 open） */
+  openTopic(roomId: string, text: string, owner?: string): BlackboardEntry | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    const trimmed = text.trim();
+    if (!trimmed) return undefined;
+    const board = (room.blackboard ??= []);
+    const entry: BlackboardEntry = {
+      id: randomUUID().slice(0, 8),
+      from: owner?.trim() || "user",
+      text: trimmed,
+      detail: trimmed,
+      at: Date.now(),
+      type: "topic",
+      owner: owner?.trim() || "user",
+      status: "open",
+    };
+    board.push(entry);
+    if (board.length > BLACKBOARD_LIMIT) board.shift();
+    this.appendEvent(roomId, "blackboard", { op: "add", entry });
+    return entry;
+  }
+
+  /** 标记话题已结：不删条目只置 status */
+  resolveTopic(roomId: string, id: string): boolean {
+    const room = this.rooms.get(roomId);
+    const entry = room?.blackboard?.find((e) => e.id === id);
+    if (!entry || (entry.type ?? "note") !== "topic") return false;
+    if (entry.status === "resolved") return false;
+    entry.status = "resolved";
+    this.appendEvent(roomId, "blackboard", { op: "resolve", id });
+    return true;
+  }
+
+  /** 仍 open 的话题（按开启顺序，最多 10 条） */
+  openTopics(roomId: string): BlackboardEntry[] {
+    const room = this.rooms.get(roomId);
+    return (room?.blackboard ?? [])
+      .filter((e) => (e.type ?? "note") === "topic" && (e.status ?? "open") === "open")
+      .slice(-10);
+  }
+
+  /** flow 结束归档：[sinceAt, untilAt] 窗口内开启且仍 open 的话题置 resolved，返回条数 */
+  resolveTopicsSince(roomId: string, sinceAt: number, untilAt = Date.now()): number {
+    const room = this.rooms.get(roomId);
+    if (!room?.blackboard) return 0;
+    let n = 0;
+    for (const e of room.blackboard) {
+      if ((e.type ?? "note") !== "topic" || (e.status ?? "open") !== "open") continue;
+      if (e.at < sinceAt || e.at > untilAt) continue;
+      e.status = "resolved";
+      this.appendEvent(roomId, "blackboard", { op: "resolve", id: e.id });
+      n++;
+    }
+    return n;
   }
 
   /** 删除黑板上的某条摘要 */
@@ -1545,7 +1760,7 @@ export class RoomManager {
     const text = detail.replace(/\s+/g, " ").slice(0, BLACKBOARD_OUTPUT_LEN).replace(/[\uD800-\uDBFF]$/, "");
     if (!text) return false;
     const board = (room.blackboard ??= []);
-    const entry = { id: randomUUID(), from: sessionName, text, detail, at: Date.now() };
+    const entry: BlackboardEntry = { id: randomUUID(), from: sessionName, text, detail, at: Date.now(), type: "note" };
     board.push(entry);
     if (board.length > BLACKBOARD_LIMIT) board.shift();
     this.appendEvent(roomId, "blackboard", { op: "add", entry });

@@ -2590,3 +2590,33 @@ div.turn-tail {
 .presence-dot.online { background: var(--success); }
 .presence-dot.generating { background: var(--accent); }
 .presence-dot.offline { background: var(--muted); opacity: 0.4; }
+
+/* 黑板话题区（openTopics 工作记忆） */
+.topic-section { margin-bottom: 6px; }
+.topic-section-head {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 0 2px;
+}
+.resolved-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 4px 0 2px;
+}
+.topic-item .topic-tag {
+  font-size: 0.66rem;
+  border-radius: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.topic-item.resolved { opacity: 0.55; }
+.topic-item.resolved .topic-tag {
+  border-color: var(--muted);
+  color: var(--muted);
+}

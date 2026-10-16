@@ -4,7 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { RoomManager, dedupeName, remapRoomModeConfig, type Room } from "./room.js";
+import {
+  RoomManager,
+  dedupeName,
+  remapRoomModeConfig,
+  normalizePersonaValue,
+  serializePersonaCard,
+  parseMemberRolesParam,
+  parseAliasesParam,
+  PERSONA_PROMPT_LIMIT,
+  type Room,
+} from "./room.js";
 import { lostReplyAction, Store } from "./store.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
@@ -899,6 +909,7 @@ describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {
       maxRounds: undefined,
       relevanceFilter: undefined,
       memberRoles: undefined,
+      aliases: undefined,
     });
   });
 });
@@ -931,5 +942,342 @@ describe("nameTaken 归档名占坑", () => {
     rooms.create("team (2)", [{ sessionId: "s3", name: "c" }]);
     assert.equal(dedupeName("team", taken), "team (3)", "递增直到空位");
     assert.equal(dedupeName("team", (n) => rooms.nameTaken(n, r2.roomId)), "team", "自身排除时原名可用");
+  });
+});
+
+describe("route 集合别名", () => {
+  const makeRoom = (rooms: RoomManager, aliases?: Record<string, string[]>) =>
+    rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "alice" },
+        { sessionId: "s2", name: "bob" },
+        { sessionId: "s3", name: "carol" },
+      ],
+      "mention",
+      aliases ? { aliases } : undefined,
+    );
+
+  it("@all 展开为全部成员", () => {
+    const rooms = new RoomManager();
+    const room = makeRoom(rooms);
+    const r = rooms.route(room.roomId, "@all 看一下");
+    assert.deepEqual(r.mentioned, ["s1", "s2", "s3"]);
+    assert.deepEqual(r.targets, ["s1", "s2", "s3"]);
+  });
+
+  it("@all 大小写不敏感，@全员 中文保留字同样生效", () => {
+    const rooms = new RoomManager();
+    const room = makeRoom(rooms);
+    for (const t of ["@ALL hi", "@All hi", "@全员 hi"]) {
+      const r = rooms.route(room.roomId, t);
+      assert.deepEqual(r.mentioned, ["s1", "s2", "s3"], t);
+    }
+    const noHit = rooms.route(room.roomId, "@allow hi");
+    assert.deepEqual(noHit.mentioned, []);
+  });
+
+  it("自定义别名组命中子集，未展开成员不派发（SILENT 语义一致）", () => {
+    const rooms = new RoomManager();
+    const room = makeRoom(rooms, { 后端组: ["s1", "s2"] });
+    const r = rooms.route(room.roomId, "@后端组 评审一下");
+    assert.deepEqual(r.mentioned, ["s1", "s2"]);
+    assert.deepEqual(r.targets, ["s1", "s2"]);
+  });
+
+  it("别名优先于同名成员：成员名撞别名时只展开别名", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "alice" },
+        { sessionId: "s2", name: "bob" },
+        { sessionId: "s3", name: "后端组" },
+      ],
+      "mention",
+      { aliases: { 后端组: ["s1"] } },
+    );
+    const r = rooms.route(room.roomId, "@后端组 来");
+    assert.deepEqual(r.mentioned, ["s1"], "成员『后端组』被别名遮蔽");
+    assert.deepEqual(r.targets, ["s1"]);
+  });
+
+  it("保留字优先：成员名为 all 时 @all 仍展开全员（该成员无法被单独点名）", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "all" },
+        { sessionId: "s2", name: "bob" },
+      ],
+      "mention",
+    );
+    const r = rooms.route(room.roomId, "@all hi");
+    assert.deepEqual(r.mentioned, ["s1", "s2"]);
+  });
+
+  it("别名值单层解析不递归，非成员 id 丢弃", () => {
+    const rooms = new RoomManager();
+    const room = makeRoom(rooms, { a组: ["s1"], b组: ["a组", "s2", "s9"] });
+    const r = rooms.route(room.roomId, "@b组 hi");
+    assert.deepEqual(r.mentioned, ["s2"], "别名值里的别名不再展开，未知 id s9 丢弃");
+  });
+
+  it("别名命中 + 普通 @点名 可叠加", () => {
+    const rooms = new RoomManager();
+    const room = makeRoom(rooms, { g: ["s1"] });
+    const r = rooms.route(room.roomId, "@g @carol 一起");
+    assert.deepEqual(r.mentioned, ["s1", "s3"]);
+  });
+
+  it("update 可设置/清空 aliases", () => {
+    const rooms = new RoomManager();
+    const room = makeRoom(rooms);
+    const members = room.members.map((m) => ({ ...m }));
+    rooms.update(room.roomId, "team", members, "mention", { aliases: { g: ["s1"] } });
+    assert.deepEqual(rooms.get(room.roomId)!.aliases, { g: ["s1"] });
+    assert.deepEqual(rooms.route(room.roomId, "@g x").targets, ["s1"]);
+    rooms.update(room.roomId, "team", members, "mention", {});
+    assert.equal(rooms.get(room.roomId)!.aliases, undefined);
+    const r = rooms.route(room.roomId, "@g x");
+    assert.deepEqual(r.mentioned, []);
+  });
+});
+
+describe("parseAliasesParam / parseMemberRolesParam", () => {
+  const members = new Set(["s1", "s2", "s3"]);
+
+  it("aliases 解析：key 去 @ 前缀、值过滤非成员、空组丢弃", () => {
+    const out = parseAliasesParam(
+      { "@后端组": ["s1", "s2", "s9"], 空组: ["s9"], 非数组: "s1" },
+      members,
+    );
+    assert.deepEqual(out, { 后端组: ["s1", "s2"] });
+  });
+
+  it("aliases 非对象/全无效时返回 undefined", () => {
+    assert.equal(parseAliasesParam("x", members), undefined);
+    assert.equal(parseAliasesParam(["a"], members), undefined);
+    assert.equal(parseAliasesParam({ g: [] }, members), undefined);
+    assert.equal(parseAliasesParam(undefined, members), undefined);
+  });
+
+  it("memberRoles 双格式：字符串直通，对象白名单清洗", () => {
+    const out = parseMemberRolesParam(
+      {
+        s1: "  你是产品经理 ",
+        s2: { persona: "后端", tone: "简洁", junk: 1, tone2: "x" },
+        s9: "not-member",
+        s3: "   ",
+      },
+      members,
+    );
+    assert.deepEqual(out, {
+      s1: "你是产品经理",
+      s2: { persona: "后端", tone: "简洁" },
+    });
+  });
+
+  it("memberRoles 非法值报错：数字、数组、缺 persona 的对象", () => {
+    assert.throws(() => parseMemberRolesParam({ s1: 42 }, members));
+    assert.throws(() => parseMemberRolesParam({ s1: ["x"] }, members));
+    assert.throws(() => parseMemberRolesParam({ s1: null }, members));
+    assert.throws(() => parseMemberRolesParam({ s1: { tone: "x" } }, members));
+  });
+});
+
+describe("PersonaCard", () => {
+  it("normalizePersonaValue：字符串兜底为原文，对象按字段清洗", () => {
+    assert.equal(normalizePersonaValue("  hi "), "hi");
+    assert.deepEqual(
+      normalizePersonaValue({ persona: "P", tone: "T", boundaries: "B", examples: "E", x: 1 }),
+      { persona: "P", tone: "T", boundaries: "B", examples: "E" },
+    );
+  });
+
+  it("serializePersonaCard：按 persona→风格→边界→示例 顺序拼接并带标签", () => {
+    const text = serializePersonaCard({
+      persona: "P",
+      tone: "T",
+      boundaries: "B",
+      examples: "E",
+    });
+    assert.equal(text, "P\n风格: T\n边界: B\n示例: E");
+  });
+
+  it("serializePersonaCard：总长截断至 PERSONA_PROMPT_LIMIT", () => {
+    const long = "x".repeat(700);
+    const text = serializePersonaCard({ persona: long, tone: "T", examples: "E" });
+    assert.ok(text.length <= PERSONA_PROMPT_LIMIT, `${text.length} <= ${PERSONA_PROMPT_LIMIT}`);
+    assert.ok(!text.includes("示例"), "超出预算的后续段被整体丢弃");
+    const head = serializePersonaCard({ persona: "P", tone: "y".repeat(700) });
+    assert.ok(head.startsWith("P\n风格: "));
+    assert.ok(head.length <= PERSONA_PROMPT_LIMIT);
+  });
+
+  it("buildPrompt 注入 PersonaCard 序列化结果", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }], "mention", {
+      memberRoles: {
+        s1: { persona: "你是后端", tone: "简洁", boundaries: "不碰前端", examples: "示例代码" },
+      },
+    });
+    const prompt = rooms.buildPrompt(room.roomId, "干活", "s1");
+    assert.ok(prompt.includes("你的角色设定：你是后端\n风格: 简洁\n边界: 不碰前端\n示例: 示例代码"));
+  });
+
+  it("memberRoles 对象形态随房间 JSON 序列化往返不丢", () => {
+    const rooms = new RoomManager();
+    const card = { persona: "P", tone: "T", boundaries: "B", examples: "E" };
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }], "mention", {
+      memberRoles: { s1: card },
+      aliases: { g: ["s1"] },
+    });
+    const revived = JSON.parse(JSON.stringify(room)) as Room;
+    assert.deepEqual(revived.memberRoles, { s1: card });
+    assert.deepEqual(revived.aliases, { g: ["s1"] });
+    const rooms2 = new RoomManager();
+    rooms2.import(revived);
+    const prompt = rooms2.buildPrompt(room.roomId, "hi", "s1");
+    assert.ok(prompt.includes("风格: T"));
+    assert.deepEqual(rooms2.route(room.roomId, "@g x").targets, ["s1"]);
+  });
+
+  it("remapRoomModeConfig：memberRoles 对象保留、aliases 按 idMap 重映射", () => {
+    const idMap = new Map([
+      ["s1", "n1"],
+      ["s2", "n2"],
+    ]);
+    const cfg = remapRoomModeConfig(
+      {
+        memberRoles: { s1: { persona: "P", tone: "T" }, s2: "plain", s9: "gone" },
+        aliases: { g: ["s1", "s9"], 空: ["s9"] },
+      },
+      idMap,
+    );
+    assert.deepEqual(cfg.memberRoles, { n1: { persona: "P", tone: "T" }, n2: "plain" });
+    assert.deepEqual(cfg.aliases, { g: ["n1"] }, "全失效的别名组丢弃");
+  });
+});
+
+describe("openTopics 话题工作记忆", () => {
+  it("openTopic/resolveTopic 保留 type/owner/status，resolve 不删条目", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+    ]);
+    const topic = rooms.openTopic(room.roomId, "  接口选型待定  ", "s1")!;
+    assert.equal(topic.type, "topic");
+    assert.equal(topic.owner, "s1");
+    assert.equal(topic.status, "open");
+    assert.equal(topic.text, "接口选型待定");
+    assert.equal(topic.from, "s1");
+    assert.equal(topic.detail, "接口选型待定");
+
+    const board = rooms.getBlackboard(room.roomId);
+    assert.equal(board.length, 1);
+    assert.equal(board[0]!.type, "topic");
+    assert.equal(board[0]!.owner, "s1");
+
+    assert.equal(rooms.resolveTopic(room.roomId, topic.id), true);
+    const after = rooms.getBlackboard(room.roomId);
+    assert.equal(after.length, 1, "resolve 不删条目");
+    assert.equal(after[0]!.status, "resolved");
+    assert.equal(rooms.resolveTopic(room.roomId, topic.id), false, "重复 resolve 幂等返回 false");
+    assert.equal(rooms.resolveTopic(room.roomId, "missing"), false);
+  });
+
+  it("recordOutput 写 note；resolve 对 note 不生效；openTopics 只列 open topic", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    rooms.recordOutput(room.roomId, "s1", "a1", "成员输出");
+    const note = rooms.getBlackboard(room.roomId)[0]!;
+    assert.equal(note.type, "note");
+    assert.equal(rooms.resolveTopic(room.roomId, note.id), false, "note 不能被 resolve");
+
+    rooms.openTopic(room.roomId, "话题一");
+    const t2 = rooms.openTopic(room.roomId, "话题二", "user")!;
+    rooms.resolveTopic(room.roomId, t2.id);
+    const open = rooms.openTopics(room.roomId);
+    assert.equal(open.length, 1);
+    assert.equal(open[0]!.text, "话题一");
+  });
+
+  it("成员 buildPrompt 黑板段只含 note，不泄漏 topic", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+    ]);
+    rooms.recordOutput(room.roomId, "s2", "a2", "普通笔记");
+    rooms.openTopic(room.roomId, "排期未确认", "user");
+    const prompt = rooms.buildPrompt(room.roomId, "hi", "s1");
+    assert.ok(prompt.includes("普通笔记"));
+    assert.ok(!prompt.includes("排期未确认"), "topic 不进成员黑板段");
+    assert.ok(!prompt.includes("未结话题"), "成员 prompt 无未结话题段");
+  });
+
+  it("黑板序列化与 room_events 回放均保留 type/owner/status", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-topics-"));
+    const store = new Store(dir);
+    try {
+      const rooms = new RoomManager();
+      rooms.setStore(store);
+      const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+      const t1 = rooms.openTopic(room.roomId, "已结话题", "s1")!;
+      rooms.openTopic(room.roomId, "未结话题", "user");
+      rooms.resolveTopic(room.roomId, t1.id);
+
+      // 1) 房间整体序列化往返
+      const rooms2 = new RoomManager();
+      rooms2.setStore(store);
+      const snapshot = JSON.parse(JSON.stringify(room)) as Room;
+      rooms2.import(snapshot);
+      const b2 = rooms2.getBlackboard(room.roomId);
+      assert.equal(b2.length, 2);
+      assert.equal(b2[0]!.type, "topic");
+      assert.equal(b2[0]!.owner, "s1");
+      assert.equal(b2[0]!.status, "resolved");
+      assert.equal(b2[1]!.status, "open");
+      assert.equal(b2[1]!.owner, "user");
+
+      // 2) 仅事件回放（清空内存黑板后由 room_events 重建）
+      const rooms3 = new RoomManager();
+      rooms3.setStore(store);
+      const emptySnap = JSON.parse(JSON.stringify(room)) as Room;
+      emptySnap.blackboard = [];
+      rooms3.import(emptySnap);
+      const b3 = rooms3.getBlackboard(room.roomId);
+      assert.deepEqual(
+        b3.map((e) => ({ type: e.type, owner: e.owner, status: e.status, text: e.text })),
+        [
+          { type: "topic", owner: "s1", status: "resolved", text: "已结话题" },
+          { type: "topic", owner: "user", status: "open", text: "未结话题" },
+        ],
+      );
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolveTopicsSince 只归档时间窗内仍 open 的话题", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const old = rooms.openTopic(room.roomId, "旧话题")!;
+    old.at -= 60_000;
+    const inWin = rooms.openTopic(room.roomId, "窗口内")!;
+    const done = rooms.openTopic(room.roomId, "已结")!;
+    rooms.resolveTopic(room.roomId, done.id);
+    const start = Date.now() - 1_000;
+    const end = Date.now() + 1_000;
+    const n = rooms.resolveTopicsSince(room.roomId, start, end);
+    assert.equal(n, 1);
+    const board = rooms.getBlackboard(room.roomId);
+    assert.equal(board.find((e) => e.id === old.id)!.status, "open", "窗口外不归档");
+    assert.equal(board.find((e) => e.id === inWin.id)!.status, "resolved");
+    assert.equal(board.find((e) => e.id === done.id)!.status, "resolved");
+    assert.equal(rooms.resolveTopicsSince(room.roomId, start, end), 0, "幂等");
   });
 });

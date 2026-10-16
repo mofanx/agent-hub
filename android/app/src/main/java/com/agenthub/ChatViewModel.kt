@@ -336,6 +336,7 @@ data class RoomInfo(
     val activeSpeaker: String? = null,
     val reason: String? = null,
     val memberRoles: Map<String, String>? = null,
+    val aliases: List<String> = emptyList(),
     val parallelSummarizerId: String? = null,
     val pipelineOrder: List<String>? = null,
     val debateSides: Pair<String, String>? = null,
@@ -530,6 +531,8 @@ data class BlackboardEntry(
     val text: String,
     val detail: String,
     val at: Long,
+    val type: String = "note",
+    val status: String = "open",
 )
 
 enum class SessionGroupBy { None, Agent, Cwd }
@@ -2093,7 +2096,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (!config.memberRoles.isNullOrEmpty()) {
                         put("memberRoles", buildJsonObject {
                             config.memberRoles.forEach { (sid, persona) ->
-                                if (persona.isNotBlank()) put(sid, persona)
+                                if (persona.isNotBlank()) put(sid, personaJsonValue(persona))
                             }
                         })
                     }
@@ -2149,7 +2152,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (!config.memberRoles.isNullOrEmpty()) {
                         put("memberRoles", buildJsonObject {
                             config.memberRoles.forEach { (sid, persona) ->
-                                if (persona.isNotBlank()) put(sid, persona)
+                                if (persona.isNotBlank()) put(sid, personaJsonValue(persona))
                             }
                         })
                     }
@@ -2243,9 +2246,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             subMode = o["subMode"]?.jsonPrimitive?.contentOrNull,
             activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.contentOrNull,
             reason = o["reason"]?.jsonPrimitive?.content,
+            aliases = o["aliases"]?.jsonObject?.keys?.toList() ?: emptyList(),
             memberRoles = o["memberRoles"]?.jsonObject?.let { obj ->
                 obj.entries.mapNotNull { (k, v) ->
-                    val persona = v.jsonPrimitive.content
+                    // 值可为字符串或 PersonaCard 对象——对象序列化回 JSON 字符串供编辑对话框双格式解析
+                    val persona = if (v is JsonObject) v.toString() else v.jsonPrimitive.contentOrNull ?: ""
                     if (persona.isNotBlank()) k to persona else null
                 }.toMap()
             },
@@ -2522,7 +2527,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             text = obj["text"]?.jsonPrimitive?.content ?: "",
             detail = obj["detail"]?.jsonPrimitive?.content ?: "",
             at = obj["at"]?.jsonPrimitive?.longOrNull ?: 0,
+            type = obj["type"]?.jsonPrimitive?.contentOrNull ?: "note",
+            status = obj["status"]?.jsonPrimitive?.contentOrNull ?: "open",
         )
+    }
+
+    fun resolveTopic(id: String) {
+        val roomId = currentRoom?.roomId ?: return
+        viewModelScope.launch {
+            runCatching {
+                hub.call("room.topic.resolve", buildJsonObject {
+                    put("roomId", roomId); put("id", id)
+                })
+            }
+        }
     }
 
     private fun parseArtifactInfo(obj: JsonObject): ArtifactInfo {
@@ -2817,6 +2835,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             else -> null
         }
+    }
+
+    /** memberRoles 值发送形态：形如 {"persona":...} 的字符串还原为 JSON 对象，否则按纯文本发 */
+    private fun personaJsonValue(persona: String): JsonElement {
+        val el = runCatching { Json.parseToJsonElement(persona) }.getOrNull()
+        // 须是对象且 persona 为字符串——JsonNull/数字形态的 {"persona":null} 不应误判为卡
+        val p = (el as? JsonObject)?.get("persona")
+        return if (p is JsonPrimitive && p.isString) el else JsonPrimitive(persona)
     }
 
     private fun parseDecisionMeta(itemId: Long, data: JsonObject, author: String, at: Long): ChatItem.Decision? {

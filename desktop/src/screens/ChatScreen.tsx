@@ -406,7 +406,20 @@ export function ChatScreen() {
     const members = store.currentRoom.members.filter((m) =>
       m[1].toLowerCase().startsWith(q.toLowerCase()),
     );
-    if (members.length) return { at, kind: "member" as const, members };
+    // 集合别名候选：内置 @all/@全员 + 房间自定义别名（hub 侧单层展开）
+    const aliasList = [
+      "all",
+      "全员",
+      ...Object.keys(store.currentRoom.aliases ?? {}),
+    ]
+      .filter((n) => n.toLowerCase().startsWith(q.toLowerCase()))
+      .map((name) => ({
+        name,
+        count: name === "all" || name === "全员"
+          ? store.currentRoom!.members.length
+          : (store.currentRoom!.aliases?.[name]?.length ?? 0),
+      }));
+    if (members.length || aliasList.length) return { at, kind: "member" as const, members, aliases: aliasList };
     const artifacts = (store.currentArtifacts ?? []).filter((a) =>
       a.id.toLowerCase().startsWith(q.toLowerCase()) ||
       (a.alias && a.alias.toLowerCase().startsWith(q.toLowerCase())) ||
@@ -633,7 +646,7 @@ export function ChatScreen() {
     const active = mention || (slash && slash.length > 0) || (fileRef && fileRef.candidates.length > 0);
     if (active && suggestOpen) {
       const items = mention
-        ? (mention.kind === "member" ? mention.members : mention.artifacts)
+        ? (mention.kind === "member" ? [...mention.members.map((m) => m[1]), ...mention.aliases.map((a) => a.name)] : mention.artifacts)
         : slash && slash.length > 0
           ? slash
           : fileRef?.candidates ?? [];
@@ -651,7 +664,8 @@ export function ChatScreen() {
         e.preventDefault();
         if (mention) {
           if (mention.kind === "member") {
-            insertMention(mention.members[suggestIndex]?.[1] ?? mention.members[0][1]);
+            const names = [...mention.members.map((m) => m[1]), ...mention.aliases.map((a) => a.name)];
+            insertMention(names[suggestIndex] ?? names[0]);
           } else {
             insertArtifactMention(mention.artifacts[suggestIndex] ?? mention.artifacts[0]);
           }
@@ -1136,16 +1150,31 @@ export function ChatScreen() {
             {suggestOpen && mention && (
               <div className="suggest-popup">
                 {mention.kind === "member"
-                  ? mention.members.map(([sid, name], i) => (
-                      <div
-                        key={sid}
-                        className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
-                        onClick={() => insertMention(name)}
-                        onMouseEnter={() => setSuggestIndex(i)}
-                      >
-                        @{store.sessionName(sid)}
-                      </div>
-                    ))
+                  ? [
+                      ...mention.members.map(([sid, name], i) => (
+                        <div
+                          key={sid}
+                          className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                          onClick={() => insertMention(name)}
+                          onMouseEnter={() => setSuggestIndex(i)}
+                        >
+                          @{store.sessionName(sid)}
+                        </div>
+                      )),
+                      ...mention.aliases.map((a, i2) => {
+                        const i = mention.members.length + i2;
+                        return (
+                          <div
+                            key={`alias-${a.name}`}
+                            className={`suggest-item ${i === suggestIndex ? "active" : ""}`}
+                            onClick={() => insertMention(a.name)}
+                            onMouseEnter={() => setSuggestIndex(i)}
+                          >
+                            @{a.name}<span className="slash-desc"> — {S.aliasCountFmt.replace("%s", String(a.count))}</span>
+                          </div>
+                        );
+                      }),
+                    ]
                   : mention.artifacts.map((a, i) => (
                       <div
                         key={a.id}
@@ -2165,6 +2194,7 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
   const roomId = store.currentRoom?.roomId;
   const [detail, setDetail] = useState<BlackboardInfo | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showResolved, setShowResolved] = useState(false);
   if (!blackboard || blackboard.length === 0) {
     return <div className="context-empty">{S.noBoardEntries}</div>;
   }
@@ -2179,13 +2209,53 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
     await store.removeBlackboard(roomId, detail.id);
     setDetail(null);
   };
+  const topics = blackboard.filter((e) => (e.type ?? "note") === "topic");
+  const openTopics = topics.filter((e) => (e.status ?? "open") === "open");
+  const resolvedTopics = topics.filter((e) => e.status === "resolved");
+  const notes = blackboard.filter((e) => (e.type ?? "note") === "note");
+  const onResolve = (e: BlackboardInfo, ev: React.MouseEvent) => {
+    ev.stopPropagation();
+    if (!roomId) return;
+    void store.client?.call("room.topic.resolve", { roomId, id: e.id }).catch(() => {});
+  };
+  const renderTopic = (e: BlackboardInfo, resolved: boolean) => (
+    <div key={e.id} className={`blackboard-item topic-item${resolved ? " resolved" : ""}`} onClick={() => setDetail(e)}>
+      <div className="blackboard-line">
+        <span className="topic-tag">{resolved ? S.topicResolvedTag : S.topicOpenTag}</span>
+        <span className="blackboard-from">
+          {e.owner === "user" ? S.meLabel : `@${e.owner ? store.sessionName(e.owner) : store.sessionName(e.from)}`}
+        </span>
+        <span className="blackboard-time">{formatArtifactTime(e.at)}</span>
+        {!resolved && (
+          <button className="context-action" onClick={(ev) => onResolve(e, ev)}>
+            {S.topicResolveLabel}
+          </button>
+        )}
+      </div>
+      <div className="blackboard-text">{e.text}</div>
+    </div>
+  );
   return (
     <div className="context-content blackboard-list">
       <div className="context-content-header">
         <span className="context-content-title">{S.blackboardLabel}</span>
         <button className="context-action danger" onClick={onClear}>{S.clearLabel}</button>
       </div>
-      {blackboard
+      {openTopics.length > 0 && (
+        <div className="topic-section">
+          <div className="topic-section-head">{S.topicsOpenLabel}</div>
+          {openTopics.slice().reverse().map((e) => renderTopic(e, false))}
+        </div>
+      )}
+      {resolvedTopics.length > 0 && (
+        <div className="topic-section">
+          <button className="topic-section-head resolved-toggle" onClick={() => setShowResolved((v) => !v)}>
+            {S.topicsResolvedFmt.replace("%s", String(resolvedTopics.length))} {showResolved ? "▾" : "▸"}
+          </button>
+          {showResolved && resolvedTopics.slice().reverse().map((e) => renderTopic(e, true))}
+        </div>
+      )}
+      {notes
         .slice()
         .reverse()
         .map((e) => (

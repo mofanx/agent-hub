@@ -524,3 +524,191 @@ describe("room-modes", () => {
     assert.match(String(last.text), /8080/);
   });
 });
+
+describe("mention 集合别名派发", () => {
+  const harness = (aliases?: Record<string, string[]>) => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "alice" },
+        { sessionId: "s2", name: "bob" },
+        { sessionId: "s3", name: "carol" },
+      ],
+      "mention",
+      aliases ? { aliases } : undefined,
+    );
+    const prompts: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid) => { prompts.push(sid); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    return { room, prompts, manager };
+  };
+
+  it("@all 派发给全部成员", async () => {
+    const h = harness();
+    const res = await h.manager.handle(h.room, "@all 集合", {});
+    assert.deepEqual([...h.prompts].sort(), ["s1", "s2", "s3"]);
+    assert.deepEqual(res.mentioned, ["s1", "s2", "s3"]);
+  });
+
+  it("自定义别名组只派发给被展开成员，未命中成员 SILENT", async () => {
+    const h = harness({ 后端组: ["s1", "s3"] });
+    const res = await h.manager.handle(h.room, "@后端组 干活", {});
+    assert.deepEqual([...h.prompts].sort(), ["s1", "s3"]);
+    assert.deepEqual(res.mentioned, ["s1", "s3"]);
+    assert.ok(!h.prompts.includes("s2"), "s2 未被别名命中，不派发");
+  });
+});
+
+describe("openTopics 编排注入与归档", () => {
+  const conductorHarness = () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const prompts: { sessionId: string; text: string }[] = [];
+    const broadcasts: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sid, text) => {
+          prompts.push({ sessionId: sid, text: String(text) });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      (method, params) => broadcasts.push({ method, params }),
+    );
+    return { rooms, room, prompts, broadcasts, manager };
+  };
+
+  it("conductor 规划/验收 prompt 含未结话题，worker prompt 不含", async () => {
+    const h = conductorHarness();
+    h.rooms.openTopic(h.room.roomId, "接口选型未定", "user");
+    h.rooms.openTopic(h.room.roomId, "已结的旧话题", "s2");
+    const done2 = h.rooms.openTopics(h.room.roomId)[1]!;
+    h.rooms.resolveTopic(h.room.roomId, done2.id);
+    await h.manager.handle(h.room, "实现登录功能");
+
+    const planning = h.prompts.find((p) => p.sessionId === "s1")!;
+    assert.match(planning.text, /未结话题/);
+    assert.match(planning.text, /user：接口选型未定/);
+    assert.ok(!planning.text.includes("已结的旧话题"), "已结话题不注入");
+
+    await h.manager.onPromptDone(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"实现登录"}]}\n```',
+    );
+    const worker = h.prompts.find((p) => p.sessionId === "s2")!;
+    assert.ok(!worker.text.includes("未结话题"), "worker prompt 不带话题段");
+    assert.ok(!worker.text.includes("接口选型未定"), "topic 不泄漏进 worker 黑板段");
+
+    await h.manager.onPromptDone("s2", "完成了");
+    const review = h.prompts.filter((p) => p.sessionId === "s1").at(-1)!;
+    assert.match(review.text, /未结话题/);
+    assert.match(review.text, /接口选型未定/);
+  });
+
+  it("auto 决策 prompt 注入未结话题", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "auto-room",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "w", name: "w" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    rooms.openTopic(room.roomId, "数据源待定", "w");
+    const prompts: { sessionId: string; text: string }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sid, text) => {
+          prompts.push({ sessionId: sid, text: String(text) });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(room, "选个方案");
+    const decision = prompts.find((p) => p.sessionId === "host")!;
+    assert.match(decision.text, /未结话题/);
+    assert.match(decision.text, /w：数据源待定/);
+  });
+
+  it("flow 到 done 自动归档本轮开启的话题并广播黑板", async () => {
+    const h = conductorHarness();
+    const stale = h.rooms.openTopic(h.room.roomId, "上一轮遗留话题")!;
+    stale.at -= 60_000; // 窗口外：flow 启动前开启的话题不归档
+    await h.manager.handle(h.room, "做功能");
+    const fresh = h.rooms.openTopic(h.room.roomId, "本轮新话题", "s2")!;
+
+    // 走完 planning → working → reviewing → summarizing → done
+    await h.manager.onPromptDone(
+      "s1",
+      '```json\n{"tasks":[{"id":"t1","to":"coder","task":"做A"}]}\n```',
+    );
+    await h.manager.onPromptDone("s2", "完成");
+    await h.manager.onPromptDone(
+      "s1",
+      '```json\n{"decision":"complete","reason":"达标"}\n```',
+    );
+    await h.manager.onPromptDone("s1", "总结输出");
+    assert.equal(
+      (h.manager.getFlow(h.room.roomId) as { phase?: string } | undefined)?.phase,
+      "done",
+    );
+    const board = h.rooms.getBlackboard(h.room.roomId);
+    assert.equal(board.find((e) => e.id === fresh.id)!.status, "resolved", "本轮开启的话题已归档");
+    assert.equal(board.find((e) => e.id === stale.id)!.status, "open", "窗口外话题保持 open");
+    assert.ok(
+      h.broadcasts.some(
+        (b) =>
+          b.method === "room.blackboardUpdate" &&
+          (b.params.blackboard as { id: string; status?: string }[]).some(
+            (e) => e.id === fresh.id && e.status === "resolved",
+          ),
+      ),
+      "归档后广播最新黑板",
+    );
+  });
+
+  it("parallel flow 完成同样归档窗口内话题", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "parallel-room",
+      [
+        { sessionId: "a", name: "a" },
+        { sessionId: "b", name: "b" },
+      ],
+      "parallel",
+      { parallelSummarizerId: "b" },
+    );
+    const manager = new RoomModeManager(
+      { prompt: async () => {}, isBusy: () => false, cancel: async () => {} },
+      rooms,
+      () => {},
+    );
+    await manager.handle(room, "给观点", { params: { targets: ["a"], summarizer: "b" } });
+    const t = rooms.openTopic(room.roomId, "并行期话题")!;
+    await manager.onPromptDone("a", "观点");
+    await manager.onPromptDone("b", "汇总");
+    assert.equal(
+      rooms.getBlackboard(room.roomId).find((e) => e.id === t.id)!.status,
+      "resolved",
+    );
+  });
+});

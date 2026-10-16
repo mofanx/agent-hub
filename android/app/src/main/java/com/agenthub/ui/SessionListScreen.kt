@@ -42,6 +42,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.activity.compose.BackHandler
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
@@ -1418,6 +1421,17 @@ internal fun RoomEditorDialog(
     var debateRounds by remember(room) { mutableIntStateOf(editing?.debateRounds ?: 2) }
     var pipelineOrder by remember(room) { mutableStateOf(initialPipelineOrder()) }
     var memberRoles by remember(room) { mutableStateOf<Map<String, String>>(editing?.memberRoles ?: emptyMap()) }
+    var personaEditFor by remember(room) { mutableStateOf<String?>(null) }
+    personaEditFor?.let { sid ->
+        PersonaEditDialog(
+            memberRoles[sid] ?: "",
+            S,
+            onSave = { v ->
+                memberRoles = if (v.isBlank()) memberRoles - sid else memberRoles + (sid to v)
+                personaEditFor = null
+            },
+        ) { personaEditFor = null }
+    }
 
     fun onModeChanged(newMode: String) {
         modeManuallyChanged = true
@@ -1661,6 +1675,9 @@ internal fun RoomEditorDialog(
                                     modifier = Modifier.padding(start = 48.dp, end = 4.dp, bottom = 4.dp),
                                 ) {
                                     Text(S.roleFieldLabel, style = MaterialTheme.typography.bodySmall)
+                                    TextButton(onClick = { personaEditFor = s.sessionId }) {
+                                        Text(S.personaCardLabel, style = MaterialTheme.typography.bodySmall)
+                                    }
                                     Box {
                                         TextButton(onClick = { roleExpanded.value = true }) {
                                             Text(
@@ -2127,4 +2144,51 @@ private fun SearchHitCard(hit: SearchHit, query: String, onClick: () -> Unit) {
             )
         }
     }
+}
+
+/** persona 结构卡编辑：persona/tone/boundaries/examples 四字段；旧值纯文本兜底进 persona 字段 */
+@Composable
+private fun PersonaEditDialog(
+    initial: String,
+    S: Strings,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    fun field(v: String, key: String): String {
+        val o = runCatching {
+            kotlinx.serialization.json.Json.parseToJsonElement(v).jsonObject
+        }.getOrNull() ?: return if (key == "persona") v else ""
+        return o[key]?.jsonPrimitive?.contentOrNull ?: ""
+    }
+    var persona by remember { mutableStateOf(field(initial, "persona")) }
+    var tone by remember { mutableStateOf(field(initial, "tone")) }
+    var boundaries by remember { mutableStateOf(field(initial, "boundaries")) }
+    var examples by remember { mutableStateOf(field(initial, "examples")) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(S.personaCardLabel) },
+        text = {
+            Column {
+                OutlinedTextField(value = persona, onValueChange = { persona = it }, label = { Text(S.personaFieldPersona) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = tone, onValueChange = { tone = it }, label = { Text(S.personaFieldTone) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = boundaries, onValueChange = { boundaries = it }, label = { Text(S.personaFieldBoundaries) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = examples, onValueChange = { examples = it }, label = { Text(S.personaFieldExamples) }, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val hasExtra = tone.isNotBlank() || boundaries.isNotBlank() || examples.isNotBlank()
+                val out = if (!hasExtra) persona.trim() else buildString {
+                    append("{\"persona\":")
+                    append(kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(persona.trim())))
+                    if (tone.isNotBlank()) append(",\"tone\":").append(kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(tone.trim())))
+                    if (boundaries.isNotBlank()) append(",\"boundaries\":").append(kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(boundaries.trim())))
+                    if (examples.isNotBlank()) append(",\"examples\":").append(kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(examples.trim())))
+                    append("}")
+                }
+                onSave(out)
+            }) { Text(S.save) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(S.cancel) } },
+    )
 }

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useHubStore } from "../../hub/store";
 import { stringsFor, type Strings } from "../../hub/strings";
-import type { RoomInfo, RoomModeConfig, SessionInfo } from "../../hub/types";
+import type { PersonaCard, RoomInfo, RoomModeConfig, SessionInfo } from "../../hub/types";
 import { FormRow } from "../../components/FormRow";
 
 type RoomModeOption = { value: string; label: string; description: string };
@@ -45,7 +45,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
     debateSides: (editing?.debateSides ?? ["", ""]) as [string, string],
     debateJudge: editing?.debateJudge ?? "",
     debateRounds: editing?.debateRounds ?? 2,
-    memberRoles: (editing?.memberRoles ?? {}) as Record<string, string>,
+    memberRoles: (editing?.memberRoles ?? {}) as Record<string, string | PersonaCard>,
   });
   const [modeManuallyChanged, setModeManuallyChanged] = useState(false);
 
@@ -136,7 +136,9 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
       config.debateRounds = Math.max(1, Math.min(5, form.debateRounds));
     }
     const memberRoles = Object.fromEntries(
-      Object.entries(form.memberRoles).filter(([, v]) => v.trim()),
+      Object.entries(form.memberRoles).filter(([, v]) =>
+        typeof v === "string" ? v.trim() : !!v?.persona?.trim(),
+      ),
     );
     if (isEdit && editing) {
       void store.updateRoom(editing, form.name, form.selected, form.mode, config, memberRoles);
@@ -323,26 +325,72 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
                 {store.displayName(s)}
               </label>
               {form.selected.includes(s.sessionId) && (
-                <select
-                  className="role-select"
-                  value={form.memberRoles[s.sessionId] ?? ""}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      memberRoles: {
-                        ...form.memberRoles,
-                        [s.sessionId]: e.currentTarget.value,
-                      },
-                    })
-                  }
-                >
-                  <option value="">{S.defaultRoleLabel}</option>
-                  {store.roles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.name}
-                    </option>
-                  ))}
-                </select>
+                <>
+                  {(() => {
+                    const v = form.memberRoles[s.sessionId];
+                    const isCard = typeof v === "object" && v !== null;
+                    const isLegacyText =
+                      typeof v === "string" && v && !store.roles.some((r) => r.id === v);
+                    const card: PersonaCard = isCard
+                      ? v
+                      : { persona: isLegacyText ? String(v) : "" };
+                    const setCard = (f: keyof PersonaCard, val: string) => {
+                      const next = { ...card, [f]: val };
+                      const memberRoles = { ...form.memberRoles };
+                      if (!next.persona?.trim() && !next.tone?.trim() && !next.boundaries?.trim() && !next.examples?.trim()) {
+                        delete memberRoles[s.sessionId];
+                      } else {
+                        memberRoles[s.sessionId] = next;
+                      }
+                      setForm({ ...form, memberRoles });
+                    };
+                    return (
+                      <>
+                        <select
+                          className="role-select"
+                          value={isCard || isLegacyText ? "__persona__" : (v ?? "")}
+                          onChange={(e) => {
+                            const val = e.currentTarget.value;
+                            const memberRoles = { ...form.memberRoles };
+                            if (val === "__persona__") memberRoles[s.sessionId] = card;
+                            else if (val) memberRoles[s.sessionId] = val;
+                            else delete memberRoles[s.sessionId];
+                            setForm({ ...form, memberRoles });
+                          }}
+                        >
+                          <option value="">{S.defaultRoleLabel}</option>
+                          {store.roles.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.name}
+                            </option>
+                          ))}
+                          <option value="__persona__">{S.personaCardOption}</option>
+                        </select>
+                        {(isCard || isLegacyText) && (
+                          <div className="persona-card-form">
+                            {(["persona", "tone", "boundaries", "examples"] as const).map((f) => (
+                              <input
+                                key={f}
+                                className="persona-field"
+                                placeholder={
+                                  f === "persona"
+                                    ? S.personaFieldPersona
+                                    : f === "tone"
+                                      ? S.personaFieldTone
+                                      : f === "boundaries"
+                                        ? S.personaFieldBoundaries
+                                        : S.personaFieldExamples
+                                }
+                                value={card[f] ?? ""}
+                                onChange={(e) => setCard(f, e.currentTarget.value)}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </>
               )}
             </div>
           ))}
