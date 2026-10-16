@@ -36,7 +36,7 @@ import {
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
 import { stringsFor, toolStatusLabel, planEntryLabel, type Strings } from "../hub/strings";
-import type { ArtifactInfo, BlackboardInfo, ChatItem, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowInfo, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
+import type { ArtifactInfo, BlackboardInfo, ChatItem, DecisionMeta, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
@@ -192,6 +192,13 @@ export function ChatScreen() {
 
   const isRoom = !!store.currentRoom;
   const title = store.currentRoom?.name || store.currentSession?.name || S.chatFallback;
+  // 指挥家/主持人的 assistant 消息（汇总、求助等编排产物）按过程卡宽度满宽渲染；
+  // author 可能是 "name (conn)" 形态，member/session 名是裸名，做前缀容错比较
+  const hostName = store.currentRoom?.conductorId
+    ? store.sessionName(store.currentRoom.conductorId)
+    : null;
+  const isHostAuthor = (author?: string) =>
+    !!hostName && !!author && (author === hostName || author.startsWith(`${hostName} (`));
 
   const renamingRef = useRef(false);
   const submitRename = async () => {
@@ -578,12 +585,27 @@ export function ChatScreen() {
   const send = () => {
     const text = input.trim();
     if (!text && !store.pendingAttachments.length) return;
+    // 生成中（且无活跃编排可并入）→ 进 follow-up 队列，回合结束后按序发送
+    if (store.isGenerating() && !flowActive) {
+      store.queueFollowUp(text, replyHelp?.helpId);
+      setReplyHelp(null);
+      setInput("");
+      return;
+    }
     if (isRoom) {
       store.sendRoomMessage(text, replyHelp ? { replyTo: replyHelp.helpId } : undefined);
       setReplyHelp(null);
     } else store.sendPrompt(text);
     setInput("");
   };
+
+  // 忙→闲转换时冲刷一条队首 follow-up（逐条发送保证顺序）
+  const wasBusyRef = useRef(false);
+  useEffect(() => {
+    const busy = store.isGenerating();
+    if (wasBusyRef.current && !busy) store.flushFollowUp();
+    wasBusyRef.current = busy;
+  }, [store.busyIds, store.flow?.phase]);
 
   const onPickImage = () => fileInputRef.current?.click();
 
@@ -736,7 +758,6 @@ export function ChatScreen() {
     }
     if (isRoom && flowCount > 0) {
       if (scrollToFlowCard()) return;
-      setSidePanel("flow");
     }
     else if (artifactCount > 0) {
       store.clearNewCounts("artifact");
@@ -784,6 +805,7 @@ export function ChatScreen() {
                 </span>
               )}
               {isRoom && <span className="chat-title-count"> ({store.currentRoom?.members.length})</span>}
+              {isRoom && <MemberPresence />}
             </div>
             {isRoom ? (
               <>
@@ -890,6 +912,10 @@ export function ChatScreen() {
 
       <div className="chat-body">
         <div className="chat-main">
+      {isRoom && store.flow && store.flow.phase !== "done" && store.flow.phase !== "cancelled" && (
+        <FlowStrip flow={store.flow} onLocate={scrollToFlowCard} />
+      )}
+
           <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
             <div className="chat-column">
               {store.historyLoading && (
@@ -939,6 +965,7 @@ export function ChatScreen() {
                   <ChatMessage
                     item={item}
                     showAuthor={isRoom}
+                    fullWidth={isHostAuthor(item.author)}
                     grouped={grouped}
                     turnPos={turnPos}
                     expanded={showThought[i] ?? false}
@@ -1069,6 +1096,31 @@ export function ChatScreen() {
                 </div>
               )}
 
+              {(() => {
+                const scopeKey = store.currentRoom
+                  ? `room:${store.currentRoom.roomId}`
+                  : `session:${store.currentSession?.sessionId ?? ""}`;
+                const queued = store.followUps
+                  .map((f, i) => ({ ...f, i }))
+                  .filter((f) => f.key === scopeKey);
+                return queued.length > 0 ? (
+                  <div className="followup-queue">
+                    {queued.map((f) => (
+                      <span key={f.i} className="followup-chip" title={f.text}>
+                        <span className="followup-chip-text">{f.text.slice(0, 60)}</span>
+                        <button
+                          className="icon-btn"
+                          title={S.deleteLabel}
+                          onClick={() => store.removeFollowUp(f.i)}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    <span className="followup-hint">{S.followUpQueuedHint}</span>
+                  </div>
+                ) : null;
+              })()}
               <div className="compose-row">
           <div className="input-wrap">
             <textarea
@@ -1186,16 +1238,19 @@ export function ChatScreen() {
 
               {store.isGenerating() ? (
                 <>
-                  {flowActive && (
-                    <button
-                      className="send-btn"
-                      onClick={send}
-                      disabled={!input.trim() && !store.pendingAttachments.length}
-                      title={S.sendMergeTitleFmt.replace("%s", store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter")}
-                    >
-                      <ArrowUp size={16} />
-                    </button>
-                  )}
+                  {/* 生成中仍可发送：flow 活跃时并入编排，否则排入 follow-up 队列 */}
+                  <button
+                    className="send-btn"
+                    onClick={send}
+                    disabled={!input.trim() && !store.pendingAttachments.length}
+                    title={
+                      flowActive
+                        ? S.sendMergeTitleFmt.replace("%s", store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter")
+                        : S.sendQueueTitleFmt.replace("%s", store.sendKey === "ctrl-enter" ? "Ctrl+Enter" : "Enter")
+                    }
+                  >
+                    <ArrowUp size={16} />
+                  </button>
                   <button
                     className="send-btn danger"
                     onClick={store.stopCurrent}
@@ -1293,7 +1348,7 @@ export function ChatScreen() {
                     title={S.flowCountFmt.replace("%s", String(flowCount))}
                     disabled={flowCount === 0 && sidePanel !== "flow"}
                     onClick={() => {
-                      if (!scrollToFlowCard()) setSidePanel("flow");
+                      scrollToFlowCard();
                     }}
                   >
                     <ListTodo size={14} />
@@ -1375,9 +1430,6 @@ export function ChatScreen() {
                   }}
                   onPreview={(file) => setFilePreview(file)}
                 />
-              )}
-              {sidePanel === "flow" && (
-                <FlowPanel flow={store.flow} roomMode={store.currentRoom?.mode ?? ""} minimal />
               )}
               {sidePanel === "blackboard" && <BlackboardPanel blackboard={store.blackboard} />}
               {sidePanel === "artifact" && <ArtifactPanel artifacts={store.currentArtifacts ?? []} minimal />}
@@ -1481,6 +1533,7 @@ function dateLabel(S: Strings, at: number | undefined): string {
 function ChatMessage({
   item,
   showAuthor,
+  fullWidth = false,
   grouped = false,
   turnPos,
   expanded,
@@ -1493,6 +1546,7 @@ function ChatMessage({
 }: {
   item: ChatItem;
   showAuthor: boolean;
+  fullWidth?: boolean;
   grouped?: boolean;
   turnPos?: "head" | "mid" | "tail" | "solo";
   expanded: boolean;
@@ -1627,7 +1681,7 @@ function ChatMessage({
 
     case "assistant":
       return (
-        <div className={`message assistant ${agentColorClass(item.author || "AI")} ${grouped ? "grouped" : ""} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
+        <div className={`message assistant ${agentColorClass(item.author || "AI")} ${fullWidth ? "full-width" : ""} ${grouped ? "grouped" : ""} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {grouped ? <div className="avatar-spacer" /> : <Avatar name={item.author || "AI"} />}
           <div className="msg-body">
             {item.author && !grouped && <div className="author">{item.author}</div>}
@@ -1711,6 +1765,15 @@ function ChatMessage({
               {item.author ? `[${item.author}] ` : ""}{S.errorLabel}: {highlight ? highlightText(item.text, highlight) : item.text}
             </div>
           </div>
+          {menuEl}
+          {selectModal}
+        </div>
+      );
+
+    case "decision":
+      return (
+        <div className={`message decision ${currentMatchClass}`}>
+          <DecisionCard meta={item.meta} />
           {menuEl}
           {selectModal}
         </div>
@@ -2196,6 +2259,144 @@ const FLOW_PHASE_LABEL_KEYS = (S: Strings): Record<string, string> => ({
   cancelled: S.phaseCancelled,
 });
 
+/** 成员 presence 指示：顶栏成员名前缀状态点（online/generating/offline），不占消息宽度 */
+function MemberPresence() {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const room = store.currentRoom;
+  if (!room) return null;
+  return (
+    <span className="presence-row">
+      {room.members.map(([sid, name]) => {
+        const st = store.memberStatus[sid] ?? (store.busyIds.includes(sid) ? "generating" : "online");
+        const label = st === "generating" ? S.presenceGenerating : st === "offline" ? S.presenceOffline : S.presenceOnline;
+        return (
+          <span key={sid} className="presence-chip" title={`${name} · ${label}`}>
+            <i className={`presence-dot ${st}`} />
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+/** 决策卡：permission/elicitation 统一审批，once/task/always 粒度 + 可撤销 */
+function DecisionCard({ meta }: { meta: DecisionMeta }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [scope, setScope] = useState<"once" | "task" | "always">("once");
+  const pending = meta.status === "pending";
+  const scopeLabel = (s: string) =>
+    s === "task" ? S.scopeTask : s === "always" ? S.scopeAlways : S.scopeOnce;
+  return (
+    <div className={`decision-card ${pending ? "" : "resolved"}`}>
+      <div className="decision-head">
+        <span className="decision-type">{meta.type === "permission" ? S.permissionRequest : S.elicitationRequestLabel}</span>
+        <span className="decision-title">{meta.title}</span>
+      </div>
+      {pending ? (
+        <>
+          <div className="decision-options">
+            {meta.options.map((o) => (
+              <button
+                key={o.id}
+                className="secondary tiny"
+                onClick={() =>
+                  void store.client?.call(
+                    meta.type === "permission" ? "permission.respond" : "elicitation.respond",
+                    meta.type === "permission"
+                      ? { requestId: meta.requestId, optionId: o.id, scope }
+                      : { requestId: meta.requestId, action: o.id, scope },
+                  )
+                }
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          <div className="decision-scope">
+            {(["once", "task", "always"] as const).map((s) => (
+              <button
+                key={s}
+                className={`tiny ${scope === s ? "primary" : "secondary"}`}
+                onClick={() => setScope(s)}
+              >
+                {scopeLabel(s)}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="decision-result">
+          <span>{meta.answer?.label ?? meta.status}</span>
+          {meta.scope !== "once" && (
+            <span className="decision-scope-tag">{scopeLabel(meta.scope)}</span>
+          )}
+          {meta.status === "answered" && meta.scope !== "once" && (
+            <button
+              className="secondary tiny"
+              onClick={() => void store.client?.call("decision.revoke", { decisionId: meta.decisionId })}
+            >
+              {S.decisionRevoke}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 常驻进度条：钉在顶栏与消息区之间，仅 flow 活跃时存在；点主区定位卡片，点箭头展开任务列表 */
+function FlowStrip({ flow, onLocate }: { flow: FlowView; onLocate: () => boolean }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const [expanded, setExpanded] = useState(false);
+  const { progress, tasks, phase } = flow;
+  const waitingUser = tasks.some((t) => t.waitingFor === "user");
+  const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const running = tasks.filter((t) => t.status === "running");
+  const current = running[0];
+  return (
+    <div className={`flow-strip ${waitingUser ? "waiting" : ""}`}>
+      <div className="flow-strip-row">
+        <button
+          className="flow-strip-main"
+          onClick={() => {
+            if (!onLocate()) setExpanded(true);
+          }}
+          title={S.flowStripLocate}
+        >
+          <span className="flow-strip-phase">{FLOW_PHASE_LABEL_KEYS(S)[phase] ?? phase}</span>
+          <span className="flow-strip-count">
+            {progress.done}/{progress.total}
+          </span>
+          {current && (
+            <span className="flow-strip-task">
+              @{current.name} {current.task}
+            </span>
+          )}
+          {waitingUser && <span className="flow-strip-waiting">{S.flowWaitingUser}</span>}
+        </button>
+        <button
+          className="flow-strip-toggle icon-btn"
+          onClick={() => setExpanded((v) => !v)}
+          title={S.flowStripExpand}
+        >
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+      </div>
+      <div className="flow-strip-bar">
+        <i style={{ width: `${pct}%` }} />
+      </div>
+      {expanded && (
+        <div className="flow-strip-tasks">
+          <FlowCardBody flow={flow} showRetry={phase === "awaiting-retry"} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 验收清单 + 完成摘要 + 任务列表 + supplements，FlowPanel 与 FlowCard 共用 */
 function FlowCardBody({ flow, showRetry }: { flow: FlowView; showRetry: boolean }) {
   const store = useHubStore();
@@ -2414,56 +2615,6 @@ function formatElapsed(start: number, end: number | undefined, S: Strings): stri
   const m = Math.floor(s / 60);
   if (m < 60) return S.elapsedMinFmt.replace("%s", String(m)).replace("%s", String(s % 60));
   return S.elapsedHourFmt.replace("%s", String(Math.floor(m / 60))).replace("%s", String(m % 60));
-}
-
-function FlowPanel({ flow, roomMode, minimal = false }: { flow: FlowInfo | null; roomMode: string; minimal?: boolean }) {
-  const store = useHubStore();
-  const S = stringsFor(store.lang);
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("flowPanelCollapsed") === "1");
-  useEffect(() => {
-    localStorage.setItem("flowPanelCollapsed", collapsed ? "1" : "0");
-  }, [collapsed]);
-  if (!flow) return null;
-  const { progress, tasks, phase } = flow;
-  if (tasks.length === 0 && phase === "done") return null;
-  const title = roomMode === "conductor" ? S.flowTitleConductor : S.flowTitleDefault;
-  const phaseTag = FLOW_PHASE_LABEL_KEYS(S)[phase] ?? "";
-  const showRetry = phase === "awaiting-retry";
-  const content = <FlowCardBody flow={flow} showRetry={showRetry} />;
-  if (minimal) {
-    return <div className="context-content">{content}</div>;
-  }
-  return (
-    <div className="flow-panel">
-      <div className="flow-header" onClick={() => setCollapsed(!collapsed)} title={S.collapseToggleTitle}>
-        <span className="flow-title">
-          {collapsed ? "▸ " : "▾ "}{title}
-          {phaseTag && <span className="flow-phase-tag">{phaseTag}</span>}
-        </span>
-        {tasks.length > 0 && (
-          <span className="flow-progress">
-            {S.progressFmt.replace("%s", String(progress.done)).replace("%s", String(progress.total)).replace("%s", String(progress.running)).replace("%s", String(progress.pending))}
-            {progress.failed > 0 ? S.failedSuffixFmt.replace("%s", String(progress.failed)) : ""}
-          </span>
-        )}
-        {phase !== "done" && phase !== "summarizing" && phase !== "reviewing" && (
-          <button
-            className="flow-cancel-btn"
-            title={S.abortFlowTitle}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (confirm(S.confirmAbortFlow)) {
-                void useHubStore.getState().cancelFlow();
-              }
-            }}
-          >
-            <X size={12} /> {S.abortLabel}
-          </button>
-        )}
-      </div>
-      {!collapsed && content}
-    </div>
-  );
 }
 
 type FileGetResult = {

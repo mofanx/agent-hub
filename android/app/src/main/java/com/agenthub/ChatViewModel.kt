@@ -50,6 +50,14 @@ data class Attachment(
     val name: String = "",
 )
 
+data class QueuedMessage(
+    val scope: String,
+    val text: String,
+    val quote: Pair<String, String>?,
+    val attachments: List<Attachment>,
+    val replyTo: String? = null,
+)
+
 
 data class ModelInfo(
     val uid: String,
@@ -170,6 +178,24 @@ sealed class ChatItem {
         override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
         override val text: String get() = message
+    }
+    /** 统一决策卡：kind:"decision" 房史条目（permission/elicitation 合并形态） */
+    data class Decision(
+        override val id: Long,
+        val decisionId: String,
+        val requestId: String,
+        val decisionType: String,
+        val title: String,
+        val options: List<Pair<String, String>>,
+        val status: String,
+        val scope: String,
+        val answerLabel: String? = null,
+        val auto: Boolean = false,
+        val contextSummary: String? = null,
+        override val author: String,
+        override val at: Long = 0L,
+    ) : ChatItem() {
+        override val text: String get() = title
     }
     data class ProcessStep(val kind: String, val title: String? = null, val text: String? = null)
     data class DispatchTask(val id: String? = null, val to: String? = null, val task: String? = null)
@@ -748,8 +774,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val chatListItems: State<List<ChatListItem>> = derivedStateOf { expandChatItems(chatItems) }
     private val chatListCache = mutableMapOf<Pair<Long, String>, List<ChatListItem>>()
     val busyIds = mutableStateListOf<String>()
+    /** member.status 事件维护的成员在线状态（sessionId → online/generating/offline） */
+    val memberStatus = mutableStateMapOf<String, String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
+    val messageQueue = mutableStateListOf<QueuedMessage>()
+    private val drafts = mutableMapOf<String, String>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
     var helpReplyTo by mutableStateOf<String?>(null)
         private set
@@ -924,7 +954,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (room != null) {
                 if (room.members.any { busyIds.contains(it.first) }) return true
                 val f = flow
-                if (f != null && f.roomId == room.roomId && f.phase != "done") return true
+                if (f != null && f.roomId == room.roomId && f.phase !in setOf("done", "cancelled")) return true
                 return false
             }
             val s = currentSession ?: return false
@@ -2261,6 +2291,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
         viewModelScope.launch { refreshSessionArtifacts(session.sessionId) }
         refreshCurrentModel()
+        refreshMemberStatus()
         refreshSessionUsage(session.sessionId)
     }
 
@@ -2309,6 +2340,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 refreshFlow(updatedRoom.roomId)
                 refreshArtifacts(updatedRoom.roomId)
                 refreshCurrentModel()
+                refreshMemberStatus()
                 updatedRoom.activeSpeaker?.let { refreshSessionUsage(it) }
             } catch (e: Exception) {
                 connectError = e.message
@@ -2776,8 +2808,80 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     null
                 }
             }
+            "decision" -> {
+                try {
+                    parseDecisionMeta(itemId, Json.parseToJsonElement(text).jsonObject, author, at)
+                } catch (_: Exception) {
+                    null
+                }
+            }
             else -> null
         }
+    }
+
+    private fun parseDecisionMeta(itemId: Long, data: JsonObject, author: String, at: Long): ChatItem.Decision? {
+        val decisionId = data["decisionId"]?.jsonPrimitive?.contentOrNull ?: return null
+        val ctx = data["context"]?.jsonObject
+        val contextSummary = buildList {
+            ctx?.get("message")?.jsonPrimitive?.contentOrNull?.take(160)?.let { add(it) }
+            ctx?.get("command")?.jsonPrimitive?.contentOrNull?.take(120)?.let { add(it) }
+            ctx?.get("path")?.jsonPrimitive?.contentOrNull?.take(120)?.let { add(it) }
+            val paths = ctx?.get("paths")?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }?.take(3)
+            if (!paths.isNullOrEmpty()) add(paths.joinToString(" · "))
+            if (ctx?.get("redacted")?.jsonPrimitive?.contentOrNull == "true") add("[redacted]")
+        }.joinToString("\n").ifBlank { null }
+        return ChatItem.Decision(
+            itemId,
+            decisionId,
+            data["requestId"]?.jsonPrimitive?.contentOrNull ?: "",
+            data["type"]?.jsonPrimitive?.contentOrNull ?: "permission",
+            data["title"]?.jsonPrimitive?.contentOrNull ?: "",
+            data["options"]?.jsonArray?.mapNotNull {
+                val o = it.jsonObject
+                val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                id to (o["label"]?.jsonPrimitive?.contentOrNull ?: id)
+            } ?: emptyList(),
+            data["status"]?.jsonPrimitive?.contentOrNull ?: "pending",
+            data["scope"]?.jsonPrimitive?.contentOrNull ?: "once",
+            data["answer"]?.jsonObject?.get("label")?.jsonPrimitive?.contentOrNull
+                ?: data["answer"]?.jsonObject?.get("action")?.jsonPrimitive?.contentOrNull,
+            data["auto"]?.jsonPrimitive?.contentOrNull?.toBoolean() ?: false,
+            contextSummary,
+            author,
+            at,
+        )
+    }
+
+    /** 决策卡 upsert：同 decisionId/条目 id 原位替换；permission 卡替代旧 Permission 条目 */
+    private fun upsertDecision(item: ChatItem.Decision) {
+        if (item.decisionType == "elicitation") {
+            val idx = chatItems.indexOfLast { it is ChatItem.Elicitation && it.requestId == item.requestId }
+            if (idx >= 0) {
+                if (item.status != "pending") {
+                    val e = chatItems[idx] as ChatItem.Elicitation
+                    chatItems[idx] = e.copy(answered = item.answerLabel ?: item.status)
+                }
+                return
+            }
+        }
+        chatItems.removeAll { it is ChatItem.Permission && it.requestId == item.requestId }
+        val idx = chatItems.indexOfLast {
+            (it is ChatItem.Decision && it.decisionId == item.decisionId) || it.id == item.id
+        }
+        if (idx >= 0) chatItems[idx] = item else chatItems.add(item)
+    }
+
+    private fun upsertDecisionEntry(entry: JsonObject) {
+        val eid = entry["id"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+        val author = entry["author"]?.jsonPrimitive?.contentOrNull ?: ""
+        val at = entry["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+        val meta = try {
+            Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
+        } catch (_: Exception) {
+            null
+        } ?: return
+        val item = parseDecisionMeta(if (eid != null) -eid else ++itemSeq, meta, author, at) ?: return
+        upsertDecision(item)
     }
 
     private fun parseProcessMeta(itemId: Long, data: JsonObject, author: String, at: Long): ChatItem.Process =
@@ -3305,12 +3409,51 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.Sessions
     }
 
-    fun sendPrompt(text: String) {
+    fun draftFor(scope: String) = drafts[scope] ?: ""
+
+    fun setDraft(scope: String, text: String) {
+        if (text.isBlank()) drafts.remove(scope) else drafts[scope] = text
+    }
+
+    fun queuedCount(scope: String) = messageQueue.count { it.scope == scope }
+
+    fun clearQueue(scope: String) {
+        messageQueue.removeAll { it.scope == scope }
+    }
+
+    fun enqueueMessage(scope: String, text: String) {
+        val t = text.trim()
+        if (t.isEmpty() && pendingAttachments.isEmpty()) return
+        if (handleSlashCommand(t)) return
+        // replyTo（求助答复）一并入队，否则下一条消息会误带过期关联
+        messageQueue.add(QueuedMessage(scope, t, quote, pendingAttachments.toList(), helpReplyTo))
+        quote = null
+        helpReplyTo = null
+        pendingAttachments.clear()
+    }
+
+    fun flushQueue(scope: String) {
+        viewModelScope.launch {
+            while (!generating) {
+                val idx = messageQueue.indexOfFirst { it.scope == scope }
+                if (idx < 0) break
+                val m = messageQueue.removeAt(idx)
+                if (currentRoom != null) {
+                    sendRoomMessage(m.text, m.quote, m.attachments, fromQueue = true, replyToOverride = m.replyTo)
+                } else {
+                    sendPrompt(m.text, m.quote, m.attachments, fromQueue = true)
+                }
+            }
+        }
+    }
+
+    fun sendPrompt(text: String, qOverride: Pair<String, String>? = null, attsOverride: List<Attachment>? = null, fromQueue: Boolean = false) {
         val session = currentSession ?: return
-        if (text.isBlank() && pendingAttachments.isEmpty()) return
+        if (text.isBlank() && attsOverride.isNullOrEmpty() && pendingAttachments.isEmpty()) return
         if (handleSlashCommand(text)) return
-        val q = quote
-        val attachments = pendingAttachments.toList()
+        // 队列冲刷时快照优先（null 即无引用），不回落也不消费当前草稿
+        val q = if (fromQueue) qOverride else (qOverride ?: quote)
+        val attachments = attsOverride ?: pendingAttachments.toList()
         chatItems.add(
             ChatItem.User(
                 ++itemSeq,
@@ -3320,8 +3463,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 quoteText = q?.second,
             ),
         )
-        quote = null
-        pendingAttachments.clear()
+        if (!fromQueue && qOverride == null) quote = null
+        if (attsOverride == null) pendingAttachments.clear()
         val fullText = if (q != null) "${stringsFor(lang).quoteHeaderFmt.format(q.first, q.second.take(300))}\n$text" else text
         busyIds.add(session.sessionId)
         viewModelScope.launch {
@@ -3392,13 +3535,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sendRoomMessage(text: String) {
+    fun sendRoomMessage(text: String, qOverride: Pair<String, String>? = null, attsOverride: List<Attachment>? = null, fromQueue: Boolean = false, replyToOverride: String? = null) {
         val room = currentRoom ?: return
-        if (text.isBlank() && pendingAttachments.isEmpty()) return
+        if (text.isBlank() && attsOverride.isNullOrEmpty() && pendingAttachments.isEmpty()) return
         if (handleSlashCommand(text)) return
-        val q = quote
-        val helpReply = helpReplyTo
-        val attachments = pendingAttachments.toList()
+        val q = if (fromQueue) qOverride else (qOverride ?: quote)
+        val helpReply = replyToOverride ?: if (fromQueue) null else helpReplyTo
+        val attachments = attsOverride ?: pendingAttachments.toList()
         chatItems.add(
             ChatItem.User(
                 ++itemSeq,
@@ -3408,9 +3551,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 quoteText = q?.second,
             ),
         )
-        quote = null
-        helpReplyTo = null
-        pendingAttachments.clear()
+        if (!fromQueue && qOverride == null) quote = null
+        if (!fromQueue) helpReplyTo = null
+        if (attsOverride == null) pendingAttachments.clear()
         viewModelScope.launch {
             try {
                 val content = buildJsonArray {
@@ -4077,12 +4220,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun answerPermission(requestId: String, optionId: String, optionName: String) {
+    fun answerPermission(requestId: String, optionId: String, optionName: String, scope: String? = null) {
         viewModelScope.launch {
             try {
                 hub.call("permission.respond", buildJsonObject {
                     put("requestId", requestId)
                     put("optionId", optionId)
+                    if (scope != null) put("scope", scope)
                 })
                 val idx = chatItems.indexOfLast { it is ChatItem.Permission && it.requestId == requestId }
                 if (idx >= 0) {
@@ -4091,6 +4235,76 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (e: Exception) {
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "permission respond failed"))
+            }
+        }
+    }
+
+    /** 决策卡应答：permission → permission.respond（带粒度）；elicitation → action 直发 */
+    fun answerDecision(item: ChatItem.Decision, optionId: String, scope: String) {
+        if (item.decisionType == "elicitation") {
+            answerElicitation(item.requestId, optionId)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                hub.call("permission.respond", buildJsonObject {
+                    put("requestId", item.requestId)
+                    put("optionId", optionId)
+                    put("scope", scope)
+                })
+                val idx = chatItems.indexOfLast { it is ChatItem.Decision && it.decisionId == item.decisionId }
+                if (idx >= 0) {
+                    val d = chatItems[idx] as ChatItem.Decision
+                    val label = d.options.find { it.first == optionId }?.second ?: optionId
+                    chatItems[idx] = d.copy(status = "answered", answerLabel = label, scope = scope)
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "permission respond failed"))
+            }
+        }
+    }
+
+    /** 决策卡撤销：pending 终止底层请求；task/always 已授权则回收授权 */
+    fun revokeDecision(item: ChatItem.Decision) {
+        viewModelScope.launch {
+            try {
+                hub.call("decision.revoke", buildJsonObject { put("decisionId", item.decisionId) })
+                val idx = chatItems.indexOfLast { it is ChatItem.Decision && it.decisionId == item.decisionId }
+                if (idx >= 0) {
+                    val d = chatItems[idx] as ChatItem.Decision
+                    chatItems[idx] = d.copy(status = "revoked")
+                }
+            } catch (e: Exception) {
+                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "decision revoke failed"))
+            }
+        }
+    }
+
+    /** member.status 种子：进房/进会话时拉一次全量，后续靠事件增量 */
+    fun refreshMemberStatus() {
+        viewModelScope.launch {
+            if (!hub.isConnected) return@launch
+            try {
+                val room = currentRoom
+                val params = if (room != null) {
+                    buildJsonObject { put("roomId", room.roomId) }
+                } else {
+                    val sid = currentSession?.sessionId ?: return@launch
+                    buildJsonObject { put("sessionId", sid) }
+                }
+                val result = hub.call("member.status", params)
+                result["members"]?.jsonArray?.forEach {
+                    val o = it.jsonObject
+                    val sid = o["sessionId"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                    val st = o["status"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                    memberStatus[sid] = st
+                }
+                result["status"]?.jsonPrimitive?.contentOrNull?.let { st ->
+                    result["sessionId"]?.jsonPrimitive?.contentOrNull?.let { sid ->
+                        memberStatus[sid] = st
+                    }
+                }
+            } catch (_: Exception) {
             }
         }
     }
@@ -4209,7 +4423,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     } catch (_: Exception) {
                         null
                     }
-                    if (meta != null && kind == "flow") {
+                    if (kind == "decision") {
+                        upsertDecisionEntry(entry)
+                    } else if (meta != null && kind == "flow") {
                         val snap = parseFlow(meta, roomId)
                         if (snap != null && snap.flowId.isNotEmpty()) {
                             val card = ChatItem.Flow(if (eid != null) -eid else ++itemSeq, snap.flowId, snap, author, at)
@@ -4283,11 +4499,37 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     viewModelScope.launch { refreshSessionArtifacts(sessionId) }
                 }
             }
+            "decision.update" -> {
+                val p = obj["params"]!!.jsonObject
+                val scope = p["scope"]?.jsonPrimitive?.contentOrNull
+                val scopeId = p["id"]?.jsonPrimitive?.contentOrNull
+                val entry = p["entry"]?.jsonObject ?: return
+                val inView = when (scope) {
+                    "room" -> scopeId == currentRoom?.roomId
+                    "session" -> currentRoom == null && scopeId == currentSession?.sessionId
+                    else -> false
+                }
+                if (inView) upsertDecisionEntry(entry)
+            }
+            "member.status" -> {
+                val p = obj["params"]!!.jsonObject
+                val scope = p["scope"]?.jsonPrimitive?.contentOrNull
+                val member = p["member"]?.jsonPrimitive?.contentOrNull ?: return
+                val status = p["status"]?.jsonPrimitive?.contentOrNull ?: return
+                val relevant = when (scope) {
+                    "room" -> p["id"]?.jsonPrimitive?.contentOrNull == currentRoom?.roomId
+                    else -> true
+                }
+                if (relevant) memberStatus[member] = status
+            }
             "permission.request" -> {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 if (!inScope(sid)) return
                 if (!busyIds.contains(sid)) busyIds.add(sid)
+                val reqId = p["requestId"]!!.jsonPrimitive.content
+                // 决策卡已覆盖此请求时不再重复渲染旧条目
+                if (chatItems.any { it is ChatItem.Decision && it.requestId == reqId }) return
                 val tool = p["toolCall"]!!.jsonObject
                 val title = tool["title"]?.jsonPrimitive?.content ?: stringsFor(lang).toolCallLabel
                 val options = p["options"]!!.jsonArray.map {
@@ -4295,8 +4537,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["optionId"]!!.jsonPrimitive.content to o["name"]!!.jsonPrimitive.content
                 }
                 chatItems.add(
-                    ChatItem.Permission(++itemSeq, 
-                        p["requestId"]!!.jsonPrimitive.content,
+                    ChatItem.Permission(++itemSeq,
+                        reqId,
                         title,
                         options,
                         author = sessionName(sid),

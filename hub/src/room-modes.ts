@@ -255,6 +255,8 @@ const MODE_LABELS: Record<RuntimeMode, string> = {
 export class RoomModeManager {
   /** 编排卡同步钩子：每次 flowUpdate 后调用，参数为 getFlow 视图（可能为 undefined） */
   onFlowCard?: (roomId: string, flow: Record<string, unknown> | undefined) => void;
+  /** nano 相关性过滤：auto/mention 唤起编排前调用，返回 false 则本轮不派发 */
+  private relevanceFilter?: (room: Room, text: string) => Promise<boolean>;
   private conductor: ConductorOrchestrator;
   private autoDecisions = new Map<string, AutoDecisionContext>();
   private parallelFlows = new Map<string, ParallelFlow>();
@@ -264,6 +266,11 @@ export class RoomModeManager {
   private promptRooms = new Map<string, string>();
   private autoHistory = new Map<string, { at: number; mode: string; reason: string; accepted?: boolean }[]>();
   private lastAuto = new Map<string, { at: number }>();
+  /** turn 提交不变量：外发 prompt 时记录房史"最后一条用户条目"游标与原 prompt 内容 */
+  private turnGuards = new Map<
+    string,
+    { roomId: string; cursor: number; retried: boolean; content: string | PromptContent }
+  >();
   private store?: Store;
 
   constructor(
@@ -274,11 +281,16 @@ export class RoomModeManager {
     isolatedChecks?: Readonly<Record<string, string>>,
   ) {
     this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs, isolatedChecks);
+    this.conductor.setTurnGuard((sid, rid, content) => this.noteTurnGuard(sid, rid, content));
   }
 
   setStore(store: Store): void {
     this.store = store;
     this.conductor.setStore(store);
+  }
+
+  setRelevanceFilter(fn: (room: Room, text: string) => Promise<boolean>): void {
+    this.relevanceFilter = fn;
   }
 
   exportRuntime(): Record<string, unknown> {
@@ -352,7 +364,52 @@ export class RoomModeManager {
 
   private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
     this.promptRooms.set(sessionId, roomId);
+    this.noteTurnGuard(sessionId, roomId, content);
     return this.agent.prompt(sessionId, content);
+  }
+
+  private noteTurnGuard(sessionId: string, roomId: string, content: string | PromptContent): void {
+    const prev = this.turnGuards.get(sessionId);
+    this.turnGuards.set(sessionId, {
+      roomId,
+      content,
+      cursor: this.store?.lastUserEntryId("room", roomId) ?? 0,
+      retried: prev?.retried ?? false,
+    });
+  }
+
+  /**
+   * onTurnEnd 用：该 turn 的房史游标已被新用户消息推进（上下文过期），
+   * 房间侧不落库（输出随后会被作废并按原 prompt 重跑一次）。
+   * 已重跑过一次的 turn 强制接受，避免死循环。
+   */
+  isStaleTurnCommit(sessionId: string, roomId: string): boolean {
+    const guard = this.turnGuards.get(sessionId);
+    if (!guard || guard.roomId !== roomId || guard.retried || !this.store) return false;
+    return this.store.lastUserEntryId("room", roomId) !== guard.cursor;
+  }
+
+  /**
+   * prompt.done 入口处的 stale 校验：游标推进且未重跑过 → 丢弃输出、按原 prompt 重发一次；
+   * 游标未推进 → 正常消费；已重跑过 → 强制接受（上限 1 次）。返回 true 表示本轮输出已处理。
+   */
+  private handleStaleTurn(sessionId: string): boolean {
+    const guard = this.turnGuards.get(sessionId);
+    if (!guard) return false;
+    const cursor = this.store?.lastUserEntryId("room", guard.roomId) ?? 0;
+    if (cursor !== guard.cursor && !guard.retried) {
+      guard.retried = true;
+      logWarn(
+        "room-modes stale",
+        `${guard.roomId}:${sessionId} 回合期间上下文已更新，输出作废并按原 prompt 重跑一次`,
+      );
+      this.agent.prompt(sessionId, guard.content).catch((err) =>
+        logError("room-modes stale retry", err),
+      );
+      return true;
+    }
+    this.turnGuards.delete(sessionId);
+    return false;
   }
 
   private captureArtifacts(sessionId: string, output: string, taskId?: string): void {
@@ -761,6 +818,29 @@ export class RoomModeManager {
 
     this.conductor.clearCompleted(room.roomId);
 
+    // nano 相关性过滤：仅作用于 auto/mention 的广播唤起路径；
+    // 显式 @ 点名或 params.targets 是用户明确意图，直通不过滤。
+    if (
+      this.relevanceFilter &&
+      (room.mode === "auto" || room.mode === "mention")
+    ) {
+      const explicit =
+        this.rooms.route(room.roomId, text).mentioned.length > 0 ||
+        (Array.isArray(options?.params?.targets) &&
+          (options.params.targets as unknown[]).length > 0);
+      if (!explicit) {
+        const relevant = await this.relevanceFilter(room, text);
+        if (!relevant) {
+          this.rooms.addEvent(room.roomId, {
+            author: "hub",
+            action: "filter",
+            summary: `过滤低相关消息：${text.slice(0, 80)}`,
+          });
+          return { sent: [], mentioned: [], skipped: [] };
+        }
+      }
+    }
+
     if (room.mode === "auto") {
       const result = await this.handleAuto(room, text, mergedOptions);
       this.emitFlowUpdate(room.roomId);
@@ -775,6 +855,8 @@ export class RoomModeManager {
 
   /** prompt 完成时的回调 */
   async onPromptDone(sessionId: string, output: string): Promise<boolean> {
+    // turn 提交不变量：上下文游标推进的输出作废重跑（≤1 次）
+    if (this.handleStaleTurn(sessionId)) return true;
     // auto 决策完成
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
@@ -890,6 +972,7 @@ export class RoomModeManager {
    * conductor 任务标 failed 终态（不自动重派）；auto 决策中止；其余模式复用 onPromptError 的终态收敛。
    */
   onSessionCancelled(sessionId: string): void {
+    this.turnGuards.delete(sessionId);
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
@@ -910,6 +993,7 @@ export class RoomModeManager {
 
   /** prompt 异常/取消时的回调 */
   onPromptError(sessionId: string): boolean {
+    this.turnGuards.delete(sessionId);
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
@@ -1029,6 +1113,12 @@ export class RoomModeManager {
           (flow.sides.includes(sessionId) || flow.judge === sessionId) &&
           (current === sessionId || !this.agent.isBusy(sessionId));
       })?.[0];
+  }
+
+  /** 该房间当前活跃编排的 flowId（过程卡归组用）；无活跃 flow 返回 undefined */
+  flowIdForRoom(roomId: string): string | undefined {
+    const flow = this.getFlow(roomId);
+    return typeof flow?.flowId === "string" ? flow.flowId : undefined;
   }
 
   /** 该会话在此房间当前执行的子任务 id（conductor worker 回合；其他模式为 undefined） */

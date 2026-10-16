@@ -409,7 +409,33 @@ export type ChatItem =
       flowId: string;
       snapshot: FlowCardSnapshot;
       author: string;
+    }
+  | {
+      kind: "decision";
+      at?: number;
+      historyId?: number;
+      meta: DecisionMeta;
+      author: string;
     };
+
+/** 决策卡（kind:"decision" 房史条目的 text JSON）：permission/elicitation 统一审批 */
+export type DecisionMeta = {
+  v: number;
+  decisionId: string;
+  requestId: string;
+  type: "permission" | "elicitation";
+  title: string;
+  options: { id: string; label: string; kind?: string }[];
+  requestedBy: string;
+  sessionId: string;
+  roomId?: string;
+  status: "pending" | "answered" | "revoked" | "expired";
+  scope: "once" | "task" | "always";
+  answer?: { optionId?: string; label?: string; action?: string };
+  grantKey?: string;
+  auto?: boolean;
+  at: number;
+};
 
 export type Screen = "connect" | "sessions" | "chat" | "room" | "settings" | "schedule";
 

@@ -9,6 +9,7 @@ import type {
   ConnectionInfo,
   ContextUsage,
   ElicitationField,
+  DecisionMeta,
   ElicitationValue,
   EventInfo,
   FlowArtifact,
@@ -78,6 +79,8 @@ interface State {
   blackboard: BlackboardInfo[] | null;
   chatItems: ChatItem[];
   busyIds: string[];
+  /** member.status 事件维护的成员在线状态（sessionId → online/generating/offline） */
+  memberStatus: Record<string, string>;
   quote: [string, string] | null;
   fileRefToInsert: string | null;
   /** 各类新增内容计数（打开对应面板时清零） */
@@ -196,8 +199,16 @@ interface Actions {
   cloneRoom(room: RoomInfo, newName: string): Promise<RoomInfo | null>;
   newChat(): void;
 
-  sendPrompt(text: string): void;
-  sendRoomMessage(text: string, opts?: { replyTo?: string }): void;
+  sendPrompt(text: string, qOverride?: [string, string] | null, attsOverride?: Attachment[] | null): void;
+  sendRoomMessage(text: string, opts?: { replyTo?: string; quote?: [string, string] | null; atts?: Attachment[] | null }): void;
+  /** 生成中的 follow-up 队列：发送排入队尾，回合空闲后按序冲刷 */
+  followUps: { key: string; text: string; at: number; replyTo?: string; quote?: [string, string]; atts?: Attachment[] }[];
+  queueFollowUp(text: string, replyTo?: string): void;
+  removeFollowUp(index: number): void;
+  /** 当前 scope 空闲时冲刷一条队首消息；返回是否冲刷了 */
+  flushFollowUp(): void;
+  /** member.status 种子：进房/进会话时拉一次全量，后续靠事件增量 */
+  refreshMemberStatus(): Promise<void>;
   stopCurrent(): void;
   cancelFlow(): Promise<void>;
   answerPermission(requestId: string, optionId: string, optionName: string): void;
@@ -426,6 +437,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
         let m: Record<string, unknown> = {};
         try { m = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
         return processMetaToItem(m, { at, historyId, author });
+      }
+      case "decision": {
+        let m: Record<string, unknown> = {};
+        try { m = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
+        if (!m.decisionId) return null;
+        return { kind: "decision", at, historyId, meta: m as unknown as DecisionMeta, author };
       }
       case "flow": {
         // 编排卡条目：text 为 toCardSnapshot 白名单快照 JSON，数组字段兜底归一化
@@ -918,6 +935,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           return [String(o.optionId ?? ""), String(o.name ?? "")] as [string, string];
         });
         const requestId = String(params.requestId ?? "");
+        // 决策卡已覆盖此请求时不再重复渲染旧条目
+        if (get().chatItems.some((it) => it.kind === "decision" && it.meta.requestId === requestId)) break;
         const next: ChatItem = {
           kind: "permission",
           at: Date.now(),
@@ -933,6 +952,59 @@ export const useHubStore = create<State & Actions>((set, get) => {
         });
         break;
       }
+      case "decision.update": {
+        // 决策卡原位更新：entry 为房史行 {id,at,kind,author,text}
+        const scope = String(params.scope ?? "");
+        const sid = String(params.id ?? "");
+        const match =
+          (scope === "room" && get().currentRoom?.roomId === sid) ||
+          (scope === "session" && get().currentSession?.sessionId === sid);
+        if (!match) break;
+        const entry = params.entry as Record<string, unknown> | undefined;
+        if (!entry) break;
+        const item = entryToChatItem(entry);
+        if (!item) break;
+        let list = get().chatItems;
+        if (item.kind === "decision") {
+          const reqId = item.meta.requestId;
+          if (item.meta.type === "elicitation") {
+            // elicitation 表单条目负责交互：存在未答表单时卡不重复插入，仅在定稿时回填状态
+            let ei = -1;
+            for (let i = list.length - 1; i >= 0; i--) {
+              const cand = list[i];
+              if (cand.kind === "elicitation" && cand.requestId === reqId && cand.answered == null) {
+                ei = i;
+                break;
+              }
+            }
+            if (ei >= 0) {
+              if (item.meta.status !== "pending") {
+                const e = list[ei];
+                if (e.kind === "elicitation") {
+                  const action = item.meta.answer?.action;
+                  const answered: "accepted" | "declined" | "cancelled" =
+                    action === "accept" ? "accepted" : action === "decline" ? "declined" : "cancelled";
+                  list = list.map((it, i) => (i === ei ? { ...e, answered } : it));
+                  set({ chatItems: list });
+                }
+              }
+              break;
+            }
+          }
+          // permission 卡替代旧 Permission 条目
+          list = list.filter((it) => !(it.kind === "permission" && it.requestId === reqId));
+        }
+        const idx = list.findIndex((it) => it.kind === "decision" && it.historyId === item.historyId);
+        set({ chatItems: idx >= 0 ? list.map((it, i) => (i === idx ? item : it)) : [...list, item] });
+        break;
+      }
+      case "member.status": {
+        const member = String(params.member ?? "");
+        const status = String(params.status ?? "");
+        if (!member || !status) break;
+        set({ memberStatus: { ...get().memberStatus, [member]: status } });
+        break;
+      }
       case "elicitation.request": {
         const sid = String(params.sessionId ?? "");
         if (!get().inScope(sid)) return;
@@ -942,16 +1014,21 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const fields = ((params.fields as unknown[] | undefined) ?? [])
           .map((it) => it as ElicitationField)
           .filter((f) => f && typeof f.name === "string");
+        const reqId = String(params.requestId ?? "");
+        // 表单优先：live 期间撤下同 requestId 的决策卡记录，表单承担交互
+        const cleaned = get().chatItems.filter(
+          (it) => !(it.kind === "decision" && it.meta.requestId === reqId),
+        );
         const next: ChatItem = {
           kind: "elicitation",
           at: Date.now(),
-          requestId: String(params.requestId ?? ""),
+          requestId: reqId,
           message: String(params.message ?? ""),
           fields,
           answered: null,
           author: get().sessionName(sid),
         };
-        set({ chatItems: [...get().chatItems, next] });
+        set({ chatItems: [...cleaned, next] });
         ensurePermission().then(() => {
           showNotification(stringsFor(get().lang).elicitationNotificationFmt.replace("%s", get().sessionName(sid)), String(params.message ?? "")).catch(() => {});
         });
@@ -1134,6 +1211,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     blackboard: null,
     chatItems: [],
     busyIds: [],
+    memberStatus: {},
     quote: null,
     fileRefToInsert: null,
     newCounts: { artifact: 0, event: 0, blackboard: 0 },
@@ -1333,6 +1411,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         blackboard: null,
         chatItems: [],
         busyIds: [],
+        memberStatus: {},
         quote: null,
     fileRefToInsert: null,
     newCounts: { artifact: 0, event: 0, blackboard: 0 },
@@ -1599,6 +1678,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
       get().refreshArtifacts({ sessionId: session.sessionId });
+      void get().refreshMemberStatus();
       void get().refreshSessionUsage(session.sessionId);
       if (session.agent === "devin") void get().refreshBackendQuota();
     },
@@ -1639,6 +1719,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().syncBusyIdsFromList(get().sessions);
       get().refreshFlow(updatedRoom.roomId);
       get().refreshArtifacts({ roomId: updatedRoom.roomId });
+      void get().refreshMemberStatus();
       if (updatedRoom.activeSpeaker) void get().refreshSessionUsage(updatedRoom.activeSpeaker);
       void get().refreshRoomMemberModels();
     },
@@ -1861,12 +1942,82 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
     },
 
-    sendPrompt: (text: string) => {
-      const session = get().currentSession;
-      if (!session) return;
+    followUps: [],
+    queueFollowUp: (text: string, replyTo?: string) => {
+      const key = get().currentRoom
+        ? `room:${get().currentRoom!.roomId}`
+        : `session:${get().currentSession?.sessionId ?? ""}`;
+      if (key.endsWith(":")) return;
+      // slash 命令立即执行，不排队
       if (get().handleSlashCommand(text)) return;
       const q = get().quote;
       const atts = get().pendingAttachments;
+      set({
+        followUps: [
+          ...get().followUps,
+          {
+            key,
+            text,
+            at: Date.now(),
+            replyTo,
+            quote: q ?? undefined,
+            atts: atts.length ? [...atts] : undefined,
+          },
+        ],
+        quote: null,
+        pendingAttachments: [],
+      });
+    },
+    removeFollowUp: (index: number) => {
+      const list = get().followUps;
+      set({ followUps: list.filter((_, i) => i !== index) });
+    },
+    flushFollowUp: () => {
+      const key = get().currentRoom
+        ? `room:${get().currentRoom!.roomId}`
+        : `session:${get().currentSession?.sessionId ?? ""}`;
+      // 会话发送同步置忙→每回合冲刷一条；群聊广播不置忙→空闲时按序清空本 scope 队列
+      while (!get().isGenerating()) {
+        const idx = get().followUps.findIndex((f) => f.key === key);
+        if (idx < 0) return;
+        const item = get().followUps[idx];
+        get().removeFollowUp(idx);
+        if (get().currentRoom) {
+          get().sendRoomMessage(item.text, { replyTo: item.replyTo, quote: item.quote ?? null, atts: item.atts ?? null });
+        } else {
+          get().sendPrompt(item.text, item.quote ?? null, item.atts ?? null);
+        }
+      }
+    },
+
+    refreshMemberStatus: async () => {
+      try {
+        const room = get().currentRoom;
+        const params: Record<string, unknown> = room
+          ? { roomId: room.roomId }
+          : { sessionId: get().currentSession?.sessionId };
+        if (!params.roomId && !params.sessionId) return;
+        const result = (await getOrCall("member.status", params)) as Record<string, unknown>;
+        const next: Record<string, string> = {};
+        ((result.members as Record<string, unknown>[] | undefined) ?? []).forEach((m) => {
+          const sid = String(m.sessionId ?? "");
+          const st = String(m.status ?? "");
+          if (sid && st) next[sid] = st;
+        });
+        const sid = String(result.sessionId ?? "");
+        const st = String(result.status ?? "");
+        if (sid && st) next[sid] = st;
+        if (Object.keys(next).length) set({ memberStatus: { ...get().memberStatus, ...next } });
+      } catch { /* member.status 可选能力，失败静默 */ }
+    },
+
+    sendPrompt: (text: string, qOverride?: [string, string] | null, attsOverride?: Attachment[] | null) => {
+      const session = get().currentSession;
+      if (!session) return;
+      if (get().handleSlashCommand(text)) return;
+      // undefined=用当前草稿，null=显式无（队列冲刷不得偷挂/清空草稿）
+      const q = qOverride === undefined ? get().quote : (qOverride ?? undefined);
+      const atts = attsOverride === undefined ? get().pendingAttachments : (attsOverride ?? []);
       const now = Date.now();
       const userItem: ChatItem = {
         kind: "user",
@@ -1877,7 +2028,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quoteAuthor: q?.[0],
         quoteText: q?.[1],
       };
-      set({ chatItems: [...get().chatItems, userItem], quote: null, pendingAttachments: [] });
+      set({
+        chatItems: [...get().chatItems, userItem],
+        ...(qOverride === undefined ? { quote: null } : {}),
+        ...(attsOverride === undefined ? { pendingAttachments: [] } : {}),
+      });
       const content: Record<string, unknown>[] = [];
       if (text) content.push({ type: "text", text: q ? `${stringsFor(get().lang).quoteHeaderFmt.replace("%s", q[0]).replace("%s", q[1].slice(0, 300))}\n${text}` : text });
       for (const a of atts) {
@@ -1897,12 +2052,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
       });
     },
 
-    sendRoomMessage: (text: string, opts?: { replyTo?: string }) => {
+    sendRoomMessage: (text: string, opts?: { replyTo?: string; quote?: [string, string] | null; atts?: Attachment[] | null }) => {
       const room = get().currentRoom;
       if (!room) return;
       if (get().handleSlashCommand(text)) return;
-      const q = get().quote;
-      const atts = get().pendingAttachments;
+      const q = opts === undefined || opts.quote === undefined ? get().quote : (opts.quote ?? undefined);
+      const atts = opts === undefined || opts.atts === undefined ? get().pendingAttachments : (opts.atts ?? []);
       const now = Date.now();
       const userItem: ChatItem = {
         kind: "user",
@@ -1913,7 +2068,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         quoteAuthor: q?.[0],
         quoteText: q?.[1],
       };
-      set({ chatItems: [...get().chatItems, userItem], quote: null, pendingAttachments: [] });
+      set({
+        chatItems: [...get().chatItems, userItem],
+        ...(opts?.quote === undefined ? { quote: null } : {}),
+        ...(opts?.atts === undefined ? { pendingAttachments: [] } : {}),
+      });
 
       const content: Record<string, unknown>[] = [];
       if (text) content.push({ type: "text", text });
@@ -2158,7 +2317,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (room) {
         if (room.members.some((m) => get().busyIds.includes(m[0]))) return true;
         const flow = get().flow;
-        if (flow && flow.phase !== "done") return true;
+        if (flow && flow.phase !== "done" && flow.phase !== "cancelled") return true;
         return false;
       }
       const s = get().currentSession;

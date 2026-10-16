@@ -104,6 +104,16 @@ interface Strings {
     val clarificationPending: String
     val clarificationReplying: String
     val send: String
+    val queueCountFmt: String
+    val queueClearHint: String
+    val decisionScopeOnce: String
+    val decisionScopeTask: String
+    val decisionScopeAlways: String
+    val decisionRevoke: String
+    val decisionRevokeGrant: String
+    val decisionRevoked: String
+    val decisionExpired: String
+    val decisionAuto: String
     val thought: String
     val thoughtOf: String
     val plan: String
@@ -314,6 +324,7 @@ interface Strings {
     val helpWanted: String
     val flowProgressFmt: String
     val flowProgressFailed: String
+    val flowTasksTitle: String
     val interruptFlow: String
     val supplementCount: String
     val capsuleBlackboard: String
@@ -577,6 +588,16 @@ object ZhStrings : Strings {
     override val clarificationPending = "指挥家需要你确认以下问题后再派工，点「答复」可自由填写其他方案"
     override val clarificationReplying = "答复指挥家的确认问题"
     override val send = "发送"
+    override val queueCountFmt = "排队 %d 条"
+    override val queueClearHint = "点按清空"
+    override val decisionScopeOnce = "仅一次"
+    override val decisionScopeTask = "本任务"
+    override val decisionScopeAlways = "始终"
+    override val decisionRevoke = "撤销"
+    override val decisionRevokeGrant = "撤销授权"
+    override val decisionRevoked = "已撤销"
+    override val decisionExpired = "已超时"
+    override val decisionAuto = "自动放行"
     override val thought = "思考过程"
     override val thoughtOf = "%s 的思考"
     override val plan = "计划"
@@ -787,6 +808,7 @@ object ZhStrings : Strings {
     override val helpWanted = "向你求助"
     override val flowProgressFmt = "%d/%d 完成 · %d 进行中 · %d 待执行"
     override val flowProgressFailed = " · %d 失败"
+    override val flowTasksTitle = "任务列表"
     override val interruptFlow = "中断"
     override val supplementCount = "用户补充 %d 条"
     override val capsuleBlackboard = "黑板 %d"
@@ -1058,6 +1080,16 @@ object EnStrings : Strings {
     override val clarificationPending = "The conductor needs your answers before dispatching — tap Answer to write any custom plan"
     override val clarificationReplying = "Answering the conductor's questions"
     override val send = "Send"
+    override val queueCountFmt = "%d queued"
+    override val queueClearHint = "tap to clear"
+    override val decisionScopeOnce = "Once"
+    override val decisionScopeTask = "This task"
+    override val decisionScopeAlways = "Always"
+    override val decisionRevoke = "Revoke"
+    override val decisionRevokeGrant = "Revoke grant"
+    override val decisionRevoked = "Revoked"
+    override val decisionExpired = "Expired"
+    override val decisionAuto = "Auto-approved"
     override val thought = "Thinking"
     override val thoughtOf = "%s's thinking"
     override val plan = "Plan"
@@ -1268,6 +1300,7 @@ object EnStrings : Strings {
     override val helpWanted = "Needs you"
     override val flowProgressFmt = "%d/%d done · %d running · %d pending"
     override val flowProgressFailed = " · %d failed"
+    override val flowTasksTitle = "Tasks"
     override val interruptFlow = "Abort"
     override val supplementCount = "%d user supplements"
     override val capsuleBlackboard = "Board %d"

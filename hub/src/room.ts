@@ -32,6 +32,10 @@ export type Room = {
   debateRounds?: number | undefined;
   /** 并发模式：汇总者 sessionId */
   parallelSummarizerId?: string | undefined;
+  /** conductor/auto 编排跟进派发轮次上限，未设置用默认 */
+  maxRounds?: number | undefined;
+  /** nano 相关性过滤开关：undefined 走全局默认，true/false 显式覆盖 */
+  relevanceFilter?: boolean | undefined;
   archived?: boolean | undefined;
   /** 房间共享黑板 */
   blackboard?: BlackboardEntry[] | undefined;
@@ -48,7 +52,9 @@ export type RoomModeConfig = {
   debateSides?: [string, string] | undefined;
   debateJudge?: string | undefined;
   debateRounds?: number | undefined;
+  maxRounds?: number | undefined;
   memberRoles?: Record<string, string> | undefined;
+  relevanceFilter?: boolean | undefined;
 };
 
 export type BlackboardEntry = { id: string; from: string; text: string; detail: string; at: number };
@@ -78,6 +84,8 @@ export function remapRoomModeConfig(
       : undefined,
     debateJudge: remap(source.debateJudge),
     debateRounds: source.debateRounds,
+    maxRounds: source.maxRounds,
+    relevanceFilter: source.relevanceFilter,
     memberRoles: source.memberRoles
       ? Object.fromEntries(
           Object.entries(source.memberRoles)
@@ -91,7 +99,15 @@ export function remapRoomModeConfig(
 const BLACKBOARD_LIMIT = 10;
 const BLACKBOARD_OUTPUT_LEN = 400;
 
-export type EventAction = "add" | "modify" | "delete" | "rename" | "command" | "test";
+export type EventAction =
+  | "add"
+  | "modify"
+  | "delete"
+  | "rename"
+  | "command"
+  | "test"
+  | "decision"
+  | "filter";
 
 export type RoomEvent = {
   id: string;
@@ -133,7 +149,10 @@ const FILE_REF_CHAR_LIMIT = 10000;
 const FILE_REF_TOTAL_LIMIT = 50000;
 
 export function isEventAction(action: string | undefined): action is EventAction {
-  return !!action && ["add", "modify", "delete", "rename", "command", "test"].includes(action);
+  return (
+    !!action &&
+    ["add", "modify", "delete", "rename", "command", "test", "decision", "filter"].includes(action)
+  );
 }
 
 const BASE_DIR = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
@@ -268,6 +287,8 @@ export class RoomManager {
       debateSides: config?.debateSides,
       debateJudge: config?.debateJudge,
       debateRounds: config?.debateRounds,
+      maxRounds: config?.maxRounds,
+      relevanceFilter: config?.relevanceFilter,
       blackboard: [],
       artifacts: [],
       events: [],
@@ -556,6 +577,8 @@ export class RoomManager {
     room.debateSides = config?.debateSides;
     room.debateJudge = config?.debateJudge;
     room.debateRounds = config?.debateRounds;
+    room.maxRounds = config?.maxRounds;
+    room.relevanceFilter = config?.relevanceFilter;
     this.dedupMemberNames(room.roomId);
     return room;
   }

@@ -32,7 +32,7 @@ export type SessionMeta = {
 
 export type HistoryEntry = {
   at: number;
-  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow";
+  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow" | "decision";
   author: string;
   text: string;
 };
@@ -553,6 +553,27 @@ export class Store {
     }
   }
 
+  /** 未决决策卡条目（kind='decision' 且 meta.status='pending'），供启动时的过期收尾 */
+  findPendingDecisionCards(): { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[] {
+    try {
+      const rows = this.db
+        .prepare(
+          "SELECT id, scope, scope_id AS scopeId, at, text FROM history WHERE kind = 'decision'",
+        )
+        .all() as { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[];
+      return rows.filter((r) => {
+        try {
+          return String((JSON.parse(r.text) as Record<string, unknown>).status ?? "") === "pending";
+        } catch {
+          return false;
+        }
+      });
+    } catch (err) {
+      logWarn("store", `findPendingDecisionCards failed: ${String(err)}`);
+      return [];
+    }
+  }
+
   /** 原位覆写已有历史条目（编排卡等长期存活条目）：只改 text，不动 at/id/draft */
   updateEntry(rowId: number, text: string): void {
     try {
@@ -649,6 +670,18 @@ export class Store {
          ORDER BY at ASC, id ASC LIMIT ?`,
       )
       .all(scope, id, at, limit) as HistoryItem[];
+  }
+
+  /** 最后一条已提交（非草稿）用户条目 id；不存在返回 0。turn 游标校验用 */
+  lastUserEntryId(scope: "session" | "room", id: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM history
+         WHERE scope = ? AND scope_id = ? AND kind = 'user' AND draft = 0
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(scope, id) as { id: number } | undefined;
+    return row?.id ?? 0;
   }
 
   hasMoreBefore(scope: "session" | "room", id: string, at: number, beforeId?: number): boolean {

@@ -213,25 +213,6 @@ internal fun authorColor(author: String): Color {
 }
 
 @Composable
-private fun AuthorAvatar(author: String, modifier: Modifier = Modifier) {
-    val color = authorColor(author)
-    Box(
-        modifier
-            .size(30.dp)
-            .clip(CircleShape)
-            .background(color.copy(alpha = 0.16f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            author.trim().firstOrNull()?.uppercase() ?: "?",
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
 private fun DateSeparator(at: Long) {
     val S = LocalStrings.current
     val zone = ZoneId.systemDefault()
@@ -308,8 +289,8 @@ private fun ContextUsage.formatCompact(S: Strings): String {
 @Composable
 fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
-    var input by remember { mutableStateOf("") }
     val sessionKey = vm.currentRoom?.roomId ?: vm.currentSession?.sessionId ?: ""
+    var input by remember(sessionKey) { mutableStateOf(vm.draftFor(sessionKey)) }
     val listState = remember(sessionKey) { LazyListState(0, 0) }
     val activeSessionId = vm.currentRoom?.activeSpeaker ?: vm.currentSession?.sessionId
     val contextUsage = activeSessionId?.let { vm.sessionUsage[it] }
@@ -378,6 +359,14 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         }
     }
 
+    LaunchedEffect(input, sessionKey) {
+        vm.setDraft(sessionKey, input)
+    }
+
+    LaunchedEffect(vm.generating, sessionKey) {
+        if (!vm.generating) vm.flushQueue(sessionKey)
+    }
+
     LaunchedEffect(vm.flow, vm.helpReplyTo) {
         val target = vm.helpReplyTo ?: return@LaunchedEffect
         val waiting = vm.flow
@@ -438,6 +427,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     }
 
     var editingRoom by remember(sessionKey) { mutableStateOf(false) }
+    var flashFlowId by remember(sessionKey) { mutableStateOf<String?>(null) }
+    LaunchedEffect(flashFlowId) {
+        if (flashFlowId != null) {
+            delay(1200)
+            flashFlowId = null
+        }
+    }
 
     BackHandler(enabled = !editingRoom) {
         if (vm.multiSelectMode) vm.exitMultiSelect()
@@ -612,6 +608,31 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
+                                room.members.forEach { (sid, name) ->
+                                    val st = vm.memberStatus[sid] ?: "offline"
+                                    val dotColor = when (st) {
+                                        "generating" -> MaterialTheme.colorScheme.primary
+                                        "online" -> MaterialTheme.colorScheme.tertiary
+                                        else -> MaterialTheme.colorScheme.outline
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(
+                                            Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(dotColor),
+                                        )
+                                        Spacer(Modifier.width(3.dp))
+                                        Text(
+                                            name,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (st == "generating") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(max = 64.dp),
+                                        )
+                                    }
+                                }
                             }
                             if (quotaText.isNotEmpty()) {
                                 Text(
@@ -678,6 +699,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 if (isRoom || vm.currentSession != null) {
                     var expandedTop by remember(sessionKey) { mutableStateOf<String?>(null) }
                     ChatTopCapsules(vm, expandedTop, showRoomExtras = isRoom) { expandedTop = it }
+                    FlowProgressStrip(vm, listState, messages) { flashFlowId = it }
                     when (expandedTop) {
                         "blackboard" -> if (isRoom) BlackboardPanel(vm)
                         "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
@@ -726,6 +748,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 isCurrentMatch = currentMatchIndex == index,
                                 isQuoted = isQuoted,
                                 onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
+                                flash = flashFlowId != null &&
+                                    (item as? ChatListItem.FlowCard)?.item?.flowId == flashFlowId,
                             )
                         }
                     }
@@ -926,6 +950,28 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             }
                         }
                     }
+                }
+            }
+            val queuedCount = vm.queuedCount(sessionKey)
+            if (queuedCount > 0) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { vm.clearQueue(sessionKey) }
+                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        S.queueCountFmt.format(queuedCount),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        S.queueClearHint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
             }
             Row(
@@ -1212,11 +1258,15 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     )
                 }
                 if (vm.generating) {
-                    if (flowAbsorbing && (input.isNotBlank() || vm.pendingAttachments.isNotEmpty())) {
+                    if (input.isNotBlank() || vm.pendingAttachments.isNotEmpty()) {
                         Spacer(Modifier.size(4.dp))
                         FilledIconButton(
                             onClick = {
-                                vm.sendRoomMessage(input.trim())
+                                if (flowAbsorbing) {
+                                    vm.sendRoomMessage(input.trim())
+                                } else {
+                                    vm.enqueueMessage(sessionKey, input.trim())
+                                }
                                 input = ""
                             },
                             modifier = Modifier.size(40.dp),
@@ -1330,9 +1380,15 @@ fun AuthorLabel(author: String) {
     val S = LocalStrings.current
     if (author.isNotBlank() && author != S.authorMe && author != "我") {
         Text(
-            author,
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = authorColor(author), fontWeight = FontWeight.SemiBold)) {
+                    append(author)
+                }
+                withStyle(SpanStyle(color = MaterialTheme.colorScheme.outline)) {
+                    append(" ·")
+                }
+            },
             style = MaterialTheme.typography.labelSmall,
-            color = authorColor(author),
         )
     }
 }
@@ -1482,28 +1538,9 @@ fun ChatBubble(
     isCurrentMatch: Boolean = false,
     isQuoted: Boolean = false,
     onMatchKeywordY: ((Float) -> Unit)? = null,
+    flash: Boolean = false,
 ) {
-    val S = LocalStrings.current
-    val isUserItem = (item as? ChatListItem.Message)?.isUser == true ||
-        ((item as? ChatListItem.Other)?.item is ChatItem.User)
-    val authored = !isUserItem && item.author.isNotBlank() &&
-        item.author != S.authorMe && item.author != "我" &&
-        item.groupableAuthor()
-    if (!authored) {
-        ChatBubbleContent(item, vm, showAuthor, grouped, highlight, isCurrentMatch, isQuoted, onMatchKeywordY)
-        return
-    }
-    Row(Modifier.fillMaxWidth()) {
-        if (item.isFirst && !grouped) {
-            AuthorAvatar(item.author)
-        } else {
-            Spacer(Modifier.width(30.dp))
-        }
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f)) {
-            ChatBubbleContent(item, vm, showAuthor, grouped, highlight, isCurrentMatch, isQuoted, onMatchKeywordY)
-        }
-    }
+    ChatBubbleContent(item, vm, showAuthor, grouped, highlight, isCurrentMatch, isQuoted, onMatchKeywordY, flash)
 }
 
 @Composable
@@ -1516,6 +1553,7 @@ private fun ChatBubbleContent(
     isCurrentMatch: Boolean,
     isQuoted: Boolean,
     onMatchKeywordY: ((Float) -> Unit)?,
+    flash: Boolean = false,
 ) {
     when (item) {
         is ChatListItem.Other -> RawChatBubble(
@@ -1551,6 +1589,7 @@ private fun ChatBubbleContent(
             item.item,
             vm,
             isCurrentMatch = isCurrentMatch,
+            flash = flash,
         )
     }
 }
@@ -1653,6 +1692,10 @@ private fun MessageBlock(
     } else {
         Column(Modifier.padding(top = blockTop, bottom = blockBottom)) {
             if (showAuthor) AuthorLabel(item.author)
+            // 指挥家/主持人的编排产物消息（汇总、求助）与过程卡同宽
+            // author 是 displayNameFor 的 "name (conn)" 形态，sessionName 返回裸名，用容错比较
+            val hostName = vm.currentRoom?.conductorId?.let { vm.sessionName(it) }
+            val hostMsg = hostName != null && sameChatAuthor(item.author, hostName)
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.surfaceVariant
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
@@ -1662,7 +1705,7 @@ private fun MessageBlock(
                 vm = vm,
                 itemId = item.id,
                 canSelect = true,
-                modifier = bubbleModifier.fillMaxWidth(),
+                modifier = bubbleModifier.fillMaxWidth(if (hostMsg) 1f else 0.9f),
             ) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -2082,7 +2125,7 @@ private fun RawChatBubble(
                 vm = vm,
                 itemId = item.id.toString(),
                 canSelect = true,
-                modifier = bubbleModifier.fillMaxWidth(),
+                modifier = bubbleModifier.fillMaxWidth(0.9f),
             ) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -2271,6 +2314,11 @@ private fun RawChatBubble(
                     )
                 }
             }
+        }
+
+        is ChatItem.Decision -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
+            if (showAuthor) AuthorLabel(item.author)
+            DecisionCardBlock(item, vm, isCurrentMatch, highlight, onMatchKeywordY, bubbleModifier)
         }
 
         is ChatItem.Permission -> Column(Modifier.padding(top = if (grouped) 1.dp else 4.dp, bottom = 4.dp)) {
@@ -2526,6 +2574,7 @@ private fun FlowCardBlock(
     item: ChatItem.Flow,
     vm: ChatViewModel,
     isCurrentMatch: Boolean = false,
+    flash: Boolean = false,
 ) {
     val S = LocalStrings.current
     val live = vm.flow
@@ -2572,10 +2621,10 @@ private fun FlowCardBlock(
     val canCancel = isLive &&
         flow.phase !in setOf("done", "summarizing", "reviewing", "cancelled")
     val waitingOnUser = flow.tasks.any { it.waitingFor == "user" }
-    val bgColor = if (isCurrentMatch) {
-        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
-    } else {
-        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    val bgColor = when {
+        flash -> MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+        isCurrentMatch -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
     }
     Card(
         modifier = Modifier
@@ -3868,6 +3917,335 @@ private fun EventPanel(events: List<EventInfo>, vm: ChatViewModel) {
                 TextButton(onClick = { confirmRemoveSelected = false }) { Text(S.actionCancel) }
             },
         )
+    }
+}
+
+/** 常驻编排进度条：钉在胶囊区与消息列表之间；点按定位时间线中的编排卡，长按展开紧凑任务列表 */
+@Composable
+private fun FlowProgressStrip(
+    vm: ChatViewModel,
+    listState: LazyListState,
+    messages: List<ChatListItem>,
+    onFlash: (String) -> Unit,
+) {
+    val S = LocalStrings.current
+    val flow = vm.flow ?: return
+    if (flow.phase == "done" || flow.phase == "cancelled") return
+    val scope = rememberCoroutineScope()
+    var tasksExpanded by remember { mutableStateOf(false) }
+    val progress = flow.progress
+    val waitingOnUser = flow.tasks.any { it.waitingFor == "user" }
+    val runningTask = flow.tasks.firstOrNull { it.status == "running" }
+    val cardFlowId = flow.flowId.ifEmpty { "__live" }
+    val phaseLabel = when (flow.phase) {
+        "planning" -> S.phasePlanning
+        "awaiting-input" -> S.flowAwaitingInput
+        "working" -> S.phaseWorking
+        "reviewing" -> S.phaseReviewing
+        "summarizing" -> S.phaseSummarizing
+        "awaiting-retry" -> S.phaseAwaitingRetry
+        else -> ""
+    }
+    val phaseTagColor = when (flow.phase) {
+        "awaiting-retry" -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.surface
+    }
+    val phaseTagTextColor = when (flow.phase) {
+        "awaiting-retry" -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val containerColor = if (waitingOnUser) {
+        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .padding(bottom = 2.dp),
+    ) {
+        Surface(
+            color = containerColor,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = {
+                        if (tasksExpanded) {
+                            tasksExpanded = false
+                        } else {
+                            val idx = messages.indexOfFirst {
+                                it is ChatListItem.FlowCard && it.item.flowId == cardFlowId
+                            }
+                            if (idx >= 0) {
+                                scope.launch { listState.animateScrollToItem(idx) }
+                                onFlash(cardFlowId)
+                            } else {
+                                tasksExpanded = true
+                            }
+                        }
+                    },
+                    onLongClick = { tasksExpanded = !tasksExpanded },
+                ),
+        ) {
+            Column {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 32.dp)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (phaseLabel.isNotEmpty()) {
+                        Surface(color = phaseTagColor, shape = RoundedCornerShape(4.dp)) {
+                            Text(
+                                phaseLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = phaseTagTextColor,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    if (progress.total > 0) {
+                        Text(
+                            "${progress.done}/${progress.total}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (waitingOnUser) {
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(4.dp),
+                        ) {
+                            Text(
+                                S.helpWanted,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
+                    if (runningTask != null) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "@${runningTask.name} ${runningTask.task}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                if (progress.total > 0) {
+                    LinearProgressIndicator(
+                        progress = { progress.done.toFloat() / progress.total },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.5.dp),
+                    )
+                }
+            }
+        }
+        if (tasksExpanded) {
+            Surface(
+                color = containerColor,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp)
+                    .clickable { tasksExpanded = false },
+            ) {
+                Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                    Text(
+                        S.flowTasksTitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Column(
+                        Modifier
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        flow.tasks.forEach { FlowStripTaskRow(it) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 统一决策卡：permission/elicitation 满宽卡，粒度选择 + 撤销入口 */
+@Composable
+private fun DecisionCardBlock(
+    item: ChatItem.Decision,
+    vm: ChatViewModel,
+    isCurrentMatch: Boolean,
+    highlight: String,
+    onMatchKeywordY: ((Float) -> Unit)?,
+    bubbleModifier: Modifier,
+) {
+    val S = LocalStrings.current
+    val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+    val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface
+    MessageBubbleBox(
+        copyText = item.title,
+        quote = null,
+        vm = vm,
+        itemId = item.id.toString(),
+        canSelect = false,
+        modifier = bubbleModifier.fillMaxWidth(),
+    ) {
+        Card(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = bgColor),
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                HighlightText(
+                    (if (item.decisionType == "elicitation") S.elicitationTitle else S.permissionRequest) + ": ${item.title}",
+                    highlight,
+                    onMatchKeywordY = onMatchKeywordY,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = textColor,
+                )
+                if (!item.contextSummary.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        item.contextSummary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                when (item.status) {
+                    "pending" -> {
+                        if (item.decisionType == "permission") {
+                            var scope by remember(item.id) { mutableStateOf("once") }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf(
+                                    "once" to S.decisionScopeOnce,
+                                    "task" to S.decisionScopeTask,
+                                    "always" to S.decisionScopeAlways,
+                                ).forEach { (key, label) ->
+                                    FilterChip(
+                                        selected = scope == key,
+                                        onClick = { scope = key },
+                                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item.options.forEach { (id, name) ->
+                                    OutlinedButton(
+                                        onClick = { vm.answerDecision(item, id, scope) },
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                                }
+                            }
+                        } else {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item.options.forEach { (id, name) ->
+                                    OutlinedButton(
+                                        onClick = { vm.answerDecision(item, id, "once") },
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        TextButton(
+                            onClick = { vm.revokeDecision(item) },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                        ) {
+                            Text(
+                                S.decisionRevoke,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                    "answered" -> {
+                        val scopeLabel = when (item.scope) {
+                            "task" -> S.decisionScopeTask
+                            "always" -> S.decisionScopeAlways
+                            else -> S.decisionScopeOnce
+                        }
+                        Text(
+                            S.chose.format(item.answerLabel ?: "") +
+                                (if (item.scope != "once") " · $scopeLabel" else "") +
+                                (if (item.auto) " · ${S.decisionAuto}" else ""),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (item.scope != "once" && !item.auto) {
+                            TextButton(
+                                onClick = { vm.revokeDecision(item) },
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                            ) {
+                                Text(
+                                    S.decisionRevokeGrant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    }
+                    else -> Text(
+                        if (item.status == "revoked") S.decisionRevoked else S.decisionExpired,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlowStripTaskRow(task: FlowTask) {
+    val S = LocalStrings.current
+    val icon = when (task.status) {
+        "done" -> "✓"
+        "running" -> "▶"
+        "failed" -> "✗"
+        else -> "○"
+    }
+    val iconColor = when (task.status) {
+        "done" -> MaterialTheme.colorScheme.primary
+        "running" -> MaterialTheme.colorScheme.tertiary
+        "failed" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(icon, color = iconColor, modifier = Modifier.width(16.dp), style = MaterialTheme.typography.labelSmall)
+        Text("@${task.name}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            task.task,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (task.waitingFor == "user") {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                S.helpWanted,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }
 

@@ -431,6 +431,15 @@ export interface Strings {
   cancelQuoteTitle: string;
   commandsGroupLabel: string;
   sendMergeTitleFmt: string;
+  sendQueueTitleFmt: string;
+  scopeOnce: string;
+  scopeTask: string;
+  scopeAlways: string;
+  decisionRevoke: string;
+  presenceOnline: string;
+  presenceGenerating: string;
+  presenceOffline: string;
+  followUpQueuedHint: string;
   stopGenerateTitle: string;
   sendTitleFmt: string;
   saveAsCommand: string;
@@ -481,6 +490,9 @@ export interface Strings {
   elapsedHourFmt: string;
   flowElapsedFmt: string;
   flowInterruptedRetry: string;
+  flowStripLocate: string;
+  flowStripExpand: string;
+  flowWaitingUser: string;
   retryAllFailed: string;
   flowCardPendingFmt: string;
   previewFailedFmt: string;
@@ -950,6 +962,15 @@ const zh: Strings = {
   cancelQuoteTitle: "取消引用",
   commandsGroupLabel: "命令",
   sendMergeTitleFmt: "发送 (%s) — 并入当前流程",
+  sendQueueTitleFmt: "发送 (%s) — 排队，回合结束后自动发送",
+  scopeOnce: "仅本次",
+  scopeTask: "本次任务",
+  scopeAlways: "始终",
+  decisionRevoke: "撤销授权",
+  presenceOnline: "在线",
+  presenceGenerating: "生成中",
+  presenceOffline: "离线",
+  followUpQueuedHint: "已排队，回合结束后按序发送",
   stopGenerateTitle: "停止生成",
   sendTitleFmt: "发送 (%s)",
   saveAsCommand: "保存当前输入为指令",
@@ -1000,6 +1021,9 @@ const zh: Strings = {
   elapsedHourFmt: "%s 小时 %s 分",
   flowElapsedFmt: "用时 %s",
   flowInterruptedRetry: "已中断 · 可重试",
+  flowStripLocate: "定位到编排卡",
+  flowStripExpand: "展开任务列表",
+  flowWaitingUser: "等待你",
   retryAllFailed: "重试失败任务",
   flowCardPendingFmt: "%s 个任务待执行",
   previewFailedFmt: "预览失败：%s",
@@ -1469,6 +1493,15 @@ const en: Strings = {
   cancelQuoteTitle: "Cancel quote",
   commandsGroupLabel: "Commands",
   sendMergeTitleFmt: "Send (%s) — merge into current flow",
+  sendQueueTitleFmt: "Send (%s) — queued, sends after this turn",
+  scopeOnce: "Once",
+  scopeTask: "This task",
+  scopeAlways: "Always",
+  decisionRevoke: "Revoke",
+  presenceOnline: "Online",
+  presenceGenerating: "Generating",
+  presenceOffline: "Offline",
+  followUpQueuedHint: "Queued — will send in order when idle",
   stopGenerateTitle: "Stop generating",
   sendTitleFmt: "Send (%s)",
   saveAsCommand: "Save current input as command",
@@ -1519,6 +1552,9 @@ const en: Strings = {
   elapsedHourFmt: "%sh %sm",
   flowElapsedFmt: "took %s",
   flowInterruptedRetry: "Interrupted · retry available",
+  flowStripLocate: "Locate flow card",
+  flowStripExpand: "Expand task list",
+  flowWaitingUser: "Waiting for you",
   retryAllFailed: "Retry failed tasks",
   flowCardPendingFmt: "%s pending",
   previewFailedFmt: "Preview failed: %s",

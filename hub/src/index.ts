@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import qrcode from "qrcode-terminal";
 import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
@@ -31,6 +31,10 @@ import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
+import { OperationLedger } from "./op-ledger.js";
+import { DecisionCenter, sweepPendingDecisions, inferOptionScope, isRejectOption, type DecisionScope, type DecisionRequestParams } from "./decision.js";
+import { RelevanceFilter } from "./filter.js";
+import { presenceEvents, type PresenceStatus } from "./presence.js";
 import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
@@ -180,7 +184,7 @@ function repairHistoryAtStartup(): void {
 repairHistoryAtStartup();
 
 function parseEventAction(raw: unknown): EventAction {
-  const actions: EventAction[] = ["add", "modify", "delete", "rename", "command", "test"];
+  const actions: EventAction[] = ["add", "modify", "delete", "rename", "command", "test", "decision", "filter"];
   const a = String(raw ?? "").toLowerCase();
   return actions.includes(a as EventAction) ? (a as EventAction) : "command";
 }
@@ -230,6 +234,15 @@ function parseRoomModeConfig(
     const n = Number(params.debateRounds);
     if (Number.isFinite(n) && n > 0) config.debateRounds = Math.max(1, Math.min(5, Math.floor(n)));
   }
+  if (params?.maxRounds != null) {
+    const n = Number(params.maxRounds);
+    if (Number.isFinite(n) && n > 0) config.maxRounds = Math.max(1, Math.min(64, Math.floor(n)));
+  }
+  const rf = params?.relevanceFilter;
+  if (rf != null) {
+    const on = !(rf === false || rf === "false" || rf === "off" || rf === "0" || rf === 0);
+    config.relevanceFilter = on;
+  }
   if (params?.memberRoles != null && typeof params.memberRoles === "object") {
     const roles: Record<string, string> = {};
     for (const [sid, v] of Object.entries(params.memberRoles as Record<string, unknown>)) {
@@ -242,9 +255,29 @@ function parseRoomModeConfig(
   return config;
 }
 
+function memberStatusOf(sessionId: string): PresenceStatus {
+  const cid = owners.get(sessionId);
+  const a = cid ? agents.get(cid) : undefined;
+  if (!a || !a.isReady) return "offline";
+  return a.isBusy(sessionId) ? "generating" : "online";
+}
+
+function emitMemberStatus(sessionId: string, status: PresenceStatus): void {
+  const roomIds = rooms.roomsFor(sessionId).map((r) => r.roomId);
+  for (const params of presenceEvents(sessionId, status, roomIds)) {
+    broadcast({ method: "member.status", params } as HubEvent);
+  }
+}
+
 function enrichRoom(room: Room): Record<string, unknown> {
   const sub = roomModeManager.subModeFor(room.roomId);
-  return { ...room, subMode: sub?.mode, activeSpeaker: sub?.activeSpeaker, reason: sub?.reason };
+  return {
+    ...room,
+    members: room.members.map((m) => ({ ...m, status: memberStatusOf(m.sessionId) })),
+    subMode: sub?.mode,
+    activeSpeaker: sub?.activeSpeaker,
+    reason: sub?.reason,
+  };
 }
 
 function persistState(): void {
@@ -297,6 +330,7 @@ async function cloneSessionWithName(
     roleId: source.roleId,
   });
   owners.set(s.sessionId, connection.id);
+  emitMemberStatus(s.sessionId, "online");
   persistState();
 
   // fresh（群聊重置）：继承模型偏好与非模型 config（thought_level/mode 等），不继承对话内容
@@ -353,7 +387,10 @@ function ensureDefaultLocalConnections(): void {
 function cleanupLocalAgent(connectionId: string): void {
   agents.delete(connectionId);
   for (const [sid, cid] of [...owners.entries()]) {
-    if (cid === connectionId) owners.delete(sid);
+    if (cid === connectionId) {
+      owners.delete(sid);
+      emitMemberStatus(sid, "offline");
+    }
   }
 }
 
@@ -519,6 +556,39 @@ roomModeManager.onFlowCard = makeFlowCardSync({
   setCardRowId: (roomId, rowId) => roomModeManager.setFlowCardRowId(roomId, rowId),
 });
 
+// 决策卡中心：permission/elicitation 统一为 kind:"decision" 房史条目 + 原位更新广播 + 审计
+const decisionCenter = new DecisionCenter({
+  store,
+  broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+  audit: (scope, scopeId, ev) => {
+    if (scope === "room") {
+      rooms.addEvent(scopeId, { author: ev.author, action: "decision", summary: ev.summary });
+    } else {
+      sessionLedger.addEvent(scopeId, { author: ev.author, action: "decision", summary: ev.summary });
+    }
+  },
+});
+/** permission.respond 显式指定的授权粒度（once/task/always），decision.resolve 时消费 */
+const pendingDecisionScope = new Map<string, DecisionScope>();
+
+// nano 相关性过滤：默认开启（HUB_RELEVANCE_FILTER=0/false/off 关闭），房间级 relevanceFilter 可覆盖；
+// 规则判定不确定时若配置 HUB_FILTER_MODEL 走轻量模型档，未配置则放行
+const relevanceFilter = new RelevanceFilter({
+  enabled: !/^(0|false|off)$/i.test(process.env.HUB_RELEVANCE_FILTER ?? ""),
+  model: process.env.HUB_FILTER_MODEL || undefined,
+  baseUrl: process.env.HUB_FILTER_BASE_URL || undefined,
+  apiKey: process.env.HUB_FILTER_API_KEY || undefined,
+});
+roomModeManager.setRelevanceFilter(async (room, text) => {
+  const enabled = room.relevanceFilter ?? relevanceFilter.enabled;
+  if (!enabled) return true;
+  const r = await relevanceFilter.isRelevant(text);
+  if (!r.relevant) {
+    logWarn("filter", `room ${room.roomId} filtered via ${r.via}: ${r.reason} :: ${text.slice(0, 60)}`);
+  }
+  return r.relevant;
+});
+
 // 孤儿编排卡收尾：重启后非终态 kind:"flow" 卡对应的 flow 已不存在
 // （parallel/pipeline/debate 不持久化，或 conductor 快照缺失）→ 定稿为已中断并重播条目
 function sweepOrphanFlowCards(): void {
@@ -539,6 +609,10 @@ const restoreRuntime = savedRuntime
 restoreRuntime
   .then(() => {
     sweepOrphanFlowCards();
+    sweepPendingDecisions({
+      store,
+      broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+    });
     persistState();
   })
   .catch((err) => logError("import runtime", err));
@@ -605,6 +679,7 @@ function listAllSessions(): {
   origin?: string | undefined;
   offline: boolean;
   archived: boolean;
+  status: PresenceStatus;
 }[] {
   const connectionsById = new Map<string, Connection>(
     store.listConnections().map((c) => [c.id, c]),
@@ -621,6 +696,7 @@ function listAllSessions(): {
         origin: originFor(meta) ?? c?.name,
         offline: false,
         archived: meta?.archived ?? false,
+        status: (s.busy ? "generating" : "online") as PresenceStatus,
       };
     });
   });
@@ -634,12 +710,19 @@ function listAllSessions(): {
       offline: true,
       archived: m.archived ?? false,
       origin: originFor(m),
+      status: "offline" as PresenceStatus,
     }));
   return [...online, ...offline];
 }
 
 const turnDrafts = new Map<string, { sessionDraftId?: number; roomDraftId?: number }>();
 const turnProcess = new TurnProcessRecorder();
+const opLedger = new OperationLedger();
+/** 每会话当前 turn 起始时刻（首个 turn 事件记录，turn 结束清除），operation ledger 的 opId 限定符 */
+const turnStarts = new Map<string, number>();
+const markTurnStart = (sessionId: string): void => {
+  if (!turnStarts.has(sessionId)) turnStarts.set(sessionId, Date.now());
+};
 
 function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interrupted" = "done"): void {
   const buf = turnProcess.take(sessionId);
@@ -658,7 +741,15 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
   const turnStartAt = buf[0]!.at;
   const turnEndAt = buf[buf.length - 1]!.at;
   const taskId = roomModeManager.taskIdForTurn(sessionId, roomId, turnStartAt, turnEndAt);
-  const meta = buildProcessMeta(roomId, sessionId, buf, taskId, status);
+  const meta = buildProcessMeta(
+    roomId,
+    sessionId,
+    buf,
+    taskId,
+    status,
+    roomModeManager.flowIdForRoom(roomId),
+  );
+  if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return;
   const at = Date.now();
   const text = JSON.stringify(meta);
   const author = displayNameFor(sessionId);
@@ -679,6 +770,7 @@ function displayNameFor(sessionId: string): string {
 
 function onTurnProgress(sessionId: string, fullText: string): void {
   if (!fullText.trim()) return;
+  markTurnStart(sessionId);
   const displayName = displayNameFor(sessionId);
   let draft = turnDrafts.get(sessionId);
   if (!draft) {
@@ -713,6 +805,7 @@ function onTurnProgress(sessionId: string, fullText: string): void {
 }
 
 function interruptTurnDrafts(sessionId: string): void {
+  turnStarts.delete(sessionId);
   flushTurnProcess(sessionId, "interrupted");
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
@@ -731,6 +824,8 @@ function onTurnEnd(
   status: "done" | "interrupted" = "done",
 ): void {
   const displayName = displayNameFor(sessionId);
+  const t0 = turnStarts.get(sessionId) ?? Date.now();
+  turnStarts.delete(sessionId);
   flushTurnProcess(sessionId, status);
   const draft = turnDrafts.get(sessionId);
   turnDrafts.delete(sessionId);
@@ -747,7 +842,7 @@ function onTurnEnd(
   if (text.trim()) {
     if (draft?.sessionDraftId !== undefined) {
       store.completeReplyDraft(draft.sessionDraftId, text);
-    } else {
+    } else if (opLedger.commit(`reply:${sessionId}:${t0}:session`, "assistant")) {
       store.append("session", sessionId, {
         at: Date.now(),
         kind: "assistant",
@@ -758,9 +853,14 @@ function onTurnEnd(
     // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
     const roomId = roomModeManager.roomIdForTurn(sessionId);
     if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
-      if (draft?.roomDraftId !== undefined) {
+      // turn 提交不变量：游标推进的过期回复不落房史（将被作废重跑）
+      if (roomModeManager.isStaleTurnCommit(sessionId, roomId)) {
+        if (draft?.roomDraftId !== undefined) {
+          store.interruptReplyDraft(draft.roomDraftId);
+        }
+      } else if (draft?.roomDraftId !== undefined) {
         store.completeReplyDraft(draft.roomDraftId, text);
-      } else {
+      } else if (opLedger.commit(`reply:${sessionId}:${t0}:room:${roomId}`, "assistant")) {
         store.append("room", roomId, {
           at: Date.now(),
           kind: "assistant",
@@ -782,6 +882,10 @@ function onTurnEnd(
 function onFileWrite(sessionId: string, relPath: string, existed: boolean, content?: string): void {
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
+  markTurnStart(sessionId);
+  // operation ledger：同内容重复写入（断连重放/重试命中）跳过副作用；内容变化是新 op
+  const fp = createHash("sha1").update(`${relPath}::${content ?? ""}`).digest("hex");
+  if (!opLedger.commit(`file:${sessionId}:${fp}`, "file")) return;
   const author = meta.name;
   const summary = existed ? "修改" : "新增";
 
@@ -806,6 +910,7 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
 function onToolCall(sessionId: string, kind: string, title: string, paths: string[]): void {
   const meta = sessionMetas.get(sessionId);
   if (!meta) return;
+  markTurnStart(sessionId);
 
   // 读文件、搜索、获取网页、思考等工具调用不产生有价值的事件
   const ignored = new Set(["read", "search", "fetch", "think", "switch_mode", "other"]);
@@ -845,6 +950,52 @@ function onAgentEvent(event: HubEvent): void {
     roomModeManager.isHiddenSession(sessionId) &&
     event.method !== "permission.request" &&
     event.method !== "elicitation.request";
+  if (event.method === "session.generating" && sessionId) {
+    // presence：busy 起止 → generating / online 状态迁移（房间作用域同步广播）
+    emitMemberStatus(sessionId, event.params.stoppable ? "generating" : "online");
+  }
+  if (event.method === "decision.request" && sessionId) {
+    // 决策卡叠加层：房间回合写房间历史，否则写会话历史；旧客户端不认识 decision.* 即丢弃
+    const p = event.params as DecisionRequestParams;
+    const roomId = roomModeManager.roomIdForTurn(sessionId) ?? rooms.roomsFor(sessionId)[0]?.roomId;
+    decisionCenter.open(p, {
+      scope: roomId ? "room" : "session",
+      scopeId: roomId ?? sessionId,
+      requestedBy: displayNameFor(sessionId),
+    });
+    return;
+  }
+  if (event.method === "decision.resolve") {
+    const p = event.params as {
+      requestId: string;
+      outcome: "answered" | "expired" | "revoked";
+      optionId?: string;
+      action?: string;
+    };
+    const requestedScope = pendingDecisionScope.get(p.requestId);
+    pendingDecisionScope.delete(p.requestId);
+    const tracked = decisionCenter.getByRequest(p.requestId);
+    const option = tracked?.meta.options.find((o) => o.id === p.optionId);
+    let scope: DecisionScope | undefined;
+    if (p.outcome === "answered" && tracked?.meta.type === "permission") {
+      scope = requestedScope ?? inferOptionScope(option);
+      // 授权粒度生效：allow 类选项 + scope≠once → 登记会话级授权（task 随回合清除）
+      if (scope !== "once" && !isRejectOption(option) && tracked.meta.grantKey) {
+        agentForSession(tracked.meta.sessionId)?.grantPermission(
+          tracked.meta.sessionId,
+          tracked.meta.grantKey,
+          scope,
+        );
+      }
+    }
+    decisionCenter.resolveByRequest(p.requestId, p.outcome, {
+      ...(p.optionId !== undefined ? { optionId: p.optionId } : {}),
+      ...(p.action !== undefined ? { action: p.action } : {}),
+      ...(scope !== undefined ? { scope } : {}),
+    });
+    persistState();
+    return;
+  }
   if (event.method === "prompt.done") {
     const { output } = event.params;
     const internalOutput = promptDoneInternalOutput(event.params);
@@ -907,6 +1058,7 @@ function onAgentEvent(event: HubEvent): void {
   } else if (event.method === "session.update" && sessionId) {
     const update = (event.params as Record<string, unknown> | undefined)?.update;
     if (update !== undefined) {
+      markTurnStart(sessionId);
       turnProcess.record(sessionId, update as Record<string, unknown>, displayNameFor(sessionId));
       roomModeManager.observeToolUpdate(sessionId, update);
     }
@@ -1141,6 +1293,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         roleId: finalRoleId,
       });
       owners.set(s.sessionId, connection.id);
+      emitMemberStatus(s.sessionId, "online");
       persistState();
 
       // 新建 session 时同步对应后端的当前模型
@@ -1207,6 +1360,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         roleId: source.roleId,
       });
       owners.set(s.sessionId, connection.id);
+      emitMemberStatus(s.sessionId, "online");
       if (s.contextCloned) {
         store.copyHistory("session", sourceSessionId, s.sessionId);
         sessionLedger.clone(sourceSessionId, s.sessionId);
@@ -1345,6 +1499,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         const newMeta = { ...meta, sessionId: s.sessionId, name: s.name };
         sessionMetas.set(s.sessionId, newMeta);
         owners.set(s.sessionId, connectionId);
+        emitMemberStatus(s.sessionId, "online");
         rooms.updateMemberSessionId(sessionId, s.sessionId);
         persistState();
         console.log(
@@ -1355,6 +1510,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         return { resumed: true, sessionId: s.sessionId };
       }
       owners.set(sessionId, connectionId);
+      emitMemberStatus(sessionId, "online");
 
       // 恢复 session 时同步对应后端的当前模型与 config 偏好
       if (connection?.agent) {
@@ -1403,6 +1559,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       sessionMetas.delete(sessionId);
       sessionLedger.drop(sessionId);
       turnDrafts.delete(sessionId);
+      turnStarts.delete(sessionId);
       turnProcess.clear(sessionId);
       modelManager.clearSessionConfig(sessionId);
       store.deleteHistory("session", sessionId);
@@ -1432,6 +1589,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         sessionMetas.delete(sessionId);
         sessionLedger.drop(sessionId);
         turnDrafts.delete(sessionId);
+        turnStarts.delete(sessionId);
         turnProcess.clear(sessionId);
         modelManager.clearSessionConfig(sessionId);
         store.deleteHistory("session", sessionId);
@@ -1594,6 +1752,12 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       if (existing) {
         existing.close();
         agents.delete(id);
+      }
+      for (const [sid, cid] of [...owners.entries()]) {
+        if (cid === id) {
+          owners.delete(sid);
+          emitMemberStatus(sid, "offline");
+        }
       }
       localAgentErrors.delete(id);
       const ok = store.deleteConnection(id);
@@ -2156,11 +2320,56 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     case "permission.respond": {
       const requestId = String(req.params?.requestId ?? "");
       const optionId = String(req.params?.optionId ?? "");
+      const rawScope = String(req.params?.scope ?? "").toLowerCase();
+      if (rawScope === "once" || rawScope === "task" || rawScope === "always") {
+        pendingDecisionScope.set(requestId, rawScope);
+      }
       const ok = [...agents.values()].some((a) =>
         a.respondPermission(requestId, optionId),
       );
-      if (!ok) throw new Error("unknown, expired, or invalid option for permission request");
+      if (!ok) {
+        pendingDecisionScope.delete(requestId);
+        throw new Error("unknown, expired, or invalid option for permission request");
+      }
       return { responded: true };
+    }
+    case "decision.revoke": {
+      const decisionId = String(req.params?.decisionId ?? "");
+      const tracked = decisionCenter.get(decisionId);
+      if (!tracked) throw new Error(`unknown decision: ${decisionId}`);
+      const meta = tracked.meta;
+      const agent = agentForSession(meta.sessionId);
+      if (meta.status === "pending") {
+        // 挂起中的决策：终止底层请求（permission 空选收尾 / elicitation cancel）
+        if (meta.type === "permission") agent?.revokePermission(meta.requestId);
+        else agent?.revokeElicitation(meta.requestId);
+      }
+      // always/task 授权撤销 → 恢复逐次询问
+      if (meta.scope !== "once" && meta.grantKey) {
+        agent?.revokePermissionGrant(meta.sessionId, meta.grantKey);
+      }
+      decisionCenter.revoke(decisionId);
+      persistState();
+      return { revoked: true, decisionId };
+    }
+    case "member.status": {
+      const roomId = String(req.params?.roomId ?? "");
+      const sessionId = String(req.params?.sessionId ?? "");
+      if (roomId) {
+        const room = rooms.get(roomId);
+        if (!room) throw new Error(`unknown room: ${roomId}`);
+        return {
+          members: room.members.map((m) => ({
+            sessionId: m.sessionId,
+            name: m.name,
+            status: memberStatusOf(m.sessionId),
+          })),
+        };
+      }
+      if (sessionId) {
+        return { sessionId, status: memberStatusOf(sessionId) };
+      }
+      return { members: listAllSessions().map((s) => ({ sessionId: s.sessionId, status: s.status })) };
     }
     case "elicitation.respond": {
       const requestId = String(req.params?.requestId ?? "");
@@ -2397,7 +2606,10 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
     console.log(`[hub] worker disconnected ${connectionId}`);
     if (agents.get(connectionId) === a) agents.delete(connectionId);
     for (const [sid, cid] of [...owners.entries()]) {
-      if (cid === connectionId) owners.delete(sid);
+      if (cid === connectionId) {
+        owners.delete(sid);
+        emitMemberStatus(sid, "offline");
+      }
     }
   });
 }
@@ -2519,7 +2731,10 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       const connId = `${baseConnection.id}::${ch}`;
       agents.delete(connId);
       for (const [sid, cid] of [...owners.entries()]) {
-        if (cid === connId) owners.delete(sid);
+        if (cid === connId) {
+          owners.delete(sid);
+          emitMemberStatus(sid, "offline");
+        }
       }
     }
     virtualAgents.clear();
