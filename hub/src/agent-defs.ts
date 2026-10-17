@@ -23,8 +23,8 @@ export function parseArgs(raw: string | undefined, fallback: string[]): string[]
       if (Array.isArray(arr) && arr.every((s): s is string => typeof s === "string")) {
         return arr;
       }
-    } catch {
-      // 非合法 JSON 时回退 shell 风格拆分
+    } catch (e) {
+      console.warn(`[agent-defs] *_ACP_ARGS 非法 JSON，回退 shell 拆分: ${e instanceof Error ? e.message : e}`);
     }
   }
   const args: string[] = [];

@@ -1426,7 +1426,7 @@ describe("collab-e2e", () => {
   it("快照失效：工作区变化后 snapshotCurrent 转 false 且验收提示历史快照", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-e2e-snap-"));
     const git = (args: string[]) =>
-      execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
+      execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...args]);
     try {
       git(["init", "--quiet"]);
       fs.writeFileSync(path.join(dir, "marker.txt"), "v1");

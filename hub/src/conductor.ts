@@ -2950,13 +2950,13 @@ function isoExcludedFile(name: string): boolean {
 function gitLsFiles(realCwd: string): string[] {
   try {
     const inside = execFileSync(
-      "/usr/bin/git",
+      "git",
       ["-c", "core.fsmonitor=false", "-C", realCwd, "rev-parse", "--is-inside-work-tree"],
       { encoding: "utf8", maxBuffer: 1024 * 1024 },
     ).trim();
     if (inside !== "true") throw new IsoAbort("snapshot_error");
     const out = execFileSync(
-      "/usr/bin/git",
+      "git",
       [
         "-c",
         "core.fsmonitor=false",
@@ -3047,7 +3047,7 @@ export function workspaceSnapshotHash(realCwd: string): string | undefined {
 function gitRepoLayout(realCwd: string): { repoName: string; relCwd: string } {
   try {
     const top = execFileSync(
-      "/usr/bin/git",
+      "git",
       ["-c", "core.fsmonitor=false", "-C", realCwd, "rev-parse", "--show-toplevel"],
       { encoding: "utf8", maxBuffer: 1024 * 1024 },
     ).trim();
