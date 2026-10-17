@@ -136,6 +136,16 @@ type SessionEntry = {
   loading?: boolean;
   turnGotUpdate?: boolean;
   watchdog?: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * prompt.done 宽限窗内待执行的定稿：ACP 响应已到但尾包 session/update
+   * 可能仍在路上（dsh-acp whenIdle 结算不等待通知写盘），期间 busy 保持
+   * true 继续累积 turnText，宽限到期或新操作到来时按已累积文本定稿。
+   */
+  pendingSettle?: {
+    timer: ReturnType<typeof setTimeout>;
+    stopReason: string;
+    usage?: TokenUsage | undefined;
+  } | undefined;
   /** 回合代际：每 prompt/cancel 递增，过期 settle 一律丢弃 */
   turnEpoch?: number;
 };
@@ -152,6 +162,12 @@ let promptAckTimeoutMs = Number(process.env.HUB_PROMPT_ACK_TIMEOUT_MS ?? 180_000
 
 export function setPromptAckTimeoutMs(v: number): void {
   promptAckTimeoutMs = v;
+}
+/** prompt.done 定稿宽限窗（ms）：<=0 关闭；env HUB_TURN_SETTLE_GRACE_MS 覆盖 */
+let turnSettleGraceMs = Number(process.env.HUB_TURN_SETTLE_GRACE_MS ?? 100);
+
+export function setTurnSettleGraceMs(v: number): void {
+  turnSettleGraceMs = v;
 }
 const ELICITATION_TIMEOUT_MS = 600_000;
 const TURN_UPDATE_KINDS = new Set([
@@ -570,6 +586,8 @@ export class AcpAgent {
     this.conn = null;
     this.sessionConfigOptions.clear();
     for (const [sessionId, entry] of this.sessions) {
+      // 宽限窗内断连：响应已收到的回合按 done 定稿，不虚报 prompt.error
+      this.flushPendingSettle(sessionId, entry);
       if (!entry.busy && !entry.stoppable) continue;
       entry.busy = false;
       entry.stoppable = false;
@@ -652,6 +670,25 @@ export class AcpAgent {
       method: "session.update",
       params: { sessionId: params.sessionId, update: params.update },
     });
+  }
+
+  /**
+   * 宽限窗内新操作（prompt/cancel 之外的调用方亦可能触发）到来：
+   * 立即按已累积文本定稿 pendingSettle，不得阻塞或吞掉后续操作。
+   */
+  private flushPendingSettle(sessionId: string, entry: SessionEntry): void {
+    const pending = entry.pendingSettle;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    entry.pendingSettle = undefined;
+    this.finishTurn(sessionId, pending.stopReason, pending.usage);
+  }
+
+  /** 丢弃待定 finish（cancel 收尾语义优先，不再补发 prompt.done） */
+  private dropPendingSettle(entry: SessionEntry): void {
+    if (!entry.pendingSettle) return;
+    clearTimeout(entry.pendingSettle.timer);
+    entry.pendingSettle = undefined;
   }
 
   private finishTurn(
@@ -1137,6 +1174,8 @@ export class AcpAgent {
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
+    // 宽限窗内新 prompt：先按已累积文本定稿旧回合（同步发 prompt.done），再开新回合
+    this.flushPendingSettle(sessionId, entry);
     if (entry.busy) throw new Error(`session busy: ${entry.name}`);
     entry.busy = true;
     entry.stoppable = true;
@@ -1183,11 +1222,24 @@ export class AcpAgent {
         if (!isCurrentTurn()) return;
         clearTimeout(entry.watchdog);
         entry.watchdog = undefined;
-        this.finishTurn(
-          sessionId,
-          (resp as { stopReason?: unknown }).stopReason as string,
-          (resp as { usage?: unknown }).usage as TokenUsage | undefined,
-        );
+        const stopReason = (resp as { stopReason?: unknown }).stopReason as string;
+        const usage = (resp as { usage?: unknown }).usage as TokenUsage | undefined;
+        if (turnSettleGraceMs <= 0) {
+          this.finishTurn(sessionId, stopReason, usage);
+          return;
+        }
+        // 宽限窗：响应先到、尾部 session/update 在路上时 busy 保持 true，
+        // routeUpdate 继续累积 turnText；到期仍按同一代际校验后定稿。
+        // timer 是定稿主路径，不可 unref（否则事件循环空置时 finish 不触发）
+        entry.pendingSettle = {
+          stopReason,
+          usage,
+          timer: setTimeout(() => {
+            entry.pendingSettle = undefined;
+            if (!isCurrentTurn()) return;
+            this.finishTurn(sessionId, stopReason, usage);
+          }, turnSettleGraceMs),
+        };
       })
       .catch((err: unknown) => {
         if (!isCurrentTurn()) return;
@@ -1260,6 +1312,8 @@ export class AcpAgent {
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (!this.ctx) throw new Error("agent not started");
     if (!entry.stoppable) return;
+    // 宽限窗内 cancel：待定 finish 作废，回合按 interrupted 原路径收尾
+    this.dropPendingSettle(entry);
     // 本地收尾：已流出的部分文本与过程缓冲照常落库（watchdog 场景 buf 为空，无过程卡）
     entry.stoppable = false;
     entry.busy = false;
@@ -1303,7 +1357,9 @@ export class AcpAgent {
   }
 
   isBusy(sessionId: string): boolean {
-    return this.sessions.get(sessionId)?.busy ?? false;
+    const entry = this.sessions.get(sessionId);
+    // 宽限窗内的会话可立即接受新回合（promptContent 会先定稿旧回合）
+    return (entry?.busy && !entry.pendingSettle) ?? false;
   }
 
   isStoppable(sessionId: string): boolean {
@@ -1312,6 +1368,8 @@ export class AcpAgent {
 
   /** 本地摘除会话（不通知 agent，用于删除） */
   dropSession(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) this.dropPendingSettle(entry);
     this.sessions.delete(sessionId);
     this.permissionGrants.delete(sessionId);
     this.contextUsage.delete(sessionId);

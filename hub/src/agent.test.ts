@@ -7,6 +7,7 @@ import {
   normalizeElicitationFields,
   setPermissionBypass,
   setPromptAckTimeoutMs,
+  setTurnSettleGraceMs,
   sliceTextFile,
   type HubEvent,
 } from "./agent.js";
@@ -1208,6 +1209,205 @@ describe("AcpAgent integration (in-memory stream)", () => {
     assert.ok(caps.elicitation?.form !== undefined);
     hub.close();
     agentConn.close();
+  });
+
+  it("prompt.done 宽限窗：响应后到达的尾部 update 计入定稿文本", async () => {
+    let finish!: (r: acp.PromptResponse) => void;
+    const turnEnds: { sessionId: string; text: string; status?: string }[] = [];
+    const { agentConn, hub, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { finish = r; }),
+      onTurnEnd: (sessionId, text, status) => turnEnds.push({ sessionId, text, status }),
+    });
+    setTurnSettleGraceMs(60);
+    try {
+      await hub.createSession("/tmp", "s");
+      const done = hub.promptOnce("s1", "hi", 0);
+      await waitFor(() => (typeof finish === "function" ? true : undefined));
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "前半" } },
+      });
+      // prompt 响应先到（dsh-acp whenIdle 结算不等待尾部通知写盘）
+      finish({ stopReason: "end_turn" });
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      assert.equal(
+        events.filter((e) => e.method === "prompt.done").length,
+        0,
+        "宽限窗内不得提前定稿",
+      );
+      assert.equal(hub.isStoppable("s1"), true, "宽限窗内仍可 cancel");
+      // 尾部 update 在宽限窗内到达：仍累积进 turnText 并照常广播
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "尾巴" } },
+      });
+      const result = await done;
+      assert.equal(result.output, "前半尾巴", "宽限窗内的尾部增量必须计入定稿");
+      assert.deepEqual(turnEnds, [{ sessionId: "s1", text: "前半尾巴", status: "done" }]);
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 1);
+    } finally {
+      setTurnSettleGraceMs(100);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("prompt.done 宽限窗外迟到的 update 按僵尸流量丢弃", async () => {
+    let finish!: (r: acp.PromptResponse) => void;
+    const { agentConn, hub, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { finish = r; }),
+    });
+    setTurnSettleGraceMs(40);
+    try {
+      await hub.createSession("/tmp", "s");
+      const done = hub.promptOnce("s1", "hi", 0);
+      await waitFor(() => (typeof finish === "function" ? true : undefined));
+      finish({ stopReason: "end_turn" });
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      const result = await done;
+      assert.equal(result.output, "");
+      // 定稿后迟到的残片：不再广播 session.update，更不得影响后续回合
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "迟到" } },
+      });
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      const updates = events
+        .filter((e) => e.method === "session.update")
+        .map((e) => JSON.stringify((e.params as { update?: unknown }).update));
+      assert.equal(updates.some((u) => u.includes("迟到")), false);
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 1);
+      assert.equal(hub.isBusy("s1"), false);
+    } finally {
+      setTurnSettleGraceMs(100);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("宽限窗内 cancel：待定 finish 作废，按 interrupted 原路径收尾", async () => {
+    let finish!: (r: acp.PromptResponse) => void;
+    const turnEnds: { sessionId: string; status?: string }[] = [];
+    const { agentConn, hub, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { finish = r; }),
+      onTurnEnd: (sessionId, _text, status) => turnEnds.push({ sessionId, status }),
+    });
+    setTurnSettleGraceMs(500);
+    try {
+      await hub.createSession("/tmp", "s");
+      const p = hub.promptOnce("s1", "hi", 0);
+      await waitFor(() => (typeof finish === "function" ? true : undefined));
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "部分" } },
+      });
+      finish({ stopReason: "end_turn" });
+      const rej = assert.rejects(p, /cancelled/);
+      await hub.cancel("s1");
+      await rej;
+      assert.deepEqual(turnEnds.map((t) => t.status), ["interrupted"]);
+      // 原定的宽限到期点已过，仍不得补发 prompt.done
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 0);
+      assert.equal(hub.isBusy("s1"), false);
+      assert.equal(hub.isStoppable("s1"), false);
+    } finally {
+      setTurnSettleGraceMs(100);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("宽限窗内新 prompt：先定稿旧回合再开新回合，done 先于新请求", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const turnEnds: { sessionId: string; text: string; status?: string }[] = [];
+    const { agentConn, hub, events, prompts } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { resolvers.push(r); }),
+      onTurnEnd: (sessionId, text, status) => turnEnds.push({ sessionId, text, status }),
+    });
+    setTurnSettleGraceMs(500);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "A文本" } },
+      });
+      await waitFor(() => (resolvers.length >= 1 ? resolvers.length : undefined));
+      resolvers[0]!({ stopReason: "end_turn" });
+      // 响应 .then 微任务跑完后 pendingSettle 建立：isBusy=false 且仍可 cancel
+      await waitFor(() => (!hub.isBusy("s1") && hub.isStoppable("s1") ? true : undefined));
+      // 新 prompt 到来：同步定稿旧回合（stale 判定仍在 finish 时刻由房史游标完成）
+      await hub.prompt("s1", "second");
+      assert.equal(
+        events.filter((e) => e.method === "prompt.done").length,
+        1,
+        "旧回合必须先定稿再开新回合",
+      );
+      assert.deepEqual(turnEnds, [{ sessionId: "s1", text: "A文本", status: "done" }]);
+      await waitFor(() => (prompts.length >= 2 ? true : undefined));
+      assert.equal(hub.isBusy("s1"), true, "新回合在途");
+      await waitFor(() => (resolvers.length >= 2 ? resolvers.length : undefined));
+      resolvers[1]!({ stopReason: "end_turn" });
+      await waitFor(() =>
+        events.filter((e) => e.method === "prompt.done").length >= 2 ? true : undefined,
+      );
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 2);
+    } finally {
+      setTurnSettleGraceMs(100);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("宽限窗内断连：响应已到的回合按 done 定稿而非 prompt.error", async () => {
+    let finish!: (r: acp.PromptResponse) => void;
+    const { agentConn, hub, events, pipes } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { finish = r; }),
+    });
+    setTurnSettleGraceMs(500);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "hi");
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "部分" } },
+      });
+      finish({ stopReason: "end_turn" });
+      // 等响应回环送达并建立 pendingSettle（isBusy=false + isStoppable=true）
+      await waitFor(() => (!hub.isBusy("s1") && hub.isStoppable("s1") ? true : undefined));
+      await pipes.a2c.writable.close();
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      const done = events.find((e) => e.method === "prompt.done");
+      if (done?.method !== "prompt.done") throw new Error("unreachable");
+      assert.equal(done.params.internalOutput, "部分");
+      assert.equal(events.filter((e) => e.method === "prompt.error").length, 0);
+    } finally {
+      setTurnSettleGraceMs(100);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("宽限窗 <=0 时退化为立即定稿（兼容旧行为）", async () => {
+    let finish!: (r: acp.PromptResponse) => void;
+    const { agentConn, hub, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { finish = r; }),
+    });
+    setTurnSettleGraceMs(0);
+    try {
+      await hub.createSession("/tmp", "s");
+      const done = hub.promptOnce("s1", "hi", 0);
+      await waitFor(() => (typeof finish === "function" ? true : undefined));
+      finish({ stopReason: "end_turn" });
+      const result = await done;
+      assert.equal(result.output, "");
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+    } finally {
+      setTurnSettleGraceMs(100);
+      hub.close();
+      agentConn.close();
+    }
   });
 
 });
