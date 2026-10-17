@@ -252,7 +252,7 @@ export function ChatScreen() {
   const quota = store.backendQuota;
   const hasDevinMember = store.currentRoom
     ? store.currentRoom.members.some(([sid]) => (store.roomMemberModels[sid]?.backendType ?? store.roomMemberModels[sid]?.backend) === "devin")
-    : store.currentSession?.agent === "devin";
+    : (store.currentSession?.backendType ?? store.currentSession?.agent) === "devin";
   const quotaParts = quota?.available
     ? [
         quota.daily ? S.quotaDaily.replace("%s", String(quota.daily.usedPercent)) : "",
@@ -3730,8 +3730,8 @@ function ModelPicker() {
         {(() => {
           const q = store.backendQuota;
           const pickerBackend = isRoom
-            ? memberModels[selectedMember ?? ""]?.backend
-            : store.currentSession?.agent;
+            ? (memberModels[selectedMember ?? ""]?.backendType ?? memberModels[selectedMember ?? ""]?.backend)
+            : (store.currentSession?.backendType ?? store.currentSession?.agent);
           if (pickerBackend !== "devin" || !q?.available) return null;
           const windows = [
             [S.quotaToday, q.daily],

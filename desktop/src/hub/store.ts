@@ -771,7 +771,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const sid = String(params.sessionId ?? "");
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
-        if (get().sessions.find((s) => s.sessionId === sid)?.agent === "devin") {
+        const sess = get().sessions.find((s) => s.sessionId === sid);
+        if ((sess?.backendType ?? sess?.agent) === "devin") {
           void get().refreshBackendQuota();
         }
         if (params.usage) {
@@ -1718,7 +1719,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().refreshArtifacts({ sessionId: session.sessionId });
       void get().refreshMemberStatus();
       void get().refreshSessionUsage(session.sessionId);
-      if (session.agent === "devin") void get().refreshBackendQuota();
+      if ((session.backendType ?? session.agent) === "devin") void get().refreshBackendQuota();
     },
 
     openRoom: async (room: RoomInfo, anchorAt?: number) => {

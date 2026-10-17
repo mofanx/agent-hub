@@ -705,6 +705,7 @@ function listAllSessions(): {
       return {
         ...s,
         agent: c?.agent ?? meta?.agent ?? "devin",
+        backendType: modelManager.backendTypeOf(c?.agent ?? meta?.agent ?? "devin"),
         connectionId,
         roleId: meta?.roleId,
         origin: originFor(meta) ?? c?.name,
@@ -721,6 +722,7 @@ function listAllSessions(): {
       ...m,
       busy: false,
       stoppable: false,
+      backendType: modelManager.backendTypeOf(m.agent ?? "devin"),
       offline: true,
       archived: m.archived ?? false,
       origin: originFor(m),

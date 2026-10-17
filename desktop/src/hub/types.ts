@@ -34,6 +34,7 @@ export interface SessionInfo {
   name: string;
   busy: boolean;
   agent: string;
+  backendType?: string;
   address: string;
   connectionId: string | null;
   offline: boolean;

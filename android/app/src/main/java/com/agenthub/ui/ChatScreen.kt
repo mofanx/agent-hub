@@ -576,7 +576,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             vm.roomMemberTypes[it.first] == "devin"
                         } == true
                     } else {
-                        vm.currentSession?.agent == "devin"
+                        (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin"
                     }
                     val quotaText = if (quota?.available == true && hasDevinMember) {
                         listOfNotNull(
@@ -697,7 +697,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     )
                                 }
                             }
-                            if (quota?.available == true && vm.currentSession?.agent == "devin") {
+                            if (quota?.available == true && (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin") {
                                 Column(horizontalAlignment = Alignment.End) {
                                     quota.daily?.let {
                                         Text(

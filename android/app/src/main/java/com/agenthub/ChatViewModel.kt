@@ -310,6 +310,7 @@ data class SessionInfo(
     val offline: Boolean = false,
     val archived: Boolean = false,
     val stoppable: Boolean = false,
+    val backendType: String? = null,
 )
 
 data class SearchHit(
@@ -1119,7 +1120,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     val session = currentSession ?: return@launch
                     val backend = session.agent
-                    if (backend == "devin") refreshBackendQuota()
+                    if ((session.backendType ?: backend) == "devin") refreshBackendQuota()
                     val result = hub.call("model.current", buildJsonObject {
                         put("backend", backend)
                         put("sessionId", session.sessionId)
@@ -1247,7 +1248,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 单聊模式
                 try {
                     val backend = currentSession?.agent ?: "devin"
-                    if (backend == "devin") refreshBackendQuota()
+                    if ((currentSession?.backendType ?: backend) == "devin") refreshBackendQuota()
                     val sid = currentSession?.sessionId
                     val result = hub.call("model.list", buildJsonObject {
                         put("backend", backend)
@@ -1336,7 +1337,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun loadModelListForMember(sessionId: String) {
         val info = roomMemberModels[sessionId] ?: return
         val backend = info.second
-        if (backend == "devin") refreshBackendQuota()
+        if ((roomMemberTypes[sessionId] ?: backend) == "devin") refreshBackendQuota()
         try {
             val result = hub.call("model.list", buildJsonObject {
                 put("backend", backend)
@@ -1694,6 +1695,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             o["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                            backendType = o["backendType"]?.jsonPrimitive?.content,
                         )
                     )
                 }
@@ -3242,6 +3244,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["offline"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         o["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                        backendType = o["backendType"]?.jsonPrimitive?.content,
                     )
                 )
             }
@@ -4537,7 +4540,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         chatItems[idx] = (chatItems[idx] as ChatItem.Assistant).copy(usage = usage)
                     }
                 }
-                if (sessions.firstOrNull { it.sessionId == sid }?.agent == "devin") {
+                if (sessions.firstOrNull { it.sessionId == sid }?.let { it.backendType ?: it.agent } == "devin") {
                     refreshBackendQuota()
                 }
                 refreshAll()
