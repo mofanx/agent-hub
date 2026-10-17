@@ -413,7 +413,7 @@ export class RoomManager {
       name,
       mode,
       conductorId,
-      members,
+      members: members.map((m) => ({ ...m, name: m.name.replaceAll("·", "-") })),
       memberRoles: config?.memberRoles,
       aliases: config?.aliases,
       roundRobinIndex: 0,
@@ -492,6 +492,7 @@ export class RoomManager {
         room.artifacts[i]!.alias = `a${i + 1}`;
       }
     }
+    for (const m of room.members) m.name = m.name.replaceAll("·", "-");
     this.rooms.set(room.roomId, room);
     this.aliasSeqs.set(room.roomId, room.artifacts.length);
     this.replayRoomEvents(room);
