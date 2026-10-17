@@ -2760,7 +2760,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun renameSession(session: SessionInfo, name: String) {
         viewModelScope.launch {
             connectError = null
-            val trimmed = name.trim()
+            val trimmed = name.trim().replace("·", "-")
             if (trimmed.isBlank()) return@launch
             try {
                 hub.call("session.rename", buildJsonObject {

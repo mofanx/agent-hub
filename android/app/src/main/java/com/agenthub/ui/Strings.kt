@@ -115,6 +115,8 @@ interface Strings {
     val topicResolve: String
     val scanFromGallery: String
     val qrDecodeFailed: String
+    val originLocal: String
+    val originRemote: String
     val attachTypeNotAllowed: String
     val attachTooLarge: String
     val attachTooMany: String
@@ -613,6 +615,8 @@ object ZhStrings : Strings {
     override val topicResolve = "标记已结"
     override val scanFromGallery = "从相册选择"
     override val qrDecodeFailed = "未识别到二维码，请重试"
+    override val originLocal = "本地"
+    override val originRemote = "远程"
     override val attachTypeNotAllowed = "不支持的附件类型"
     override val attachTooLarge = "附件过大（上限 10MB）"
     override val attachTooMany = "附件过多（最多 %d 个）"
@@ -1119,6 +1123,8 @@ object EnStrings : Strings {
     override val topicResolve = "Mark done"
     override val scanFromGallery = "Choose from gallery"
     override val qrDecodeFailed = "No QR code detected, please retry"
+    override val originLocal = "local"
+    override val originRemote = "remote"
     override val attachTypeNotAllowed = "Unsupported attachment type"
     override val attachTooLarge = "Attachment too large (max 10MB)"
     override val attachTooMany = "Too many attachments (max %d)"

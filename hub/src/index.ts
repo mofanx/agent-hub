@@ -1612,6 +1612,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const meta = sessionMetas.get(sessionId);
       if (!meta) throw new Error(`unknown session: ${sessionId}`);
       if (!name) throw new Error("name required");
+      if (name.includes("·")) throw new Error("name cannot contain '·'");
       const finalName = dedupeSessionName(name, sessionId);
       meta.name = finalName;
       agentForSession(sessionId)?.renameSession(sessionId, finalName);

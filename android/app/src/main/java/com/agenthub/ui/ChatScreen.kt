@@ -252,8 +252,26 @@ private fun sameDay(a: Long, b: Long): Boolean {
         Instant.ofEpochMilli(b).atZone(zone).toLocalDate()
 }
 
-private fun sameChatAuthor(a: String, b: String): Boolean =
-    a == b || a.startsWith("$b (") || b.startsWith("$a (")
+private fun sameChatAuthor(a: String, b: String): Boolean {
+    if (a == b) return true
+    // 兼容三种作者形态：裸名、`name (conn)` 旧格式、`name·type·origin` 新格式
+    val sep = { it: String, other: String -> it.startsWith("$other (") || it.startsWith("$other·") }
+    return sep(a, b) || sep(b, a)
+}
+
+/** 作者显示：新格式 `name·type·local|remote` 的 origin 尾段本地化；旧格式原样。仅 ≥3 段才按 origin 处理，成员名内嵌 · 不受影响 */
+@Composable
+private fun fmtAuthor(author: String): String {
+    val S = LocalStrings.current
+    val parts = author.split("·")
+    val last = parts.last()
+    val localized = when {
+        parts.size >= 3 && last == "local" -> S.originLocal
+        parts.size >= 3 && last == "remote" -> S.originRemote
+        else -> return author
+    }
+    return parts.dropLast(1).joinToString("·") + "·" + localized
+}
 
 private fun ChatListItem.groupableAuthor(): Boolean = when (this) {
     is ChatListItem.FlowCard -> false
@@ -1399,12 +1417,13 @@ fun AttachmentPreviews(
 @Composable
 fun AuthorLabel(author: String) {
     val S = LocalStrings.current
+    val display = fmtAuthor(author)
     if (author.isNotBlank() && author != S.authorMe && author != "我") {
         Text(
             buildAnnotatedString {
                 // 成员色向主题 onSurfaceVariant 靠拢降饱和，深浅色模式自适应
                 withStyle(SpanStyle(color = lerp(authorColor(author), MaterialTheme.colorScheme.onSurfaceVariant, 0.38f), fontWeight = FontWeight.SemiBold)) {
-                    append(author)
+                    append(display)
                 }
                 withStyle(SpanStyle(color = MaterialTheme.colorScheme.outline)) {
                     append(" ·")
@@ -2314,7 +2333,7 @@ private fun RawChatBubble(
         }
 
         is ChatItem.Error -> {
-            val text = (if (item.author.isNotBlank()) "[${item.author}] " else "") +
+            val text = (if (item.author.isNotBlank()) "[${fmtAuthor(item.author)}] " else "") +
                 "${S.errorTag}: ${item.text}"
             val textColor = if (isCurrentMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
             MessageBubbleBox(

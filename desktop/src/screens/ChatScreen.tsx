@@ -158,6 +158,23 @@ function highlightHtml(html: string, query: string): string {
   return out;
 }
 
+
+// author 展示：统一展示名 name·agentType·local|remote 分段渲染（origin 双语化），旧格式 name (conn) 原样
+function formatAuthor(author: string, S: Strings): string {
+  const parts = author.split("·");
+  if (parts.length < 3) return author;
+  const last = parts[parts.length - 1];
+  const localized = last === "local" ? S.originLocal : last === "remote" ? S.originRemote : undefined;
+  if (!localized) return author;
+  return parts.slice(0, -1).join("·") + "·" + localized;
+}
+// author 等价判定：同成员的裸名/旧 name (conn)/新 name·agentType·origin 三种形态互认
+function sameAuthor(a: string, b: string): boolean {
+  if (a === b) return true;
+  return a.startsWith(`${b}·`) || b.startsWith(`${a}·`) ||
+    a.startsWith(`${b} (`) || b.startsWith(`${a} (`);
+}
+
 export function ChatScreen() {
   const store = useHubStore();
   const S = stringsFor(store.lang);
@@ -198,7 +215,8 @@ export function ChatScreen() {
     ? store.sessionName(store.currentRoom.conductorId)
     : null;
   const isHostAuthor = (author?: string) =>
-    !!hostName && !!author && (author === hostName || author.startsWith(`${hostName} (`));
+    !!hostName && !!author &&
+    (author === hostName || author.startsWith(`${hostName} (`) || author.startsWith(`${hostName}·`));
 
   const renamingRef = useRef(false);
   const submitRename = async () => {
@@ -210,7 +228,7 @@ export function ChatScreen() {
       if (store.currentRoom) {
         await store.client?.call("room.rename", { roomId: store.currentRoom.roomId, name });
       } else if (store.currentSession) {
-        await store.client?.call("session.rename", { sessionId: store.currentSession.sessionId, name });
+        await store.client?.call("session.rename", { sessionId: store.currentSession.sessionId, name: name.replace(/·/g, "-") });
       }
       await store.refreshAll();
     } catch (err) {
@@ -964,7 +982,7 @@ export function ChatScreen() {
                   gap >= 0 &&
                   gap < 120_000 &&
                   item.kind === prev!.kind &&
-                  (item.author ?? "") === (prev!.author ?? "") &&
+                  sameAuthor(item.author ?? "", prev!.author ?? "") &&
                   (item.kind === "assistant" || item.kind === "thought");
                 const inTurn = TURN_KINDS.has(item.kind);
                 const prevInTurn = !!prev && TURN_KINDS.has(prev.kind);
@@ -1194,7 +1212,7 @@ export function ChatScreen() {
                         onClick={() => insertArtifactMention(a)}
                         onMouseEnter={() => setSuggestIndex(i)}
                       >
-                        {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)} · @{store.sessionName(a.author)}
+                        {a.path ? `${a.path} · ` : ""}{a.summary.slice(0, 80)} · @{formatAuthor(store.sessionName(a.author), S)}
                       </div>
                     ))}
               </div>
@@ -1551,7 +1569,7 @@ function getItemText(item: ChatItem, S: Strings): string {
   if (item.kind === "process") {
     return item.dispatchCount !== undefined
       ? S.dispatchCardFmt.replace("%s", String(item.dispatchCount))
-      : S.processCardFmt.replace("%s", item.author).replace("%s", String(item.steps));
+      : S.processCardFmt.replace("%s", formatAuthor(item.author, S)).replace("%s", String(item.steps));
   }
   if (item.kind === "flow") {
     const f = item.snapshot;
@@ -1725,7 +1743,7 @@ function ChatMessage({
         <div className={`message assistant ${agentColorClass(item.author || "AI")} ${fullWidth ? "full-width" : ""} ${grouped ? "grouped" : ""} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           {grouped ? <div className="avatar-spacer" /> : <Avatar name={item.author || "AI"} />}
           <div className="msg-body">
-            {item.author && !grouped && <div className="author">{item.author}</div>}
+            {item.author && !grouped && <div className="author">{formatAuthor(item.author, S)}</div>}
             {item.quoteAuthor && (
               <div className="quote-preview">
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
@@ -1743,7 +1761,7 @@ function ChatMessage({
       return (
         <div className={`message thought ${agentColorClass(item.author || "AI")} ${turnPos ? `turn-${turnPos}` : ""} ${isQuoted ? "quoted" : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
-            {showAuthor && item.author && <div className="author">{item.author}</div>}
+            {showAuthor && item.author && <div className="author">{formatAuthor(item.author, S)}</div>}
             {item.quoteAuthor && (
               <div className="quote-preview">
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
@@ -1765,7 +1783,7 @@ function ChatMessage({
       return (
         <div className={`message tool ${turnPos ? `turn-${turnPos}` : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
-            {showAuthor && item.author && <div className="author">{item.author}</div>}
+            {showAuthor && item.author && <div className="author">{formatAuthor(item.author, S)}</div>}
             <div className="tool-row">
               <span className="tool-icon">
                 <Wrench size={12} />
@@ -1783,7 +1801,7 @@ function ChatMessage({
       return (
         <div className={`message plan ${turnPos ? `turn-${turnPos}` : ""} ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
-            {showAuthor && item.author && <div className="author">{item.author}</div>}
+            {showAuthor && item.author && <div className="author">{formatAuthor(item.author, S)}</div>}
             <div className="plan-head">
               <ListTodo size={12} /> {S.plan}
             </div>
@@ -1803,7 +1821,7 @@ function ChatMessage({
         <div className={`message error ${currentMatchClass}`} onContextMenu={onContextMenu}>
           <div className="msg-body">
             <div className="text">
-              {item.author ? `[${item.author}] ` : ""}{S.errorLabel}: {highlight ? highlightText(item.text, highlight) : item.text}
+              {item.author ? `[${formatAuthor(item.author, S)}] ` : ""}{S.errorLabel}: {highlight ? highlightText(item.text, highlight) : item.text}
             </div>
           </div>
           {menuEl}
@@ -1929,7 +1947,7 @@ function ProcessCard({
   const running = item.status === "running";
   const label = isDispatch
     ? S.dispatchCardFmt.replace("%s", String(item.dispatchCount))
-    : S.processCardFmt.replace("%s", item.author || "?").replace("%s", String(item.steps));
+    : S.processCardFmt.replace("%s", formatAuthor(item.author || "?", S)).replace("%s", String(item.steps));
 
   const toggle = async () => {
     const next = !expanded;
@@ -1950,7 +1968,7 @@ function ProcessCard({
     <div className={`message process ${currentMatchClass}`}>
       <div className="msg-body">
         {showAuthor && item.author && !isDispatch && (
-          <div className="author">{item.author}</div>
+          <div className="author">{formatAuthor(item.author, S)}</div>
         )}
         <button className="thought-toggle" onClick={toggle}>
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {label}
@@ -2881,7 +2899,7 @@ function ArtifactPanel({ artifacts, minimal = false }: { artifacts: ArtifactInfo
           )}
           <div className="artifact-info">
             <span className="artifact-kind-badge">{kindIcon("file")}</span>
-            <span className="artifact-author">@{store.sessionName(a.author)}</span>
+            <span className="artifact-author">@{formatAuthor(store.sessionName(a.author), S)}</span>
             <span className="artifact-time">{formatArtifactTime(a.at)}</span>
             <span className="artifact-path" title={a.path ?? a.alias ?? a.id}>{a.path ?? a.alias ?? a.id}</span>
           </div>
@@ -3105,7 +3123,7 @@ function EventPanel({ events, minimal = false }: { events: EventInfo[]; minimal?
           )}
           <div className="artifact-info">
             <span className="artifact-kind-badge">{eventIcon(e.action)}</span>
-            <span className="artifact-author">@{store.sessionName(e.author)}</span>
+            <span className="artifact-author">@{formatAuthor(store.sessionName(e.author), S)}</span>
             <span className="artifact-time">{formatArtifactTime(e.at)}</span>
             <span className="artifact-summary">
               {eventLabel(S, e.action)} · {e.oldPath ? `${e.oldPath} → ` : ""}

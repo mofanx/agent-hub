@@ -1854,7 +1854,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     renameSession: async (session, name) => {
       try {
-        await getOrCall("session.rename", { sessionId: session.sessionId, name });
+        await getOrCall("session.rename", { sessionId: session.sessionId, name: name.replace(/·/g, "-") });
         await get().refreshAll();
       } catch (e) {
         set({ connectError: String(e) });

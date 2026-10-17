@@ -1336,3 +1336,12 @@ describe("openTopics 话题工作记忆", () => {
     assert.equal(rooms.resolveTopicsSince(room.roomId, start, end), 0, "幂等");
   });
 });
+
+  it("成员名分隔符消毒：addMember/updateMemberName 将 · 归一为 -", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }], "mention", {});
+    rooms.addMember(room.roomId, "s2", "a·b·local");
+    assert.equal(room.members.find((m) => m.sessionId === "s2")!.name, "a-b-local");
+    rooms.updateMemberName("s2", "x·y");
+    assert.equal(room.members.find((m) => m.sessionId === "s2")!.name, "x-y");
+  });

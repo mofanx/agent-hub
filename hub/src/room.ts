@@ -442,7 +442,7 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return false;
     if (room.members.some((m) => m.sessionId === sessionId)) return false;
-    room.members.push({ sessionId, name });
+    room.members.push({ sessionId, name: name.replaceAll("·", "-") });
     this.dedupMemberNames(roomId);
     return true;
   }
@@ -1682,7 +1682,7 @@ export class RoomManager {
     for (const room of this.rooms.values()) {
       const member = room.members.find((m) => m.sessionId === sessionId);
       if (member) {
-        member.name = name;
+        member.name = name.replaceAll("·", "-");
         this.dedupMemberNames(room.roomId);
         touched.push(room.roomId);
       }
