@@ -55,6 +55,12 @@ export class ModelManager {
     return this.backends.filter(b => b.enabled);
   }
 
+  /** backend id → 后端类型；自定义远程后端按其注册的 type 解析，未知 id 回退为 id 本身 */
+  backendTypeOf(id: string): ModelBackend {
+    this.loadBackends();
+    return this.backends.find((b) => b.id === id)?.type ?? (id as ModelBackend);
+  }
+
   /** 添加自定义后端配置 */
   addBackend(config: BackendConfig): void {
     this.loadBackends();

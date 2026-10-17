@@ -1955,6 +1955,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           sessionId: m.sessionId,
           name: m.name,
           backend,
+          backendType: modelManager.backendTypeOf(backend),
           model: current.uid,
         };
       });

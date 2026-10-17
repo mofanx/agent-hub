@@ -251,7 +251,7 @@ export function ChatScreen() {
   const contextUsage = activeSessionId ? store.sessionUsage[activeSessionId] : undefined;
   const quota = store.backendQuota;
   const hasDevinMember = store.currentRoom
-    ? store.currentRoom.members.some(([sid]) => store.roomMemberModels[sid]?.backend === "devin")
+    ? store.currentRoom.members.some(([sid]) => (store.roomMemberModels[sid]?.backendType ?? store.roomMemberModels[sid]?.backend) === "devin")
     : store.currentSession?.agent === "devin";
   const quotaParts = quota?.available
     ? [

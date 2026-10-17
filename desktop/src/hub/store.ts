@@ -109,7 +109,7 @@ interface State {
   backendQuota: BackendQuota | null;
   editRoomTarget: RoomInfo | null;
   /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
-  roomMemberModels: Record<string, { name: string; backend: string; model: string }>;
+  roomMemberModels: Record<string, { name: string; backend: string; backendType?: string; model: string }>;
   /** 群聊模式：当前选中的成员标签 sessionId */
   selectedMemberSession: string | null;
   backends: BackendConfig[];
@@ -3047,11 +3047,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const result = await getOrCall<Record<string, unknown>>("room.memberModels", { roomId: room.roomId });
         if (get().currentRoom?.roomId !== room.roomId) return;
-        const members = (result.members as Array<{ sessionId: string; name: string; backend: string; model: string }>) ?? [];
-        const map: Record<string, { name: string; backend: string; model: string }> = {};
-        for (const m of members) map[m.sessionId] = { name: m.name, backend: m.backend, model: m.model };
+        const members = (result.members as Array<{ sessionId: string; name: string; backend: string; backendType?: string; model: string }>) ?? [];
+        const map: Record<string, { name: string; backend: string; backendType?: string; model: string }> = {};
+        for (const m of members) map[m.sessionId] = { name: m.name, backend: m.backend, backendType: m.backendType ?? m.backend, model: m.model };
         set({ roomMemberModels: map });
-        if (Object.values(map).some((m) => m.backend === "devin")) void get().refreshBackendQuota();
+        if (Object.values(map).some((m) => m.backendType === "devin")) void get().refreshBackendQuota();
       } catch (e) {
         set({ connectError: String(e) });
       }

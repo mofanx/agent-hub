@@ -573,7 +573,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     val quota = vm.backendQuota
                     val hasDevinMember = if (isRoom) {
                         vm.currentRoom?.members?.any {
-                            vm.roomMemberModels[it.first]?.second == "devin"
+                            vm.roomMemberTypes[it.first] == "devin"
                         } == true
                     } else {
                         vm.currentSession?.agent == "devin"

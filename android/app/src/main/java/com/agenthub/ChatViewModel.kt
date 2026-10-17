@@ -810,6 +810,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var backendQuota by mutableStateOf<BackendQuota?>(null)
     /** 群聊模式：成员模型信息 sessionId -> (name, backend, model) */
     val roomMemberModels = mutableStateMapOf<String, Triple<String, String, String>>()
+    val roomMemberTypes = mutableStateMapOf<String, String>() // sessionId → backendType（配额判定用，与 backend id 区分）
     /** 群聊模式：当前选中的成员 sessionId */
     var selectedMemberSession by mutableStateOf<String?>(null)
     /** 当前选中会话的非模型 ACP 配置项（mode/thought_level 等） */
@@ -1107,12 +1108,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         val sid = obj["sessionId"]?.jsonPrimitive?.content ?: continue
                         val name = obj["name"]?.jsonPrimitive?.content ?: sid
                         val backend = obj["backend"]?.jsonPrimitive?.content ?: "devin"
+                        val backendType = obj["backendType"]?.jsonPrimitive?.content ?: backend
                         val model = obj["model"]?.jsonPrimitive?.content ?: ""
                         roomMemberModels[sid] = Triple(name, backend, model)
+                        roomMemberTypes[sid] = backendType
                     }
                     // 显示第一个成员的模型作为概览
                     modelCurrent = roomMemberModels.values.firstOrNull()?.third ?: ""
-                    if (roomMemberModels.values.any { it.second == "devin" }) refreshBackendQuota()
+                    if (roomMemberTypes.values.any { it == "devin" }) refreshBackendQuota()
                 } else {
                     val session = currentSession ?: return@launch
                     val backend = session.agent
@@ -1307,8 +1310,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val sid = obj["sessionId"]?.jsonPrimitive?.content ?: continue
                 val name = obj["name"]?.jsonPrimitive?.content ?: sid
                 val backend = obj["backend"]?.jsonPrimitive?.content ?: "devin"
+                val backendType = obj["backendType"]?.jsonPrimitive?.content ?: backend
                 val model = obj["model"]?.jsonPrimitive?.content ?: ""
                 roomMemberModels[sid] = Triple(name, backend, model)
+                roomMemberTypes[sid] = backendType
             }
             // 默认选第一个成员
             val firstSid = roomMemberModels.keys.firstOrNull()
