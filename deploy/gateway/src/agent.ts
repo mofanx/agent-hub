@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fetchLocalDevinQuota } from './quota.js';
 
 const TOKEN_RE = /^[a-zA-Z0-9_-]{32,128}$/;
 const HUB_ID_RE = /^[a-zA-Z0-9_-]{16,64}$/;
@@ -33,30 +34,113 @@ export function startAgent(options: {
   /** ch -> 本地连接就绪前缓冲的下行帧（有界） */
   const pending = new Map<number, string[]>();
 
-  /** 注册成功后向本地 hub 上报 gatewayAnnounce（配合 hub 侧 connectInfo；t2 提供方法） */
-  const announceToHub = (params: { publicUrl: string; publicToken: string }) => {
-    const url = `${localBase}/?token=${encodeURIComponent(hubToken)}`;
-    const ws = new WebSocket(url);
-    const timer = setTimeout(() => ws.close(), 5000);
-    ws.on('open', () => {
-      ws.send(
-        JSON.stringify({
-          id: 'gw-announce',
-          method: 'hub.gatewayAnnounce',
-          params,
-        }),
-      );
+  /**
+   * 本地 hub 上报通道：一条常驻客户端连接复用 gatewayAnnounce + 周期 quotaReport。
+   * hub 重启会丢内存态（gatewayInfo / 配额表），断线重连后需重放 announce。
+   */
+  let hubWs: WebSocket | null = null;
+  let announceParams: { publicUrl: string; publicToken: string } | null = null;
+  /** quotaReport 归附的 connectionId：env 覆盖 > connection.list 解析 > 兜底 local-devin */
+  let quotaConnectionId: string | null =
+    process.env.HUB_QUOTA_CONNECTION_ID?.trim() || null;
+  let hubRpcSeq = 0;
+
+  const hubSend = (msg: Record<string, unknown>) => {
+    if (hubWs && hubWs.readyState === WebSocket.OPEN) {
+      hubWs.send(JSON.stringify(msg));
+    }
+  };
+
+  const pendingHubRpc = new Map<string, (v: unknown) => void>();
+
+  /** 简单 RPC：只认 {id, result} 响应，5s 超时 */
+  const hubCall = (method: string): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const id = `gw-rpc-${++hubRpcSeq}`;
+      const timer = setTimeout(() => {
+        pendingHubRpc.delete(id);
+        reject(new Error(`${method} timeout`));
+      }, 5000);
+      pendingHubRpc.set(id, (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      });
+      hubSend({ id, method });
     });
-    ws.on('message', () => {
-      clearTimeout(timer);
-      ws.close();
-    });
-    ws.on('close', () => clearTimeout(timer));
-    ws.on('error', (err) => {
-      clearTimeout(timer);
-      console.warn(`[agent] gatewayAnnounce failed: ${err.message}`);
+
+  const resolveQuotaConnectionId = async (): Promise<string> => {
+    if (quotaConnectionId) return quotaConnectionId;
+    try {
+      const res = (await hubCall('connection.list')) as {
+        connections?: { id?: string; agent?: string; local?: boolean }[];
+      };
+      const conns = res.connections ?? [];
+      quotaConnectionId =
+        conns.find((c) => c.id === 'local-devin')?.id ??
+        conns.find((c) => c.local && c.agent === 'devin')?.id ??
+        null;
+    } catch (err) {
+      console.warn(`[agent] connection.list failed: ${String(err)}`);
+    }
+    // 解析不到时兜底标准种子 id：挂在不存在的连接上仅是不匹配，无副作用
+    return quotaConnectionId ?? 'local-devin';
+  };
+
+  const reportQuota = async () => {
+    const quota = await fetchLocalDevinQuota();
+    const connectionId = await resolveQuotaConnectionId();
+    hubSend({
+      id: `gw-quota-${Date.now()}`,
+      method: 'hub.quotaReport',
+      params: { scope: 'connection', connectionId, quota },
     });
   };
+
+  const ensureHubConn = () => {
+    if (hubWs && hubWs.readyState !== WebSocket.CLOSED) return;
+    const ws = new WebSocket(`${localBase}/?token=${encodeURIComponent(hubToken)}`);
+    hubWs = ws;
+    ws.on('open', () => {
+      if (announceParams) {
+        hubSend({ id: 'gw-announce', method: 'hub.gatewayAnnounce', params: announceParams });
+      }
+      reportQuota().catch(() => {});
+    });
+    ws.on('message', (data) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(toText(data)) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      const resolve = typeof msg.id === 'string' ? pendingHubRpc.get(msg.id) : undefined;
+      if (resolve) {
+        pendingHubRpc.delete(msg.id as string);
+        resolve(msg.result);
+      }
+      // 其余为 hub 事件广播，忽略
+    });
+    ws.on('close', () => {
+      if (hubWs === ws) hubWs = null;
+      setTimeout(ensureHubConn, 5000);
+    });
+    ws.on('error', (err) => {
+      console.warn(`[agent] local hub conn error: ${err.message}`);
+    });
+  };
+
+  const announceToHub = (params: { publicUrl: string; publicToken: string }) => {
+    announceParams = params;
+    ensureHubConn();
+    hubSend({ id: 'gw-announce', method: 'hub.gatewayAnnounce', params });
+  };
+
+  // 启动即建本地 hub 连接并周期上报本机 devin 配额（默认 60s，HUB_QUOTA_INTERVAL_MS 可调）
+  ensureHubConn();
+  setInterval(
+    () => reportQuota().catch(() => {}),
+    Number(process.env.HUB_QUOTA_INTERVAL_MS ?? 60_000),
+  );
 
   /** open 帧 → 建立对应的本地 hub 连接 */
   const openLocal = (ch: number, path: string) => {

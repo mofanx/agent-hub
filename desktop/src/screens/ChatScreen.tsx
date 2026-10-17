@@ -253,10 +253,12 @@ export function ChatScreen() {
   const hasDevinMember = store.currentRoom
     ? store.currentRoom.members.some(([sid]) => (store.roomMemberModels[sid]?.backendType ?? store.roomMemberModels[sid]?.backend) === "devin")
     : (store.currentSession?.backendType ?? store.currentSession?.agent) === "devin";
-  const quotaParts = quota?.available
+  const remoteQuota = Object.values(store.memberQuotas ?? {}).find((q) => q?.available);
+  const effQuota = remoteQuota ?? quota;
+  const quotaParts = effQuota?.available
     ? [
-        quota.daily ? S.quotaDaily.replace("%s", String(quota.daily.usedPercent)) : "",
-        quota.weekly ? S.quotaWeekly.replace("%s", String(quota.weekly.usedPercent)) : "",
+        effQuota.daily ? S.quotaDaily.replace("%s", String(effQuota.daily.usedPercent)) : "",
+        effQuota.weekly ? S.quotaWeekly.replace("%s", String(effQuota.weekly.usedPercent)) : "",
       ].filter(Boolean)
     : [];
   const quotaSummary = hasDevinMember && quotaParts.length > 0 ? `Devin ${quotaParts.join(" · ")}` : "";

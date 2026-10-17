@@ -36,6 +36,7 @@ import { WebSocket } from "ws";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Stream, AnyMessage } from "@agentclientprotocol/sdk";
 import { getAgentDef } from "./agent-defs.js";
+import { fetchDevinQuota, type DevinQuota } from "./quota.js";
 const HUB_URL = process.env.HUB_URL;
 const TOKEN = process.env.CONNECTION_TOKEN;
 const AGENTS_ENV = process.env.AGENTS;
@@ -180,6 +181,28 @@ function buildUrl(): string {
   return url.toString();
 }
 
+const QUOTA_REPORT_INTERVAL_MS = 60_000;
+
+/** DevinQuota → hub.quotaReport 的 quota 字段（去 backend/updatedAt，resetAtUnix→resetAt） */
+function toReportedQuota(q: DevinQuota): Record<string, unknown> {
+  const win = (w?: { usedPercent: number; remainingPercent: number; resetAtUnix?: number }) =>
+    w
+      ? {
+          usedPercent: w.usedPercent,
+          remainingPercent: w.remainingPercent,
+          ...(w.resetAtUnix !== undefined ? { resetAt: w.resetAtUnix } : {}),
+        }
+      : undefined;
+  return {
+    available: q.available,
+    ...(q.planName ? { planName: q.planName } : {}),
+    ...(q.billingStrategy ? { billingStrategy: q.billingStrategy } : {}),
+    ...(q.daily ? { daily: win(q.daily) } : {}),
+    ...(q.weekly ? { weekly: win(q.weekly) } : {}),
+    ...(q.error ? { error: q.error } : {}),
+  };
+}
+
 const PERMANENT_CLOSE_CODES = new Set([1000, 1008, 1009, 1011]);
 const MAX_RETRY_MS = 30_000;
 let retryDelay = 1000;
@@ -189,11 +212,13 @@ async function runOnce(channels: Channel[]): Promise<{ code: number; permanent: 
     const ws = new WebSocket(buildUrl());
     const abort = new AbortController();
     let finished = false;
+    let quotaTimer: NodeJS.Timeout | undefined;
     const bridgePromises: Promise<void>[] = [];
 
     function finish(code: number, permanent: boolean): void {
       if (finished) return;
       finished = true;
+      if (quotaTimer) clearInterval(quotaTimer);
       try { ws.close(); } catch {}
       try { abort.abort(); } catch {}
       Promise.allSettled(bridgePromises).then(() => resolve({ code, permanent }));
@@ -212,6 +237,25 @@ async function runOnce(channels: Channel[]): Promise<{ code: number; permanent: 
       };
       ws.send(JSON.stringify(announce));
       console.log(`[mux-worker] announced ${channels.length} channels: ${channels.map(c => c.id).join(", ")}`);
+
+      // 1.5 远端配额上报：有 devin 通道时把本机 devin 配额周期性推给 hub
+      // （__control__ 控制帧，hub 归到 base+虚拟 connection；agent 进程看不到这些帧）
+      if (channels.some((c) => c.agent === "devin")) {
+        const reportQuota = () => {
+          fetchDevinQuota()
+            .then((q) => {
+              if (ws.readyState !== ws.OPEN) return;
+              ws.send(JSON.stringify({
+                channel: "__control__",
+                method: "quotaReport",
+                quota: toReportedQuota(q),
+              }));
+            })
+            .catch(() => {});
+        };
+        reportQuota();
+        quotaTimer = setInterval(reportQuota, QUOTA_REPORT_INTERVAL_MS);
+      }
 
       // 2. 为每个 channel 建立双向桥接
       for (const ch of channels) {

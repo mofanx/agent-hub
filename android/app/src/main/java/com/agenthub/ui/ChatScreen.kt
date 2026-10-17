@@ -578,10 +578,11 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     } else {
                         (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin"
                     }
-                    val quotaText = if (quota?.available == true && hasDevinMember) {
+                    val effQuota = (vm.memberQuotas.values.firstOrNull { it.available }) ?: quota
+                    val quotaText = if (effQuota?.available == true && hasDevinMember) {
                         listOfNotNull(
-                            quota.daily?.let { S.quotaDaily.format(it.usedPercent) },
-                            quota.weekly?.let { S.quotaWeekly.format(it.usedPercent) },
+                            effQuota.daily?.let { S.quotaDaily.format(it.usedPercent) },
+                            effQuota.weekly?.let { S.quotaWeekly.format(it.usedPercent) },
                         ).joinToString(" · ")
                     } else ""
                     if (isRoom) {
@@ -697,9 +698,10 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                     )
                                 }
                             }
-                            if (quota?.available == true && (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin") {
+                            val sessQuota = vm.currentSession?.let { vm.memberQuotas[it.sessionId] } ?: quota
+                            if (sessQuota?.available == true && (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin") {
                                 Column(horizontalAlignment = Alignment.End) {
-                                    quota.daily?.let {
+                                    sessQuota.daily?.let {
                                         Text(
                                             S.quotaDaily.format(it.usedPercent),
                                             style = MaterialTheme.typography.labelSmall,
@@ -707,7 +709,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                             maxLines = 1,
                                         )
                                     }
-                                    quota.weekly?.let {
+                                    sessQuota.weekly?.let {
                                         val costText = contextUsage?.costAmount?.let { cost ->
                                             "${contextUsage.costCurrency} ${String.format("%.4f", cost)} · "
                                         } ?: ""

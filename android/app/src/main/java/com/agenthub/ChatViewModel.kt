@@ -809,6 +809,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var modelFilter by mutableStateOf("")
     var modelCurrent by mutableStateOf("")
     var backendQuota by mutableStateOf<BackendQuota?>(null)
+    /** member.quota 事件+payload quota 字段：远端成员配额（sessionId/connectionId → quota） */
+    val memberQuotas = mutableStateMapOf<String, BackendQuota>()
     /** 群聊模式：成员模型信息 sessionId -> (name, backend, model) */
     val roomMemberModels = mutableStateMapOf<String, Triple<String, String, String>>()
     val roomMemberTypes = mutableStateMapOf<String, String>() // sessionId → backendType（配额判定用，与 backend id 区分）
@@ -978,6 +980,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sessions.find { it.sessionId == sessionId }?.let { return displayName(it) }
         currentRoom?.members?.find { it.second == sessionId }?.second?.let { return it }
         return sessionId
+    }
+
+    private fun parseReportedQuota(v: JsonElement?): BackendQuota? {
+        val o = (v as? JsonObject) ?: return null
+        fun win(key: String): QuotaWindow? {
+            val w = o[key]?.jsonObject ?: return null
+            val used = w["usedPercent"]?.jsonPrimitive?.intOrNull ?: return null
+            val remaining = w["remainingPercent"]?.jsonPrimitive?.intOrNull ?: (100 - used)
+            return QuotaWindow(remaining, used, w["resetAtUnix"]?.jsonPrimitive?.longOrNull
+                ?: w["resetAt"]?.jsonPrimitive?.longOrNull?.let { it / 1000 })
+        }
+        return BackendQuota(
+            available = o["available"]?.jsonPrimitive?.booleanOrNull == true,
+            planName = o["planName"]?.jsonPrimitive?.contentOrNull,
+            daily = win("daily"), weekly = win("weekly"),
+        )
     }
 
     private fun parseContextUsage(u: JsonObject) = ContextUsage(
@@ -1698,6 +1716,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             backendType = o["backendType"]?.jsonPrimitive?.content,
                         )
                     )
+                    parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
                 }
                 syncBusyIdsFromList(sessions)
             } catch (_: Exception) {
@@ -2252,6 +2271,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun parseRoom(o: JsonObject): RoomInfo {
         val members = o["members"]!!.jsonArray.map {
             val m = it.jsonObject
+            parseReportedQuota(m["quota"])?.let { memberQuotas[m["sessionId"]!!.jsonPrimitive.content] = it }
             m["sessionId"]!!.jsonPrimitive.content to
                 m["name"]!!.jsonPrimitive.content
         }
@@ -3247,6 +3267,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         backendType = o["backendType"]?.jsonPrimitive?.content,
                     )
                 )
+                parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
             }
             syncBusyIdsFromList(sessionsList)
         } catch (_: Exception) {
@@ -4673,6 +4694,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     else -> true
                 }
                 if (relevant) memberStatus[member] = status
+            }
+            "member.quota" -> {
+                val p = obj["params"]!!.jsonObject
+                val q = parseReportedQuota(p["quota"]) ?: return
+                (p["sessionIds"]?.jsonArray ?: p["connectionIds"]?.jsonArray)
+                    ?.forEach { memberQuotas[it.jsonPrimitive.content] = q }
+                p["sessionId"]?.jsonPrimitive?.contentOrNull?.let { memberQuotas[it] = q }
+                p["connectionId"]?.jsonPrimitive?.contentOrNull?.let { memberQuotas[it] = q }
             }
             "permission.request" -> {
                 val p = obj["params"]!!.jsonObject

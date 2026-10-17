@@ -104,6 +104,18 @@ export type HubEvent =
         status: "online" | "generating" | "offline";
       };
     }
+  | {
+      /** 远端配额上报扩散：hub.quotaReport / worker 控制帧被接受后广播 */
+      method: "member.quota";
+      params: {
+        scope: "connection" | "session";
+        connectionId?: string | undefined;
+        connectionIds?: string[] | undefined;
+        sessionId?: string | undefined;
+        quota: unknown;
+        updatedAt: number;
+      };
+    }
   | { method: "room.notice"; params: { roomId: string; message: string } }
   | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string } } }
   | { method: "room.artifact"; params: { roomId: string; artifact?: unknown } }

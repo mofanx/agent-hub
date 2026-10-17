@@ -107,6 +107,7 @@ interface State {
   /** 当前选中会话的非模型 ACP 配置项（mode/thought_level 等） */
   sessionConfigOptions: SessionConfigOption[];
   backendQuota: BackendQuota | null;
+  memberQuotas: Record<string, BackendQuota>;
   editRoomTarget: RoomInfo | null;
   /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
   roomMemberModels: Record<string, { name: string; backend: string; backendType?: string; model: string }>;
@@ -1018,6 +1019,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({ chatItems: idx >= 0 ? list.map((it, i) => (i === idx ? item : it)) : [...list, item] });
         break;
       }
+      case "member.quota": {
+        const q = params.quota as BackendQuota | undefined;
+        if (!q || typeof q !== "object") break;
+        const ids = [
+          ...((params.sessionIds as string[] | undefined) ?? (params.connectionIds as string[] | undefined) ?? []),
+          String(params.sessionId ?? ""), String(params.connectionId ?? ""),
+        ].filter(Boolean);
+        if (ids.length) set({ memberQuotas: { ...get().memberQuotas, ...Object.fromEntries(ids.map((id) => [id, q])) } });
+        break;
+      }
       case "member.status": {
         const member = String(params.member ?? "");
         const status = String(params.status ?? "");
@@ -1094,6 +1105,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
     offline: o.offline === true,
     archived: o.archived === true,
   });
+  const collectSessionQuotas = (list: Array<Record<string, unknown>>) => {
+    const next: Record<string, BackendQuota> = {};
+    for (const o of list) {
+      const q = o.quota as BackendQuota | undefined;
+      const sid = o.sessionId as string | undefined;
+      if (q && typeof q === "object" && sid) next[sid] = q;
+    }
+    if (Object.keys(next).length) set({ memberQuotas: { ...get().memberQuotas, ...next } });
+  };
 
   const parseRoom = (o: Record<string, unknown>): RoomInfo => {
     const members = ((o.members as unknown[] | undefined) ?? []).map((it) => {
@@ -1274,6 +1294,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     showModelPicker: false,
     sessionConfigOptions: [],
     backendQuota: null,
+    memberQuotas: {},
     editRoomTarget: null,
     roomMemberModels: {},
     selectedMemberSession: null,
@@ -1476,6 +1497,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         showModelPicker: false,
         sessionConfigOptions: [],
         backendQuota: null,
+        memberQuotas: {},
         roomMemberModels: {},
         selectedMemberSession: null,
         pendingAttachments: [],
@@ -1508,7 +1530,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
       try {
         const sList = (await client.call("session.list")) as Record<string, unknown>;
-        const list = ((sList.sessions as unknown[] | undefined) ?? []).map((it) =>
+        const rawSessions = (sList.sessions as unknown[] | undefined) ?? [];
+        collectSessionQuotas(rawSessions as Array<Record<string, unknown>>);
+        const list = rawSessions.map((it) =>
           parseSession(it as Record<string, unknown>),
         );
         const curS = get().currentSession;

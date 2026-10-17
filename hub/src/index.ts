@@ -26,7 +26,15 @@ import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
-import { getDevinQuota } from "./quota.js";
+import {
+  getDevinQuota,
+  validateQuotaReport,
+  validateReportedQuota,
+  recordQuotaReport,
+  quotaFor,
+  clearQuotaReports,
+  type ReportedQuota,
+} from "./quota.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
@@ -287,7 +295,14 @@ function enrichRoom(room: Room): Record<string, unknown> {
   const sub = roomModeManager.subModeFor(room.roomId);
   return {
     ...room,
-    members: room.members.map((m) => ({ ...m, status: memberStatusOf(m.sessionId) })),
+    members: room.members.map((m) => ({
+      ...m,
+      status: memberStatusOf(m.sessionId),
+      quota: quotaFor({
+        sessionId: m.sessionId,
+        connectionId: sessionMetas.get(m.sessionId)?.connectionId,
+      }),
+    })),
     subMode: sub?.mode,
     activeSpeaker: sub?.activeSpeaker,
     reason: sub?.reason,
@@ -694,6 +709,7 @@ function listAllSessions(): {
   offline: boolean;
   archived: boolean;
   status: PresenceStatus;
+  quota: (ReportedQuota & { updatedAt: number }) | null;
 }[] {
   const connectionsById = new Map<string, Connection>(
     store.listConnections().map((c) => [c.id, c]),
@@ -712,6 +728,7 @@ function listAllSessions(): {
         offline: false,
         archived: meta?.archived ?? false,
         status: (s.busy ? "generating" : "online") as PresenceStatus,
+        quota: quotaFor({ sessionId: s.sessionId, connectionId }),
       };
     });
   });
@@ -727,6 +744,7 @@ function listAllSessions(): {
       archived: m.archived ?? false,
       origin: originFor(m),
       status: "offline" as PresenceStatus,
+      quota: quotaFor({ sessionId: m.sessionId, connectionId: m.connectionId }),
     }));
   return [...online, ...offline];
 }
@@ -1791,6 +1809,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           online: agents.has(c.id),
           local: c.local ?? false,
           error: localAgentErrors.get(c.id),
+          quota: quotaFor({ connectionId: c.id }),
         })),
       };
     case "hub.connectInfo": {
@@ -1804,6 +1823,23 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       setGatewayInfo(info);
       console.log(`[hub] gateway announced: ${info.publicUrl}`);
       return { ok: true };
+    }
+    case "hub.quotaReport": {
+      // 远端 devin 配额上报：gateway agent / 远端代理由认证客户端连接上报；
+      // multiplex worker 走 __control__ 控制帧（见 handleMultiplexWorker）。
+      const report = validateQuotaReport(req.params);
+      const updatedAt = recordQuotaReport(report);
+      broadcast({
+        method: "member.quota",
+        params: {
+          scope: report.scope,
+          connectionId: report.connectionId,
+          sessionId: report.sessionId,
+          quota: report.quota,
+          updatedAt,
+        },
+      });
+      return { ok: true, updatedAt };
     }
     case "connection.create": {
       const name = String(req.params?.name ?? "").trim();
@@ -1846,13 +1882,16 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         existing.close();
         agents.delete(id);
       }
+      const removedSids: string[] = [];
       for (const [sid, cid] of [...owners.entries()]) {
         if (cid === id) {
           owners.delete(sid);
+          removedSids.push(sid);
           emitMemberStatus(sid, "offline");
         }
       }
       localAgentErrors.delete(id);
+      clearQuotaReports(id, removedSids);
       const ok = store.deleteConnection(id);
       if (!ok) throw new Error("connection not found");
       return { deleted: true };
@@ -1959,6 +1998,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           backend,
           backendType: modelManager.backendTypeOf(backend),
           model: current.uid,
+          quota: quotaFor({ sessionId: m.sessionId, connectionId: meta?.connectionId }),
         };
       });
       return { members };
@@ -2731,12 +2771,15 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   ws.on("close", () => {
     console.log(`[hub] worker disconnected ${connectionId}`);
     if (agents.get(connectionId) === a) agents.delete(connectionId);
+    const removedSids: string[] = [];
     for (const [sid, cid] of [...owners.entries()]) {
       if (cid === connectionId) {
         owners.delete(sid);
+        removedSids.push(sid);
         emitMemberStatus(sid, "offline");
       }
     }
+    clearQuotaReports(connectionId, removedSids);
   });
 }
 
@@ -2808,8 +2851,26 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       }
     }
 
-    // 创建子通道 Stream（注册新的 message listener）
-    multiplexed = multiplexWebSocketStream(ws, channelIds);
+    // 创建子通道 Stream（注册新的 message listener）；
+    // onControl 承接 announce 之后的控制帧——quotaReport 把 worker 本机配额
+    // 归到 base connection 与其全部虚拟通道（同一台机共享同一份配额）。
+    multiplexed = multiplexWebSocketStream(ws, channelIds, (frame) => {
+      if (frame.method !== "quotaReport") return;
+      try {
+        const quota = validateReportedQuota(frame.quota);
+        const ids = [baseConnection.id, ...channelIds.map((id) => `${baseConnection.id}::${id}`)];
+        const updatedAt = Date.now();
+        for (const id of ids) {
+          recordQuotaReport({ scope: "connection", connectionId: id, quota }, updatedAt);
+        }
+        broadcast({
+          method: "member.quota",
+          params: { scope: "connection", connectionIds: ids, quota, updatedAt },
+        });
+      } catch (err) {
+        logWarn("worker", `quotaReport rejected: ${String(err)}`);
+      }
+    });
 
     // 为每个通道创建 AcpAgent
     for (const ch of channels) {
@@ -2856,14 +2917,18 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
       a.close();
       const connId = `${baseConnection.id}::${ch}`;
       agents.delete(connId);
+      const removedSids: string[] = [];
       for (const [sid, cid] of [...owners.entries()]) {
         if (cid === connId) {
           owners.delete(sid);
+          removedSids.push(sid);
           emitMemberStatus(sid, "offline");
         }
       }
+      clearQuotaReports(connId, removedSids);
     }
     virtualAgents.clear();
+    clearQuotaReports(baseConnection.id);
   });
 }
 
