@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import {
   RoomManager,
   dedupeName,
+  displayNameFor,
   remapRoomModeConfig,
   normalizePersonaValue,
   serializePersonaCard,
@@ -298,6 +299,60 @@ describe("room", () => {
     rooms.import(room);
     assert.equal(rooms.get(room.roomId)!.artifacts![0]!.author, "s1");
     assert.equal(rooms.get(room.roomId)!.events![0]!.author, "s1");
+  });
+
+  it("displayNameFor 输出 成员名·agentType·origin，通道缺失段省略", () => {
+    const m = { sessionId: "s1", name: "alice" };
+    assert.equal(displayNameFor(m, { agent: "devin", origin: "local" }), "alice·devin·local");
+    assert.equal(displayNameFor(m, { agent: "claude", origin: "remote" }), "alice·claude·remote");
+    assert.equal(displayNameFor(m, { origin: "remote" }), "alice·remote");
+    assert.equal(displayNameFor(m), "alice");
+    // 新格式不含 " ("，与客户端 startsWith("name (") 容差互不误判
+    assert.ok(!displayNameFor(m, { agent: "devin", origin: "local" }).includes(" ("));
+  });
+
+  it("rooms.displayNameFor 经 resolver 判定 local/remote；displayNameForId 查不到成员兜底 sessionId", () => {
+    const rooms = new RoomManager();
+    rooms.setMemberChannelResolver((sid) =>
+      sid === "s1"
+        ? { agent: "devin", origin: "local" }
+        : sid === "s2"
+          ? { agent: "claude", origin: "remote" }
+          : undefined,
+    );
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "alice" },
+      { sessionId: "s2", name: "bob" },
+    ]);
+    assert.equal(rooms.displayNameFor(room.members[0]!), "alice·devin·local");
+    assert.equal(rooms.displayNameFor(room.members[1]!), "bob·claude·remote");
+    assert.equal(rooms.displayNameForId(room.roomId, "s1"), "alice·devin·local");
+    assert.equal(rooms.displayNameForId(room.roomId, "ghost"), "ghost");
+    // memberName 同一展示口径：sessionId/name/displayName 入参均产出新格式或原样透传
+    assert.equal(rooms.memberName(room.roomId, "s2"), "bob·claude·remote");
+    assert.equal(rooms.memberName(room.roomId, "bob·claude·remote"), "bob·claude·remote");
+  });
+
+  it("displayName 格式的 artifact author 仍参与自身产物排除与成员 cwd 解析", () => {
+    const rooms = new RoomManager();
+    rooms.setMemberChannelResolver(() => ({ agent: "devin", origin: "local" }));
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+    ]);
+    const artifact = rooms.addFile(room.roomId, {
+      author: "a1·devin·local",
+      summary: "我写的",
+      path: "src/own.ts",
+    })!;
+    // 新格式 author 原样入库（不再回写 sessionId）
+    assert.equal(artifact.author, "a1·devin·local");
+    const prompt = rooms.buildPrompt(room.roomId, "继续", "s1");
+    assert.ok(!prompt.includes("我写的"));
+    const prompt2 = rooms.buildPrompt(room.roomId, "继续", "s2");
+    assert.ok(prompt2.includes("我写的"));
+    // 产物展示走 memberName → 统一展示名
+    assert.ok(prompt2.includes("@a1·devin·local"));
   });
 
   it("sendFile 复制文件到缓存并生成 file artifact", () => {

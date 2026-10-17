@@ -454,10 +454,11 @@ export class RoomModeManager {
       return;
     }
     const result = extractTaskResult(output);
+    const author = this.rooms.displayNameForId(roomId, sessionId);
     for (const a of result.artifacts) {
       if (a.type === "file") {
         this.rooms.addFile(roomId, {
-          author: sessionId,
+          author,
           summary: a.summary,
           path: a.path,
           taskId,
@@ -465,7 +466,7 @@ export class RoomModeManager {
         });
       } else if (a.type === "event" && isEventAction(a.action)) {
         this.rooms.addEvent(roomId, {
-          author: sessionId,
+          author,
           action: a.action,
           summary: a.summary,
           path: a.path,
@@ -519,13 +520,12 @@ export class RoomModeManager {
   private parallelFlowView(roomId: string): Record<string, unknown> | undefined {
     const flow = this.parallelFlows.get(roomId);
     if (!flow) return undefined;
-    const room = this.rooms.get(roomId);
     // 任务视图枚举全部已派发成员（pending ∪ results ∪ failed），不随完成缩水
     const all = flow.members ?? [...flow.results.keys(), ...flow.pending, ...(flow.failed ?? [])];
     const tasks = all.map((sid) => ({
       id: sid,
       sessionId: sid,
-      name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
+      name: this.rooms.displayNameForId(roomId, sid),
       status: flow.failed?.has(sid)
         ? "failed"
         : flow.results.has(sid)
@@ -559,14 +559,13 @@ export class RoomModeManager {
   private pipelineFlowView(roomId: string): Record<string, unknown> | undefined {
     const flow = this.pipelineFlows.get(roomId);
     if (!flow) return undefined;
-    const room = this.rooms.get(roomId);
     const tasks = flow.order.map((sid, i) => {
       const isDone = i < flow.stage;
       const isCurrent = i === flow.stage;
       return {
         id: `p${i + 1}`,
         sessionId: sid,
-        name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
+        name: this.rooms.displayNameForId(roomId, sid),
         status: isDone
           ? "done"
           : isCurrent
@@ -599,7 +598,6 @@ export class RoomModeManager {
   private debateFlowView(roomId: string): Record<string, unknown> | undefined {
     const flow = this.debateFlows.get(roomId);
     if (!flow) return undefined;
-    const room = this.rooms.get(roomId);
     const total = flow.rounds * flow.sides.length;
     const completed = flow.outputs.length;
     const tasks: Record<string, unknown>[] = [];
@@ -613,7 +611,7 @@ export class RoomModeManager {
       tasks.push({
         id: `r${round}s${side + 1}`,
         sessionId: sid,
-        name: room?.members.find((m) => m.sessionId === sid)?.name ?? sid,
+        name: this.rooms.displayNameForId(roomId, sid),
         status: output
           ? "done"
           : isCurrent
@@ -631,7 +629,7 @@ export class RoomModeManager {
     tasks.push({
       id: "judge",
       sessionId: flow.judge,
-      name: room?.members.find((m) => m.sessionId === flow.judge)?.name ?? flow.judge,
+      name: this.rooms.displayNameForId(roomId, flow.judge),
       status: completed >= total
         ? flow.failed
           ? "failed"
@@ -1519,7 +1517,7 @@ export class RoomModeManager {
         if (f.pending.size === 0) this.summarizeParallel(room.roomId, f);
       });
     }
-    const names = members.map((m) => `@${m.name}`).join("、");
+    const names = members.map((m) => `@${this.rooms.displayNameFor(m)}`).join("、");
     const sName = summarizer ? this.nameFor(room.roomId, summarizer) : "无";
     this.notice({ roomId: room.roomId, message: `⚡ 并行模式：已询问 ${names}，汇总者 @${sName}` });
     return { sent, mentioned: [], skipped };
@@ -2154,6 +2152,7 @@ export class RoomModeManager {
   private nameFor(roomId: string, sessionId?: string): string {
     if (!sessionId) return "未知";
     const room = this.rooms.get(roomId);
-    return room?.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId.slice(-4);
+    const member = room?.members.find((m) => m.sessionId === sessionId);
+    return member ? this.rooms.displayNameFor(member) : sessionId.slice(-4);
   }
 }

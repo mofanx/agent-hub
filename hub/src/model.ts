@@ -166,6 +166,26 @@ export class ModelManager {
     this.writeSessionConfigPreferences(prefs);
   }
 
+  /** 后端级默认 config（__backend__ 扁平键 backend.configId），低于会话偏好、高于内建默认 */
+  backendConfig(backend: ModelBackend): Record<string, string> {
+    const flat = this.loadSessionConfigPreferences()["__backend__"] ?? {};
+    const prefix = `${backend}.`;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(flat)) {
+      if (k.startsWith(prefix)) out[k.slice(prefix.length)] = v;
+    }
+    return out;
+  }
+
+  setBackendConfig(backend: ModelBackend, configId: string, value: string): void {
+    const prefs = this.loadSessionConfigPreferences();
+    prefs["__backend__"] = {
+      ...(prefs["__backend__"] ?? {}),
+      [`${backend}.${configId}`]: value,
+    };
+    this.writeSessionConfigPreferences(prefs);
+  }
+
   /** 克隆/重建会话时复制模型偏好，使新 session 恢复时继承选择 */
   copySessionPreference(sourceId: string, targetId: string): void {
     const source = this.loadSessionPreferences()[sourceId];

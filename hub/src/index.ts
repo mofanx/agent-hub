@@ -51,9 +51,13 @@ function setSessionModel(
   return agent.setConfigOption(sessionId, "model", model);
 }
 
-/** resume/clone 后重新应用保存的非模型 config 偏好（thought_level/mode 等） */
-async function syncSessionConfigPrefs(agent: AcpAgent, sessionId: string): Promise<void> {
-  const prefs = modelManager.sessionConfig(sessionId);
+const DEVIN_DEFAULT_CONFIG: Record<string, string> = { mode: "bypass" };
+
+/** resume/clone 后重新应用保存的非模型 config 偏好（thought_level/mode 等）；devin 缺省 mode=bypass，会话级偏好优先 */
+async function syncSessionConfigPrefs(agent: AcpAgent, sessionId: string, backend?: ModelBackend): Promise<void> {
+  const defaults = backend === "devin" ? DEVIN_DEFAULT_CONFIG : {};
+  const backendPrefs = backend ? modelManager.backendConfig(backend) : {};
+  const prefs = { ...defaults, ...backendPrefs, ...modelManager.sessionConfig(sessionId) };
   for (const [configId, value] of Object.entries(prefs)) {
     await agent
       .setConfigOption(sessionId, configId, value)
@@ -88,6 +92,21 @@ const sessionMetas = new Map<string, SessionMeta>(
 const sessionLedger = new SessionLedger();
 sessionLedger.importFromMeta(savedState.sessions);
 rooms.setCwdResolver((sessionId) => sessionMetas.get(sessionId)?.cwd);
+// 成员通道判定：connection.local → local；非本地 connection / 带 address 的远端会话 → remote；其余默认 local
+rooms.setMemberChannelResolver((sessionId) => {
+  const meta = sessionMetas.get(sessionId);
+  const connection = getConnectionById(meta?.connectionId ?? undefined);
+  return {
+    agent: meta?.agent ?? connection?.agent,
+    origin: connection
+      ? connection.local
+        ? "local"
+        : "remote"
+      : meta?.address
+        ? "remote"
+        : "local",
+  };
+});
 for (const room of savedState.rooms) rooms.import(room);
 
 const LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]";
@@ -337,7 +356,7 @@ async function cloneSessionWithName(
     await setSessionModel(agent, backend, s.sessionId, current.uid).catch((err) =>
       logWarn("room.clone", `sync model failed: ${String(err)}`),
     );
-    await syncSessionConfigPrefs(agent, s.sessionId);
+    await syncSessionConfigPrefs(agent, s.sessionId, backend);
   }
 
   if (source.roleId) {
@@ -891,10 +910,12 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
   sessionLedger.addFileEvent(sessionId, { author, action: existed ? "modify" : "add", summary, path: relPath });
 
   // 只有群聊回合才同步产物/事件到 room，单聊操作不泄漏到群聊
+  // 房间侧 author 统一为成员展示名（成员名·agentType·origin），查不到成员回退 meta.name
   const roomId = roomModeManager.roomIdForTurn(sessionId);
   if (roomId) {
-    rooms.addFile?.(roomId, { author, summary, path: relPath, content });
-    rooms.addFileEvent?.(roomId, { author, action: existed ? "modify" : "add", summary, path: relPath });
+    const roomAuthor = rooms.displayNameForId(roomId, sessionId, author);
+    rooms.addFile?.(roomId, { author: roomAuthor, summary, path: relPath, content });
+    rooms.addFileEvent?.(roomId, { author: roomAuthor, action: existed ? "modify" : "add", summary, path: relPath });
   }
 
   persistState();
@@ -928,7 +949,7 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
     // 只有群聊回合才同步事件到 room，单聊操作不泄漏到群聊
     const roomId = roomModeManager.roomIdForTurn(sessionId);
     if (roomId) {
-      rooms.addEvent?.(roomId, { author: meta.name, action, summary, path: relPath });
+      rooms.addEvent?.(roomId, { author: rooms.displayNameForId(roomId, sessionId, meta.name), action, summary, path: relPath });
     }
   }
 
@@ -1135,7 +1156,7 @@ function send(ws: WebSocket, msg: unknown): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
-type SlashCmd = { command: string; mentions: string[] };
+type SlashCmd = { command: string; mentions: string[]; args: string[] };
 
 function parseSlash(text: string): SlashCmd | null {
   const t = text.trim();
@@ -1145,7 +1166,22 @@ function parseSlash(text: string): SlashCmd | null {
   const mentions = rest
     .filter((p) => p.startsWith("@"))
     .map((p) => p.slice(1));
-  return { command: head.toLowerCase(), mentions };
+  const args = rest.filter((p) => !p.startsWith("@"));
+  return { command: head.toLowerCase(), mentions, args };
+}
+
+const SESSION_MODES = new Set(["accept-edits", "ask", "plan", "bypass", "smart", "autonomous"]);
+
+function sessionBackend(sessionId: string): ModelBackend | undefined {
+  return (sessionMetas.get(sessionId)?.agent ?? undefined) as ModelBackend | undefined;
+}
+
+async function applySessionMode(sessionId: string, mode: string): Promise<void> {
+  if (!SESSION_MODES.has(mode)) throw new Error(`unknown mode: ${mode}`);
+  const agent = agentForSession(sessionId);
+  if (!agent) throw new Error("agent 未连接");
+  await agent.setConfigOption(sessionId, "mode", mode);
+  modelManager.setSessionConfigForSession(sessionId, "mode", mode);
 }
 
 function parseRetryCommand(text: string): { taskIds?: string[] } | null {
@@ -1163,6 +1199,24 @@ function agentForSession(sessionId: string): AcpAgent | undefined {
 }
 
 async function handleSessionSlash(sessionId: string, slash: SlashCmd): Promise<unknown> {
+  if (slash.command === "bypass" || slash.command === "mode") {
+    const mode =
+      slash.command === "mode"
+        ? slash.args[0] ?? ""
+        : slash.args[0] === "off"
+          ? "accept-edits"
+          : "bypass";
+    if (!mode) throw new Error(`usage: /mode <${[...SESSION_MODES].join("|")}>`);
+    await applySessionMode(sessionId, mode);
+    let backendDefault = false;
+    const namedBackend = slash.args.find((a) => a !== mode && modelManager.findByBackend(a as ModelBackend).length > 0) as ModelBackend | undefined;
+    const backend = namedBackend ?? ((slash.args.includes("--global") || slash.args.includes("-g")) ? sessionBackend(sessionId) : undefined);
+    if (backend) {
+      modelManager.setBackendConfig(backend, "mode", mode);
+      backendDefault = true;
+    }
+    return { sessionId, mode, backendDefault };
+  }
   if (slash.command !== "stop") {
     throw new Error(`unknown command: /${slash.command}`);
   }
@@ -1181,6 +1235,32 @@ async function handleRoomSlash(
   rawText: string,
   quote?: { author: string; text: string },
 ): Promise<unknown> {
+  if (slash.command === "bypass" || slash.command === "mode") {
+    const mode =
+      slash.command === "mode"
+        ? slash.args[0] ?? ""
+        : slash.args[0] === "off"
+          ? "accept-edits"
+          : "bypass";
+    if (!mode) throw new Error(`usage: /mode <${[...SESSION_MODES].join("|")}>`);
+    const targetIds =
+      slash.mentions.length > 0
+        ? room.members
+            .filter((m) => slash.mentions.includes(m.name))
+            .map((m) => m.sessionId)
+        : room.members.map((m) => m.sessionId);
+    const applied: string[] = [];
+    const failed: string[] = [];
+    for (const sid of targetIds) {
+      try {
+        await applySessionMode(sid, mode);
+        applied.push(sid);
+      } catch {
+        failed.push(sid);
+      }
+    }
+    return { mode, applied, failed };
+  }
   if (slash.command !== "stop") {
     throw new Error(`unknown command: /${slash.command}`);
   }
@@ -1303,6 +1383,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         const current = modelManager.current(backend, s.sessionId);
         await setSessionModel(agent, backend, s.sessionId, current.uid)
           .catch((err) => logWarn("session.create", `sync model failed: ${String(err)}`));
+        await syncSessionConfigPrefs(agent, s.sessionId, backend);
       }
 
       if (role) {
@@ -1369,7 +1450,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           const current = modelManager.current(backend, sourceSessionId);
           await setSessionModel(agent, backend, s.sessionId, current.uid)
             .catch((err) => logWarn("session.clone", `sync model failed: ${String(err)}`));
-          await syncSessionConfigPrefs(agent, s.sessionId);
+          await syncSessionConfigPrefs(agent, s.sessionId, backend);
         }
         if (source.roleId) {
           const role = store.listRoles().find((r) => r.id === source.roleId);
@@ -1489,7 +1570,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           const current = modelManager.current(backend, s.sessionId);
           await setSessionModel(agent, backend, s.sessionId, current.uid)
             .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
-          await syncSessionConfigPrefs(agent, s.sessionId);
+          await syncSessionConfigPrefs(agent, s.sessionId, backend);
         }
 
         if (hasHistory) {
@@ -1519,7 +1600,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         const current = modelManager.current(backend, sessionId);
         setSessionModel(agent, backend, sessionId, current.uid)
           .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
-        syncSessionConfigPrefs(agent, sessionId)
+        syncSessionConfigPrefs(agent, sessionId, backend)
           .catch((err) => logWarn("session.resume", `sync config failed: ${String(err)}`));
       }
 

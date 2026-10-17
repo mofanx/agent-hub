@@ -94,6 +94,81 @@ describe("room-modes", () => {
     assert.equal(event?.summary, "npx tsc --noEmit");
   });
 
+  it("成员展示名统一：事件 author 与 notice 均产出 name·type·origin", async () => {
+    const rooms = new RoomManager();
+    rooms.setMemberChannelResolver((sid) =>
+      sid === "s1" ? { agent: "devin", origin: "local" } : { agent: "claude", origin: "remote" },
+    );
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ]);
+    const agent: AgentOps = { prompt: async () => {}, isBusy: () => false, cancel: async () => {} };
+    const broadcasted: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) =>
+      broadcasted.push({ method, params }),
+    );
+    await manager.handle(room, "@coder 跑一下测试", {});
+    await manager.onPromptDone("s1", "完成\n```bash\nnpm test\n```");
+    // captureArtifacts 路径：事件 author 不再是裸 sessionId/name
+    const event = rooms.getEvents(room.roomId, 10).find((e) => e.action === "command");
+    assert.equal(event?.author, "coder·devin·local");
+    // mention 命中成员场景：直接断言展示名格式（name·agentType·local|remote）
+    assert.match(event!.author, /^coder·devin·local$/);
+  });
+
+  it("nameFor 通知路径产出展示名；查不到成员回退短 id", async () => {
+    const rooms = new RoomManager();
+    rooms.setMemberChannelResolver((sid) =>
+      sid === "s1" ? { agent: "devin", origin: "local" } : { agent: "claude", origin: "remote" },
+    );
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ], "roundrobin");
+    const agent: AgentOps = { prompt: async () => {}, isBusy: () => false, cancel: async () => {} };
+    const broadcasted: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) =>
+      broadcasted.push({ method, params }),
+    );
+    await manager.handle(room, "介绍下这个项目", {});
+    const notice = broadcasted.find((b) => b.method === "room.notice");
+    assert.equal(
+      (notice?.params as { message?: string })?.message,
+      "🔄 轮询模式：由 @coder·devin·local 作答",
+    );
+    // 非成员 sessionId（如已离房成员）回退为短 id，而不是整条展示名
+    const rm = manager as unknown as { nameFor(roomId: string, sid?: string): string };
+    assert.equal(rm.nameFor(room.roomId, "ghost9zzz"), "9zzz");
+    assert.equal(rm.nameFor(room.roomId, "s2"), "tester·claude·remote");
+  });
+
+  it("并行 flow 视图的成员名与汇总者通知使用统一展示名", async () => {
+    const rooms = new RoomManager();
+    rooms.setMemberChannelResolver((sid) =>
+      sid === "s1" ? { agent: "devin", origin: "local" } : { agent: "claude", origin: "remote" },
+    );
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "coder" },
+      { sessionId: "s2", name: "tester" },
+    ], "parallel", { parallelSummarizerId: "s2" });
+    const agent: AgentOps = { prompt: async () => {}, isBusy: () => false, cancel: async () => {} };
+    const broadcasted: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) =>
+      broadcasted.push({ method, params }),
+    );
+    await manager.handle(room, "你怎么看？", {});
+    const notice = broadcasted.find(
+      (b) => b.method === "room.notice" && String((b.params as { message?: string }).message ?? "").includes("并行模式"),
+    );
+    assert.ok(String((notice?.params as { message?: string }).message).includes("@coder·devin·local"));
+    assert.ok(String((notice?.params as { message?: string }).message).includes("@tester·claude·remote"));
+    const flow = broadcasted
+      .filter((b) => b.method === "room.flowUpdate")
+      .at(-1)?.params.flow as { tasks?: { name: string }[] } | undefined;
+    assert.deepEqual(flow?.tasks?.map((t) => t.name), ["coder·devin·local", "tester·claude·remote"]);
+  });
+
   it("mention 模式自动识别 alias 引用并注入上下文", async () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [

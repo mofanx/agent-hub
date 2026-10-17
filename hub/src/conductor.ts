@@ -654,7 +654,7 @@ export class ConductorOrchestrator {
     const snapshot = "snapshotHash" in check ? check.snapshotHash : undefined;
     const detail = "detail" in check && check.detail ? `, detail=${check.detail.slice(0, 200)}` : "";
     this.rooms.addEvent(flow.roomId, {
-      author: sessionId,
+      author: this.rooms.displayNameForId(flow.roomId, sessionId),
       action: "test",
       summary: `隔离检查 [${task.id}]：${check.status}（exit=${exitCode ?? "unknown"}, snapshot=${snapshot?.slice(0, 12) ?? "none"}${detail}）`,
       taskId: task.id,
@@ -694,7 +694,6 @@ export class ConductorOrchestrator {
   getFlow(roomId: string): Record<string, unknown> | undefined {
     const flow = this.flows.get(roomId);
     if (!flow) return undefined;
-    const room = this.rooms.get(roomId);
     const hashCache = new Map<string, string | undefined>();
     const tasks = [...flow.tasks.values()].map((t) => {
       const result = flow.results.get(t.id);
@@ -710,7 +709,7 @@ export class ConductorOrchestrator {
       return {
         id: t.id,
         sessionId: t.sessionId,
-        name: room?.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId,
+        name: this.rooms.displayNameForId(flow.roomId, t.sessionId),
         status: t.status,
         task: t.task,
         dependsOn: t.dependsOn,
@@ -729,7 +728,7 @@ export class ConductorOrchestrator {
               waitingFor:
                 waiting.to === "user"
                   ? "user"
-                  : room?.members.find((m) => m.sessionId === waiting.to)?.name ?? waiting.to,
+                  : this.rooms.displayNameForId(flow.roomId, waiting.to),
               waitingQuestion: waiting.question.slice(0, 200),
               waitingHelpId: waiting.id,
             }
@@ -737,7 +736,7 @@ export class ConductorOrchestrator {
         ...(t.verifications?.length
           ? {
               verifications: t.verifications.map((v) => ({
-                by: room?.members.find((m) => m.sessionId === v.by)?.name ?? v.by,
+                by: this.rooms.displayNameForId(flow.roomId, v.by),
                 verdict: v.verdict,
                 evidence: summarizeEvidence(v.evidence).slice(0, 500),
                 evidenceDetail: v.evidence,
@@ -887,8 +886,7 @@ export class ConductorOrchestrator {
         (t) => t.sessionId === sessionId && t.status === "running",
       );
       if (hits.length === 0) continue;
-      const name =
-        room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+      const name = this.rooms.displayNameForId(room.roomId, sessionId);
       for (const t of hits) {
         t.status = "failed";
         t.failureMessage = "成员被停止/中断";
@@ -946,7 +944,7 @@ export class ConductorOrchestrator {
           this.notice({
             roomId,
             message: `@${
-              room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId
+              this.rooms.displayNameForId(room.roomId, sessionId)
             } 子任务中断（剩 ${pendingCount} 项待派发）`,
           });
           void this.scheduleTasks(flow, room).catch((err) => {
@@ -1140,8 +1138,8 @@ export class ConductorOrchestrator {
         if (reply) {
           reply.status = "answered";
           reply.answer = output;
-          const toName = room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
-          const fromName = room.members.find((m) => m.sessionId === reply.from)?.name ?? reply.from;
+          const toName = this.rooms.displayNameForId(room.roomId, sessionId);
+          const fromName = this.rooms.displayNameForId(room.roomId, reply.from);
           this.notice({
             roomId: flow.roomId,
             message: `@${toName} 已回复 @${fromName} 的求助（任务 ${reply.taskId}），任务继续`,
@@ -1154,8 +1152,7 @@ export class ConductorOrchestrator {
           (t) => t.sessionId === sessionId && t.status === "running",
         );
         if (running) {
-          const name =
-            room.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+          const name = this.rooms.displayNameForId(room.roomId, sessionId);
           // 定向求助：命中则挂起任务等待回复，而不是按结果收尾
           const helpReq = extractHelpRequest(output);
           if (helpReq && this.handleHelpRequest(flow, room, running, helpReq, output)) {
@@ -1199,9 +1196,11 @@ export class ConductorOrchestrator {
     author: string,
     taskId?: string,
   ): void {
+    // author 入参为 sessionId：产物/事件 author 统一存成员展示名，查不到成员时保留 sessionId 兜底
+    const displayAuthor = this.rooms.displayNameForId(roomId, author);
     if (a.type === "file") {
       this.rooms.addFile(roomId, {
-        author,
+        author: displayAuthor,
         summary: a.summary,
         path: a.path,
         taskId,
@@ -1212,7 +1211,7 @@ export class ConductorOrchestrator {
     const action = isEventAction(a.action) ? a.action : undefined;
     if (!action) return;
     this.rooms.addEvent(roomId, {
-      author,
+      author: displayAuthor,
       action,
       summary: a.summary,
       path: a.path,
@@ -1304,7 +1303,7 @@ export class ConductorOrchestrator {
     if (rounds >= MAX_HELP_ROUNDS) {
       this.notice({
         roomId: flow.roomId,
-        message: `@${room.members.find((m) => m.sessionId === task.sessionId)?.name ?? task.sessionId} 求助次数已达上限（${MAX_HELP_ROUNDS}），按当前输出收尾`,
+        message: `@${this.rooms.displayNameForId(flow.roomId, task.sessionId)} 求助次数已达上限（${MAX_HELP_ROUNDS}），按当前输出收尾`,
       });
       return false;
     }
@@ -1332,7 +1331,7 @@ export class ConductorOrchestrator {
     flow.help.set(exchange.id, exchange);
     task.waitingForHelp = exchange.id;
     this.pendingToolCalls.delete(task.sessionId);
-    const fromName = room.members.find((m) => m.sessionId === task.sessionId)?.name ?? task.sessionId;
+    const fromName = this.rooms.displayNameForId(flow.roomId, task.sessionId);
     if (toUser) {
       this.notice({
         roomId: flow.roomId,
@@ -1343,7 +1342,7 @@ export class ConductorOrchestrator {
     }
     this.notice({
       roomId: flow.roomId,
-      message: `🆘 @${fromName} 在任务 ${task.id} 向 @${target!.name} 求助：${req.question.slice(0, 160)}`,
+      message: `🆘 @${fromName} 在任务 ${task.id} 向 @${this.rooms.displayNameFor(target!)} 求助：${req.question.slice(0, 160)}`,
     });
     this.dispatchPendingHelp(flow, room);
     this.ensureHelpDispatch(flow, room);
@@ -1371,8 +1370,8 @@ export class ConductorOrchestrator {
       );
       if (ownActive || this.agent.isBusy(e.to)) continue;
       e.dispatched = true;
-      const fromName = room.members.find((m) => m.sessionId === e.from)?.name ?? e.from;
-      const toName = room.members.find((m) => m.sessionId === e.to)?.name ?? e.to;
+      const fromName = this.rooms.displayNameForId(room.roomId, e.from);
+      const toName = this.rooms.displayNameForId(room.roomId, e.to);
       const body = helpRequestPrompt({
         roomName: room.name,
         fromName,
@@ -1421,7 +1420,7 @@ export class ConductorOrchestrator {
     const fromLabel =
       e.to === "user"
         ? "用户"
-        : `@${room.members.find((m) => m.sessionId === e.to)?.name ?? e.to}`;
+        : `@${this.rooms.displayNameForId(room.roomId, e.to)}`;
     const remaining = MAX_HELP_ROUNDS - (task.helpRounds ?? 0);
     const taskBody = helpResumePrompt({
       taskId: task.id,
@@ -1466,8 +1465,7 @@ export class ConductorOrchestrator {
     verifierTask: FlowTask,
     verifs: { taskId: string; verdict: string; evidence: VerificationEvidence }[],
   ): void {
-    const verifierName =
-      room.members.find((m) => m.sessionId === verifierId)?.name ?? verifierId;
+    const verifierName = this.rooms.displayNameForId(room.roomId, verifierId);
     const verifierRuns = verifierTask.backendRuns ?? [];
     for (const v of verifs) {
       const target = flow.tasks.get(v.taskId);
@@ -1496,7 +1494,7 @@ export class ConductorOrchestrator {
       });
       const summary = summarizeEvidence(v.evidence).slice(0, 160);
       this.rooms.addEvent(flow.roomId, {
-        author: verifierId,
+        author: this.rooms.displayNameForId(flow.roomId, verifierId),
         action: "test",
         summary: `验证任务 ${v.taskId}：${v.verdict}${summary ? ` — ${summary}` : ""}`,
         taskId: v.taskId,
@@ -1755,7 +1753,7 @@ export class ConductorOrchestrator {
         }
       } else {
         const failedTasks = values.filter((t) => t.status === "failed");
-        const names = failedTasks.map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId);
+        const names = failedTasks.map((t) => this.rooms.displayNameForId(room.roomId, t.sessionId));
         this.notice({
           roomId: flow.roomId,
           message: `所有子任务均失败（${names.join("、")}），无法汇总`,
@@ -1781,7 +1779,7 @@ export class ConductorOrchestrator {
       delete t.backendRuns;
       delete t.automaticCheck;
       this.pendingToolCalls.delete(t.sessionId);
-      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      const name = this.rooms.displayNameForId(room.roomId, t.sessionId);
       assignments.push(`@${name}：${t.task}`);
       dispatchedTasks.push({ id: t.id, to: name, task: t.task });
       const taskRefs = this.rooms.parseArtifactRefs(room.roomId, t.task);
@@ -1798,7 +1796,7 @@ export class ConductorOrchestrator {
         if (!depResult) continue;
         const depTask = flow.tasks.get(depId);
         const depName = depTask
-          ? room.members.find((m) => m.sessionId === depTask.sessionId)?.name ?? depTask.sessionId
+          ? this.rooms.displayNameForId(room.roomId, depTask.sessionId)
           : depId;
         upstreamLines.push(`- [${depId}] @${depName}：${depResult.text.slice(0, PLAN_RESULT_LEN)}`);
         for (const a of depResult.artifacts) {
@@ -1948,7 +1946,7 @@ export class ConductorOrchestrator {
     this.emitFlow?.(flow.roomId);
     this.notice({
       roomId: flow.roomId,
-      message: `新增独立复核任务 ${taskId}：@${reviewer.name} 对已完成交付做质疑性验证`,
+      message: `新增独立复核任务 ${taskId}：@${this.rooms.displayNameFor(reviewer)} 对已完成交付做质疑性验证`,
     });
     return true;
   }
@@ -1987,7 +1985,7 @@ export class ConductorOrchestrator {
     const lines: string[] = [];
     const hashCache = new Map<string, string | undefined>();
     for (const t of flow.tasks.values()) {
-      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      const name = this.rooms.displayNameForId(room.roomId, t.sessionId);
       const result = flow.results.get(t.id);
       if (!result) continue;
       const artifacts = result.artifacts
@@ -2001,7 +1999,7 @@ export class ConductorOrchestrator {
       const verifs = (t.verifications ?? [])
         .map(
           (v) =>
-            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${summarizeEvidence(v.evidence).slice(0, 300)}）` : ""}`,
+            `    - @${this.rooms.displayNameForId(room.roomId, v.by)}：${v.verdict}${v.evidence ? `（${summarizeEvidence(v.evidence).slice(0, 300)}）` : ""}`,
         )
         .join("\n");
       lines.push([
@@ -2104,7 +2102,7 @@ export class ConductorOrchestrator {
     const lines: string[] = [];
     const hashCache = new Map<string, string | undefined>();
     for (const t of flow.tasks.values()) {
-      const name = room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId;
+      const name = this.rooms.displayNameForId(room.roomId, t.sessionId);
       if (t.status === "failed") {
         lines.push(`- [${t.id}] @${name}: 失败（${t.failureMessage ?? "未知原因"}）`);
         continue;
@@ -2122,7 +2120,7 @@ export class ConductorOrchestrator {
       const verifs = (t.verifications ?? [])
         .map(
           (v) =>
-            `    - @${room.members.find((m) => m.sessionId === v.by)?.name ?? v.by}：${v.verdict}${v.evidence ? `（${summarizeEvidence(v.evidence).slice(0, 300)}）` : ""}`,
+            `    - @${this.rooms.displayNameForId(room.roomId, v.by)}：${v.verdict}${v.evidence ? `（${summarizeEvidence(v.evidence).slice(0, 300)}）` : ""}`,
         )
         .join("\n");
       lines.push([
@@ -2148,7 +2146,7 @@ export class ConductorOrchestrator {
       hasChecks,
       unverifiedDone,
       failedNames: failedTasks
-        .map((t) => room.members.find((m) => m.sessionId === t.sessionId)?.name ?? t.sessionId)
+        .map((t) => this.rooms.displayNameForId(room.roomId, t.sessionId))
         .join("、"),
       openTopics: this.openTopicsFor(room),
     });
@@ -2860,7 +2858,11 @@ export function resolveMemberByString(
     (m) => m.name.toLowerCase().startsWith(to.toLowerCase()),
   );
   if (byPrefix) return byPrefix;
-  return room.members.find((m) => m.name.toLowerCase().includes(to.toLowerCase()));
+  const byIncludes = room.members.find((m) => m.name.toLowerCase().includes(to.toLowerCase()));
+  if (byIncludes) return byIncludes;
+  // agent 回显统一展示名（成员名·agentType·origin）时按首段成员名兜底
+  const base = to.split("·")[0]!;
+  return base !== to ? room.members.find((m) => m.name === base) : undefined;
 }
 
 /** 从 worker 输出中提取定向求助块：{"help":{"to":"成员|user","question":"..."}} */

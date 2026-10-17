@@ -150,6 +150,20 @@ export type BlackboardEntry = {
   status?: "open" | "resolved" | undefined;
 };
 
+/** 成员连接通道语义：local=Hub 本地/直连 agent；remote=远端 worker（含 gateway 中继接入） */
+export type MemberOrigin = "local" | "remote";
+
+/** displayNameFor 所需的成员通道信息（agentType / local|remote），由外层按 connection 判定注入 */
+export type MemberChannel = { agent?: string | undefined; origin?: MemberOrigin | undefined };
+
+/** 成员统一展示名：成员名·agentType·origin。成员名不含群聊前缀；通道信息缺失的段自动省略 */
+export function displayNameFor(
+  member: { sessionId: string; name: string },
+  channel?: MemberChannel,
+): string {
+  return [member.name, channel?.agent, channel?.origin].filter(Boolean).join("·");
+}
+
 /** 展示名消歧：重名时自动追加 (2)/(3) 后缀而非拒绝——id 才是唯一键 */
 export function dedupeName(name: string, taken: (n: string) => boolean): string {
   if (!taken(name)) return name;
@@ -342,6 +356,7 @@ export class RoomManager {
   private aliasSeqs = new Map<string, number>();
   private getPersona?: (roleId: string) => string | undefined;
   private getCwd?: (sessionId: string) => string | undefined;
+  private memberChannel?: (sessionId: string) => MemberChannel | undefined;
   private store?: Store;
 
   setRoleResolver(getPersona: (roleId: string) => string | undefined): void {
@@ -350,6 +365,24 @@ export class RoomManager {
 
   setCwdResolver(getCwd: (sessionId: string) => string | undefined): void {
     this.getCwd = getCwd;
+  }
+
+  /** 注入成员通道信息（agentType / local|remote 判定），由外层按 member→connection 解析 */
+  setMemberChannelResolver(
+    fn: (sessionId: string) => MemberChannel | undefined,
+  ): void {
+    this.memberChannel = fn;
+  }
+
+  /** 成员统一展示名：成员名·agentType·origin */
+  displayNameFor(member: { sessionId: string; name: string }): string {
+    return displayNameFor(member, this.memberChannel?.(member.sessionId));
+  }
+
+  /** sessionId → 成员展示名；查不到成员时返回 fallback（默认原 sessionId）兜底 */
+  displayNameForId(roomId: string, sessionId: string, fallback = sessionId): string {
+    const member = this.rooms.get(roomId)?.members.find((m) => m.sessionId === sessionId);
+    return member ? this.displayNameFor(member) : fallback;
   }
 
   setStore(store: Store): void {
@@ -766,14 +799,33 @@ export class RoomManager {
     return `a${seq}`;
   }
 
+  /** 成员展示名（成员名·agentType·origin）；入参可为 sessionId/裸名/displayName，未命中原样返回 */
   memberName(roomId: string, sessionId: string): string {
     const room = this.rooms.get(roomId);
-    return room?.members.find((m) => m.sessionId === sessionId)?.name ?? sessionId;
+    const member = room?.members.find(
+      (m) => m.sessionId === sessionId || m.name === sessionId,
+    );
+    return member ? this.displayNameFor(member) : sessionId;
   }
 
   private resolveMember(room: Room, author?: string): { sessionId: string; name: string } | undefined {
     if (!author) return undefined;
     return room.members.find((m) => m.sessionId === author || m.name === author);
+  }
+
+  /** 读取侧 author → 成员解析：兼容 sessionId、旧裸 name、新 displayName（name·agentType·origin） */
+  private resolveAuthorMember(room: Room, author: string): { sessionId: string; name: string } | undefined {
+    return room.members.find(
+      (m) =>
+        m.sessionId === author ||
+        m.name === author ||
+        author === this.displayNameFor(m) ||
+        author.startsWith(`${m.name}·`),
+    );
+  }
+
+  private authorSessionId(room: Room, author: string): string {
+    return this.resolveAuthorMember(room, author)?.sessionId ?? author;
   }
 
   /** 添加一个文件产物；同房间同 path 时更新已有条目 */
@@ -1011,7 +1063,7 @@ export class RoomManager {
     const roots: { path: string; kind: "project" | "workspace" | "cwd"; sessionId?: string }[] = [];
     if (this.getCwd && room) {
       if (author) {
-        const member = this.resolveMember(room, author);
+        const member = this.resolveAuthorMember(room, author);
         if (member) {
           const cwd = this.getCwd(member.sessionId);
           if (cwd) roots.push({ path: cwd, kind: "cwd", sessionId: member.sessionId });
@@ -1530,12 +1582,12 @@ export class RoomManager {
     if (deps && deps.length > 0) {
       const set = new Set(deps);
       return [...all]
-        .filter((a) => set.has(a.taskId ?? "") && a.author !== excludeSessionId)
+        .filter((a) => set.has(a.taskId ?? "") && this.authorSessionId(room, a.author) !== excludeSessionId)
         .reverse()
         .slice(0, ARTIFACT_PROMPT_LIMIT);
     }
     return this.getArtifacts(roomId)
-      .filter((a) => a.author !== excludeSessionId)
+      .filter((a) => this.authorSessionId(room, a.author) !== excludeSessionId)
       .slice(0, ARTIFACT_PROMPT_LIMIT);
   }
 
