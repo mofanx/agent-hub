@@ -312,7 +312,9 @@ export interface ModelInfo {
   backend: ModelBackend;
 }
 
-export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "custom";
+export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "deepseek" | "custom";
+
+export const KNOWN_AGENT_TYPES = ["devin", "claude", "codex", "opencode", "openclaw", "deepseek"];
 
 export interface QuotaWindow {
   remainingPercent: number;

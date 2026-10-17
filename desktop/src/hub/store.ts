@@ -33,6 +33,7 @@ import type {
   SlashCommand,
   TaskLog,
 } from "./types";
+import { KNOWN_AGENT_TYPES } from "./types";
 import { HubClient } from "./client";
 import {
   loadConfig,
@@ -73,6 +74,7 @@ interface State {
   roles: RoleInfo[];
   skills: SkillInfo[];
   connections: ConnectionInfo[];
+  agentTypes: string[];
   currentSession: SessionInfo | null;
   currentRoom: RoomInfo | null;
   currentArtifacts: ArtifactInfo[] | null;
@@ -1263,6 +1265,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     roles: [],
     skills: [],
     connections: [],
+    agentTypes: KNOWN_AGENT_TYPES,
     currentSession: null,
     currentRoom: null,
     currentArtifacts: null,
@@ -1464,6 +1467,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         roles: [],
         skills: [],
         connections: [],
+        agentTypes: KNOWN_AGENT_TYPES,
         currentSession: null,
         currentRoom: null,
         currentArtifacts: null,
@@ -1551,6 +1555,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
           parseRole(it as Record<string, unknown>),
         );
         set({ roles: list });
+      } catch {}
+
+      try {
+        const info = (await client.call("agent.info")) as Record<string, unknown>;
+        const reported = ((info.agents as unknown[] | undefined) ?? [])
+          .map((a) => String(a))
+          .filter(Boolean);
+        set({ agentTypes: [...new Set([...KNOWN_AGENT_TYPES, ...reported])] });
       } catch {}
 
       try {

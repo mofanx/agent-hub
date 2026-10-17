@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { logError } from "./logger.js";
 
-export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "custom";
+export type ModelBackend = "devin" | "claude" | "codex" | "opencode" | "openclaw" | "deepseek" | "custom";
 
 export type ModelInfo = {
   uid: string;
@@ -385,6 +385,9 @@ export class ModelManager {
         return this.loadOpenCodeModels(backend.config);
       case "openclaw":
         return this.loadOpenClawModels(backend.config);
+      case "deepseek":
+        // dsh-acp 不上报 configOptions，模型由 cordis profile 侧固定
+        return this.injectedModels.get("deepseek") ?? [];
       case "custom":
         return this.loadCustomModels(backend.config);
       default:

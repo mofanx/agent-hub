@@ -152,11 +152,14 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     var tokenAuto by remember { mutableStateOf(true) }
                     var newToken by remember { mutableStateOf("") }
                     var agentMenu by remember { mutableStateOf(false) }
-                    val agentTypes = listOf(
+                    val knownTypes = listOf(
                         "devin" to "Devin", "claude" to "Claude",
                         "codex" to "Codex", "opencode" to "OpenCode",
-                        "openclaw" to "OpenClaw",
+                        "openclaw" to "OpenClaw", "deepseek" to "DeepSeek",
                     )
+                    val agentTypes = knownTypes + vm.hubAgentTypes
+                        .filter { h -> knownTypes.none { it.first == h } }
+                        .map { it to it }
                     OutlinedButton(
                         onClick = { showAdd = true },
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),

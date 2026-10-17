@@ -28,11 +28,15 @@ Hub 内置多 agent 注册表，群聊可混编不同类型的 agent 会话。
 | 类型 | 命令 | 前提 |
 |------|------|------|
 | `devin` | `devin acp` | `devin auth login` |
-| `claude` | `npx -y @zed-industries/claude-code-acp` | `npm i -g @anthropic-ai/claude-code` 且 `claude auth login` |
-| `codex` | `npx -y @zed-industries/codex-acp` | `npm i -g @openai/codex` 且 `codex login` |
+| `claude` | `npx -y @agentclientprotocol/claude-agent-acp` | `claude auth login` |
+| `codex` | `npx -y @agentclientprotocol/codex-acp` | `codex login` |
 | `opencode` | `opencode acp` | `npm i -g opencode-ai`（如已有模型配置可直接用） |
+| `openclaw` | `openclaw acp` | `npm i -g openclaw` |
+| `deepseek` | `npx -y @deepseek-ai/dsh --profile acp` | `DEEPSEEK_API_KEY`；`DSH_ROOT` 可切源码模式 |
 
-四种 agent 的会话可混编进同一个群。新增类型只需在 `AGENT_DEFS` 加一行。
+六种 agent 的会话可混编进同一个群。新增类型只需在 `AGENT_DEFS` 加一行。
+
+> deepseek-harness 的 ACP 面是自动化契约：只回传最终文本（`agent_message_chunk`），不上报 configOptions（模型/模式选择）、tool_call、fs 事件，session 不可 resume/fork。因此 deepseek 会话在 App 中无工具过程与产物面板，模型需在 harness 侧（cordis profile / `DSH_ACP_ARGS`）固定。
 
 ## 快速开始
 
@@ -134,11 +138,11 @@ HUB_URL=ws://<hub-ip>:8787/worker \
 
 - `HUB_URL`：填 Hub 的 IP 和端口（局域网 IP 或远程地址），路径必须是 `/worker`。
 - `CONNECTION_TOKEN`：App 中为该来源生成的 token（**不是** App 连接 Hub 用的 `dev-token`）。
-- `AGENT`：支持 `devin`（默认）、`claude`、`codex`、`opencode`，对应的 agent 需要在该机器上安装并登录。
+- `AGENT`：支持 `devin`（默认）、`claude`、`codex`、`opencode`、`openclaw`、`deepseek`，对应的 agent 需要在该机器上安装并登录；`deepseek` 默认走 `npx @deepseek-ai/dsh --profile acp`，需要 `DEEPSEEK_API_KEY`。
 - worker 和 agent 运行在同一台机器上；可以在多台机器分别启动多个 worker，每台对应 App 里的一个连接。
 - **不要**在项目根目录执行 `npx tsx worker.js` 或 `npx tsx hub/src/worker.ts`；根目录没有 `tsx` 等依赖，`npx` 会重新下载一个孤立的 tsx，找不到 `worker.ts` 也会找不到 `ws` 等包。
 
-worker 环境变量：`HUB_URL`、`CONNECTION_TOKEN`、`AGENT`、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`、`CODEX_ACP_BIN/CODEX_ACP_ARGS`、`OPENCODE_BIN/OPENCODE_ARGS`。
+worker 环境变量：`HUB_URL`、`CONNECTION_TOKEN`、`AGENT`、`DEVIN_BIN`、`CLAUDE_ACP_BIN/CLAUDE_ACP_ARGS`、`CODEX_ACP_BIN/CODEX_ACP_ARGS`、`OPENCODE_BIN/OPENCODE_ARGS`、`OPENCLAW_BIN/OPENCLAW_ARGS`、`DSH_ACP_BIN/DSH_ACP_ARGS`（deepseek 自定义 ACP 入口，`*_ARGS` 支持 JSON 数组或带引号的 shell 风格拆分）、`DSH_ROOT`（设为 deepseek-harness 仓库根目录时走源码开发模式，`node --import tsx/esm apps/cli/src/bin.ts --profile acp`）。
 
 ### 5b. 启动 Multiplex Worker（单连接复用多 agent，可选）
 

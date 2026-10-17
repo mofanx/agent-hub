@@ -102,7 +102,7 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
                 // 群聊模式：不分组，直接列表
                 listOf("" to filtered)
             } else {
-                val order = listOf("devin", "claude", "codex", "opencode", "openclaw", "custom")
+                val order = listOf("devin", "claude", "codex", "opencode", "openclaw", "deepseek", "custom")
                 filtered.groupBy { it.backend }
                     .toList()
                     .sortedBy { (backend, _) -> order.indexOf(backend).takeIf { it >= 0 } ?: Int.MAX_VALUE }
@@ -510,6 +510,7 @@ private fun backendDisplayName(S: Strings, backend: String): String = when (back
     "codex" -> "Codex"
     "opencode" -> "OpenCode"
     "openclaw" -> "OpenClaw"
+    "deepseek" -> "DeepSeek"
     "custom" -> S.customBackend
     else -> backend
 }
