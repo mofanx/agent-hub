@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -74,4 +75,13 @@ test("buildConnectInfo: relayed 连接拿不到 HUB_TOKEN 与 LAN 卡，本机�
   assert.deepEqual(uris.lan, []);
   assert.ok(uris.gateway?.includes("mode=gateway"));
   assert.ok(uris.gateway?.includes(encodeURIComponent("pub-0123456789abcdef0123456789abcdef")));
+});
+
+test("契约回归：gateway agent 上报方法名须为 hub.gatewayAnnounce", () => {
+  const agentSrc = readFileSync(
+    new URL("../../deploy/gateway/src/agent.ts", import.meta.url),
+    "utf8",
+  );
+  assert.ok(agentSrc.includes("'hub.gatewayAnnounce'"));
+  assert.ok(!agentSrc.includes("method: 'gatewayAnnounce'"));
 });

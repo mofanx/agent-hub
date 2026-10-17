@@ -4565,5 +4565,3 @@ private fun BlackboardPanel(vm: ChatViewModel) {
         )
     }
 }
-// verified by agent-hub conductor dispatch
-// t2: 在 t1 确定的文件末尾追加此注释，标记子任务 t2 已完成

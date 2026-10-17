@@ -22,6 +22,9 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -1643,10 +1646,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { syncRefreshAll() }
     }
 
-    private suspend fun syncRefreshAll() {
+    private suspend fun syncRefreshAll() = coroutineScope {
         try {
             val cResult = hub.call("connection.list")
-            val cList = cResult["connections"]?.jsonArray ?: return
+            val cList = cResult["connections"]?.jsonArray ?: return@coroutineScope
                 connections.clear()
                 for (c in cList) {
                     val o = c.jsonObject
@@ -1665,9 +1668,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (_: Exception) {
             }
+        val jobs = listOf(
+        async {
             try {
                 val result = hub.call("session.list")
-                val list = result["sessions"]?.jsonArray ?: return
+                val list = result["sessions"]?.jsonArray ?: return@async
                 sessions.clear()
                 for (s in list) {
                     val o = s.jsonObject
@@ -1690,9 +1695,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 syncBusyIdsFromList(sessions)
             } catch (_: Exception) {
             }
+        },
+        async {
             try {
                 val result = hub.call("role.list")
-                val list = result["roles"]?.jsonArray ?: return
+                val list = result["roles"]?.jsonArray ?: return@async
                 roles.clear()
                 for (r in list) {
                     val o = r.jsonObject
@@ -1709,10 +1716,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (_: Exception) {
             }
+        },
+        async {
             try {
                 val connId = connections.firstOrNull()?.id
                 val result = if (connId != null) hub.call("skill.list", buildJsonObject { put("connectionId", connId) }) else hub.call("skill.list")
-                val list = result["skills"]?.jsonArray ?: return
+                val list = result["skills"]?.jsonArray ?: return@async
                 skills.clear()
                 for (s in list) {
                     val o = s.jsonObject
@@ -1725,22 +1734,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (_: Exception) {
             }
+        },
+        async {
             try {
                 val result = hub.call("room.list")
-                val list = result["rooms"]?.jsonArray ?: return
+                val list = result["rooms"]?.jsonArray ?: return@async
                 rooms.clear()
                 for (r in list) rooms.add(parseRoom(r.jsonObject))
                 currentRoom?.let { cur -> rooms.find { it.roomId == cur.roomId }?.let { currentRoom = it } }
             } catch (_: Exception) {
             }
+        },
+        async {
             try {
                 val result = hub.call("task.list")
-                val list = result["tasks"]?.jsonArray ?: return
+                val list = result["tasks"]?.jsonArray ?: return@async
                 scheduledTasks.clear()
                 for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
             } catch (_: Exception) {
             }
-        }
+        },
+        )
+        jobs.awaitAll()
+    }
 
     private fun parseTask(o: JsonObject): ScheduledTask {
         val sched = o["schedule"]!!.jsonObject

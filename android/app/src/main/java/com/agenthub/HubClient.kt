@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -171,7 +172,12 @@ class HubClient(
             }
             throw IllegalStateException("send failed")
         }
-        val resp = deferred.await()
+        val resp = try {
+            withTimeout(15_000) { deferred.await() }
+        } catch (e: Exception) {
+            pending.remove(id)
+            throw e
+        }
         resp["error"]?.let { throw Exception(it.jsonPrimitive.content) }
         return resp["result"]?.jsonObject ?: JsonObject(emptyMap())
     }

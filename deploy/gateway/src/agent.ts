@@ -42,7 +42,7 @@ export function startAgent(options: {
       ws.send(
         JSON.stringify({
           id: 'gw-announce',
-          method: 'gatewayAnnounce',
+          method: 'hub.gatewayAnnounce',
           params,
         }),
       );
