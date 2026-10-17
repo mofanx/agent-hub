@@ -704,6 +704,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val roles = mutableStateListOf<RoleInfo>()
     val skills = mutableStateListOf<SkillInfo>()
     val connections = mutableStateListOf<ConnectionInfo>()
+    val hubAgentTypes = mutableStateListOf<String>()
     val scheduledTasks = mutableStateListOf<ScheduledTask>()
     val taskLogs = mutableStateListOf<TaskLog>()
     var scheduleReturnScreen by mutableStateOf(Screen.Sessions)
@@ -1705,6 +1706,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = result["tasks"]?.jsonArray ?: return
                 scheduledTasks.clear()
                 for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+            } catch (_: Exception) {
+            }
+            try {
+                val result = hub.call("agent.info")
+                val list = result["agents"]?.jsonArray ?: JsonArray(emptyList())
+                hubAgentTypes.clear()
+                for (a in list) hubAgentTypes.add(a.jsonPrimitive.content)
             } catch (_: Exception) {
             }
         }

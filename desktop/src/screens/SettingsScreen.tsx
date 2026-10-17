@@ -258,7 +258,7 @@ function RemoteBackendJoin() {
         </FormRow>
         <FormRow label={S.typeLabel}>
           <select value={agent} onChange={(e) => setAgent(e.currentTarget.value)}>
-            {["devin", "claude", "codex", "opencode", "openclaw"].map((a) => (
+            {store.agentTypes.map((a) => (
               <option key={a} value={a}>{a}</option>
             ))}
           </select>
@@ -331,7 +331,7 @@ function ConnectionsSettings() {
           </FormRow>
           <FormRow label={S.typeLabel}>
             <select value={form.agent ?? "devin"} onChange={(e) => setForm({ ...form, agent: e.currentTarget.value })}>
-              {["devin", "claude", "codex", "opencode", "openclaw"].map((a) => (
+              {store.agentTypes.map((a) => (
                 <option key={a} value={a}>
                   {a}
                 </option>

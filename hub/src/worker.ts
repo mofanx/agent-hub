@@ -1,10 +1,9 @@
-import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { WebSocket } from "ws";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Stream } from "@agentclientprotocol/sdk";
 import { webSocketStream } from "./stream.js";
-import { getAgentDef } from "./agent-defs.js";
+import { getAgentDef, spawnAgentProcess } from "./agent-defs.js";
 
 const HUB_URL = process.env.HUB_URL;
 const TOKEN = process.env.CONNECTION_TOKEN;
@@ -96,10 +95,7 @@ function runOnce(localStream: Stream): Promise<{ code: number; permanent: boolea
 async function main(): Promise<void> {
   console.log(`[worker] ${AGENT} -> ${HUB_URL}`);
 
-  const proc = spawn(def!.bin, def!.args, {
-    stdio: ["pipe", "pipe", "inherit"],
-    windowsHide: true,
-  });
+  const proc = spawnAgentProcess(def!, ["pipe", "pipe", "inherit"]);
 
   const localStream = acp.ndJsonStream(
     Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>,

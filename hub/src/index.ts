@@ -1,11 +1,9 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { randomBytes } from "node:crypto";
 import qrcode from "qrcode-terminal";
-import type { ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import fs from "node:fs";
 import path from "node:path";
-import spawn from "cross-spawn";
 import * as acp from "@agentclientprotocol/sdk";
 import {
   AcpAgent,
@@ -24,7 +22,7 @@ import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult, parseIsolatedChecks, runIsolatedCheck } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
-import { AGENT_DEFS, type AgentDef } from "./agent-defs.js";
+import { AGENT_DEFS, spawnAgentProcess } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import { getDevinQuota } from "./quota.js";
 import { logError, logWarn } from "./logger.js";
@@ -357,23 +355,12 @@ function cleanupLocalAgent(connectionId: string): void {
   }
 }
 
-function spawnAgent(def: AgentDef): ChildProcess {
-  const env = { ...process.env, ...def.env };
-  if (!def.env?.ACP_BACKEND) delete env.ACP_BACKEND;
-  return spawn(def.bin, def.args, {
-    stdio: ["pipe", "pipe", "pipe"],
-    cwd: def.cwd,
-    env,
-    windowsHide: true,
-  });
-}
-
 async function startLocalAgent(connection: Connection): Promise<void> {
   const def = AGENT_DEFS[connection.agent];
   if (!def) throw new Error(`unknown agent type: ${connection.agent}`);
   localAgentErrors.delete(connection.id);
 
-  const proc = spawnAgent(def);
+  const proc = spawnAgentProcess(def);
   const stderrChunks: Buffer[] = [];
   proc.stderr!.on("data", (chunk: Buffer) => {
     stderrChunks.push(chunk);

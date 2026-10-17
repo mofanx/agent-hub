@@ -29,13 +29,13 @@
  * 5. 双向桥接：agent stdio ↔ WebSocket channel
  */
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import * as os from "node:os";
 import { Readable, Writable } from "node:stream";
 import { WebSocket } from "ws";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Stream, AnyMessage } from "@agentclientprotocol/sdk";
-import { getAgentDef } from "./agent-defs.js";
+import { getAgentDef, spawnAgentProcess } from "./agent-defs.js";
 const HUB_URL = process.env.HUB_URL;
 const TOKEN = process.env.CONNECTION_TOKEN;
 const AGENTS_ENV = process.env.AGENTS;
@@ -71,6 +71,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   openclaw   openclaw acp           （需 npm i -g openclaw）
   claude     npx ...claude-agent-acp（需 claude auth login）
   codex      npx ...codex-acp       （需 codex login）
+  deepseek   npx -y @deepseek-ai/dsh --profile acp（需 DEEPSEEK_API_KEY；
+             不在自动检测列表，需 AGENTS=deepseek 显式启用）
 
 自动检测：
   不设置 AGENTS 时，worker 检测本地 PATH 中哪些 agent CLI 可用，
@@ -152,10 +154,7 @@ function spawnAgent(agent: string): Channel | null {
   if (!def) return null;
 
   try {
-    const proc = spawn(def.bin, def.args, {
-      stdio: ["pipe", "pipe", "inherit"],
-      windowsHide: true,
-    });
+    const proc = spawnAgentProcess(def, ["pipe", "pipe", "inherit"]);
 
     const localStream = acp.ndJsonStream(
       Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>,

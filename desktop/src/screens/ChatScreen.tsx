@@ -3390,6 +3390,7 @@ function ModelPicker() {
     codex: "Codex",
     opencode: "OpenCode",
     openclaw: "OpenClaw",
+    deepseek: "DeepSeek",
     custom: S.customOpt,
   };
 
