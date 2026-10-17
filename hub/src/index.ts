@@ -35,6 +35,15 @@ import {
 } from "./quota.js";
 import { logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
+import {
+  parseSlash,
+  SESSION_MODES,
+  HUB_SLASH_COMMANDS,
+  handleSessionModeSlash,
+  handleRoomModeSlash,
+  type SlashCmd,
+  type ModeSlashDeps,
+} from "./slash.js";
 import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 import { OperationLedger } from "./op-ledger.js";
@@ -1163,22 +1172,6 @@ function send(ws: WebSocket, msg: unknown): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
-type SlashCmd = { command: string; mentions: string[]; args: string[] };
-
-function parseSlash(text: string): SlashCmd | null {
-  const t = text.trim();
-  if (!t.startsWith("/")) return null;
-  const [head, ...rest] = t.slice(1).split(/\s+/);
-  if (!head) return null;
-  const mentions = rest
-    .filter((p) => p.startsWith("@"))
-    .map((p) => p.slice(1));
-  const args = rest.filter((p) => !p.startsWith("@"));
-  return { command: head.toLowerCase(), mentions, args };
-}
-
-const SESSION_MODES = new Set(["accept-edits", "ask", "plan", "bypass", "smart", "autonomous"]);
-
 function sessionBackend(sessionId: string): ModelBackend | undefined {
   return (sessionMetas.get(sessionId)?.agent ?? undefined) as ModelBackend | undefined;
 }
@@ -1205,24 +1198,25 @@ function agentForSession(sessionId: string): AcpAgent | undefined {
   return key ? agents.get(key) : undefined;
 }
 
+/** 成员后端类型：meta.agent / connection.agent 经 backendTypeOf 解析（自定义后端归并到注册 type） */
+function memberBackendType(sessionId: string): ModelBackend {
+  const meta = sessionMetas.get(sessionId);
+  const agent = meta?.agent ?? getConnectionById(meta?.connectionId ?? undefined)?.agent;
+  return modelManager.backendTypeOf(agent ?? "devin");
+}
+
+const modeSlashDeps: ModeSlashDeps = {
+  applySessionMode,
+  sessionBackend,
+  memberBackendType,
+  memberDisplayName: (m) => rooms.displayNameFor(m),
+  findByBackend: (b) => modelManager.findByBackend(b),
+  setBackendConfig: (b, k, v) => modelManager.setBackendConfig(b, k, v),
+};
+
 async function handleSessionSlash(sessionId: string, slash: SlashCmd): Promise<unknown> {
   if (slash.command === "bypass" || slash.command === "mode") {
-    const mode =
-      slash.command === "mode"
-        ? slash.args[0] ?? ""
-        : slash.args[0] === "off"
-          ? "accept-edits"
-          : "bypass";
-    if (!mode) throw new Error(`usage: /mode <${[...SESSION_MODES].join("|")}>`);
-    await applySessionMode(sessionId, mode);
-    let backendDefault = false;
-    const namedBackend = slash.args.find((a) => a !== mode && modelManager.findByBackend(a as ModelBackend).length > 0) as ModelBackend | undefined;
-    const backend = namedBackend ?? ((slash.args.includes("--global") || slash.args.includes("-g")) ? sessionBackend(sessionId) : undefined);
-    if (backend) {
-      modelManager.setBackendConfig(backend, "mode", mode);
-      backendDefault = true;
-    }
-    return { sessionId, mode, backendDefault };
+    return handleSessionModeSlash(sessionId, slash, modeSlashDeps);
   }
   if (slash.command !== "stop") {
     throw new Error(`unknown command: /${slash.command}`);
@@ -1242,37 +1236,7 @@ async function handleRoomSlash(
   rawText: string,
   quote?: { author: string; text: string },
 ): Promise<unknown> {
-  if (slash.command === "bypass" || slash.command === "mode") {
-    const mode =
-      slash.command === "mode"
-        ? slash.args[0] ?? ""
-        : slash.args[0] === "off"
-          ? "accept-edits"
-          : "bypass";
-    if (!mode) throw new Error(`usage: /mode <${[...SESSION_MODES].join("|")}>`);
-    const targetIds =
-      slash.mentions.length > 0
-        ? room.members
-            .filter((m) => slash.mentions.includes(m.name))
-            .map((m) => m.sessionId)
-        : room.members.map((m) => m.sessionId);
-    const applied: string[] = [];
-    const failed: string[] = [];
-    for (const sid of targetIds) {
-      try {
-        await applySessionMode(sid, mode);
-        applied.push(sid);
-      } catch {
-        failed.push(sid);
-      }
-    }
-    return { mode, applied, failed };
-  }
-  if (slash.command !== "stop") {
-    throw new Error(`unknown command: /${slash.command}`);
-  }
-
-  // 记录用户的 slash 指令本身
+  // 记录用户的 slash 指令本身（mode/bypass/stop 均记入房史）
   store.append("room", room.roomId, {
     at: Date.now(),
     kind: "user",
@@ -1281,6 +1245,13 @@ async function handleRoomSlash(
       ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${rawText}`
       : rawText,
   });
+
+  if (slash.command === "bypass" || slash.command === "mode") {
+    return handleRoomModeSlash(room, slash, modeSlashDeps);
+  }
+  if (slash.command !== "stop") {
+    throw new Error(`unknown command: /${slash.command}`);
+  }
 
   const targetIds =
     slash.mentions.length > 0
@@ -2374,7 +2345,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         .join("") || "（图片）";
 
       const slash = parseSlash(text);
-      if (slash?.command === "stop") {
+      if (slash && HUB_SLASH_COMMANDS.has(slash.command)) {
         return handleRoomSlash(room, slash, text, quote);
       }
 
@@ -2433,7 +2404,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         .map((b) => String(b.text ?? ""))
         .join("");
       const slash = parseSlash(slashText);
-      if (slash?.command === "stop") {
+      if (slash && HUB_SLASH_COMMANDS.has(slash.command)) {
         return handleSessionSlash(sessionId, slash);
       }
       const historyText = promptContent

@@ -2631,7 +2631,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const S = stringsFor(get().lang);
       switch (command) {
         case "help": {
-          const msg = `${S.slashHelpTitle}\n${S.slashHelpHelp}\n${S.slashHelpStop}\n${S.slashHelpBypass}\n${S.slashHelpModel}\n${S.slashHelpNew}`;
+          const msg = `${S.slashHelpTitle}\n${S.slashHelpHelp}\n${S.slashHelpStop}\n${S.slashHelpBypass}\n${S.slashHelpMode}\n${S.slashHelpModel}\n${S.slashHelpNew}`;
           set({ chatItems: [...get().chatItems, { kind: "system", text: msg, author: "" }] });
           return true;
         }
@@ -3270,6 +3270,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         { name: "help", description: S.slashHelpHelp },
         { name: "stop", description: S.slashHelpStop },
         { name: "bypass", description: S.slashHelpBypass },
+        { name: "mode", description: S.slashHelpMode },
         { name: "model", description: S.slashHelpModel },
         { name: "new", description: S.slashHelpNew },
       ];

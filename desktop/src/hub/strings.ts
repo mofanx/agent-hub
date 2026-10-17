@@ -5,6 +5,7 @@ export interface Strings {
   slashHelpHelp: string;
   slashHelpStop: string;
   slashHelpBypass: string;
+  slashHelpMode: string;
   slashHelpModel: string;
   slashHelpNew: string;
   newChatDoneFmt: string;
@@ -552,6 +553,7 @@ const zh: Strings = {
   slashHelpHelp: "/help — 显示帮助",
   slashHelpStop: "/stop — 停止当前生成",
   slashHelpBypass: "/bypass [on|off] — 切换审批自动通过",
+  slashHelpMode: "/mode <accept-edits|ask|plan|bypass|smart|autonomous> [@成员|backend] — 切换会话模式",
   slashHelpModel: "/model [模型] — 切换模型",
   slashHelpNew: "/new — 新建对话/群聊并重置上下文（旧的自动归档）",
   newChatDoneFmt: "已切换到新会话 %s，原会话已归档",
@@ -1097,6 +1099,7 @@ const en: Strings = {
   slashHelpHelp: "/help — show help",
   slashHelpStop: "/stop — stop current generation",
   slashHelpBypass: "/bypass [on|off] — toggle permission bypass",
+  slashHelpMode: "/mode <accept-edits|ask|plan|bypass|smart|autonomous> [@member|backend] — set session mode",
   slashHelpModel: "/model [model] — switch model",
   slashHelpNew: "/new — start a fresh chat/room (the old one is archived)",
   newChatDoneFmt: "Switched to %s; the previous one was archived",

@@ -204,6 +204,7 @@ interface Strings {
     val slashHelpHelp: String
     val slashHelpStop: String
     val slashHelpBypass: String
+    val slashHelpMode: String
     val slashHelpModel: String
     val slashHelpNew: String
     val newChatDoneFmt: String
@@ -704,6 +705,7 @@ object ZhStrings : Strings {
     override val slashHelpHelp = "/help — 显示命令说明"
     override val slashHelpStop = "/stop — 停止当前生成（在群里可 @成员 指定）"
     override val slashHelpBypass = "/bypass [on|off|toggle] — 切换权限自动审批"
+    override val slashHelpMode = "/mode <accept-edits|ask|plan|bypass|smart|autonomous> [@成员|backend] — 切换会话模式"
     override val slashHelpModel = "/model [name] — 列出或切换模型"
     override val slashHelpNew = "/new — 新建对话/群聊并重置上下文（旧的自动归档）"
     override val newChatDoneFmt = "已切换到新会话 %s，原会话已归档"
@@ -1212,6 +1214,7 @@ object EnStrings : Strings {
     override val slashHelpHelp = "/help — show command help"
     override val slashHelpStop = "/stop — stop current generation (use @name in a room)"
     override val slashHelpBypass = "/bypass [on|off|toggle] — toggle permission auto-approve"
+    override val slashHelpMode = "/mode <accept-edits|ask|plan|bypass|smart|autonomous> [@member|backend] — set session mode"
     override val slashHelpModel = "/model [name] — list or switch model"
     override val slashHelpNew = "/new — start a fresh chat/room (the old one is archived)"
     override val newChatDoneFmt = "Switched to %s; the previous one was archived"

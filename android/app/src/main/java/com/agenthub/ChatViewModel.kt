@@ -1460,6 +1460,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 SlashCommand("help", S.slashHelpHelp),
                 SlashCommand("stop", S.slashHelpStop),
                 SlashCommand("bypass", S.slashHelpBypass),
+                SlashCommand("mode", S.slashHelpMode),
                 SlashCommand("model", S.slashHelpModel),
                 SlashCommand("new", S.slashHelpNew),
                 SlashCommand("fusion", S.fusionDesc),
