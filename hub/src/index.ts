@@ -91,6 +91,8 @@ const rooms = new RoomManager();
 const agents = new Map<string, AcpAgent>();
 const owners = new Map<string, string>();
 const localStarts = new Map<string, Promise<void>>();
+/** session.resume 按 sessionId 去重：并发/重试调用复用同一 Promise，防重复创建幽灵会话 */
+const sessionResumes = new Map<string, Promise<unknown>>();
 const localAgentErrors = new Map<string, string>();
 const store = new Store();
 const modelManager = new ModelManager();
@@ -540,6 +542,72 @@ async function ensureLocalAgent(connection: Connection): Promise<void> {
   }
 }
 
+async function resumeSessionById(sessionId: string) {
+  const meta = sessionMetas.get(sessionId);
+  if (!meta) throw new Error(`unknown session: ${sessionId}`);
+  const ownerAgent = agents.get(owners.get(sessionId) ?? "");
+  if (ownerAgent?.listSessions().some((s) => s.sessionId === sessionId)) {
+    return { resumed: true, already: true };
+  }
+  owners.delete(sessionId);
+  const connectionId = meta.connectionId;
+  if (!connectionId) throw new Error("session has no connection");
+  const connection = getConnectionById(connectionId);
+  if (connection?.local) await ensureLocalAgent(connection);
+  const agent = agents.get(connectionId);
+  if (!agent) throw new Error("agent 未连接");
+  let ok = await agent.resumeSession(meta.sessionId, meta.cwd, meta.name);
+
+  if (!ok) {
+    const hasHistory = store.read("session", sessionId).length > 0;
+    // 无论是否有历史，agent 已无法恢复该 session，直接用同名/cwd 重建
+    const s = await agent.createSession(meta.cwd, meta.name);
+
+    // 重建 session 时继承旧会话的模型与 config 偏好
+    modelManager.copySessionPreference(sessionId, s.sessionId);
+    modelManager.copySessionConfig(sessionId, s.sessionId);
+    if (connection?.agent) {
+      const backend = connection.agent as ModelBackend;
+      const current = modelManager.current(backend, s.sessionId);
+      await setSessionModel(agent, backend, s.sessionId, current.uid)
+        .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
+      await syncSessionConfigPrefs(agent, s.sessionId, backend);
+    }
+
+    if (hasHistory) {
+      store.renameHistory("session", sessionId, s.sessionId);
+    }
+    sessionMetas.delete(sessionId);
+    owners.delete(sessionId);
+    const newMeta = { ...meta, sessionId: s.sessionId, name: s.name };
+    sessionMetas.set(s.sessionId, newMeta);
+    owners.set(s.sessionId, connectionId);
+    emitMemberStatus(s.sessionId, "online");
+    rooms.updateMemberSessionId(sessionId, s.sessionId);
+    persistState();
+    console.log(
+      `[hub] recreated session ${sessionId} -> ${s.sessionId} (${s.name})${
+        hasHistory ? " with history" : ""
+      }`,
+    );
+    return { resumed: true, sessionId: s.sessionId };
+  }
+  owners.set(sessionId, connectionId);
+  emitMemberStatus(sessionId, "online");
+
+  // 恢复 session 时同步对应后端的当前模型与 config 偏好
+  if (connection?.agent) {
+    const backend = connection.agent as ModelBackend;
+    const current = modelManager.current(backend, sessionId);
+    setSessionModel(agent, backend, sessionId, current.uid)
+      .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
+    syncSessionConfigPrefs(agent, sessionId, backend)
+      .catch((err) => logWarn("session.resume", `sync config failed: ${String(err)}`));
+  }
+
+  return { resumed: true };
+}
+
 const agentOps: AgentOps = {
   prompt: (sessionId, content) => {
     const agent = ownerOf(sessionId);
@@ -639,10 +707,10 @@ const relevanceFilter = new RelevanceFilter({
   baseUrl: process.env.HUB_FILTER_BASE_URL || undefined,
   apiKey: process.env.HUB_FILTER_API_KEY || undefined,
 });
-roomModeManager.setRelevanceFilter(async (room, text) => {
+roomModeManager.setRelevanceFilter(async (room, text, note) => {
   const enabled = room.relevanceFilter ?? relevanceFilter.enabled;
   if (!enabled) return true;
-  const r = await relevanceFilter.isRelevant(text);
+  const r = await relevanceFilter.isRelevant(text, note);
   if (!r.relevant) {
     logWarn("filter", `room ${room.roomId} filtered via ${r.via}: ${r.reason} :: ${text.slice(0, 60)}`);
   }
@@ -1580,69 +1648,15 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     }
     case "session.resume": {
       const sessionId = String(req.params?.sessionId ?? "");
-      const meta = sessionMetas.get(sessionId);
-      if (!meta) throw new Error(`unknown session: ${sessionId}`);
-      const ownerAgent = agents.get(owners.get(sessionId) ?? "");
-      if (ownerAgent?.listSessions().some((s) => s.sessionId === sessionId)) {
-        return { resumed: true, already: true };
+      const inflight = sessionResumes.get(sessionId);
+      if (inflight) return inflight;
+      const resumePromise = resumeSessionById(sessionId);
+      sessionResumes.set(sessionId, resumePromise);
+      try {
+        return await resumePromise;
+      } finally {
+        sessionResumes.delete(sessionId);
       }
-      owners.delete(sessionId);
-      const connectionId = meta.connectionId;
-      if (!connectionId) throw new Error("session has no connection");
-      const connection = getConnectionById(connectionId);
-      if (connection?.local) await ensureLocalAgent(connection);
-      const agent = agents.get(connectionId);
-      if (!agent) throw new Error("agent 未连接");
-      let ok = await agent.resumeSession(meta.sessionId, meta.cwd, meta.name);
-
-      if (!ok) {
-        const hasHistory = store.read("session", sessionId).length > 0;
-        // 无论是否有历史，agent 已无法恢复该 session，直接用同名/cwd 重建
-        const s = await agent.createSession(meta.cwd, meta.name);
-
-        // 重建 session 时继承旧会话的模型与 config 偏好
-        modelManager.copySessionPreference(sessionId, s.sessionId);
-        modelManager.copySessionConfig(sessionId, s.sessionId);
-        if (connection?.agent) {
-          const backend = connection.agent as ModelBackend;
-          const current = modelManager.current(backend, s.sessionId);
-          await setSessionModel(agent, backend, s.sessionId, current.uid)
-            .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
-          await syncSessionConfigPrefs(agent, s.sessionId, backend);
-        }
-
-        if (hasHistory) {
-          store.renameHistory("session", sessionId, s.sessionId);
-        }
-        sessionMetas.delete(sessionId);
-        owners.delete(sessionId);
-        const newMeta = { ...meta, sessionId: s.sessionId, name: s.name };
-        sessionMetas.set(s.sessionId, newMeta);
-        owners.set(s.sessionId, connectionId);
-        emitMemberStatus(s.sessionId, "online");
-        rooms.updateMemberSessionId(sessionId, s.sessionId);
-        persistState();
-        console.log(
-          `[hub] recreated session ${sessionId} -> ${s.sessionId} (${s.name})${
-            hasHistory ? " with history" : ""
-          }`,
-        );
-        return { resumed: true, sessionId: s.sessionId };
-      }
-      owners.set(sessionId, connectionId);
-      emitMemberStatus(sessionId, "online");
-
-      // 恢复 session 时同步对应后端的当前模型与 config 偏好
-      if (connection?.agent) {
-        const backend = connection.agent as ModelBackend;
-        const current = modelManager.current(backend, sessionId);
-        setSessionModel(agent, backend, sessionId, current.uid)
-          .catch((err) => logWarn("session.resume", `sync model failed: ${String(err)}`));
-        syncSessionConfigPrefs(agent, sessionId, backend)
-          .catch((err) => logWarn("session.resume", `sync config failed: ${String(err)}`));
-      }
-
-      return { resumed: true };
     }
     case "session.rename": {
       const sessionId = String(req.params?.sessionId ?? "");

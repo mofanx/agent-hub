@@ -270,8 +270,8 @@ const MAX_TURN_GUARDS = 2000;
 export class RoomModeManager {
   /** 编排卡同步钩子：每次 flowUpdate 后调用，参数为 getFlow 视图（可能为 undefined） */
   onFlowCard?: (roomId: string, flow: Record<string, unknown> | undefined) => void;
-  /** nano 相关性过滤：auto/mention 唤起编排前调用，返回 false 则本轮不派发 */
-  private relevanceFilter?: (room: Room, text: string) => Promise<boolean>;
+  /** nano 相关性过滤：auto/mention 唤起编排前调用，返回 false 则本轮不派发；note 为续接上下文（如重启丢回复提示） */
+  private relevanceFilter?: (room: Room, text: string, note?: string) => Promise<boolean>;
   private conductor: ConductorOrchestrator;
   private autoDecisions = new Map<string, AutoDecisionContext>();
   private parallelFlows = new Map<string, ParallelFlow>();
@@ -304,7 +304,7 @@ export class RoomModeManager {
     this.conductor.setStore(store);
   }
 
-  setRelevanceFilter(fn: (room: Room, text: string) => Promise<boolean>): void {
+  setRelevanceFilter(fn: (room: Room, text: string, note?: string) => Promise<boolean>): void {
     this.relevanceFilter = fn;
   }
 
@@ -889,12 +889,16 @@ export class RoomModeManager {
         (Array.isArray(options?.params?.targets) &&
           (options.params.targets as unknown[]).length > 0);
       if (!explicit) {
-        const relevant = await this.relevanceFilter(room, text);
+        const relevant = await this.relevanceFilter(room, text, options?.note);
         if (!relevant) {
           this.rooms.addEvent(room.roomId, {
             author: "hub",
             action: "filter",
             summary: `过滤低相关消息：${text.slice(0, 80)}`,
+          });
+          this.notice({
+            roomId: room.roomId,
+            message: `💤 该消息被判定为闲聊已忽略：${text.slice(0, 80)}（如需执行请 @ 成员或描述任务）`,
           });
           return { sent: [], mentioned: [], skipped: [] };
         }

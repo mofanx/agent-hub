@@ -15,7 +15,7 @@ describe("classifyUtterance 规则层", () => {
     }
   });
 
-  it("任务词/问号/命令/长文本 → relevant", () => {
+  it("任务词/问号/命令/长文本/续接词 → relevant", () => {
     for (const t of [
       "帮我看下这个报错",
       "这个函数怎么改？",
@@ -23,6 +23,9 @@ describe("classifyUtterance 规则层", () => {
       "review this diff please",
       "大家看看",
       "这是一个超过三十二个字符但没有明显任务语义的陈述句句子啊啊啊啊啊啊啊",
+      "继续",
+      "接着往下写",
+      "continue",
     ]) {
       assert.equal(classifyUtterance(t), "relevant", t);
     }
@@ -85,6 +88,15 @@ describe("RelevanceFilter", () => {
     assert.equal(rn.relevant, false);
     assert.equal(rn.reason, "model:filtered");
   });
+
+  it("存在续接 note 时短消息不再判 chatter", async () => {
+    const f = new RelevanceFilter({ enabled: true });
+    const note = "上一条用户消息已处理，但回复因 Hub 重启未保存。";
+    assert.equal((await f.isRelevant("嗯")).relevant, false);
+    const r = await f.isRelevant("嗯", note);
+    assert.equal(r.relevant, true);
+    assert.equal(r.reason, "note-context");
+  });
 });
 
 describe("编排唤起过滤（RoomModeManager 集成）", () => {
@@ -109,15 +121,28 @@ describe("编排唤起过滤（RoomModeManager 集成）", () => {
       isBusy: () => false,
       cancel: async () => {},
     };
-    const manager = new RoomModeManager(agent, rooms, () => {});
+    const notices: string[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) => {
+      // 复刻 index.ts 接线语义：room.notice → 房史 system 条目
+      if (method === "room.notice") {
+        const message = String((params as Record<string, unknown>).message ?? "");
+        notices.push(message);
+        store.append("room", room.roomId, {
+          at: Date.now(),
+          kind: "system",
+          author: "",
+          text: message,
+        });
+      }
+    });
     manager.setStore(store);
     const filter = new RelevanceFilter({ enabled: true });
-    manager.setRelevanceFilter(async (_room, text) => (await filter.isRelevant(text)).relevant);
-    return { store, rooms, room, prompted, manager };
+    manager.setRelevanceFilter(async (_room, text, note) => (await filter.isRelevant(text, note)).relevant);
+    return { store, rooms, room, prompted, notices, manager };
   };
 
   it("auto 模式：闲聊不唤起主持人决策，任务消息照常派发", async () => {
-    const { room, prompted, manager, rooms } = setup("auto");
+    const { store, room, prompted, manager, rooms } = setup("auto");
     const r1 = await manager.handle(room, "你好", {});
     assert.deepEqual(r1.sent, []);
     assert.equal(prompted.length, 0, "闲聊不得唤起 auto 决策");
@@ -125,6 +150,10 @@ describe("编排唤起过滤（RoomModeManager 集成）", () => {
       rooms.getEvents(room.roomId).some((e) => e.action === "filter"),
       "命中过滤应写 room events 审计",
     );
+    const sysEntry = store
+      .read("room", room.roomId)
+      .find((e) => e.kind === "system" && e.text.includes("闲聊已忽略"));
+    assert.ok(sysEntry, "被过滤时应产生用户可见的 system 条目");
 
     await manager.handle(room, "帮我实现一个排序函数", {});
     assert.deepEqual(prompted, ["host"], "任务消息照常唤起 auto 决策");
@@ -153,6 +182,14 @@ describe("编排唤起过滤（RoomModeManager 集成）", () => {
     room.relevanceFilter = false;
     const r = await manager.handle(room, "你好", {});
     assert.deepEqual(r.sent.sort(), ["host", "s1"], "房间级关闭时无 @ 广播照常派发");
+    assert.equal(prompted.length, 2);
+  });
+
+  it("mention 模式：携带 note 的短消息跳过 chatter 判定照常派发", async () => {
+    const { room, prompted, manager } = setup("mention");
+    const note = "上一条用户消息已处理，但回复因 Hub 重启未保存。请直接回答以下新消息，不要重复处理上一条：";
+    const r = await manager.handle(room, "嗯", { note });
+    assert.deepEqual(r.sent.sort(), ["host", "s1"], "note 存在时短消息不应被过滤");
     assert.equal(prompted.length, 2);
   });
 });

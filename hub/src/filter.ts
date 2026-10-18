@@ -6,9 +6,9 @@ import { logWarn } from "./logger.js";
 
 export type FilterVerdict = "relevant" | "chatter" | "uncertain";
 
-/** 任务信号：问号、斜杠命令、中英动词/任务词 */
+/** 任务信号：问号、斜杠命令、中英动词/任务词、续接指令 */
 const TASK_SIGNAL =
-  /[?？]|\/\w+|做|写|改|修|查|看|跑|测|审|译|算|找|搜|读|列|删|建|装|搬|发|回答|回复|部署|实现|检查|分析|总结|翻译|解释|评估|生成|创建|更新|对比|帮|请|告诉|说明|设计|重构|优化|排查|执行|运行|安装|配置|提交|合并|推送|下载|打开|关闭|讨论|review|fix|write|build|run|test|check|list|show|explain|analyze|implement|create|update|delete|search|deploy|commit|merge|push|help|please/i;
+  /[?？]|\/\w+|做|写|改|修|查|看|跑|测|审|译|算|找|搜|读|列|删|建|装|搬|发|回答|回复|部署|实现|检查|分析|总结|翻译|解释|评估|生成|创建|更新|对比|帮|请|告诉|说明|设计|重构|优化|排查|执行|运行|安装|配置|提交|合并|推送|下载|打开|关闭|讨论|继续|接着|接下去|然后呢|往下|review|fix|write|build|run|test|check|list|show|explain|analyze|implement|create|update|delete|search|deploy|commit|merge|push|help|please|continue|proceed|go on|keep going|carry on|resume/i;
 
 /** 整句寒暄/敷衍应答（全匹配） */
 const GREETING =
@@ -59,13 +59,15 @@ export class RelevanceFilter {
     return !!this.opts.model;
   }
 
-  async isRelevant(text: string): Promise<FilterResult> {
+  async isRelevant(text: string, note?: string): Promise<FilterResult> {
     if (!this.enabled) return { relevant: true, via: "off", reason: "disabled" };
     const verdict = classifyUtterance(text);
     if (verdict === "relevant") {
       return { relevant: true, via: "rule", reason: "task-signal" };
     }
     if (verdict === "chatter") {
+      // 存在续接上下文（如重启丢回复 note）时，短消息多为续作指令而非闲聊，放行
+      if (note) return { relevant: true, via: "rule", reason: "note-context" };
       return { relevant: false, via: "rule", reason: "chatter" };
     }
     if (!this.opts.model) {
