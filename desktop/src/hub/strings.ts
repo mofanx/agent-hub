@@ -544,6 +544,105 @@ export interface Strings {
   quotaWeek: string;
   devinQuotaLabel: string;
   quotaResetFmt: string;
+  missionSection: string;
+  missionRoom: string;
+  missionOwner: string;
+  missionOwnerAuto: string;
+  missionGoal: string;
+  missionCriteria: string;
+  missionScope: string;
+  missionConstraints: string;
+  missionSaveDraft: string;
+  missionStart: string;
+  missionStop: string;
+  missionStartConfirm: string;
+  missionStopConfirm: string;
+  missionEmpty: string;
+  missionNoRoom: string;
+  missionCreateRoom: string;
+  missionRiskNotice: string;
+  missionViewRoom: string;
+  missionHistory: string;
+  missionAwaitingHint: string;
+  missionStatusDraft: string;
+  missionStatusRunning: string;
+  missionStatusWaitingUser: string;
+  missionStatusAwaitingAcceptance: string;
+  missionStatusAccepted: string;
+  missionStatusStopped: string;
+  missionStatusFailed: string;
+  missionCriteriaShort: string;
+  missionFilterAll: string;
+  missionFilterActive: string;
+  missionFilterWaiting: string;
+  missionFilterRisk: string;
+  missionFilterAcceptance: string;
+  missionFilterClosed: string;
+  missionNew: string;
+  missionReview: string;
+  missionFieldOutput: string;
+  missionFieldDiff: string;
+  missionFieldBaseline: string;
+  missionFieldReproSteps: string;
+  missionFieldCommand: string;
+  missionFieldExitCode: string;
+  missionFieldStdout: string;
+  missionFieldStderr: string;
+  missionFieldArtifacts: string;
+  missionFieldVerdict: string;
+  missionFieldEvidence: string;
+  missionFieldSummary: string;
+  missionFieldStatus: string;
+  missionAutoRetryCount: string;
+  missionReworkReason: string;
+  missionFrozenContract: string;
+  missionScheduleDraftOnly: string;
+  missionTimeLabel: string;
+  missionDraftClose: string;
+  missionAcceptedNote: string;
+  taskTemplateLocked: string;
+  taskTemplateRebuild: string;
+  taskTemplateDraftOnly: string;
+  missionReviewPass: string;
+  missionReviewFail: string;
+  missionReviewUnverified: string;
+  missionReviewNote: string;
+  missionReviewTasks: string;
+  missionAccept: string;
+  missionRework: string;
+  missionReworkNote: string;
+  missionSupplement: string;
+  missionSupplementHint: string;
+  missionEditContract: string;
+  missionNotProvided: string;
+  missionSelfReport: string;
+  missionPeerReview: string;
+  missionIsolatedCheck: string;
+  missionExitZero: string;
+  missionSnapshotStale: string;
+  missionDelivered: string;
+  missionRecordedOnly: string;
+  missionEventLifecycle: string;
+  missionEventFlow: string;
+  missionEventOutput: string;
+  missionEventError: string;
+  missionEventReview: string;
+  missionEventRework: string;
+  missionEventSupplement: string;
+  missionEventsDetail: string;
+  missionOutput: string;
+  decisionSection: string;
+  decisionFrom: string;
+  decisionWaitingFmt: string;
+  decisionLocate: string;
+  decisionRedacted: string;
+  missionAutoRetries: string;
+  missionAutoRetriesHint: string;
+  missionAutoStart: string;
+  missionAutoStartConfirm: string;
+  missionSchedule: string;
+  missionScheduleSave: string;
+  missionRetry: string;
 }
 
 const zh: Strings = {
@@ -1090,6 +1189,105 @@ const zh: Strings = {
   quotaWeek: "本周已用",
   devinQuotaLabel: "Devin 用量",
   quotaResetFmt: "重置 %s",
+  missionSection: "目标工作单",
+  missionRoom: "房间",
+  missionOwner: "负责人",
+  missionOwnerAuto: "默认（指挥家/首成员）",
+  missionGoal: "目标",
+  missionCriteria: "验收标准（每行一条）",
+  missionScope: "范围",
+  missionConstraints: "禁止事项（每行一条）",
+  missionSaveDraft: "保存草稿",
+  missionStart: "启动",
+  missionStop: "停止",
+  missionStartConfirm: "确认启动该目标工作单？请核对目标、验收标准与范围，启动后将按房间现有协作模式派发执行。",
+  missionStopConfirm: "确认停止该目标？将请求取消进行中的任务，已发生的修改不会回滚。",
+  missionEmpty: "该房间暂无目标工作单",
+  missionNoRoom: "还没有可用的房间，先创建一个群聊再下发目标。",
+  missionCreateRoom: "新建房间",
+  missionRiskNotice: "任务边界仅为约定，不等于后端强制隔离；停止不回滚已发生的修改。",
+  missionViewRoom: "查看过程",
+  missionHistory: "历史",
+  missionAwaitingHint: "执行已结束，等待你人工验收",
+  missionStatusDraft: "草稿",
+  missionStatusRunning: "执行中",
+  missionStatusWaitingUser: "等待你答复",
+  missionStatusAwaitingAcceptance: "待验收",
+  missionStatusAccepted: "已验收",
+  missionStatusStopped: "已停止",
+  missionStatusFailed: "失败",
+  missionCriteriaShort: "验收标准",
+  missionFilterAll: "全部",
+  missionFilterActive: "执行中",
+  missionFilterWaiting: "等我处理",
+  missionFilterRisk: "风险",
+  missionFilterAcceptance: "待验收",
+  missionFilterClosed: "已结束",
+  missionNew: "新建目标",
+  missionReview: "人工验收",
+  missionFieldOutput: "输出",
+  missionFieldDiff: "变更 diff",
+  missionFieldBaseline: "基线",
+  missionFieldReproSteps: "复现步骤",
+  missionFieldCommand: "验证命令",
+  missionFieldExitCode: "退出码",
+  missionFieldStdout: "stdout",
+  missionFieldStderr: "stderr",
+  missionFieldArtifacts: "产物",
+  missionFieldVerdict: "判定",
+  missionFieldEvidence: "证据",
+  missionFieldSummary: "摘要",
+  missionFieldStatus: "状态",
+  missionAutoRetryCount: "已自动重试 %s/%s 次",
+  missionReworkReason: "返工原因",
+  missionFrozenContract: "冻结契约",
+  missionScheduleDraftOnly: "默认只创建待确认草稿；勾选自动启动将立即派发。",
+  missionTimeLabel: "每日时间 (HH:mm)",
+  missionDraftClose: "关闭草稿",
+  missionAcceptedNote: "验收说明",
+  taskTemplateLocked: "定时目标的契约与目标已冻结",
+  taskTemplateRebuild: "修改契约/目标需删除后重新创建定时任务",
+  taskTemplateDraftOnly: "默认仅生成待确认草稿",
+  missionReviewPass: "通过",
+  missionReviewFail: "不通过",
+  missionReviewUnverified: "未核对",
+  missionReviewNote: "验收说明（通过必填）",
+  missionReviewTasks: "关联任务证据",
+  missionAccept: "确认验收",
+  missionRework: "返工",
+  missionReworkNote: "返工原因（必填）",
+  missionSupplement: "补充说明",
+  missionSupplementHint: "补充已记录，当前在途执行不保证采纳；需要时停止后返工。",
+  missionEditContract: "编辑契约",
+  missionNotProvided: "未提供",
+  missionSelfReport: "成员自报",
+  missionPeerReview: "成员复核",
+  missionIsolatedCheck: "Hub 隔离检查",
+  missionExitZero: "检查进程退出码 0（不代表该标准达标）",
+  missionSnapshotStale: "快照已过期（工作区已被修改）",
+  missionDelivered: "已投递",
+  missionRecordedOnly: "仅记录",
+  missionEventLifecycle: "生命周期",
+  missionEventFlow: "编排",
+  missionEventOutput: "输出",
+  missionEventError: "错误",
+  missionEventReview: "验收",
+  missionEventRework: "返工",
+  missionEventSupplement: "补充",
+  missionEventsDetail: "技术详情",
+  missionOutput: "输出摘要",
+  decisionSection: "待处理决策",
+  decisionFrom: "来自",
+  decisionWaitingFmt: "等待 %s 分钟",
+  decisionLocate: "定位到会话",
+  decisionRedacted: "敏感内容已隐藏",
+  missionAutoRetries: "失败自动重试",
+  missionAutoRetriesHint: "额外的失败重试轮次（0-3），不包含编排引擎已有重试；默认关闭。",
+  missionAutoStart: "自动启动",
+  missionAutoStartConfirm: "自动启动将按授权范围直接派发目标，确认开启？",
+  missionSchedule: "设为定时任务",
+  missionScheduleSave: "创建定时任务",
+  missionRetry: "重试失败任务",
 };
 
 const en: Strings = {
@@ -1636,10 +1834,122 @@ const en: Strings = {
   quotaWeek: "This week",
   devinQuotaLabel: "Devin usage",
   quotaResetFmt: "Resets %s",
+  missionSection: "Task missions",
+  missionRoom: "Room",
+  missionOwner: "Owner",
+  missionOwnerAuto: "Default (conductor/first member)",
+  missionGoal: "Goal",
+  missionCriteria: "Acceptance criteria (one per line)",
+  missionScope: "Scope",
+  missionConstraints: "Constraints (one per line)",
+  missionSaveDraft: "Save draft",
+  missionStart: "Start",
+  missionStop: "Stop",
+  missionStartConfirm: "Start this mission? Review the goal, acceptance criteria and scope — it will be dispatched using the room's existing collaboration mode.",
+  missionStopConfirm: "Stop this mission? In-flight tasks will be asked to cancel; changes already made will not be rolled back.",
+  missionEmpty: "No missions in this room yet",
+  missionNoRoom: "No room available yet. Create a room before issuing a mission.",
+  missionCreateRoom: "Create room",
+  missionRiskNotice: "Task boundaries are a contract, not backend-enforced isolation; stopping does not roll back changes already made.",
+  missionViewRoom: "View progress",
+  missionHistory: "History",
+  missionAwaitingHint: "Execution finished, awaiting your manual acceptance",
+  missionStatusDraft: "Draft",
+  missionStatusRunning: "Running",
+  missionStatusWaitingUser: "Waiting for you",
+  missionStatusAwaitingAcceptance: "Awaiting acceptance",
+  missionStatusAccepted: "Accepted",
+  missionStatusStopped: "Stopped",
+  missionStatusFailed: "Failed",
+  missionCriteriaShort: "Acceptance criteria",
+  missionFilterAll: "All",
+  missionFilterActive: "Active",
+  missionFilterWaiting: "Needs me",
+  missionFilterRisk: "Risk",
+  missionFilterAcceptance: "To accept",
+  missionFilterClosed: "Closed",
+  missionNew: "New mission",
+  missionReview: "Manual review",
+  missionFieldOutput: "Output",
+  missionFieldDiff: "Diff",
+  missionFieldBaseline: "Baseline",
+  missionFieldReproSteps: "Repro steps",
+  missionFieldCommand: "Verify command",
+  missionFieldExitCode: "Exit code",
+  missionFieldStdout: "stdout",
+  missionFieldStderr: "stderr",
+  missionFieldArtifacts: "Artifacts",
+  missionFieldVerdict: "Verdict",
+  missionFieldEvidence: "Evidence",
+  missionFieldSummary: "Summary",
+  missionFieldStatus: "Status",
+  missionAutoRetryCount: "Auto-retried %s/%s times",
+  missionReworkReason: "Rework reason",
+  missionFrozenContract: "Frozen contract",
+  missionScheduleDraftOnly: "Creates a pending draft by default; enabling auto start dispatches immediately.",
+  missionTimeLabel: "Daily time (HH:mm)",
+  missionDraftClose: "Close draft",
+  missionAcceptedNote: "Acceptance note",
+  taskTemplateLocked: "Mission template contract and target are frozen",
+  taskTemplateRebuild: "To change contract/target, delete and recreate the scheduled task",
+  taskTemplateDraftOnly: "Creates a pending draft by default",
+  missionReviewPass: "Pass",
+  missionReviewFail: "Fail",
+  missionReviewUnverified: "Unverified",
+  missionReviewNote: "Review note (required to pass)",
+  missionReviewTasks: "Linked task evidence",
+  missionAccept: "Accept",
+  missionRework: "Rework",
+  missionReworkNote: "Rework reason (required)",
+  missionSupplement: "Add supplement",
+  missionSupplementHint: "Supplement recorded; in-flight execution is not guaranteed to adopt it — stop and rework if needed.",
+  missionEditContract: "Edit contract",
+  missionNotProvided: "Not provided",
+  missionSelfReport: "Self-reported",
+  missionPeerReview: "Peer-reviewed",
+  missionIsolatedCheck: "Hub isolated check",
+  missionExitZero: "Check process exited 0 (does not prove this criterion is met)",
+  missionSnapshotStale: "Snapshot stale (workspace changed since)",
+  missionDelivered: "Delivered",
+  missionRecordedOnly: "Recorded only",
+  missionEventLifecycle: "Lifecycle",
+  missionEventFlow: "Flow",
+  missionEventOutput: "Output",
+  missionEventError: "Error",
+  missionEventReview: "Review",
+  missionEventRework: "Rework",
+  missionEventSupplement: "Supplement",
+  missionEventsDetail: "Technical details",
+  missionOutput: "Output summary",
+  decisionSection: "Pending decisions",
+  decisionFrom: "From",
+  decisionWaitingFmt: "Waiting %s min",
+  decisionLocate: "Locate session",
+  decisionRedacted: "Sensitive content redacted",
+  missionAutoRetries: "Auto retry on failure",
+  missionAutoRetriesHint: "Extra failure retry rounds (0-3), on top of the orchestrator's own retries. Off by default.",
+  missionAutoStart: "Auto start",
+  missionAutoStartConfirm: "Auto start dispatches the mission with the authorized scope immediately. Enable?",
+  missionSchedule: "Schedule task",
+  missionScheduleSave: "Create schedule",
+  missionRetry: "Retry failed tasks",
 };
 
 export function stringsFor(lang: string): Strings {
   return lang === "zh" ? zh : en;
+}
+
+export function missionStatusLabel(S: Strings, status: string): string {
+  switch (status) {
+    case "draft": return S.missionStatusDraft;
+    case "running": return S.missionStatusRunning;
+    case "waiting-user": return S.missionStatusWaitingUser;
+    case "awaiting-acceptance": return S.missionStatusAwaitingAcceptance;
+    case "accepted": return S.missionStatusAccepted;
+    case "stopped": return S.missionStatusStopped;
+    case "failed": return S.missionStatusFailed;
+    default: return status;
+  }
 }
 
 export function toolStatusLabel(S: Strings, status: string): string {

@@ -487,6 +487,17 @@ export type ScheduledTask = {
   lastRunAt: number | null;
   nextRunAt: number | null;
   createdAt: number;
+  missionTemplate?: {
+    sourceMissionId: string;
+    roomId: string;
+    goal: string;
+    acceptanceCriteria: string[];
+    scope: string;
+    constraints: string[];
+    ownerSessionId: string;
+    maxAutoRetries: number;
+  };
+  missionAutoStart?: boolean;
 };
 
 export type TaskLog = {
@@ -523,4 +534,90 @@ export interface AppConfig {
   lang: string;
   sendKey?: "enter" | "ctrl-enter";
   last: { address: string; token: string } | null;
+}
+
+export type MissionStatus =
+  | "draft"
+  | "running"
+  | "waiting-user"
+  | "awaiting-acceptance"
+  | "accepted"
+  | "stopped"
+  | "failed";
+
+export interface MissionEvent {
+  id: string;
+  at: number;
+  kind: string;
+  text: string;
+}
+
+export interface MissionCriterionReview {
+  index: number;
+  verdict: "pass" | "fail" | "unverified";
+  taskIds: string[];
+  note: string;
+  source: "user";
+  at: number;
+}
+
+export interface MissionSupplement {
+  id: string;
+  at: number;
+  text: string;
+  delivered: boolean;
+}
+
+export interface MissionInfo {
+  id: string;
+  roomId: string;
+  goal: string;
+  acceptanceCriteria: string[];
+  scope: string;
+  constraints: string[];
+  ownerSessionId: string;
+  status: MissionStatus;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  flowId?: string;
+  flow?: Record<string, unknown>;
+  output?: string;
+  error?: string;
+  events: MissionEvent[];
+  reviews: MissionCriterionReview[];
+  acceptance?: { at: number; note: string };
+  supplements: MissionSupplement[];
+  parentMissionId?: string;
+  reworkReason?: string;
+  maxAutoRetries: number;
+  autoRetryCount: number;
+  revision: number;
+}
+
+export interface DecisionInfo {
+  v: number;
+  decisionId: string;
+  requestId: string;
+  type: "permission" | "elicitation";
+  title: string;
+  options: { id: string; label: string; kind?: string }[];
+  context?: Record<string, unknown>;
+  requestedBy: string;
+  sessionId: string;
+  roomId?: string;
+  status: "pending" | "answered" | "revoked" | "expired";
+  scope: string;
+  at: number;
+}
+
+export interface MissionCreateInput {
+  roomId: string;
+  goal: string;
+  acceptanceCriteria: string[];
+  scope: string;
+  constraints: string[];
+  ownerSessionId?: string;
+  maxAutoRetries?: number;
 }

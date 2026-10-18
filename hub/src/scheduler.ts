@@ -21,6 +21,17 @@ export type CronSchedule = {
 
 export type Schedule = SimpleSchedule | CronSchedule;
 
+export type MissionTemplate = {
+  sourceMissionId: string;
+  roomId: string;
+  goal: string;
+  acceptanceCriteria: string[];
+  scope: string;
+  constraints: string[];
+  ownerSessionId: string;
+  maxAutoRetries: number;
+};
+
 export type ScheduledTask = {
   id: string;
   name: string;
@@ -33,6 +44,8 @@ export type ScheduledTask = {
   lastRunAt: number | null;
   nextRunAt: number | null;
   createdAt: number;
+  missionTemplate?: MissionTemplate | undefined;
+  missionAutoStart?: boolean | undefined;
 };
 
 export type TaskLog = {

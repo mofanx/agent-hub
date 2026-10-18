@@ -643,3 +643,57 @@
 .home-recent-item.archived:hover {
   opacity: 0.85;
 }
+
+/* 目标工作单 */
+.mission-form {
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  margin-bottom: 0.5rem;
+}
+.mission-item {
+  cursor: default;
+  align-items: flex-start;
+}
+.mission-item .nav-sub {
+  white-space: normal;
+}
+.mission-status {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.mission-status-running {
+  color: var(--accent);
+}
+.mission-status-waiting-user,
+.mission-status-awaiting-acceptance {
+  color: var(--warn);
+}
+.mission-status-failed {
+  color: var(--danger);
+}
+.mission-status-accepted {
+  color: var(--success);
+}
+.mission-hint {
+  color: var(--muted);
+}
+.mission-error {
+  color: var(--danger);
+}
+.mission-empty {
+  padding: 0.4rem 0.65rem;
+  color: var(--muted);
+}
+
+.mission-filters { display: flex; flex-wrap: wrap; gap: 2px; }
+.mission-actions { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.mission-ev-field { display: block; overflow-wrap: anywhere; }
+.mission-ev-pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow-y: auto; margin: 2px 0; font-size: 11px; }
+.mission-ev-detail { margin-left: 8px; }
+.mission-review { display: flex; flex-direction: column; gap: 4px; }
+.mission-review-edit { display: flex; flex-direction: column; gap: 4px; }
+.permission-options { display: flex; flex-wrap: wrap; gap: 4px; }

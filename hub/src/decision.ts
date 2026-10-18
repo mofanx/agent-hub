@@ -295,6 +295,14 @@ export class DecisionCenter {
     return this.byId.get(decisionId);
   }
 
+  /** 当前待处理决策（仅活跃 pending；重启后请求已消失的不在此列，由 sweep 收敛） */
+  listPending(): DecisionMeta[] {
+    return [...this.byId.values()]
+      .filter((t) => t.meta.status === "pending")
+      .sort((a, b) => a.meta.at - b.meta.at)
+      .map((t) => JSON.parse(JSON.stringify(t.meta)) as DecisionMeta);
+  }
+
   getByRequest(requestId: string): Tracked | undefined {
     const id = this.byRequest.get(requestId);
     return id ? this.byId.get(id) : undefined;

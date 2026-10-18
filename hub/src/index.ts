@@ -51,6 +51,8 @@ import { DecisionCenter, sweepPendingDecisions, inferOptionScope, isRejectOption
 import { RelevanceFilter } from "./filter.js";
 import { presenceEvents, type PresenceStatus } from "./presence.js";
 import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
+import { MissionManager } from "./mission.js";
+import { missionTemplateFrom, runMissionTask } from "./mission-schedule.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -571,15 +573,48 @@ const roomModeManager = new RoomModeManager(
   parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS),
 );
 roomModeManager.setStore(store);
+
+const missionManager = new MissionManager({
+  store,
+  getRoom: (roomId) => rooms.get(roomId),
+  getFlow: (roomId) => roomModeManager.getFlow(roomId),
+  hasActiveFlow: (roomId) => roomModeManager.hasActiveFlow(roomId),
+  isBusy: (sessionId) => agentOps.isBusy(sessionId),
+  isAvailable: (sessionId) =>
+    agentForSession(sessionId)?.listSessions().some((s) => s.sessionId === sessionId) ?? false,
+  roomIdForTurn: (sessionId) => roomModeManager.roomIdForTurn(sessionId),
+  dispatch: async (room, text, options) => {
+    if (options?.note) {
+      store.append("room", room.roomId, {
+        at: Date.now(),
+        kind: "user",
+        author: "我",
+        text,
+      });
+    }
+    return roomModeManager.handle(room, text, options);
+  },
+  cancelActive: (roomId, reason) => roomModeManager.cancelActive(roomId, reason),
+  cancel: (sessionId) => agentOps.cancel(sessionId),
+  retryFailedTasks: (roomId, taskIds) => roomModeManager.retryFailedTasks(roomId, taskIds),
+  supplementActive: (room, text) => roomModeManager.supplementActive(room, text),
+  broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+});
+missionManager.beginRestore();
+
 // 编排卡：flowUpdate 离散点同步房史 kind:"flow" 条目（append → hash 脏检查覆写 → 终态定稿），
 // 广播复用 room.process 信封，客户端按 historyId/flowId 配对原位更新
-roomModeManager.onFlowCard = makeFlowCardSync({
+const baseFlowCardSync = makeFlowCardSync({
   store,
   rooms,
   broadcast: (method, params) => broadcast({ method, params } as HubEvent),
   cardRowId: (roomId) => roomModeManager.flowCardRowId(roomId),
   setCardRowId: (roomId, rowId) => roomModeManager.setFlowCardRowId(roomId, rowId),
 });
+roomModeManager.onFlowCard = (roomId, flow) => {
+  baseFlowCardSync(roomId, flow);
+  missionManager.syncFlow(roomId, flow);
+};
 
 // 决策卡中心：permission/elicitation 统一为 kind:"decision" 房史条目 + 原位更新广播 + 审计
 const decisionCenter = new DecisionCenter({
@@ -638,6 +673,7 @@ restoreRuntime
       store,
       broadcast: (method, params) => broadcast({ method, params } as HubEvent),
     });
+    missionManager.reconcile();
     persistState();
   })
   .catch((err) => logError("import runtime", err));
@@ -647,6 +683,20 @@ const scheduler = new Scheduler(
   () => scheduler.persistTo(store),
   (tasks) => broadcast({ method: "task.update", params: { tasks } } as HubEvent),
   async (task) => {
+    if (task.missionTemplate) {
+      await runMissionTask(task, {
+        getRoom: (id) => rooms.get(id),
+        hasActiveFlow: (id) => roomModeManager.hasActiveFlow(id),
+        isMemberBusy: (sid) => agentOps.isBusy(sid),
+        isAvailable: (sid) =>
+          agentForSession(sid)?.listSessions().some((x) => x.sessionId === sid) === true,
+        activeMissions: (id) => missionManager.list(id),
+        createMission: (input) => missionManager.create(input),
+        startMission: (id) => missionManager.start(id),
+      });
+      persistState();
+      return;
+    }
     if (task.targetType === "room") {
       const room = rooms.get(task.targetId);
       if (!room) throw new Error(`unknown room: ${task.targetId}`);
@@ -1052,7 +1102,8 @@ function onAgentEvent(event: HubEvent): void {
     }
     void roomModeManager
       .onPromptDone(sessionId!, internalOutput)
-      .then((handled) => {
+      .then(() => {
+        missionManager.onTurnDone(sessionId!, turnRoomId, internalOutput);
         persistState();
       })
       .catch((err) => {
@@ -1080,6 +1131,7 @@ function onAgentEvent(event: HubEvent): void {
         });
       }
       roomModeManager.onPromptError(sessionId);
+      missionManager.onTurnError(sessionId, errorRoomId, message);
       persistState();
     }
   } else if (event.method === "room.notice") {
@@ -2048,6 +2100,97 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       persistState();
       return { retried };
     }
+    case "mission.create": {
+      const mission = missionManager.create({
+        roomId: req.params?.roomId,
+        goal: req.params?.goal,
+        acceptanceCriteria: req.params?.acceptanceCriteria,
+        scope: req.params?.scope,
+        constraints: req.params?.constraints,
+        ownerSessionId: req.params?.ownerSessionId,
+        maxAutoRetries: req.params?.maxAutoRetries,
+      });
+      persistState();
+      return { mission };
+    }
+    case "mission.list": {
+      const roomId =
+        typeof req.params?.roomId === "string" && req.params.roomId.trim()
+          ? req.params.roomId.trim()
+          : undefined;
+      return { missions: missionManager.list(roomId) };
+    }
+    case "mission.get": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = missionManager.get(id);
+      if (!mission) throw new Error(`unknown mission: ${id}`);
+      return { mission };
+    }
+    case "mission.start": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = await missionManager.start(id);
+      persistState();
+      return { mission };
+    }
+    case "mission.stop": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const reason =
+        typeof req.params?.reason === "string" ? req.params.reason : undefined;
+      const mission = await missionManager.stop(id, reason);
+      persistState();
+      return { mission };
+    }
+    case "mission.review": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = missionManager.review(id, {
+        index: req.params?.index,
+        verdict: req.params?.verdict,
+        taskIds: req.params?.taskIds,
+        note: req.params?.note,
+      });
+      persistState();
+      return { mission };
+    }
+    case "mission.accept": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = missionManager.accept(id, req.params?.note);
+      persistState();
+      return { mission };
+    }
+    case "mission.rework": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = missionManager.rework(id, req.params?.note);
+      persistState();
+      return { mission };
+    }
+    case "mission.updateContract": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = missionManager.updateContract(id, {
+        goal: req.params?.goal,
+        acceptanceCriteria: req.params?.acceptanceCriteria,
+        scope: req.params?.scope,
+        constraints: req.params?.constraints,
+        ownerSessionId: req.params?.ownerSessionId,
+        maxAutoRetries: req.params?.maxAutoRetries,
+      });
+      persistState();
+      return { mission };
+    }
+    case "mission.supplement": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = await missionManager.supplement(id, req.params?.text);
+      persistState();
+      return { mission };
+    }
+    case "decision.list": {
+      return { decisions: decisionCenter.listPending() };
+    }
+    case "mission.retry": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const mission = missionManager.retry(id);
+      persistState();
+      return { mission };
+    }
     case "session.artifacts": {
       const sessionId = String(req.params?.sessionId ?? "");
       if (!sessionId) throw new Error("sessionId required");
@@ -2631,25 +2774,56 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const targetType = req.params?.targetType === "room" ? "room" : "session";
       const targetId = String(req.params?.targetId ?? "");
       const targetName = String(req.params?.targetName ?? "");
-      const message = String(req.params?.message ?? "");
       const schedule = req.params?.schedule as ScheduledTask["schedule"];
       const enabled = req.params?.enabled !== false;
-      if (!name || !targetId || !message || !schedule)
-        throw new Error("name, targetId, message, schedule required");
-      const task = scheduler.create({ name, targetType, targetId, targetName, message, schedule, enabled });
+      if (!name || !targetId || !schedule)
+        throw new Error("name, targetId, schedule required");
+      const missionId = req.params?.missionId;
+      let message = String(req.params?.message ?? "");
+      let missionTemplate: import("./scheduler.js").MissionTemplate | undefined;
+      let missionAutoStart = false;
+      if (missionId !== undefined && missionId !== null) {
+        if (targetType !== "room") throw new Error("mission schedule requires room target");
+        const m = missionManager.get(String(missionId));
+        if (!m) throw new Error(`unknown mission: ${String(missionId)}`);
+        missionTemplate = missionTemplateFrom(m, targetType, targetId);
+        missionAutoStart = req.params?.missionAutoStart === true;
+        if (!message) message = `定时生成待确认目标：${m.goal.slice(0, 80)}`;
+      }
+      if (!message) throw new Error("message required");
+      const task = scheduler.create({
+        name, targetType, targetId, targetName, message, schedule, enabled,
+        ...(missionTemplate ? { missionTemplate, missionAutoStart } : {}),
+      });
       return { task };
     }
     case "task.update": {
       const id = String(req.params?.id ?? "");
+      if (req.params?.missionTemplate !== undefined || req.params?.missionId !== undefined)
+        throw new Error("mission template cannot be changed; recreate the task");
+      const existing = scheduler.list().find((t) => t.id === id);
+      if (!existing) throw new Error(`unknown task: ${id}`);
       const patch: Partial<Omit<ScheduledTask, "id" | "createdAt">> = {};
       if (typeof req.params?.name === "string") patch.name = req.params.name;
       if (req.params?.targetType === "room" || req.params?.targetType === "session")
         patch.targetType = req.params.targetType;
       if (typeof req.params?.targetId === "string") patch.targetId = req.params.targetId;
+      if (existing.missionTemplate) {
+        if (patch.targetType !== undefined && patch.targetType !== existing.targetType)
+          throw new Error("mission template target is frozen; recreate the task");
+        if (patch.targetId !== undefined && patch.targetId !== existing.targetId)
+          throw new Error("mission template target is frozen; recreate the task");
+        if (typeof req.params?.message === "string" && req.params.message !== existing.message)
+          throw new Error("mission template message is frozen; recreate the task");
+      }
+      if (!existing.missionTemplate && req.params?.missionAutoStart !== undefined)
+        throw new Error("missionAutoStart requires a mission template");
       if (typeof req.params?.targetName === "string") patch.targetName = req.params.targetName;
       if (typeof req.params?.message === "string") patch.message = req.params.message;
       if (req.params?.schedule) patch.schedule = req.params.schedule as ScheduledTask["schedule"];
       if (typeof req.params?.enabled === "boolean") patch.enabled = req.params.enabled;
+      if (req.params?.missionAutoStart !== undefined)
+        patch.missionAutoStart = req.params.missionAutoStart === true;
       const task = scheduler.update(id, patch);
       if (!task) throw new Error(`unknown task: ${id}`);
       return { task };

@@ -5,6 +5,7 @@ import { stringsFor, type Strings } from "../hub/strings";
 import { modeLabel, truncatePath } from "./session-shared";
 import { SessionDialog } from "./dialogs/SessionDialog";
 import { RoomDialog } from "./dialogs/RoomDialog";
+import { MissionPanel } from "./MissionPanel";
 
 function greeting(S: Strings): string {
   const h = new Date().getHours();
@@ -128,6 +129,8 @@ export function HomeScreen() {
             </div>
           </>
         )}
+
+        <MissionPanel onCreateRoom={() => setDialog("room")} />
 
         {archivedItems.length > 0 && (
           <>

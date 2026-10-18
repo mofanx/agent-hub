@@ -359,3 +359,37 @@ describe("permissionKeyOf/permissionTitleOf", () => {
     assert.equal(permissionTitleOf({}), "permission");
   });
 });
+
+describe("listPending", () => {
+  it("仅返回活跃 pending，按 at 排序，深拷贝", () => {
+    const store = tmpStore();
+    try {
+      const broadcasts: unknown[] = [];
+      const dc = new DecisionCenter({
+        store,
+        broadcast: (m, p) => broadcasts.push({ method: m, params: p }),
+      });
+      dc.open(
+        { requestId: "r2", sessionId: "s1", type: "permission", title: "T2", options: [{ id: "allow", label: "Allow" }] },
+        { scope: "session", scopeId: "s1", requestedBy: "a" },
+      );
+      dc.open(
+        { requestId: "r1", sessionId: "s1", type: "permission", title: "T1", options: [{ id: "allow", label: "Allow" }] },
+        { scope: "room", scopeId: "room1", requestedBy: "b" },
+      );
+      const list = dc.listPending();
+      assert.equal(list.length, 2);
+      assert.ok(list[0]!.at <= list[1]!.at);
+      (list[0] as Record<string, unknown>).title = "mutated";
+      assert.notEqual(dc.listPending()[0]!.title, "mutated", "深拷贝隔离");
+      dc.resolveByRequest("r1", "answered", { optionId: "allow" });
+      const after = dc.listPending();
+      assert.equal(after.length, 1);
+      assert.equal(after[0]!.requestId, "r2");
+      dc.resolveByRequest("r2", "expired");
+      assert.equal(dc.listPending().length, 0);
+    } finally {
+      store.close();
+    }
+  });
+});

@@ -501,6 +501,104 @@ interface Strings {
     val statusSection: String
     val filterAllHint: String
     val resetLabel: String
+    val missionSection: String
+    val missionRoom: String
+    val missionOwner: String
+    val missionOwnerAuto: String
+    val missionGoal: String
+    val missionCriteria: String
+    val missionScope: String
+    val missionConstraints: String
+    val missionSaveDraft: String
+    val missionStart: String
+    val missionStop: String
+    val missionStartConfirm: String
+    val missionStopConfirm: String
+    val missionEmpty: String
+    val missionNoRoom: String
+    val missionCreateRoom: String
+    val missionRiskNotice: String
+    val missionViewRoom: String
+    val missionHistory: String
+    val missionAwaitingHint: String
+    val missionStatusDraft: String
+    val missionStatusRunning: String
+    val missionStatusWaitingUser: String
+    val missionStatusAwaitingAcceptance: String
+    val missionStatusAccepted: String
+    val missionStatusStopped: String
+    val missionStatusFailed: String
+    val missionCriteriaShort: String
+    val missionFilterAll: String
+    val missionFilterActive: String
+    val missionFilterWaiting: String
+    val missionFilterRisk: String
+    val missionFilterAcceptance: String
+    val missionFilterClosed: String
+    val missionNew: String
+    val missionReview: String
+    val missionReviewPass: String
+    val missionReviewFail: String
+    val missionReviewUnverified: String
+    val missionReviewNote: String
+    val missionReviewTasks: String
+    val missionAccept: String
+    val missionRework: String
+    val missionReworkNote: String
+    val missionSupplement: String
+    val missionSupplementHint: String
+    val missionEditContract: String
+    val missionAutoRetries: String
+    val missionAutoRetriesHint: String
+    val missionRetry: String
+    val missionAutoRetryCount: String
+    val missionReworkReason: String
+    val missionSchedule: String
+    val missionScheduleSave: String
+    val missionAutoStart: String
+    val missionAutoStartConfirm: String
+    val missionFrozenContract: String
+    val missionFieldOutput: String
+    val missionFieldDiff: String
+    val missionFieldBaseline: String
+    val missionFieldReproSteps: String
+    val missionFieldCommand: String
+    val missionFieldExitCode: String
+    val missionFieldStdout: String
+    val missionFieldStderr: String
+    val missionFieldArtifacts: String
+    val missionFieldVerdict: String
+    val missionFieldEvidence: String
+    val missionFieldSummary: String
+    val missionFieldStatus: String
+    val missionScheduleDraftOnly: String
+    val missionTimeLabel: String
+    val missionDraftClose: String
+    val missionAcceptedNote: String
+    val taskTemplateLocked: String
+    val taskTemplateRebuild: String
+    val missionNotProvided: String
+    val missionSelfReport: String
+    val missionPeerReview: String
+    val missionIsolatedCheck: String
+    val missionExitZero: String
+    val missionSnapshotStale: String
+    val missionDelivered: String
+    val missionRecordedOnly: String
+    val missionEventsDetail: String
+    val missionEventLifecycle: String
+    val missionEventFlow: String
+    val missionEventOutput: String
+    val missionEventError: String
+    val missionEventReview: String
+    val missionEventRework: String
+    val missionEventSupplement: String
+    val missionOutput: String
+    val decisionSection: String
+    val decisionFrom: String
+    val decisionWaitingFmt: String
+    val decisionLocate: String
+    val decisionRedacted: String
 }
 
 object ZhStrings : Strings {
@@ -1010,6 +1108,104 @@ object ZhStrings : Strings {
     override val statusSection = "状态"
     override val filterAllHint = "未选择时显示全部"
     override val resetLabel = "重置"
+    override val missionSection = "目标工作单"
+    override val missionRoom = "房间"
+    override val missionOwner = "负责人"
+    override val missionOwnerAuto = "默认（指挥家/首成员）"
+    override val missionGoal = "目标"
+    override val missionCriteria = "验收标准（每行一条）"
+    override val missionScope = "范围"
+    override val missionConstraints = "禁止事项（每行一条）"
+    override val missionSaveDraft = "保存草稿"
+    override val missionStart = "启动"
+    override val missionStop = "停止"
+    override val missionStartConfirm = "确认启动该目标工作单？请核对目标、验收标准与范围，启动后将按房间现有协作模式派发执行。"
+    override val missionStopConfirm = "确认停止该目标？将请求取消进行中的任务，已发生的修改不会回滚。"
+    override val missionEmpty = "该房间暂无目标工作单"
+    override val missionNoRoom = "还没有可用的房间，先创建一个群聊再下发目标。"
+    override val missionCreateRoom = "新建房间"
+    override val missionRiskNotice = "任务边界仅为约定，不等于后端强制隔离；停止不回滚已发生的修改。"
+    override val missionViewRoom = "查看过程"
+    override val missionHistory = "历史"
+    override val missionAwaitingHint = "执行已结束，等待你人工验收"
+    override val missionStatusDraft = "草稿"
+    override val missionStatusRunning = "执行中"
+    override val missionStatusWaitingUser = "等待你答复"
+    override val missionStatusAwaitingAcceptance = "待验收"
+    override val missionStatusAccepted = "已验收"
+    override val missionStatusStopped = "已停止"
+    override val missionStatusFailed = "失败"
+    override val missionCriteriaShort = "验收标准"
+    override val missionFilterAll = "全部"
+    override val missionFilterActive = "执行中"
+    override val missionFilterWaiting = "等我处理"
+    override val missionFilterRisk = "风险"
+    override val missionFilterAcceptance = "待验收"
+    override val missionFilterClosed = "已结束"
+    override val missionNew = "新建目标"
+    override val missionReview = "人工验收"
+    override val missionReviewPass = "通过"
+    override val missionReviewFail = "不通过"
+    override val missionReviewUnverified = "未核对"
+    override val missionReviewNote = "验收说明（通过必填）"
+    override val missionReviewTasks = "关联任务证据"
+    override val missionAccept = "确认验收"
+    override val missionRework = "返工"
+    override val missionReworkNote = "返工原因（必填）"
+    override val missionSupplement = "补充说明"
+    override val missionSupplementHint = "补充已记录，当前在途执行不保证采纳；需要时停止后返工。"
+    override val missionEditContract = "编辑契约"
+    override val missionAutoRetries = "失败自动重试"
+    override val missionAutoRetriesHint = "额外的失败重试轮次（0-3），不包含编排引擎已有重试；默认关闭。"
+    override val missionRetry = "重试失败任务"
+    override val missionAutoRetryCount = "已自动重试 %s/%s 次"
+    override val missionReworkReason = "返工原因"
+    override val missionSchedule = "设为定时任务"
+    override val missionScheduleSave = "创建定时任务"
+    override val missionAutoStart = "自动启动"
+    override val missionAutoStartConfirm = "自动启动将按授权范围直接派发目标，确认开启？"
+    override val missionFrozenContract = "冻结契约"
+    override val missionFieldOutput = "输出"
+    override val missionFieldDiff = "变更 diff"
+    override val missionFieldBaseline = "基线"
+    override val missionFieldReproSteps = "复现步骤"
+    override val missionFieldCommand = "验证命令"
+    override val missionFieldExitCode = "退出码"
+    override val missionFieldStdout = "stdout"
+    override val missionFieldStderr = "stderr"
+    override val missionFieldArtifacts = "产物"
+    override val missionFieldVerdict = "判定"
+    override val missionFieldEvidence = "证据"
+    override val missionFieldSummary = "摘要"
+    override val missionFieldStatus = "状态"
+    override val missionScheduleDraftOnly = "默认只创建待确认草稿；勾选自动启动将立即派发。"
+    override val missionTimeLabel = "每日时间 (HH:mm)"
+    override val missionDraftClose = "关闭草稿"
+    override val missionAcceptedNote = "验收说明"
+    override val taskTemplateLocked = "定时目标的契约与目标已冻结"
+    override val taskTemplateRebuild = "修改契约/目标需删除后重新创建定时任务"
+    override val missionNotProvided = "未提供"
+    override val missionSelfReport = "成员自报"
+    override val missionPeerReview = "成员复核"
+    override val missionIsolatedCheck = "Hub 隔离检查"
+    override val missionExitZero = "检查进程退出码 0（不代表该标准达标）"
+    override val missionSnapshotStale = "快照已过期（工作区已被修改）"
+    override val missionDelivered = "已投递"
+    override val missionRecordedOnly = "仅记录"
+    override val missionEventsDetail = "技术详情"
+    override val missionEventLifecycle = "生命周期"
+    override val missionEventFlow = "编排"
+    override val missionEventOutput = "输出"
+    override val missionEventError = "错误"
+    override val missionEventReview = "验收"
+    override val missionEventRework = "返工"
+    override val missionEventSupplement = "补充"
+    override val missionOutput = "输出摘要"
+    override val decisionSection = "待处理决策"
+    override val decisionFrom = "来自"
+    override val decisionWaitingFmt = "等待 %s 分钟"
+    override val decisionLocate = "定位到会话"
+    override val decisionRedacted = "敏感内容已隐藏"
 }
 
 object EnStrings : Strings {
@@ -1519,6 +1715,104 @@ object EnStrings : Strings {
     override val statusSection = "Status"
     override val filterAllHint = "All shown when nothing selected"
     override val resetLabel = "Reset"
+    override val missionSection = "Task missions"
+    override val missionRoom = "Room"
+    override val missionOwner = "Owner"
+    override val missionOwnerAuto = "Default (conductor/first member)"
+    override val missionGoal = "Goal"
+    override val missionCriteria = "Acceptance criteria (one per line)"
+    override val missionScope = "Scope"
+    override val missionConstraints = "Constraints (one per line)"
+    override val missionSaveDraft = "Save draft"
+    override val missionStart = "Start"
+    override val missionStop = "Stop"
+    override val missionStartConfirm = "Start this mission? Review the goal, acceptance criteria and scope — it will be dispatched using the room's existing collaboration mode."
+    override val missionStopConfirm = "Stop this mission? In-flight tasks will be asked to cancel; changes already made will not be rolled back."
+    override val missionEmpty = "No missions in this room yet"
+    override val missionNoRoom = "No room available yet. Create a room before issuing a mission."
+    override val missionCreateRoom = "Create room"
+    override val missionRiskNotice = "Task boundaries are a contract, not backend-enforced isolation; stopping does not roll back changes already made."
+    override val missionViewRoom = "View progress"
+    override val missionHistory = "History"
+    override val missionAwaitingHint = "Execution finished, awaiting your manual acceptance"
+    override val missionStatusDraft = "Draft"
+    override val missionStatusRunning = "Running"
+    override val missionStatusWaitingUser = "Waiting for you"
+    override val missionStatusAwaitingAcceptance = "Awaiting acceptance"
+    override val missionStatusAccepted = "Accepted"
+    override val missionStatusStopped = "Stopped"
+    override val missionStatusFailed = "Failed"
+    override val missionCriteriaShort = "Acceptance criteria"
+    override val missionFilterAll = "All"
+    override val missionFilterActive = "Active"
+    override val missionFilterWaiting = "Needs me"
+    override val missionFilterRisk = "Risk"
+    override val missionFilterAcceptance = "To accept"
+    override val missionFilterClosed = "Closed"
+    override val missionNew = "New mission"
+    override val missionReview = "Manual review"
+    override val missionReviewPass = "Pass"
+    override val missionReviewFail = "Fail"
+    override val missionReviewUnverified = "Unverified"
+    override val missionReviewNote = "Review note (required to pass)"
+    override val missionReviewTasks = "Linked task evidence"
+    override val missionAccept = "Accept"
+    override val missionRework = "Rework"
+    override val missionReworkNote = "Rework reason (required)"
+    override val missionSupplement = "Add supplement"
+    override val missionSupplementHint = "Supplement recorded; in-flight execution is not guaranteed to adopt it — stop and rework if needed."
+    override val missionEditContract = "Edit contract"
+    override val missionAutoRetries = "Auto retry on failure"
+    override val missionAutoRetriesHint = "Extra failure retry rounds (0-3), on top of the orchestrator's own retries. Off by default."
+    override val missionRetry = "Retry failed tasks"
+    override val missionAutoRetryCount = "Auto-retried %s/%s times"
+    override val missionReworkReason = "Rework reason"
+    override val missionSchedule = "Schedule task"
+    override val missionScheduleSave = "Create schedule"
+    override val missionAutoStart = "Auto start"
+    override val missionAutoStartConfirm = "Auto start dispatches the mission with the authorized scope immediately. Enable?"
+    override val missionFrozenContract = "Frozen contract"
+    override val missionFieldOutput = "Output"
+    override val missionFieldDiff = "Diff"
+    override val missionFieldBaseline = "Baseline"
+    override val missionFieldReproSteps = "Repro steps"
+    override val missionFieldCommand = "Verify command"
+    override val missionFieldExitCode = "Exit code"
+    override val missionFieldStdout = "stdout"
+    override val missionFieldStderr = "stderr"
+    override val missionFieldArtifacts = "Artifacts"
+    override val missionFieldVerdict = "Verdict"
+    override val missionFieldEvidence = "Evidence"
+    override val missionFieldSummary = "Summary"
+    override val missionFieldStatus = "Status"
+    override val missionScheduleDraftOnly = "Creates a pending draft by default; enabling auto start dispatches immediately."
+    override val missionTimeLabel = "Daily time (HH:mm)"
+    override val missionDraftClose = "Close draft"
+    override val missionAcceptedNote = "Acceptance note"
+    override val taskTemplateLocked = "Mission template contract and target are frozen"
+    override val taskTemplateRebuild = "To change contract/target, delete and recreate the scheduled task"
+    override val missionNotProvided = "Not provided"
+    override val missionSelfReport = "Self-reported"
+    override val missionPeerReview = "Peer-reviewed"
+    override val missionIsolatedCheck = "Hub isolated check"
+    override val missionExitZero = "Check process exited 0 (does not prove the criterion is met)"
+    override val missionSnapshotStale = "Snapshot stale (workspace changed since)"
+    override val missionDelivered = "Delivered"
+    override val missionRecordedOnly = "Recorded only"
+    override val missionEventsDetail = "Technical details"
+    override val missionEventLifecycle = "Lifecycle"
+    override val missionEventFlow = "Flow"
+    override val missionEventOutput = "Output"
+    override val missionEventError = "Error"
+    override val missionEventReview = "Review"
+    override val missionEventRework = "Rework"
+    override val missionEventSupplement = "Supplement"
+    override val missionOutput = "Output summary"
+    override val decisionSection = "Pending decisions"
+    override val decisionFrom = "From"
+    override val decisionWaitingFmt = "Waiting %s min"
+    override val decisionLocate = "Locate session"
+    override val decisionRedacted = "Sensitive content redacted"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }
@@ -1534,7 +1828,29 @@ fun toolStatusLabel(S: Strings, status: String): String = when (status) {
     else -> status
 }
 
+fun missionStatusLabel(S: Strings, status: String): String = when (status) {
+    "draft" -> S.missionStatusDraft
+    "running" -> S.missionStatusRunning
+    "waiting-user" -> S.missionStatusWaitingUser
+    "awaiting-acceptance" -> S.missionStatusAwaitingAcceptance
+    "accepted" -> S.missionStatusAccepted
+    "stopped" -> S.missionStatusStopped
+    "failed" -> S.missionStatusFailed
+    else -> status
+}
+
 private val PLAN_STATUS_RE = Regex("^\\[(pending|in_progress|completed|failed|cancelled)\\]\\s*")
 
 fun planEntryLabel(S: Strings, entry: String): String =
     PLAN_STATUS_RE.replace(entry) { "[${toolStatusLabel(S, it.groupValues[1])}] " }
+
+fun missionEventLabel(S: Strings, kind: String): String = when (kind) {
+    "lifecycle" -> S.missionEventLifecycle
+    "flow" -> S.missionEventFlow
+    "output" -> S.missionEventOutput
+    "error" -> S.missionEventError
+    "review" -> S.missionEventReview
+    "rework" -> S.missionEventRework
+    "supplement" -> S.missionEventSupplement
+    else -> kind
+}

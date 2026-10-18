@@ -823,6 +823,20 @@ export class RoomModeManager {
     return undefined;
   }
 
+  /**
+   * 仅把补充并入当前活跃编排（clarification/user-help/supplements/extras/决策上下文），
+   * 不触发 cancel/restart；无吸收路径（含 awaiting-retry）返回 false。
+   */
+  supplementActive(room: Room, text: string): boolean {
+    if (!this.hasActiveFlow(room.roomId)) return false;
+    const flow = this.getFlow(room.roomId);
+    if (flow?.phase === "awaiting-retry") return false;
+    const absorbed = this.absorbActiveMessage(room, text, {});
+    if (absorbed === undefined) return false;
+    this.emitFlowUpdate(room.roomId);
+    return true;
+  }
+
   /** 处理一条新的房间消息 */
   async handle(
     room: Room,

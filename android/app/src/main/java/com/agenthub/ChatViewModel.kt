@@ -354,6 +354,70 @@ data class FlowArtifact(
     val summary: String = "",
 )
 
+data class MissionEvent(
+    val id: String,
+    val at: Long,
+    val kind: String,
+    val text: String,
+)
+
+data class MissionReview(
+    val index: Int,
+    val verdict: String,
+    val taskIds: List<String>,
+    val note: String,
+    val source: String = "user",
+    val at: Long = 0,
+)
+
+data class MissionSupplement(
+    val id: String,
+    val at: Long,
+    val text: String,
+    val delivered: Boolean,
+)
+
+data class Mission(
+    val id: String,
+    val roomId: String,
+    val goal: String,
+    val acceptanceCriteria: List<String>,
+    val scope: String,
+    val constraints: List<String>,
+    val ownerSessionId: String,
+    val status: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val startedAt: Long? = null,
+    val finishedAt: Long? = null,
+    val flowId: String? = null,
+    val flow: JsonObject? = null,
+    val output: String? = null,
+    val error: String? = null,
+    val events: List<MissionEvent> = emptyList(),
+    val reviews: List<MissionReview> = emptyList(),
+    val acceptanceNote: String? = null,
+    val supplements: List<MissionSupplement> = emptyList(),
+    val parentMissionId: String? = null,
+    val reworkReason: String? = null,
+    val maxAutoRetries: Int = 0,
+    val autoRetryCount: Int = 0,
+    val revision: Int = 0,
+)
+
+data class PendingDecision(
+    val decisionId: String,
+    val requestId: String,
+    val type: String,
+    val title: String,
+    val options: List<Pair<String, String>>,
+    val contextSummary: String,
+    val requestedBy: String,
+    val sessionId: String,
+    val roomId: String?,
+    val at: Long,
+)
+
 data class FlowVerification(
     val by: String,
     val verdict: String,
@@ -398,6 +462,8 @@ data class ScheduledTask(
     val lastRunAt: Long? = null,
     val nextRunAt: Long? = null,
     val createdAt: Long = 0,
+    val missionTemplate: JsonObject? = null,
+    val missionAutoStart: Boolean = false,
 )
 
 data class TaskLog(
@@ -740,6 +806,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val hubAgentTypes = mutableStateListOf<String>()
     val scheduledTasks = mutableStateListOf<ScheduledTask>()
     val taskLogs = mutableStateListOf<TaskLog>()
+    val missions = mutableStateListOf<Mission>()
+    /** hub 是否支持 mission.* API；探测失败（unknown method）保持 false 隐藏入口 */
+    var missionSupported by mutableStateOf(false)
+    var missionChecked by mutableStateOf(false)
+    var missionLoading by mutableStateOf(false)
+    var missionError by mutableStateOf<String?>(null)
+    private var missionConnectionGeneration = 0
+    private var missionListSeq = 0
+    private var missionEventRev = 0
+    private var decisionListSeq = 0
+    private var decisionEventRev = 0
+    val pendingDecisions = mutableStateListOf<PendingDecision>()
+    var decisionLoading by mutableStateOf(false)
     var scheduleReturnScreen by mutableStateOf(Screen.Sessions)
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
@@ -1629,7 +1708,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         eventJob = viewModelScope.launch {
-            hub.events.collect { handleEvent(it) }
+            val gen = missionConnectionGeneration
+            hub.events.collect { if (gen != missionConnectionGeneration) return@collect; handleEvent(it) }
         }
     }
 
@@ -1665,6 +1745,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         connectError = null
         agentStatus = "offline"
         currentProfile = null
+        missions.clear()
+        missionSupported = false
+        missionChecked = false
+        missionLoading = false
+        missionError = null
+        missionConnectionGeneration++
+        missionListSeq++
+        decisionListSeq++
+        pendingDecisions.clear()
+        decisionLoading = false
         screen = Screen.Sessions
     }
 
@@ -1783,6 +1873,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         },
         async {
+            syncRefreshMissions()
+        },
+        async {
             try {
                 val result = hub.call("agent.info")
                 val list = result["agents"]?.jsonArray ?: JsonArray(emptyList())
@@ -1793,6 +1886,432 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         },
         )
         jobs.awaitAll()
+        refreshDecisions()
+    }
+
+    private suspend fun syncRefreshMissions(retry: Boolean = true) {
+        if (missionChecked && !missionSupported) return
+        val gen = missionConnectionGeneration
+        val seq = ++missionListSeq
+        val rev = missionEventRev
+        missionLoading = true
+        try {
+            val result = hub.call("mission.list")
+            if (gen != missionConnectionGeneration || seq != missionListSeq) return
+            if (rev != missionEventRev) {
+                if (retry) viewModelScope.launch { syncRefreshMissions(false) }
+                return
+            }
+            val list = result["missions"]?.jsonArray
+            if (list != null) {
+                val fresh = list.map { parseMission(it.jsonObject) }
+                val byId = fresh.associateBy { it.id }.toMutableMap()
+                for (old in missions) {
+                    val f = byId[old.id]
+                    if (f != null && old.revision > f.revision) byId[old.id] = old
+                }
+                missions.clear()
+                missions.addAll(byId.values)
+                missionSupported = true
+                missionChecked = true
+                missionError = null
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (gen != missionConnectionGeneration || seq != missionListSeq || rev != missionEventRev) return
+            if (e.message?.contains("unknown method") == true || e.message?.contains("-32601") == true) {
+                missions.clear()
+                missionSupported = false
+                missionChecked = true
+                missionError = null
+            } else {
+                missionError = e.message ?: e.toString()
+            }
+        } finally {
+            if (gen == missionConnectionGeneration && seq == missionListSeq) missionLoading = false
+        }
+    }
+
+    fun refreshDecisions(retry: Boolean = true) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            val seq = ++decisionListSeq
+            val rev = decisionEventRev
+            decisionLoading = true
+            try {
+                val result = hub.call("decision.list")
+                if (gen != missionConnectionGeneration || seq != decisionListSeq) return@launch
+                if (rev != decisionEventRev) { if (retry) refreshDecisions(false); return@launch }
+                val list = result["decisions"]?.jsonArray ?: JsonArray(emptyList())
+                pendingDecisions.clear()
+                for (d in list) pendingDecisions.add(parseDecision(d.jsonObject))
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (gen == missionConnectionGeneration && seq == decisionListSeq && rev == decisionEventRev) {
+                    if (e.message?.contains("unknown method") == true || e.message?.contains("-32601") == true) {
+                        pendingDecisions.clear()
+                    } else {
+                        missionError = e.message ?: e.toString()
+                    }
+                }
+            } finally {
+                if (gen == missionConnectionGeneration && seq == decisionListSeq) decisionLoading = false
+            }
+        }
+    }
+
+    private fun parseDecision(o: JsonObject): PendingDecision {
+        val ctx = o["context"] as? JsonObject
+        val summary = if (ctx?.get("redacted")?.jsonPrimitive?.content == "true") "redacted"
+        else listOf("command", "path", "url", "kind", "name")
+            .mapNotNull { ctx?.get(it)?.jsonPrimitive?.contentOrNull }
+            .filter { it.isNotEmpty() }
+            .joinToString(" · ") { it.take(80) }
+        return PendingDecision(
+            decisionId = o["decisionId"]!!.jsonPrimitive.content,
+            requestId = o["requestId"]!!.jsonPrimitive.content,
+            type = o["type"]?.jsonPrimitive?.content ?: "permission",
+            title = o["title"]?.jsonPrimitive?.content ?: "",
+            options = (o["options"] as? JsonArray)?.map {
+                val p = it.jsonObject
+                p["id"]!!.jsonPrimitive.content to (p["label"]?.jsonPrimitive?.content ?: p["id"]!!.jsonPrimitive.content)
+            } ?: emptyList(),
+            contextSummary = summary,
+            requestedBy = o["requestedBy"]?.jsonPrimitive?.content ?: "",
+            sessionId = o["sessionId"]?.jsonPrimitive?.content ?: "",
+            roomId = o["roomId"]?.jsonPrimitive?.contentOrNull,
+            at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+        )
+    }
+
+    fun respondToDecision(d: PendingDecision, optionId: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                hub.call("permission.respond", buildJsonObject {
+                    put("requestId", d.requestId)
+                    put("optionId", optionId)
+                    put("scope", "once")
+                })
+                if (gen == missionConnectionGeneration) onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun reviewMission(id: String, index: Int, verdict: String, taskIds: List<String>, note: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.review", buildJsonObject {
+                    put("id", id)
+                    put("index", index)
+                    put("verdict", verdict)
+                    put("taskIds", JsonArray(taskIds.map { JsonPrimitive(it) }))
+                    put("note", note)
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun acceptMission(id: String, note: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.accept", buildJsonObject {
+                    put("id", id)
+                    put("note", note)
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun reworkMission(id: String, note: String, onDone: (Mission?) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.rework", buildJsonObject {
+                    put("id", id)
+                    put("note", note)
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                val m = parseMission(result["mission"]!!.jsonObject)
+                upsertMission(m)
+                missionError = null
+                onDone(m)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(null)
+                }
+            }
+        }
+    }
+
+    fun updateMissionContract(id: String, goal: String, acceptanceCriteria: List<String>, scope: String, constraints: List<String>, ownerSessionId: String?, maxAutoRetries: Int = 0, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.updateContract", buildJsonObject {
+                    put("id", id)
+                    put("goal", goal)
+                    put("acceptanceCriteria", JsonArray(acceptanceCriteria.map { JsonPrimitive(it) }))
+                    put("scope", scope)
+                    put("constraints", JsonArray(constraints.map { JsonPrimitive(it) }))
+                    put("maxAutoRetries", maxAutoRetries)
+                    ownerSessionId?.let { put("ownerSessionId", it) }
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun supplementMission(id: String, text: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.supplement", buildJsonObject {
+                    put("id", id)
+                    put("text", text)
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun retryMission(id: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.retry", buildJsonObject { put("id", id) })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun createMissionSchedule(
+        name: String,
+        roomId: String,
+        roomName: String,
+        message: String,
+        time: String,
+        missionId: String,
+        missionAutoStart: Boolean,
+        onDone: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                hub.call("task.create", buildJsonObject {
+                    put("name", name)
+                    put("targetType", "room")
+                    put("targetId", roomId)
+                    put("targetName", roomName)
+                    put("message", message)
+                    put("schedule", buildJsonObject {
+                        put("mode", "simple")
+                        put("kind", "daily")
+                        put("time", time)
+                    })
+                    put("enabled", true)
+                    put("missionId", missionId)
+                    put("missionAutoStart", missionAutoStart)
+                })
+                if (gen == missionConnectionGeneration) {
+                    loadScheduledTasks()
+                    onDone(true)
+                }
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    private fun upsertMission(m: Mission) {
+        missions.removeAll { it.id == m.id }
+        missions.add(m)
+    }
+
+    fun refreshMissions() {
+        viewModelScope.launch { syncRefreshMissions() }
+    }
+
+    fun createMission(
+        roomId: String,
+        goal: String,
+        acceptanceCriteria: List<String>,
+        scope: String,
+        constraints: List<String>,
+        ownerSessionId: String?,
+        maxAutoRetries: Int = 0,
+        onDone: (Mission?) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.create", buildJsonObject {
+                    put("roomId", roomId)
+                    put("goal", goal)
+                    put("acceptanceCriteria", JsonArray(acceptanceCriteria.map { JsonPrimitive(it) }))
+                    put("scope", scope)
+                    put("constraints", JsonArray(constraints.map { JsonPrimitive(it) }))
+                    put("maxAutoRetries", maxAutoRetries)
+                    ownerSessionId?.let { put("ownerSessionId", it) }
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(parseMission(result["mission"]!!.jsonObject))
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(null)
+                }
+            }
+        }
+    }
+
+    fun startMission(id: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.start", buildJsonObject { put("id", id) })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    fun stopMission(id: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.stop", buildJsonObject { put("id", id) })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    private fun parseMission(o: JsonObject): Mission {
+        val strList = { key: String ->
+            (o[key] as? JsonArray)?.map { it.jsonPrimitive.content } ?: emptyList()
+        }
+        return Mission(
+            id = o["id"]!!.jsonPrimitive.content,
+            roomId = o["roomId"]!!.jsonPrimitive.content,
+            goal = o["goal"]!!.jsonPrimitive.content,
+            acceptanceCriteria = strList("acceptanceCriteria"),
+            scope = o["scope"]?.jsonPrimitive?.content ?: "",
+            constraints = strList("constraints"),
+            ownerSessionId = o["ownerSessionId"]!!.jsonPrimitive.content,
+            status = o["status"]?.jsonPrimitive?.content ?: "draft",
+            createdAt = o["createdAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            updatedAt = o["updatedAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            startedAt = o["startedAt"]?.jsonPrimitive?.content?.toLongOrNull(),
+            finishedAt = o["finishedAt"]?.jsonPrimitive?.content?.toLongOrNull(),
+            flowId = o["flowId"]?.jsonPrimitive?.content,
+            flow = o["flow"] as? JsonObject,
+            output = o["output"]?.jsonPrimitive?.content,
+            error = o["error"]?.jsonPrimitive?.content,
+            events = (o["events"] as? JsonArray)?.map {
+                val ev = it.jsonObject
+                MissionEvent(
+                    ev["id"]?.jsonPrimitive?.content ?: "",
+                    ev["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                    ev["kind"]?.jsonPrimitive?.content ?: "",
+                    ev["text"]?.jsonPrimitive?.content ?: "",
+                )
+            } ?: emptyList(),
+            reviews = (o["reviews"] as? JsonArray)?.map {
+                val rv = it.jsonObject
+                MissionReview(
+                    index = rv["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    verdict = rv["verdict"]?.jsonPrimitive?.content ?: "unverified",
+                    taskIds = (rv["taskIds"] as? JsonArray)?.map { t -> t.jsonPrimitive.content } ?: emptyList(),
+                    note = rv["note"]?.jsonPrimitive?.content ?: "",
+                    at = rv["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                )
+            } ?: emptyList(),
+            acceptanceNote = (o["acceptance"] as? JsonObject)?.get("note")?.jsonPrimitive?.content,
+            supplements = (o["supplements"] as? JsonArray)?.map {
+                val sp = it.jsonObject
+                MissionSupplement(
+                    id = sp["id"]?.jsonPrimitive?.content ?: "",
+                    at = sp["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                    text = sp["text"]?.jsonPrimitive?.content ?: "",
+                    delivered = sp["delivered"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                )
+            } ?: emptyList(),
+            parentMissionId = o["parentMissionId"]?.jsonPrimitive?.contentOrNull,
+            reworkReason = o["reworkReason"]?.jsonPrimitive?.contentOrNull,
+            maxAutoRetries = o["maxAutoRetries"]?.jsonPrimitive?.intOrNull ?: 0,
+            autoRetryCount = o["autoRetryCount"]?.jsonPrimitive?.intOrNull ?: 0,
+            revision = o["revision"]?.jsonPrimitive?.intOrNull ?: 0,
+        )
     }
 
     private fun parseTask(o: JsonObject): ScheduledTask {
@@ -1814,6 +2333,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             lastRunAt = o["lastRunAt"]?.jsonPrimitive?.content?.toLongOrNull(),
             nextRunAt = o["nextRunAt"]?.jsonPrimitive?.content?.toLongOrNull(),
             createdAt = o["createdAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+            missionTemplate = o["missionTemplate"] as? JsonObject,
+            missionAutoStart = o["missionAutoStart"]?.jsonPrimitive?.contentOrNull == "true",
         )
     }
 
@@ -4684,10 +5205,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "decision.update" -> {
+                decisionEventRev++
                 val p = obj["params"]!!.jsonObject
                 val scope = p["scope"]?.jsonPrimitive?.contentOrNull
                 val scopeId = p["id"]?.jsonPrimitive?.contentOrNull
                 val entry = p["entry"]?.jsonObject ?: return
+                try {
+                    val meta = Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
+                    val did = meta["decisionId"]?.jsonPrimitive?.content
+                    val st = meta["status"]?.jsonPrimitive?.content
+                    if (did != null) {
+                        if (st == "pending") {
+                            pendingDecisions.removeAll { it.decisionId == did }
+                            pendingDecisions.add(parseDecision(meta))
+                        } else {
+                            pendingDecisions.removeAll { it.decisionId == did }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
                 val inView = when (scope) {
                     "room" -> scopeId == currentRoom?.roomId
                     "session" -> currentRoom == null && scopeId == currentSession?.sessionId
@@ -4774,6 +5310,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val list = p["tasks"]?.jsonArray ?: return
                 scheduledTasks.clear()
                 for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+            }
+            "mission.update" -> {
+                val p = obj["params"]!!.jsonObject
+                val raw = p["mission"] as? JsonObject ?: return
+                missionEventRev++
+                upsertMission(parseMission(raw))
             }
         }
     }

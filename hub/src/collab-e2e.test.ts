@@ -5,10 +5,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { RoomModeManager, type AgentOps } from "./room-modes.js";
-import { RoomManager } from "./room.js";
+import { RoomManager, type Room } from "./room.js";
 import { Store } from "./store.js";
 import { makeFlowCardSync, sweepOrphanFlowCards } from "./flow-card.js";
 import { workspaceSnapshotHash, type IsolatedCheckResult } from "./conductor.js";
+import { MissionManager } from "./mission.js";
 
 type Prompt = { sessionId: string; text: string };
 type Broadcast = { method: string; params: Record<string, unknown> };
@@ -2711,6 +2712,345 @@ describe("collab-e2e", () => {
     } finally {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("mission 集成：conductor 全生命周期 → awaiting-acceptance，worker done 不提前终结", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "tester" },
+      ],
+      { conductorId: "s1" },
+    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mission-e2e-"));
+    const store = new Store(dir);
+    try {
+      const missions = new MissionManager({
+        store,
+        getRoom: (id) => h.rooms.get(id),
+        getFlow: (id) => h.manager.getFlow(id),
+        hasActiveFlow: (id) => h.manager.hasActiveFlow(id),
+        isBusy: (sid) => h.agent.isBusy(sid),
+        isAvailable: () => true,
+        dispatch: (room, text, options) => h.manager.handle(room, text, options),
+        cancelActive: (id, reason) => h.manager.cancelActive(id, reason),
+        cancel: (sid) => h.agent.cancel(sid),
+        retryFailedTasks: (id, taskIds) => h.manager.retryFailedTasks(id, taskIds),
+        supplementActive: (room, text) => h.manager.supplementActive(room, text),
+        broadcast: () => {},
+      });
+      h.manager.onFlowCard = (roomId, flow) => missions.syncFlow(roomId, flow);
+      const turnDone = async (sid: string, output: string) => {
+        const rid = h.manager.roomIdForTurn(sid);
+        await h.done(sid, output);
+        missions.onTurnDone(sid, rid, output);
+      };
+
+      const m = missions.create({
+        roomId: h.room.roomId,
+        goal: "交付排序模块并请他人独立验证",
+        acceptanceCriteria: ["实现完成且经独立验证"],
+      });
+      await missions.start(m.id);
+      assert.match(h.lastPrompt("s1")!.text, /Execute the user-approved task contract/);
+      assert.match(h.lastPrompt("s1")!.text, /"missionId"/);
+      assert.equal(missions.get(m.id)?.status, "running");
+
+      await turnDone(
+        "s1",
+        '```json\n{"goal":"交付排序模块","acceptanceCriteria":["实现完成且经独立验证"],"tasks":[{"id":"t1","to":"coder","task":"实现排序模块"},{"id":"t2","to":"tester","task":"独立验证 t1","dependsOn":["t1"]}]}\n```',
+      );
+      await tick();
+      assert.ok(missions.get(m.id)?.flowId, "应绑定新 flowId");
+      assert.equal(missions.get(m.id)?.status, "running");
+
+      await turnDone("s2", "实现完成");
+      await tick();
+      assert.equal(
+        missions.get(m.id)?.status,
+        "running",
+        "t2 未派发完成前不得提前终结",
+      );
+
+      await turnDone("s3", "独立验证通过");
+      await tick();
+      assert.equal(h.flow()?.phase, "reviewing");
+      assert.equal(missions.get(m.id)?.status, "running");
+
+      await turnDone("s1", '```json\n{"decision":"complete","reason":"达标"}\n```');
+      await tick();
+      assert.equal(h.flow()?.phase, "summarizing");
+      assert.equal(missions.get(m.id)?.status, "running");
+
+      await turnDone("s1", "最终答复：已完成实现并通过独立验证");
+      await tick();
+      const cur = missions.get(m.id)!;
+      assert.equal(cur.status, "awaiting-acceptance", "flow done 后等待用户验收");
+      assert.notEqual(cur.status, "accepted");
+      assert.equal(h.manager.hasActiveFlow(h.room.roomId), false);
+      // 终态后迟到事件不复活
+      await turnDone("s2", "迟到输出");
+      assert.equal(missions.get(m.id)?.status, "awaiting-acceptance");
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("mission 集成：mention 无 flow 模式 → 全部成员 done 才 awaiting-acceptance", async () => {
+    const members = [
+      { sessionId: "s1", name: "a" },
+      { sessionId: "s2", name: "b" },
+    ];
+    const rooms = new RoomManager();
+    const room = rooms.create("m", members, "mention");
+    const prompts: Prompt[] = [];
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sessionId, content) => {
+        prompts.push({ sessionId, text: String(content) });
+        busy.add(sessionId);
+      },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => {
+        busy.delete(sid);
+      },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {}, 0);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mission-e2e-mention-"));
+    const store = new Store(dir);
+    try {
+      const missions = new MissionManager({
+        store,
+        getRoom: (id) => rooms.get(id),
+        getFlow: (id) => manager.getFlow(id),
+        hasActiveFlow: (id) => manager.hasActiveFlow(id),
+        isBusy: (sid) => agent.isBusy(sid),
+        isAvailable: () => true,
+        dispatch: (r, text, options) => manager.handle(r, text, options),
+        cancelActive: (id, reason) => manager.cancelActive(id, reason),
+        cancel: (sid) => agent.cancel(sid),
+        retryFailedTasks: (id, taskIds) => manager.retryFailedTasks(id, taskIds),
+        supplementActive: (room, text) => manager.supplementActive(room, text),
+        broadcast: () => {},
+      });
+      manager.onFlowCard = (roomId, flow) => missions.syncFlow(roomId, flow);
+      const turnDone = async (sid: string, output: string) => {
+        const rid = manager.roomIdForTurn(sid);
+        busy.delete(sid);
+        await manager.onPromptDone(sid, output);
+        missions.onTurnDone(sid, rid, output);
+      };
+
+      const m = missions.create({
+        roomId: room.roomId,
+        goal: "各自评估这个方案",
+        acceptanceCriteria: ["两名成员都给出评估"],
+      });
+      await missions.start(m.id);
+      assert.deepEqual(
+        [...new Set(prompts.map((p) => p.sessionId))].sort(),
+        ["s1", "s2"],
+        "mention 无 @ 回退全体成员",
+      );
+      assert.match(prompts[0]!.text, /Execute the user-approved task contract/);
+      await turnDone("s1", "a 的评估");
+      assert.equal(missions.get(m.id)?.status, "running", "b 未完成不终结");
+      await turnDone("s2", "b 的评估");
+      const cur = missions.get(m.id)!;
+      assert.equal(cur.status, "awaiting-acceptance");
+      assert.ok(cur.output?.includes("评估"));
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("mission e2e v3", () => {
+  const mkHarness = (
+    members: { sessionId: string; name: string }[],
+    mode: string,
+    opts: Record<string, unknown> = {},
+  ) => {
+    const rooms = new RoomManager();
+    const room = rooms.create("v3", members, mode as Room["mode"], opts);
+    const prompts: Prompt[] = [];
+    const cancelled: string[] = [];
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid, content) => {
+        prompts.push({ sessionId: sid, text: String(content) });
+        busy.add(sid);
+      },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => {
+        cancelled.push(sid);
+        busy.delete(sid);
+      },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {}, 0);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mission-e2e-v3-"));
+    const store = new Store(dir);
+    const missions = new MissionManager({
+      store,
+      getRoom: (id) => rooms.get(id),
+      getFlow: (id) => manager.getFlow(id),
+      hasActiveFlow: (id) => manager.hasActiveFlow(id),
+      isBusy: (sid) => agent.isBusy(sid),
+      isAvailable: () => true,
+      roomIdForTurn: (sid) => manager.roomIdForTurn(sid),
+      dispatch: (r, text, o) => manager.handle(r, text, o),
+      cancelActive: (id, reason) => manager.cancelActive(id, reason),
+      cancel: (sid) => agent.cancel(sid),
+      retryFailedTasks: (id, taskIds) => manager.retryFailedTasks(id, taskIds),
+      supplementActive: (r, text) => manager.supplementActive(r, text),
+      broadcast: () => {},
+    });
+    manager.onFlowCard = (roomId, flow) => missions.syncFlow(roomId, flow);
+    const turnDone = async (sid: string, output: string) => {
+      const rid = manager.roomIdForTurn(sid);
+      busy.delete(sid);
+      await manager.onPromptDone(sid, output);
+      missions.onTurnDone(sid, rid, output);
+    };
+    const cleanup = () => {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    };
+    return { rooms, room, prompts, cancelled, busy, agent, manager, missions, turnDone, cleanup };
+  };
+
+  const AUTO_SELF = '```json\n{"mode":"self","reason":"单人即可"}\n```';
+  const AUTO_MENTION = '```json\n{"mode":"mention","reason":"委派","params":{"targets":["s2"]}}\n```';
+
+  it("auto→self：决策回合不提前终结，worker 最终结束", async () => {
+    const h = mkHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "auto",
+      { conductorId: "s1" },
+    );
+    try {
+      const m = h.missions.create({ roomId: h.room.roomId, goal: "评估方案", acceptanceCriteria: ["有结论"] });
+      await h.missions.start(m.id);
+      assert.deepEqual(h.prompts.map((p) => p.sessionId), ["s1"], "auto 先派发主持人决策");
+      assert.equal(h.missions.get(m.id)!.status, "running");
+      // 决策回合完成 → 不应终结 mission；self 应答 prompt 续派
+      await h.turnDone("s1", AUTO_SELF);
+      assert.notEqual(h.missions.get(m.id)!.status, "awaiting-acceptance", "auto 决策回合不得终结");
+      const selfPrompt = h.prompts.filter((p) => p.sessionId === "s1").length;
+      assert.equal(selfPrompt, 2, "self 模式下应续派主持人执行 prompt");
+      // self 工作完成 → awaiting-acceptance
+      await h.turnDone("s1", "方案评估完成：选 A");
+      const cur = h.missions.get(m.id)!;
+      assert.equal(cur.status, "awaiting-acceptance");
+      assert.ok(cur.output?.includes("方案评估"));
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("auto→mention：接力 worker 计入 sent，done 后收敛", async () => {
+    const h = mkHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "auto",
+      { conductorId: "s1" },
+    );
+    try {
+      const m = h.missions.create({ roomId: h.room.roomId, goal: "修 bug", acceptanceCriteria: ["回归通过"] });
+      await h.missions.start(m.id);
+      await h.turnDone("s1", AUTO_MENTION);
+      assert.equal(
+        h.prompts.filter((p) => p.sessionId === "s2").length,
+        1,
+        "mention 应派发 s2",
+      );
+      assert.equal(h.missions.get(m.id)!.status, "running");
+      await h.turnDone("s2", "修复完成，回归通过");
+      const cur = h.missions.get(m.id)!;
+      assert.equal(cur.status, "awaiting-acceptance");
+      // stop 取消应覆盖 relay worker（此处已终态，改用运行态验证交给单测）
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("conductor：补充并入流程不取消/不启动新 flow", async () => {
+    const h = mkHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    try {
+      const m = h.missions.create({ roomId: h.room.roomId, goal: "实现排序", acceptanceCriteria: ["单测过"] });
+      await h.missions.start(m.id);
+      const flowId = h.manager.getFlow(h.room.roomId)?.flowId;
+      const promptsBefore = h.prompts.length;
+      const r = await h.missions.supplement(m.id, "优先快排实现");
+      assert.equal(r.supplements[0]!.delivered, true, "conductor 补充应被吸收");
+      assert.equal(h.prompts.length, promptsBefore, "补充不得派发新 prompt");
+      assert.deepEqual(h.cancelled, [], "补充不得取消任何会话");
+      assert.equal(h.manager.getFlow(h.room.roomId)?.flowId, flowId, "flow 不得重启");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("停止取消后不派发新 worker、迟到 done 不复活", async () => {
+    const h = mkHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    try {
+      const m = h.missions.create({ roomId: h.room.roomId, goal: "实现功能", acceptanceCriteria: ["done"] });
+      await h.missions.start(m.id);
+      await h.missions.stop(m.id);
+      const promptsBefore = h.prompts.length;
+      assert.ok(h.cancelled.length > 0, "运行中停止应取消在途会话");
+      const cur = h.missions.get(m.id)!;
+      assert.equal(cur.status, "stopped");
+      await h.turnDone("s1", "迟到输出");
+      assert.equal(h.missions.get(m.id)!.status, "stopped", "迟到 done 不复活");
+      assert.equal(h.prompts.length, promptsBefore, "取消后不得派发新 worker");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("恢复 reconcile 不重复派发", async () => {
+    const h = mkHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "mention",
+      {},
+    );
+    try {
+      const m = h.missions.create({ roomId: h.room.roomId, goal: "任务", acceptanceCriteria: ["ok"] });
+      await h.missions.start(m.id);
+      const promptsBefore = h.prompts.length;
+      h.missions.beginRestore();
+      h.missions.reconcile();
+      assert.equal(h.prompts.length, promptsBefore, "reconcile 不得派发 prompt");
+      assert.equal(h.missions.get(m.id)!.status, "stopped", "无 flow 的运行态恢复为 stopped");
+    } finally {
+      h.cleanup();
     }
   });
 });

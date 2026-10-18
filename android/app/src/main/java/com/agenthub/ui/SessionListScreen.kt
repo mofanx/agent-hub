@@ -727,6 +727,11 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
                 if (selectedTab == 1 || inBatchMode) {
+                    if (!inBatchMode && vm.missionSupported) {
+                        item {
+                            MissionSection(vm, S, onCreateRoom = { showCreateRoom = true })
+                        }
+                    }
                     if (inBatchMode) {
                         items(flatRooms.size) { i ->
                             val r = flatRooms[i]

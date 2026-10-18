@@ -19,6 +19,11 @@ import type {
   ModelInfo,
   ModelBackend,
   BackendQuota,
+  MissionInfo,
+  MissionCreateInput,
+  MissionStatus,
+  MissionCriterionReview,
+  DecisionInfo,
   Attachment,
   RoomInfo,
   RoomModeConfig,
@@ -123,6 +128,14 @@ interface State {
   fileUpdateAt: number;
   scheduledTasks: ScheduledTask[];
   taskLogs: TaskLog[];
+  missions: MissionInfo[];
+  /** hub 是否支持 mission.* API；探测失败（unknown method）保持 false 隐藏入口 */
+  missionSupported: boolean;
+  missionChecked: boolean;
+  missionLoading: boolean;
+  missionError: string | null;
+  pendingDecisions: DecisionInfo[];
+  decisionLoading: boolean;
 }
 
 interface Actions {
@@ -301,9 +314,37 @@ interface Actions {
   loadTaskLogs(): Promise<void>;
   clearTaskLogs(): Promise<void>;
 
+  refreshMissions(retry?: boolean): Promise<void>;
+  createMission(input: MissionCreateInput): Promise<MissionInfo | null>;
+  startMission(id: string): Promise<void>;
+  stopMission(id: string): Promise<void>;
+  reviewMission(id: string, index: number, verdict: "pass" | "fail" | "unverified", taskIds: string[], note: string): Promise<boolean>;
+  acceptMission(id: string, note: string): Promise<boolean>;
+  reworkMission(id: string, note: string): Promise<MissionInfo | null>;
+  updateMissionContract(id: string, input: MissionCreateInput): Promise<MissionInfo | null>;
+  supplementMission(id: string, text: string): Promise<boolean>;
+  refreshDecisions(retry?: boolean): Promise<void>;
+  respondToDecision(d: DecisionInfo, optionId: string): Promise<void>;
+  retryMission(id: string): Promise<void>;
+  createMissionSchedule(input: {
+    name: string;
+    targetType: "room";
+    targetId: string;
+    targetName: string;
+    message: string;
+    schedule: unknown;
+    enabled: boolean;
+    missionId: string;
+    missionAutoStart?: boolean;
+  }): Promise<Record<string, unknown> | null>;
+
 }
 
 let artifactRefreshGeneration = 0;
+let missionListSeq = 0;
+let decisionListSeq = 0;
+let missionRev = 0;
+let decisionRev = 0;
 let usageRefreshGeneration = 0;
 const flowCache = new Map<string, FlowInfo | null>();
 const panelsCache = new Map<
@@ -977,6 +1018,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
       case "decision.update": {
         // 决策卡原位更新：entry 为房史行 {id,at,kind,author,text}
+        const entryRaw = params.entry as Record<string, unknown> | undefined;
+        if (entryRaw && typeof entryRaw.text === "string") {
+          try {
+            const meta = parseDecision(JSON.parse(entryRaw.text) as Record<string, unknown>);
+            if (meta.decisionId) {
+              decisionRev++;
+              if (meta.status === "pending") {
+                set({ pendingDecisions: [...get().pendingDecisions.filter((d) => d.decisionId !== meta.decisionId), meta] });
+              } else {
+                set({ pendingDecisions: get().pendingDecisions.filter((d) => d.decisionId !== meta.decisionId) });
+              }
+            }
+          } catch {}
+        }
         const scope = String(params.scope ?? "");
         const sid = String(params.id ?? "");
         const match =
@@ -1072,9 +1127,26 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({ scheduledTasks: tasks as ScheduledTask[] });
         break;
       }
+      case "mission.update": {
+        const raw = params.mission as Record<string, unknown> | undefined;
+        if (!raw) break;
+        const mission = parseMission(raw);
+        missionRev++;
+        set({ missions: upsertMission(get().missions, mission) });
+        break;
+      }
     }
   };
 
+
+  const upsertMission = (list: MissionInfo[], m: MissionInfo): MissionInfo[] => {
+    const i = list.findIndex((x) => x.id === m.id);
+    if (i < 0) return [...list, m];
+    if (list[i]!.revision >= m.revision) return list;
+    const next = [...list];
+    next[i] = m;
+    return next;
+  };
   const getOrCall = async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
     const client = get().client;
     if (!client || !client.isConnected) throw new Error("not connected");
@@ -1177,6 +1249,106 @@ export const useHubStore = create<State & Actions>((set, get) => {
       debateRounds: numberOrNull(o.debateRounds),
     };
   };
+
+  const parseMission = (o: Record<string, unknown>): MissionInfo => {
+    const strList = (v: unknown): string[] =>
+      Array.isArray(v) ? (v as unknown[]).map((s) => String(s)) : [];
+    return {
+      id: String(o.id ?? ""),
+      roomId: String(o.roomId ?? ""),
+      goal: String(o.goal ?? ""),
+      acceptanceCriteria: strList(o.acceptanceCriteria),
+      scope: typeof o.scope === "string" ? o.scope : "",
+      constraints: strList(o.constraints),
+      ownerSessionId: String(o.ownerSessionId ?? ""),
+      status: (typeof o.status === "string" ? o.status : "draft") as MissionStatus,
+      createdAt: typeof o.createdAt === "number" ? o.createdAt : 0,
+      updatedAt: typeof o.updatedAt === "number" ? o.updatedAt : 0,
+      ...(typeof o.startedAt === "number" ? { startedAt: o.startedAt } : {}),
+      ...(typeof o.finishedAt === "number" ? { finishedAt: o.finishedAt } : {}),
+      ...(typeof o.flowId === "string" ? { flowId: o.flowId } : {}),
+      ...(typeof o.flow === "object" && o.flow !== null
+        ? { flow: o.flow as Record<string, unknown> }
+        : {}),
+      ...(typeof o.output === "string" ? { output: o.output } : {}),
+      ...(typeof o.error === "string" ? { error: o.error } : {}),
+      events: Array.isArray(o.events)
+        ? (o.events as unknown[]).map((e) => {
+            const ev = e as Record<string, unknown>;
+            return {
+              id: String(ev.id ?? ""),
+              at: typeof ev.at === "number" ? ev.at : 0,
+              kind: String(ev.kind ?? ""),
+              text: String(ev.text ?? ""),
+            };
+          })
+        : [],
+      reviews: Array.isArray(o.reviews)
+        ? (o.reviews as unknown[]).map((r) => {
+            const rv = r as Record<string, unknown>;
+            return {
+              index: typeof rv.index === "number" ? rv.index : 0,
+              verdict: (typeof rv.verdict === "string" ? rv.verdict : "unverified") as MissionCriterionReview["verdict"],
+              taskIds: strList(rv.taskIds),
+              note: typeof rv.note === "string" ? rv.note : "",
+              source: "user" as const,
+              at: typeof rv.at === "number" ? rv.at : 0,
+            };
+          })
+        : [],
+      ...(typeof o.acceptance === "object" && o.acceptance !== null
+        ? {
+            acceptance: {
+              at: typeof (o.acceptance as Record<string, unknown>).at === "number" ? (o.acceptance as Record<string, unknown>).at as number : 0,
+              note: String((o.acceptance as Record<string, unknown>).note ?? ""),
+            },
+          }
+        : {}),
+      supplements: Array.isArray(o.supplements)
+        ? (o.supplements as unknown[]).map((s) => {
+            const sp = s as Record<string, unknown>;
+            return {
+              id: String(sp.id ?? ""),
+              at: typeof sp.at === "number" ? sp.at : 0,
+              text: String(sp.text ?? ""),
+              delivered: sp.delivered === true,
+            };
+          })
+        : [],
+      ...(typeof o.parentMissionId === "string" ? { parentMissionId: o.parentMissionId } : {}),
+      ...(typeof o.reworkReason === "string" ? { reworkReason: o.reworkReason } : {}),
+      maxAutoRetries: typeof o.maxAutoRetries === "number" ? o.maxAutoRetries : 0,
+      autoRetryCount: typeof o.autoRetryCount === "number" ? o.autoRetryCount : 0,
+      revision: typeof o.revision === "number" ? o.revision : 0,
+    };
+  };
+
+  const parseDecision = (o: Record<string, unknown>): DecisionInfo => ({
+    v: typeof o.v === "number" ? o.v : 1,
+    decisionId: String(o.decisionId ?? ""),
+    requestId: String(o.requestId ?? ""),
+    type: (o.type === "elicitation" ? "elicitation" : "permission") as DecisionInfo["type"],
+    title: String(o.title ?? ""),
+    options: Array.isArray(o.options)
+      ? (o.options as unknown[]).map((op) => {
+          const p = op as Record<string, unknown>;
+          return {
+            id: String(p.id ?? ""),
+            label: String(p.label ?? p.id ?? ""),
+            ...(typeof p.kind === "string" ? { kind: p.kind } : {}),
+          };
+        })
+      : [],
+    ...(typeof o.context === "object" && o.context !== null
+      ? { context: o.context as Record<string, unknown> }
+      : {}),
+    requestedBy: String(o.requestedBy ?? ""),
+    sessionId: String(o.sessionId ?? ""),
+    ...(typeof o.roomId === "string" ? { roomId: o.roomId } : {}),
+    status: (typeof o.status === "string" ? o.status : "pending") as DecisionInfo["status"],
+    scope: String(o.scope ?? "once"),
+    at: typeof o.at === "number" ? o.at : 0,
+  });
 
   const parseRole = (o: Record<string, unknown>): RoleInfo => ({
     id: String(o.id ?? ""),
@@ -1309,6 +1481,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
     fileUpdateAt: 0,
     scheduledTasks: [],
     taskLogs: [],
+    missions: [],
+    missionSupported: false,
+    missionChecked: false,
+    missionLoading: false,
+    missionError: null,
+    pendingDecisions: [],
+    decisionLoading: false,
 
     init: async () => {
       await get().loadConfigFromDisk();
@@ -1435,28 +1614,36 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const client = new HubClient({ heartbeatIntervalMs: 20000, maxReconnectDelayMs: 60000 });
       set({ client });
 
-      client.addEventListener("event", (obj) => handleEvent(obj));
+      client.addEventListener("event", (obj) => {
+        if (get().client === client) handleEvent(obj);
+      });
       client.addEventListener("close", () => {
+        if (get().client !== client) return;
         set({ agentStatus: stringsFor(get().lang).agentDisconnected });
         updateTray();
       });
       client.addEventListener("error", (msg) => {
+        if (get().client !== client) return;
         if (get().connecting) set({ connectError: msg, connecting: false });
       });
 
       client.connect(
         url,
         () => {
+          if (get().client !== client) return;
           set({ connecting: false, connectError: null, agentStatus: stringsFor(get().lang).connected });
           get().saveProfileAndConnect(address, token, name);
         },
         (msg) => {
+          if (get().client !== client) return;
           set({ connecting: false, connectError: msg });
         },
       );
     },
 
     disconnect: () => {
+      missionListSeq++;
+      decisionListSeq++;
       flowCache.clear();
       panelsCache.clear();
       get().client?.disconnect();
@@ -1506,6 +1693,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
         selectedMemberSession: null,
         pendingAttachments: [],
         fileUpdateAt: 0,
+        missions: [],
+        missionSupported: false,
+        missionChecked: false,
+        missionLoading: false,
+        missionError: null,
+        pendingDecisions: [],
+        decisionLoading: false,
       });
       updateTray();
     },
@@ -1598,6 +1792,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const tasks = ((tList.tasks as unknown[] | undefined) ?? []) as ScheduledTask[];
         set({ scheduledTasks: tasks });
       } catch {}
+
+      await get().refreshMissions();
+      await get().refreshDecisions();
     },
 
     refreshBusy: () => {
@@ -3258,6 +3455,245 @@ export const useHubStore = create<State & Actions>((set, get) => {
         await getOrCall("task.clearLogs");
         set({ taskLogs: [] });
       } catch {}
+    },
+
+    refreshMissions: async (retry = true) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      if (get().missionChecked && !get().missionSupported) return;
+      const seq = ++missionListSeq;
+      const rev = missionRev;
+      set({ missionLoading: true });
+      try {
+        const resp = await client.call("mission.list");
+        if (get().client !== client || seq !== missionListSeq) return;
+        if (rev !== missionRev) {
+          if (retry) void get().refreshMissions(false);
+          return;
+        }
+        const fresh = ((resp.missions as unknown[] | undefined) ?? []).map((it) =>
+          parseMission(it as Record<string, unknown>),
+        );
+        set({ missions: fresh.map((m) => {
+          const old = get().missions.find((x) => x.id === m.id);
+          return old && old.revision > m.revision ? old : m;
+        }), missionSupported: true, missionChecked: true, missionError: null });
+      } catch (e) {
+        if (get().client !== client || seq !== missionListSeq || rev !== missionRev) return;
+        const msg = String(e);
+        if (/unknown method|-32601/i.test(msg)) {
+          set({ missions: [], missionSupported: false, missionChecked: true, missionError: null });
+        } else {
+          set({ missionError: msg });
+        }
+      } finally {
+        if (get().client === client && seq === missionListSeq) set({ missionLoading: false });
+      }
+    },
+
+    refreshDecisions: async (retry = true) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      const seq = ++decisionListSeq;
+      const rev = decisionRev;
+      set({ decisionLoading: true });
+      try {
+        const resp = await client.call("decision.list");
+        if (get().client !== client || seq !== decisionListSeq) return;
+        if (rev !== decisionRev) {
+          if (retry) void get().refreshDecisions(false);
+          return;
+        }
+        const list = ((resp.decisions as unknown[] | undefined) ?? []).map((it) =>
+          parseDecision(it as Record<string, unknown>),
+        );
+        set({ pendingDecisions: list.filter((d) => d.status === "pending").sort((a, b) => a.at - b.at) });
+      } catch (e) {
+        if (get().client === client && seq === decisionListSeq && rev === decisionRev && !/unknown method|-32601/i.test(String(e))) {
+          set({ missionError: String(e) });
+        }
+      } finally {
+        if (get().client === client && seq === decisionListSeq) set({ decisionLoading: false });
+      }
+    },
+
+    createMission: async (input: MissionCreateInput) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return null;
+      try {
+        const resp = await client.call("mission.create", {
+          roomId: input.roomId,
+          goal: input.goal,
+          acceptanceCriteria: input.acceptanceCriteria,
+          scope: input.scope,
+          constraints: input.constraints,
+          maxAutoRetries: input.maxAutoRetries,
+          ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
+        });
+        if (get().client !== client) return null;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        return mission;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return null;
+      }
+    },
+
+    startMission: async (id: string) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      try {
+        const resp = await client.call("mission.start", { id });
+        if (get().client !== client) return;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+      }
+    },
+
+    stopMission: async (id: string) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      try {
+        const resp = await client.call("mission.stop", { id });
+        if (get().client !== client) return;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+      }
+    },
+
+    reviewMission: async (id, index, verdict, taskIds, note) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return false;
+      try {
+        const resp = await client.call("mission.review", { id, index, verdict, taskIds, note });
+        if (get().client !== client) return false;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        return true;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return false;
+      }
+    },
+
+    acceptMission: async (id, note) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return false;
+      try {
+        const resp = await client.call("mission.accept", { id, note });
+        if (get().client !== client) return false;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        return true;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return false;
+      }
+    },
+
+    reworkMission: async (id, note) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return null;
+      try {
+        const resp = await client.call("mission.rework", { id, note });
+        if (get().client !== client) return null;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        return mission;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return null;
+      }
+    },
+
+    updateMissionContract: async (id, input) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return null;
+      try {
+        const resp = await client.call("mission.updateContract", {
+          id,
+          goal: input.goal,
+          acceptanceCriteria: input.acceptanceCriteria,
+          scope: input.scope,
+          constraints: input.constraints,
+          maxAutoRetries: input.maxAutoRetries,
+          ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
+        });
+        if (get().client !== client) return null;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        return mission;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return null;
+      }
+    },
+
+    createMissionSchedule: async (input: {
+      name: string;
+      targetType: "room";
+      targetId: string;
+      targetName: string;
+      message: string;
+      schedule: unknown;
+      enabled: boolean;
+      missionId: string;
+      missionAutoStart?: boolean;
+    }) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return null;
+      try {
+        const resp = await client.call("task.create", input as unknown as Record<string, unknown>);
+        if (get().client !== client) return null;
+        await get().loadScheduledTasks();
+        return resp.task as Record<string, unknown>;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return null;
+      }
+    },
+
+    retryMission: async (id: string) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      try {
+        const resp = await client.call("mission.retry", { id });
+        if (get().client !== client) return;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+      }
+    },
+
+    supplementMission: async (id, text) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return false;
+      try {
+        const resp = await client.call("mission.supplement", { id, text });
+        if (get().client !== client) return false;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        return true;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return false;
+      }
+    },
+
+    respondToDecision: async (d, optionId) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      try {
+        await client.call("permission.respond", { requestId: d.requestId, optionId, scope: "once" });
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+      }
     },
 
   };

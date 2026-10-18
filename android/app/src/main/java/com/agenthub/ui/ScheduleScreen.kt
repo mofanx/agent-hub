@@ -61,6 +61,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -288,6 +290,11 @@ private fun TaskCard(
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(S.messageFmt.format(task.message.take(80) + if (task.message.length > 80) "…" else ""),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            task.missionTemplate?.let { tpl ->
+                Text("${S.missionFrozenContract}: ${tpl["goal"]?.jsonPrimitive?.contentOrNull ?: ""}${if (task.missionAutoStart) " · ${S.missionAutoStart}" else ""}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(S.taskTemplateRebuild, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Text("${
                 if (task.nextRunAt != null) "${S.nextRun}: ${df.format(Date(task.nextRunAt))}"
                 else "${S.nextRun}: —"
@@ -373,16 +380,22 @@ private fun TaskEditorDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
+                if (task?.missionTemplate != null) {
+                    Text(S.taskTemplateLocked, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                }
 
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     SegmentedButton(
                         selected = targetType == "session",
-                        onClick = { targetType = "session"; targetId = "" },
+                        onClick = { if (task?.missionTemplate == null) { targetType = "session"; targetId = "" } },
+                        enabled = task?.missionTemplate == null,
                         shape = SegmentedButtonDefaults.itemShape(0, 2),
                     ) { Text(S.sessionLabel) }
                     SegmentedButton(
                         selected = targetType == "room",
-                        onClick = { targetType = "room"; targetId = "" },
+                        onClick = { if (task?.missionTemplate == null) { targetType = "room"; targetId = "" } },
+                        enabled = task?.missionTemplate == null,
                         shape = SegmentedButtonDefaults.itemShape(1, 2),
                     ) { Text(S.roomLabel) }
                 }
@@ -394,7 +407,8 @@ private fun TaskEditorDialog(
                     targets.forEach { (id, label) ->
                         FilterChip(
                             selected = targetId == id,
-                            onClick = { targetId = id },
+                            onClick = { if (task?.missionTemplate == null) targetId = id },
+                            enabled = task?.missionTemplate == null,
                             label = { Text(label, maxLines = 1, style = MaterialTheme.typography.labelSmall) },
                         )
                     }
@@ -403,7 +417,8 @@ private fun TaskEditorDialog(
 
                 OutlinedTextField(
                     value = message,
-                    onValueChange = { message = it },
+                    onValueChange = { if (task?.missionTemplate == null) message = it },
+                    enabled = task?.missionTemplate == null,
                     label = { Text(S.taskMessage) },
                     minLines = 2,
                     maxLines = 4,

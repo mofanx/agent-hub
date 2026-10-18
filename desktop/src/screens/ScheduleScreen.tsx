@@ -83,6 +83,17 @@ export function ScheduleScreen() {
                 <div>{S.targetRowFmt.replace("%s", task.targetType === "room" ? S.roomsLabel : S.sessionsLabel).replace("%s", task.targetName)}</div>
                 <div>{S.scheduleRowFmt.replace("%s", describeSchedule(S, task.schedule))}</div>
                 <div>{S.messageRowFmt.replace("%s", task.message.slice(0, 80) + (task.message.length > 80 ? "…" : ""))}</div>
+                {task.missionTemplate && (
+                  <>
+                    <div className="nav-sub">
+                      {S.missionFrozenContract}: {task.missionTemplate.goal}
+                      {task.missionTemplate.scope && ` · ${S.missionScope}: ${task.missionTemplate.scope}`}
+                      {task.missionTemplate.constraints.length > 0 && ` · ${task.missionTemplate.constraints.join("；")}`}
+                      {task.missionAutoStart ? ` · ${S.missionAutoStart}` : ` · ${S.taskTemplateDraftOnly}`}
+                    </div>
+                    <div className="nav-sub">{S.taskTemplateRebuild}</div>
+                  </>
+                )}
                 <div>{S.nextRunFmt.replace("%s", formatTime(task.nextRunAt))}</div>
                 <div>{S.lastRunFmt.replace("%s", formatTime(task.lastRunAt))}</div>
               </div>
@@ -278,14 +289,15 @@ function TaskEditor({
       <FormRow label={S.nameLabel}>
         <input value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder={S.taskNamePlaceholder} />
       </FormRow>
+      {task?.missionTemplate && <div className="nav-sub">{S.taskTemplateLocked}</div>}
       <FormRow label={S.targetTypeLabel}>
-        <select value={targetType} onChange={(e) => { setTargetType(e.currentTarget.value as "session" | "room"); setTargetId(""); }}>
+        <select value={targetType} disabled={!!task?.missionTemplate} onChange={(e) => { setTargetType(e.currentTarget.value as "session" | "room"); setTargetId(""); }}>
           <option value="session">{S.sessionSingleLabel}</option>
           <option value="room">{S.roomsLabel}</option>
         </select>
       </FormRow>
       <FormRow label={S.targetLabel}>
-        <select value={targetId} onChange={(e) => setTargetId(e.currentTarget.value)}>
+        <select value={targetId} disabled={!!task?.missionTemplate} onChange={(e) => setTargetId(e.currentTarget.value)}>
           <option value="">{S.pleaseSelect}</option>
           {targets.map((t) => (
             <option key={t.id} value={t.id}>{t.name}</option>
@@ -293,8 +305,10 @@ function TaskEditor({
         </select>
       </FormRow>
       <FormRow label={S.messageContentLabel}>
+        {task?.missionTemplate && <div className="nav-sub">{S.taskTemplateLocked}</div>}
         <textarea
           value={message}
+          disabled={!!task?.missionTemplate}
           onChange={(e) => setMessage(e.currentTarget.value)}
           placeholder={S.messagePlaceholder}
           rows={3}
