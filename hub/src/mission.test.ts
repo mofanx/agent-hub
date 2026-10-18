@@ -562,6 +562,45 @@ describe("mission", () => {
     assert.equal(r.get(m.id)?.status, "stopped");
   });
 
+  it("reconcile：单条记录恢复抛错被隔离，restoreDone 仍置位、后续 mission 正常收尾", async () => {
+    const h = makeHarness();
+    const room2 = h.rooms.create("t2", [{ sessionId: "s3", name: "w2" }], "mention");
+    // 先建坏 mission（迭代序在前），其 room 的 getFlow 在恢复时抛错
+    const bad = makeMission(h);
+    await h.manager.start(bad.id);
+    const good = makeMission(h, { roomId: room2.roomId });
+    await h.manager.start(good.id);
+
+    const mgr2 = new MissionManager({
+      store: h.store,
+      getRoom: (id) => h.rooms.get(id),
+      getFlow: (id) => {
+        if (id === h.room.roomId) throw new Error("flow snapshot corrupt");
+        return undefined;
+      },
+      hasActiveFlow: () => false,
+      isBusy: () => false,
+      isAvailable: () => true,
+      dispatch: async () => ({ sent: [], mentioned: [], skipped: [] }),
+      cancelActive: async () => {},
+      cancel: async () => {},
+      retryFailedTasks: () => false,
+      supplementActive: () => false,
+      broadcast: () => {},
+    });
+    mgr2.beginRestore();
+    assert.doesNotThrow(() => mgr2.reconcile());
+    assert.equal(
+      (mgr2 as unknown as { restoreDone: boolean }).restoreDone,
+      true,
+      "单条记录失败不得让 restoreDone 永久 false",
+    );
+    const badRec = mgr2.get(bad.id)!;
+    assert.equal(badRec.status, "running", "恢复失败的记录保持原状态");
+    assert.ok(badRec.events.some((e) => e.kind === "error" && /reconcile/.test(e.text)));
+    assert.equal(mgr2.get(good.id)!.status, "stopped", "后续 mission 仍被正常 reconcile");
+  });
+
   it("状态变化广播 mission.update", async () => {
     const h = makeHarness();
     const m = makeMission(h);

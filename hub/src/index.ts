@@ -678,8 +678,12 @@ restoreRuntime
     } catch (err) {
       logError("post-restore sweep", err);
     }
-    missionManager.reconcile();
-    persistState();
+    try {
+      missionManager.reconcile();
+      persistState();
+    } catch (err) {
+      logError("post-restore reconcile", err);
+    }
   });
 
 const scheduler = new Scheduler(

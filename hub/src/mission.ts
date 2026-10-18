@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { logError } from "./logger.js";
 import type { Room } from "./room.js";
 import type { ModeResult } from "./room-modes.js";
 import type { Store } from "./store.js";
@@ -825,27 +826,38 @@ export class MissionManager {
   }
 
   reconcile(): void {
-    for (const m of this.missions.values()) {
-      if (m.status !== "running" && m.status !== "waiting-user") continue;
-      const flow = this.deps.getFlow(m.roomId);
-      const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
-      const active = this.deps.hasActiveFlow(m.roomId);
-      if (m.flowId && active && flowId === m.flowId) {
-        m.lastFlowSig = "";
-        m.lastPhase = "";
-        this.syncFlow(m.roomId, flow);
-        continue;
+    try {
+      for (const m of this.missions.values()) {
+        if (m.status !== "running" && m.status !== "waiting-user") continue;
+        try {
+          const flow = this.deps.getFlow(m.roomId);
+          const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+          const active = this.deps.hasActiveFlow(m.roomId);
+          if (m.flowId && active && flowId === m.flowId) {
+            m.lastFlowSig = "";
+            m.lastPhase = "";
+            this.syncFlow(m.roomId, flow);
+            continue;
+          }
+          m.pending = [];
+          this.transition(
+            m,
+            "stopped",
+            "lifecycle",
+            "interrupted by hub restart; matching flow lost or absent, not re-dispatched",
+          );
+          this.commit(m);
+        } catch (err) {
+          // 单条记录恢复失败不中断整体 reconcile，也不阻断 restoreDone 置位
+          logError(`mission reconcile ${m.id}`, err);
+          try {
+            this.log(m, "error", `restore reconcile failed: ${String(err)}`);
+          } catch {}
+        }
       }
-      m.pending = [];
-      this.transition(
-        m,
-        "stopped",
-        "lifecycle",
-        "interrupted by hub restart; matching flow lost or absent, not re-dispatched",
-      );
-      this.commit(m);
+    } finally {
+      this.restoreDone = true;
     }
-    this.restoreDone = true;
   }
 
   review(id: string, input: {
