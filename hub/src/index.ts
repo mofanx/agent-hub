@@ -44,7 +44,7 @@ import {
   type SlashCmd,
   type ModeSlashDeps,
 } from "./slash.js";
-import { Scheduler, type ScheduledTask, type TaskLog } from "./scheduler.js";
+import { Scheduler, parseSchedule, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 import { OperationLedger } from "./op-ledger.js";
 import { DecisionCenter, sweepPendingDecisions, inferOptionScope, isRejectOption, type DecisionScope, type DecisionRequestParams } from "./decision.js";
@@ -592,7 +592,7 @@ const missionManager = new MissionManager({
         text,
       });
     }
-    return roomModeManager.handle(room, text, options);
+    return roomModeManager.handle(room, text, { ...options, bypassFilter: true });
   },
   cancelActive: (roomId, reason) => roomModeManager.cancelActive(roomId, reason),
   cancel: (sessionId) => agentOps.cancel(sessionId),
@@ -667,16 +667,20 @@ const restoreRuntime = savedRuntime
   ? roomModeManager.importRuntime(savedRuntime)
   : Promise.resolve();
 restoreRuntime
+  .catch((err) => logError("import runtime", err))
   .then(() => {
-    sweepOrphanFlowCards();
-    sweepPendingDecisions({
-      store,
-      broadcast: (method, params) => broadcast({ method, params } as HubEvent),
-    });
+    try {
+      sweepOrphanFlowCards();
+      sweepPendingDecisions({
+        store,
+        broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+      });
+    } catch (err) {
+      logError("post-restore sweep", err);
+    }
     missionManager.reconcile();
     persistState();
-  })
-  .catch((err) => logError("import runtime", err));
+  });
 
 const scheduler = new Scheduler(
   store,
@@ -2774,10 +2778,10 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const targetType = req.params?.targetType === "room" ? "room" : "session";
       const targetId = String(req.params?.targetId ?? "");
       const targetName = String(req.params?.targetName ?? "");
-      const schedule = req.params?.schedule as ScheduledTask["schedule"];
       const enabled = req.params?.enabled !== false;
-      if (!name || !targetId || !schedule)
+      if (!name || !targetId || req.params?.schedule === undefined || req.params?.schedule === null)
         throw new Error("name, targetId, schedule required");
+      const schedule = parseSchedule(req.params.schedule);
       const missionId = req.params?.missionId;
       let message = String(req.params?.message ?? "");
       let missionTemplate: import("./scheduler.js").MissionTemplate | undefined;
@@ -2789,6 +2793,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         missionTemplate = missionTemplateFrom(m, targetType, targetId);
         missionAutoStart = req.params?.missionAutoStart === true;
         if (!message) message = `定时生成待确认目标：${m.goal.slice(0, 80)}`;
+      } else if (req.params?.missionAutoStart !== undefined) {
+        throw new Error("missionAutoStart requires missionId");
       }
       if (!message) throw new Error("message required");
       const task = scheduler.create({
@@ -2820,7 +2826,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         throw new Error("missionAutoStart requires a mission template");
       if (typeof req.params?.targetName === "string") patch.targetName = req.params.targetName;
       if (typeof req.params?.message === "string") patch.message = req.params.message;
-      if (req.params?.schedule) patch.schedule = req.params.schedule as ScheduledTask["schedule"];
+      if (req.params?.schedule) patch.schedule = parseSchedule(req.params.schedule);
       if (typeof req.params?.enabled === "boolean") patch.enabled = req.params.enabled;
       if (req.params?.missionAutoStart !== undefined)
         patch.missionAutoStart = req.params.missionAutoStart === true;

@@ -1,5 +1,5 @@
 import type { MissionInfo } from "../hub/types";
-import { stringsFor, type Strings } from "../hub/strings";
+import { missionCheckStatusLabel, missionTaskStatusLabel, missionVerdictLabel, stringsFor, type Strings } from "../hub/strings";
 import { useHubStore } from "../hub/store";
 import type {
   FlowTask,
@@ -8,7 +8,7 @@ import type {
 } from "../hub/types";
 
 function Field({ label, value, S }: { label: string; value: unknown; S: Strings }) {
-  if (value === undefined || value === null || value === "") {
+  if (value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0)) {
     return <span className="nav-sub mission-ev-field">{label}: {S.missionNotProvided}</span>;
   }
   const text = Array.isArray(value) ? value.join("\n") : String(value);
@@ -42,7 +42,7 @@ export function MissionEvidence({ mission }: { mission: MissionInfo }) {
   if (tasks.length === 0 && !mission.output) return null;
   return (
     <details className="mission-evidence">
-      <summary className="nav-sub">{S.missionEventsDetail}</summary>
+      <summary className="nav-sub">{S.missionEvidenceDetail}</summary>
       {mission.output && (
         <span className="nav-sub mission-ev-field">
           {S.missionOutput}: <pre className="mission-ev-pre">{mission.output}</pre>
@@ -54,7 +54,7 @@ export function MissionEvidence({ mission }: { mission: MissionInfo }) {
         return (
           <div key={t.id} className="nav-sub mission-task-evidence">
             <span>
-              {t.id} [{t.status}] {t.name}
+              {t.id} [{missionTaskStatusLabel(S, t.status)}] {t.name}
             </span>
             <Field label={`${S.missionSelfReport} ${S.missionFieldOutput}`} value={t.output} S={S} />
             <Field label={`${S.missionSelfReport} ${S.missionFieldDiff}`} value={t.diff} S={S} />
@@ -72,7 +72,7 @@ export function MissionEvidence({ mission }: { mission: MissionInfo }) {
             {vers.map((v, i) => (
               <span key={i} className="mission-ev-field">
                 <span className="nav-sub">
-                  {S.missionPeerReview} {v.by}: {S.missionFieldVerdict} {v.verdict} · {S.missionFieldEvidence} {v.evidence || S.missionNotProvided}
+                  {S.missionPeerReview} {v.by}: {S.missionFieldVerdict} {missionVerdictLabel(S, v.verdict)} · {S.missionFieldEvidence} {v.evidence || S.missionNotProvided}
                 </span>
                 {v.evidenceDetail && <PeerDetail ed={v.evidenceDetail} S={S} />}
               </span>
@@ -80,12 +80,14 @@ export function MissionEvidence({ mission }: { mission: MissionInfo }) {
             {ac && String(ac.status ?? "not_run") !== "not_run" && (
               <span className="mission-ev-field">
                 <span className="nav-sub">
-                  {S.missionIsolatedCheck}: {S.missionFieldStatus} {String(ac.status ?? S.missionNotProvided)}
+                  {S.missionIsolatedCheck}: {S.missionFieldStatus} {missionCheckStatusLabel(S, String(ac.status))}
                   {typeof ac.exitCode === "number" ? ` · ${S.missionFieldExitCode} ${ac.exitCode}` : ""}
+                  {typeof ac.reason === "string" && ac.reason ? ` · ${ac.reason}` : ""}
                   {ac.snapshotCurrent === false ? ` (${S.missionSnapshotStale})` : ""}
                 </span>
-                <Field label={`${S.missionIsolatedCheck} ${S.missionFieldStdout}`} value={ac.stdout} S={S} />
-                <Field label={`${S.missionIsolatedCheck} ${S.missionFieldStderr}`} value={ac.stderr} S={S} />
+                {typeof ac.detail === "string" && ac.detail && (
+                  <Field label={S.missionEvidenceDetail} value={ac.detail} S={S} />
+                )}
               </span>
             )}
           </div>

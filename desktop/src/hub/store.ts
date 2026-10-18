@@ -3691,6 +3691,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!client || !client.isConnected) return;
       try {
         await client.call("permission.respond", { requestId: d.requestId, optionId, scope: "once" });
+        set({ pendingDecisions: get().pendingDecisions.filter((x) => x.decisionId !== d.decisionId) });
       } catch (e) {
         if (get().client === client) set({ missionError: String(e) });
       }

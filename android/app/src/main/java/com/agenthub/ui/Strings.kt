@@ -162,6 +162,7 @@ interface Strings {
     val scheduleCron: String
     val scheduleDaily: String
     val scheduleInterval: String
+    val schedIntervalFmt: String
     val scheduleOnce: String
     val taskEnabled: String
     val noTasks: String
@@ -577,6 +578,7 @@ interface Strings {
     val missionAcceptedNote: String
     val taskTemplateLocked: String
     val taskTemplateRebuild: String
+    val taskTemplateDraftOnly: String
     val missionNotProvided: String
     val missionSelfReport: String
     val missionPeerReview: String
@@ -761,6 +763,7 @@ object ZhStrings : Strings {
     override val scheduleCron = "高级"
     override val scheduleDaily = "每天"
     override val scheduleInterval = "间隔"
+    override val schedIntervalFmt = "每 %s 分钟"
     override val scheduleOnce = "一次性"
     override val taskEnabled = "启用"
     override val noTasks = "暂无定时任务"
@@ -1184,6 +1187,7 @@ object ZhStrings : Strings {
     override val missionAcceptedNote = "验收说明"
     override val taskTemplateLocked = "定时目标的契约与目标已冻结"
     override val taskTemplateRebuild = "修改契约/目标需删除后重新创建定时任务"
+    override val taskTemplateDraftOnly = "默认仅生成待确认草稿"
     override val missionNotProvided = "未提供"
     override val missionSelfReport = "成员自报"
     override val missionPeerReview = "成员复核"
@@ -1368,6 +1372,7 @@ object EnStrings : Strings {
     override val scheduleCron = "Cron"
     override val scheduleDaily = "Daily"
     override val scheduleInterval = "Interval"
+    override val schedIntervalFmt = "every %s min"
     override val scheduleOnce = "Once"
     override val taskEnabled = "Enabled"
     override val noTasks = "No scheduled tasks"
@@ -1791,6 +1796,7 @@ object EnStrings : Strings {
     override val missionAcceptedNote = "Acceptance note"
     override val taskTemplateLocked = "Mission template contract and target are frozen"
     override val taskTemplateRebuild = "To change contract/target, delete and recreate the scheduled task"
+    override val taskTemplateDraftOnly = "Creates a pending draft by default"
     override val missionNotProvided = "Not provided"
     override val missionSelfReport = "Self-reported"
     override val missionPeerReview = "Peer-reviewed"

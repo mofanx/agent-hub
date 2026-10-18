@@ -150,6 +150,39 @@ function simpleNextRun(schedule: SimpleSchedule, from: Date, lastRunAt: number |
   return null;
 }
 
+/** API 入参校验：非法 schedule 拒绝落库（否则会成为永不触发的哑任务） */
+export function parseSchedule(raw: unknown): Schedule {
+  if (typeof raw !== "object" || raw === null) throw new Error("schedule must be an object");
+  const s = raw as Record<string, unknown>;
+  if (s.mode === "simple") {
+    if (s.kind === "daily") {
+      if (typeof s.time !== "string" || !/^\d{1,2}:\d{2}$/.test(s.time))
+        throw new Error('schedule daily requires time "HH:MM"');
+      const [h, m] = s.time.split(":").map(Number) as [number, number];
+      if (h > 23 || m > 59) throw new Error(`schedule daily time out of range: ${s.time}`);
+      return { mode: "simple", kind: "daily", time: s.time };
+    }
+    if (s.kind === "interval") {
+      if (typeof s.intervalMinutes !== "number" || !Number.isInteger(s.intervalMinutes) || s.intervalMinutes <= 0)
+        throw new Error("schedule interval requires a positive integer intervalMinutes");
+      return { mode: "simple", kind: "interval", intervalMinutes: s.intervalMinutes };
+    }
+    if (s.kind === "once") {
+      if (typeof s.at !== "number" || !Number.isFinite(s.at))
+        throw new Error("schedule once requires a numeric at timestamp");
+      return { mode: "simple", kind: "once", at: s.at };
+    }
+    throw new Error(`unknown schedule kind: ${String(s.kind)}`);
+  }
+  if (s.mode === "cron") {
+    if (typeof s.expr !== "string" || !s.expr.trim()) throw new Error("schedule cron requires expr");
+    if (cronNextRun(s.expr, new Date()) === null)
+      throw new Error(`invalid cron expression: ${s.expr}`);
+    return { mode: "cron", expr: s.expr };
+  }
+  throw new Error(`unknown schedule mode: ${String(s.mode)}`);
+}
+
 export function computeNextRun(task: ScheduledTask, from: Date = new Date()): number | null {
   if (!task.enabled) return null;
   if (task.schedule.mode === "cron") {

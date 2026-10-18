@@ -7,7 +7,7 @@ import { MissionManager, type MissionSnapshot } from "./mission.js";
 import { missionTemplateFrom, runMissionTask, type MissionTaskDeps } from "./mission-schedule.js";
 import { RoomManager } from "./room.js";
 import { Store } from "./store.js";
-import type { ScheduledTask } from "./scheduler.js";
+import { parseSchedule, type ScheduledTask } from "./scheduler.js";
 
 const cleanupStores: Store[] = [];
 const cleanupDirs: string[] = [];
@@ -162,5 +162,44 @@ describe("mission schedule", () => {
       /unavailable/,
     );
     assert.equal(h.manager.list(h.room.roomId).length, before, "不得产生新 draft");
+  });
+
+  it("parseSchedule 拒绝非法 schedule，合法值原样通过", () => {
+    assert.throws(() => parseSchedule(null), /object/);
+    assert.throws(() => parseSchedule("daily"), /object/);
+    assert.throws(() => parseSchedule({ mode: "weekly" }), /mode/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "hourly" }), /kind/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "daily" }), /time/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "daily", time: "9点" }), /time/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "daily", time: "9:5" }), /time/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "daily", time: "24:00" }), /range/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "daily", time: "12:60" }), /range/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "interval" }), /intervalMinutes/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "interval", intervalMinutes: 0 }), /intervalMinutes/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "interval", intervalMinutes: -5 }), /intervalMinutes/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "interval", intervalMinutes: 1.5 }), /intervalMinutes/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "once" }), /at/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "once", at: "tomorrow" }), /at/);
+    assert.throws(() => parseSchedule({ mode: "cron" }), /expr/);
+    assert.throws(() => parseSchedule({ mode: "cron", expr: "* * *" }), /cron/);
+    assert.throws(() => parseSchedule({ mode: "cron", expr: "99 * * * *" }), /cron/);
+    assert.throws(() => parseSchedule({ mode: "cron", expr: "0 0 31 2 *" }), /cron/);
+    assert.deepEqual(
+      parseSchedule({ mode: "simple", kind: "daily", time: "9:05" }),
+      { mode: "simple", kind: "daily", time: "9:05" },
+    );
+    assert.deepEqual(
+      parseSchedule({ mode: "simple", kind: "interval", intervalMinutes: 30 }),
+      { mode: "simple", kind: "interval", intervalMinutes: 30 },
+    );
+    const at = Date.now() + 60_000;
+    assert.deepEqual(
+      parseSchedule({ mode: "simple", kind: "once", at }),
+      { mode: "simple", kind: "once", at },
+    );
+    assert.deepEqual(
+      parseSchedule({ mode: "cron", expr: "*/5 * * * *" }),
+      { mode: "cron", expr: "*/5 * * * *" },
+    );
   });
 });

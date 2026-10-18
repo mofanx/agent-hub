@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { MissionEvidence } from "./MissionEvidence";
 import { ExternalLink, Play, Square, Target } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { missionStatusLabel, stringsFor, type Strings } from "../hub/strings";
+import { missionEventKindLabel, missionStatusLabel, missionTaskStatusLabel, stringsFor, type Strings } from "../hub/strings";
 import { FormRow } from "../components/FormRow";
 import type { DecisionInfo, MissionCriterionReview, MissionInfo, RoomInfo } from "../hub/types";
 
@@ -50,7 +50,9 @@ function DecisionSection() {
                 <span className="nav-title">{d.title}</span>
                 <span className="nav-sub">
                   {S.decisionFrom} {d.requestedBy}
-                  {d.roomId ? ` · ${d.roomId}` : ` · ${d.sessionId.slice(0, 8)}`} ·{" "}
+                  {d.roomId
+                    ? ` · ${store.rooms.find((r) => r.roomId === d.roomId)?.name ?? d.roomId}`
+                    : ` · ${d.sessionId.slice(0, 8)}`} ·{" "}
                   {S.decisionWaitingFmt.replace("%s", String(ago(d.at)))}
                 </span>
                 {summary && (
@@ -91,9 +93,9 @@ function DecisionSection() {
   );
 }
 
-function taskSummary(t: Record<string, unknown>): string {
+function taskSummary(t: Record<string, unknown>, S: Strings): string {
   const bits: string[] = [];
-  if (typeof t.status === "string") bits.push(String(t.status));
+  if (typeof t.status === "string") bits.push(missionTaskStatusLabel(S, String(t.status)));
   if (typeof t.output === "string" && t.output) bits.push(t.output.slice(0, 100));
   return bits.join(" · ");
 }
@@ -158,7 +160,7 @@ function ReviewBlock({ mission, onReview }: {
                               setTaskIds(checked ? taskIds.filter((x) => x !== id) : [...taskIds, id])
                             }
                           />
-                          {id} {taskSummary(t)}
+                          {id} {taskSummary(t, S)}
                         </label>
                       );
                     })}
@@ -216,7 +218,6 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
   const [filter, setFilter] = useState<FilterKey>("all");
   const [showForm, setShowForm] = useState(false);
   const [roomId, setRoomId] = useState("");
-  const room = rooms.find((r) => r.roomId === roomId) ?? rooms[0];
   const [ownerId, setOwnerId] = useState("");
   const [goal, setGoal] = useState("");
   const [criteria, setCriteria] = useState("");
@@ -229,6 +230,9 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
   const [reworkNote, setReworkNote] = useState("");
   const [acceptNoteMap, setAcceptNoteMap] = useState<Record<string, string>>({});
   const [editId, setEditId] = useState<string | null>(null);
+  const room = editId
+    ? store.rooms.find((r) => r.roomId === roomId)
+    : rooms.find((r) => r.roomId === roomId) ?? rooms[0];
   const [maxAutoRetries, setMaxAutoRetries] = useState(0);
   const [schedId, setSchedId] = useState<string | null>(null);
   const [schedTime, setSchedTime] = useState("09:00");
@@ -253,7 +257,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
   }, [missions]);
   const filtered = useMemo(() => missions.filter(FILTERS.find((f) => f.key === filter)!.match), [missions, filter]);
 
-  if (!store.missionSupported) return null;
+  if (!store.missionSupported) return <DecisionSection />;
   const lines = (v: string) => v.split("\n").map((s) => s.trim()).filter(Boolean);
   const canStart = (m: MissionInfo) => m.status === "draft";
   const canStop = (m: MissionInfo) => ["running", "waiting-user", "awaiting-acceptance"].includes(m.status);
@@ -278,6 +282,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
       : await store.createMission(input);
     if (created !== null) {
       setGoal(""); setCriteria(""); setScope(""); setConstraints(""); setEditId(null); setShowForm(false);
+      setRoomId(""); setOwnerId(""); setMaxAutoRetries(0);
     }
   });
 
@@ -319,7 +324,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
           <div className="home-recent mission-form">
             <FormRow label={S.missionRoom}>
               <select value={room?.roomId ?? ""} disabled={!!editId} onChange={(e) => { setRoomId(e.target.value); setOwnerId(""); }}>
-                {rooms.map((r) => <option key={r.roomId} value={r.roomId}>{r.name}</option>)}
+                {(editId && room ? [room] : rooms).map((r) => <option key={r.roomId} value={r.roomId}>{r.name}</option>)}
               </select>
             </FormRow>
             <FormRow label={S.missionOwner}>
@@ -385,7 +390,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                       <summary>{S.missionEventsDetail} ({m.events.length})</summary>
                       {m.events.map((e) => (
                         <div key={e.id}>
-                          [{e.kind === "lifecycle" ? S.missionEventLifecycle : e.kind === "flow" ? S.missionEventFlow : e.kind === "output" ? S.missionEventOutput : e.kind === "error" ? S.missionEventError : e.kind === "review" ? S.missionEventReview : e.kind === "rework" ? S.missionEventRework : e.kind === "supplement" ? S.missionEventSupplement : e.kind}] {e.text}
+                          [{missionEventKindLabel(S, e.kind)}] {e.text}
                         </div>
                       ))}
                     </details>
@@ -493,7 +498,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                 {m.status === "draft" && (
                   <button className="secondary" disabled={busy} onClick={() => void run(() => store.stopMission(m.id))}>{S.missionDraftClose}</button>
                 )}
-                {m.status === "waiting-user" && String((m.flow as Record<string, unknown> | undefined)?.phase ?? "") === "awaiting-retry" && (
+                {(m.status === "waiting-user" || m.status === "running") && String((m.flow as Record<string, unknown> | undefined)?.phase ?? "") === "awaiting-retry" && (
                   <button className="secondary" disabled={busy} onClick={() => void run(() => store.retryMission(m.id))}>{S.missionRetry}</button>
                 )}
                 {rm && (

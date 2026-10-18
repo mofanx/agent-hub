@@ -631,6 +631,12 @@ export interface Strings {
   missionEventSupplement: string;
   missionEventsDetail: string;
   missionOutput: string;
+  missionEvidenceDetail: string;
+  missionCheckExitedZero: string;
+  missionCheckExitedNonzero: string;
+  missionCheckBlocked: string;
+  missionCheckTimedOut: string;
+  missionCheckNotRun: string;
   decisionSection: string;
   decisionFrom: string;
   decisionWaitingFmt: string;
@@ -1276,6 +1282,12 @@ const zh: Strings = {
   missionEventSupplement: "补充",
   missionEventsDetail: "技术详情",
   missionOutput: "输出摘要",
+  missionEvidenceDetail: "证据详情",
+  missionCheckExitedZero: "退出码 0",
+  missionCheckExitedNonzero: "退出码非 0",
+  missionCheckBlocked: "受限未执行",
+  missionCheckTimedOut: "超时",
+  missionCheckNotRun: "未运行",
   decisionSection: "待处理决策",
   decisionFrom: "来自",
   decisionWaitingFmt: "等待 %s 分钟",
@@ -1921,6 +1933,12 @@ const en: Strings = {
   missionEventSupplement: "Supplement",
   missionEventsDetail: "Technical details",
   missionOutput: "Output summary",
+  missionEvidenceDetail: "Evidence details",
+  missionCheckExitedZero: "exit 0",
+  missionCheckExitedNonzero: "non-zero exit",
+  missionCheckBlocked: "Blocked",
+  missionCheckTimedOut: "Timed out",
+  missionCheckNotRun: "Not run",
   decisionSection: "Pending decisions",
   decisionFrom: "From",
   decisionWaitingFmt: "Waiting %s min",
@@ -1949,6 +1967,49 @@ export function missionStatusLabel(S: Strings, status: string): string {
     case "stopped": return S.missionStatusStopped;
     case "failed": return S.missionStatusFailed;
     default: return status;
+  }
+}
+
+export function missionTaskStatusLabel(S: Strings, status: string): string {
+  switch (status) {
+    case "pending": return S.toolStatusPending;
+    case "running": return S.missionStatusRunning;
+    case "done": return S.toolStatusCompleted;
+    case "failed": return S.missionStatusFailed;
+    default: return status;
+  }
+}
+
+export function missionVerdictLabel(S: Strings, verdict: string): string {
+  switch (verdict) {
+    case "pass": return S.missionReviewPass;
+    case "fail": return S.missionReviewFail;
+    case "unverified": return S.missionReviewUnverified;
+    default: return verdict;
+  }
+}
+
+export function missionCheckStatusLabel(S: Strings, status: string): string {
+  switch (status) {
+    case "exited_zero": return S.missionCheckExitedZero;
+    case "exited_nonzero": return S.missionCheckExitedNonzero;
+    case "blocked": return S.missionCheckBlocked;
+    case "timed_out": return S.missionCheckTimedOut;
+    case "not_run": return S.missionCheckNotRun;
+    default: return status;
+  }
+}
+
+export function missionEventKindLabel(S: Strings, kind: string): string {
+  switch (kind) {
+    case "lifecycle": return S.missionEventLifecycle;
+    case "flow": return S.missionEventFlow;
+    case "output": return S.missionEventOutput;
+    case "error": return S.missionEventError;
+    case "review": return S.missionEventReview;
+    case "rework": return S.missionEventRework;
+    case "supplement": return S.missionEventSupplement;
+    default: return kind;
   }
 }
 

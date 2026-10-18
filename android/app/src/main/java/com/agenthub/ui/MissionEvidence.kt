@@ -15,7 +15,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.agenthub.Mission
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 private fun JsonObject.str(key: String): String? =
@@ -34,12 +33,12 @@ private fun Field(label: String, value: String?, S: Strings) {
 fun MissionEvidence(m: Mission, S: Strings) {
     val tasks = (m.flow?.get("tasks") as? kotlinx.serialization.json.JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
     if (tasks.isEmpty() && m.output.isNullOrBlank()) return
-    if (tasks.isEmpty()) {
-        Text("${S.missionFieldOutput}: ${m.output}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        return
-    }
     var expanded by remember { mutableStateOf(false) }
     Column {
+        if (!m.output.isNullOrBlank()) {
+            Text("${S.missionOutput}: ${m.output}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (tasks.isNotEmpty()) {
         Text(
             "${S.missionSelfReport} · ${S.missionPeerReview} · ${S.missionIsolatedCheck}",
             Modifier.clickable { expanded = !expanded }.padding(vertical = 2.dp),
@@ -56,7 +55,7 @@ fun MissionEvidence(m: Mission, S: Strings) {
                     Field("${S.missionSelfReport} ${S.missionFieldDiff}", t.str("diff"), S)
                     Field("${S.missionSelfReport} ${S.missionFieldBaseline}", t.str("baseline"), S)
                     Field("${S.missionSelfReport} ${S.missionFieldReproSteps}",
-                        (t["reproSteps"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }?.joinToString("\n")
+                        (t["reproSteps"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }?.joinToString("\n")
                             ?: t.str("reproSteps"), S)
                     val vc = t.str("verifyCommand")
                     val vec = t.str("verifyExitCode") ?: (t["verifyExitCode"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
@@ -74,10 +73,12 @@ fun MissionEvidence(m: Mission, S: Strings) {
                             Field("${S.missionPeerReview} ${S.missionFieldBaseline}", ed.str("baseline"), S)
                             Field("${S.missionPeerReview} ${S.missionFieldDiff}", ed.str("diff"), S)
                             Field("${S.missionPeerReview} ${S.missionFieldReproSteps}",
-                                (ed["reproSteps"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }?.joinToString("\n")
+                                (ed["reproSteps"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }?.joinToString("\n")
                                     ?: ed.str("reproSteps"), S)
                             Field("${S.missionPeerReview} ${S.missionFieldCommand}", ed.str("command"), S)
-                            Field("${S.missionPeerReview} ${S.missionFieldExitCode}", ed.str("exitCode") ?: (ed["exitCode"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull, S)
+                            Field("${S.missionPeerReview} ${S.missionFieldExitCode}",
+                                (ed.str("exitCode") ?: (ed["exitCode"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull)
+                                    ?.let { c -> "$c${if (c == "0") " (${S.missionExitZero})" else ""}" }, S)
                             Field("${S.missionPeerReview} ${S.missionFieldStdout}", ed.str("stdout"), S)
                             Field("${S.missionPeerReview} ${S.missionFieldStderr}", ed.str("stderr"), S)
                             val arts = (ed["artifactRefs"] as? kotlinx.serialization.json.JsonArray)
@@ -96,6 +97,7 @@ fun MissionEvidence(m: Mission, S: Strings) {
                     }
                 }
             }
+        }
         }
     }
 }

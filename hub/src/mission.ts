@@ -528,11 +528,13 @@ export class MissionManager {
     const flow = this.deps.getFlow(m.roomId);
     const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
     if (flowId && flowId !== m.baselineFlowId) {
+      // dispatch await 期间 syncFlow 可能已绑定同一 flow：不重复记 bound 事件
+      const alreadyBound = m.flowId === flowId;
       m.flowId = flowId;
       if (flow) m.flow = flow;
       m.lastPhase = flow ? String(flow.phase ?? "") : "";
       m.lastFlowSig = JSON.stringify(flow);
-      this.log(m, "flow", `bound flow ${flowId} (${m.lastPhase || "?"})`);
+      if (!alreadyBound) this.log(m, "flow", `bound flow ${flowId} (${m.lastPhase || "?"})`);
       if (flow) this.applyFlowPhase(m, flow);
     }
     if (m.stopRequested) {
@@ -904,11 +906,7 @@ export class MissionManager {
     if (typeof note !== "string" || !note.trim()) throw new Error("rework requires a non-empty reason");
     if (m.status !== "awaiting-acceptance" && m.status !== "failed" && m.status !== "stopped")
       throw new Error(`rework requires a closed mission: ${m.status}`);
-    if (m.status === "awaiting-acceptance") {
-      this.transition(m, "stopped", "lifecycle", "closed for rework");
-    }
-    this.log(m, "rework", `rework requested: ${note.trim().slice(0, 300)}`);
-    this.commit(m);
+    // 先创建子 draft（完成全部校验），成功后再关闭原任务：失败时零副作用
     const draft = this.create({
       roomId: m.roomId,
       goal: m.goal,
@@ -922,6 +920,11 @@ export class MissionManager {
     nm.parentMissionId = m.id;
     nm.reworkReason = note.trim();
     this.log(nm, "rework", `rework of ${m.id}: ${note.trim().slice(0, 300)}`);
+    if (m.status === "awaiting-acceptance") {
+      this.transition(m, "stopped", "lifecycle", "closed for rework");
+    }
+    this.log(m, "rework", `rework requested: ${note.trim().slice(0, 300)}`);
+    this.commit(m);
     return this.commit(nm);
   }
 

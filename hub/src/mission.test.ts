@@ -826,6 +826,28 @@ describe("mission v2", () => {
     assert.throws(() => h.manager.rework(nm.id, "x"), /closed/);
   });
 
+  it("rework：create 失败时原 mission 零副作用", async () => {
+    const h = makeHarness(
+      [
+        { sessionId: "s1", name: "lead" },
+        { sessionId: "s2", name: "coder" },
+        { sessionId: "s3", name: "ops" },
+      ],
+      "mention",
+    );
+    const m = await doneFlowMission(h);
+    assert.equal(h.manager.get(m.id)!.status, "awaiting-acceptance");
+    const revBefore = h.manager.get(m.id)!.revision;
+    // owner 已离房 → 子 draft 的 create 校验必然失败
+    h.rooms.removeMember("s1");
+    assert.throws(() => h.manager.rework(m.id, "返工"), /not a room member/);
+    const orig = h.manager.get(m.id)!;
+    assert.equal(orig.status, "awaiting-acceptance", "原 mission 不得被关闭");
+    assert.equal(orig.revision, revBefore, "不得产生新提交");
+    assert.ok(!orig.events.some((e) => e.kind === "rework"), "不得残留 rework 事件");
+    assert.equal(h.manager.list().length, 1, "不得产生子 draft");
+  });
+
   it("updateContract：仅 draft 可改，同 create 校验", async () => {
     const h = makeHarness();
     const m = makeMission(h);

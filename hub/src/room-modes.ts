@@ -51,6 +51,8 @@ type PromptOptions = {
   sessionNote?: ((sessionId: string) => string | undefined) | undefined;
   params?: Record<string, unknown> | undefined;
   artifactContext?: { taskId?: string; dependsOn?: string[]; refs?: string[] } | undefined;
+  /** mission 等用户显式批准的派发：跳过相关性过滤 */
+  bypassFilter?: boolean | undefined;
 };
 
 export function parseTaskCommand(
@@ -879,6 +881,7 @@ export class RoomModeManager {
     // 显式 @ 点名或 params.targets 是用户明确意图，直通不过滤。
     if (
       this.relevanceFilter &&
+      !options?.bypassFilter &&
       (room.mode === "auto" || room.mode === "mention")
     ) {
       const explicit =

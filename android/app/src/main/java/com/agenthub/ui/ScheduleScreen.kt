@@ -291,7 +291,13 @@ private fun TaskCard(
             Text(S.messageFmt.format(task.message.take(80) + if (task.message.length > 80) "…" else ""),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             task.missionTemplate?.let { tpl ->
-                Text("${S.missionFrozenContract}: ${tpl["goal"]?.jsonPrimitive?.contentOrNull ?: ""}${if (task.missionAutoStart) " · ${S.missionAutoStart}" else ""}",
+                val tplScope = (tpl["scope"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: ""
+                val tplConstraints = (tpl["constraints"] as? kotlinx.serialization.json.JsonArray)
+                    ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: emptyList()
+                Text("${S.missionFrozenContract}: ${tpl["goal"]?.jsonPrimitive?.contentOrNull ?: ""}" +
+                    "${if (tplScope.isNotBlank()) " · ${S.missionScope}: $tplScope" else ""}" +
+                    "${if (tplConstraints.isNotEmpty()) " · ${tplConstraints.joinToString("；")}" else ""}" +
+                    " · ${if (task.missionAutoStart) S.missionAutoStart else S.taskTemplateDraftOnly}",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(S.taskTemplateRebuild, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -329,7 +335,7 @@ private fun describeSchedule(task: ScheduledTask, S: Strings): String {
     if (task.scheduleMode == "cron") return "Cron: ${task.cronExpr ?: ""}"
     return when (task.simpleKind) {
         "daily" -> "${S.scheduleDaily} ${task.time ?: "09:00"}"
-        "interval" -> "${S.scheduleInterval} ${task.intervalMinutes ?: 0} min"
+        "interval" -> S.schedIntervalFmt.format(task.intervalMinutes ?: 0)
         "once" -> "${S.scheduleOnce} ${task.at?.let { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it)) } ?: "—"}"
         else -> "—"
     }
@@ -452,7 +458,7 @@ private fun TaskEditorDialog(
                             OutlinedTextField(
                                 value = time,
                                 onValueChange = { time = it },
-                                label = { Text("HH:MM") },
+                                label = { Text(S.missionTimeLabel) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                             )

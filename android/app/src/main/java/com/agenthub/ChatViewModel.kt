@@ -1709,7 +1709,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         eventJob = viewModelScope.launch {
             val gen = missionConnectionGeneration
-            hub.events.collect { if (gen != missionConnectionGeneration) return@collect; handleEvent(it) }
+            hub.events.collect {
+                if (gen != missionConnectionGeneration) return@collect
+                try {
+                    handleEvent(it)
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                }
+            }
         }
     }
 
@@ -1968,13 +1975,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             .filter { it.isNotEmpty() }
             .joinToString(" · ") { it.take(80) }
         return PendingDecision(
-            decisionId = o["decisionId"]!!.jsonPrimitive.content,
-            requestId = o["requestId"]!!.jsonPrimitive.content,
+            decisionId = (o["decisionId"] as? JsonPrimitive)?.contentOrNull ?: "",
+            requestId = (o["requestId"] as? JsonPrimitive)?.contentOrNull ?: "",
             type = o["type"]?.jsonPrimitive?.content ?: "permission",
             title = o["title"]?.jsonPrimitive?.content ?: "",
-            options = (o["options"] as? JsonArray)?.map {
-                val p = it.jsonObject
-                p["id"]!!.jsonPrimitive.content to (p["label"]?.jsonPrimitive?.content ?: p["id"]!!.jsonPrimitive.content)
+            options = (o["options"] as? JsonArray)?.mapNotNull {
+                val p = it as? JsonObject ?: return@mapNotNull null
+                val oid = (p["id"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+                oid to ((p["label"] as? JsonPrimitive)?.contentOrNull ?: oid)
             } ?: emptyList(),
             contextSummary = summary,
             requestedBy = o["requestedBy"]?.jsonPrimitive?.content ?: "",
@@ -2177,6 +2185,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun upsertMission(m: Mission) {
+        val local = missions.find { it.id == m.id }
+        if (local != null && local.revision >= m.revision) return
         missions.removeAll { it.id == m.id }
         missions.add(m)
     }
@@ -2257,60 +2267,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun parseMission(o: JsonObject): Mission {
+        val str = { key: String -> (o[key] as? JsonPrimitive)?.contentOrNull }
         val strList = { key: String ->
-            (o[key] as? JsonArray)?.map { it.jsonPrimitive.content } ?: emptyList()
+            (o[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
         }
         return Mission(
-            id = o["id"]!!.jsonPrimitive.content,
-            roomId = o["roomId"]!!.jsonPrimitive.content,
-            goal = o["goal"]!!.jsonPrimitive.content,
+            id = str("id") ?: "",
+            roomId = str("roomId") ?: "",
+            goal = str("goal") ?: "",
             acceptanceCriteria = strList("acceptanceCriteria"),
-            scope = o["scope"]?.jsonPrimitive?.content ?: "",
+            scope = str("scope") ?: "",
             constraints = strList("constraints"),
-            ownerSessionId = o["ownerSessionId"]!!.jsonPrimitive.content,
-            status = o["status"]?.jsonPrimitive?.content ?: "draft",
-            createdAt = o["createdAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
-            updatedAt = o["updatedAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
-            startedAt = o["startedAt"]?.jsonPrimitive?.content?.toLongOrNull(),
-            finishedAt = o["finishedAt"]?.jsonPrimitive?.content?.toLongOrNull(),
-            flowId = o["flowId"]?.jsonPrimitive?.content,
+            ownerSessionId = str("ownerSessionId") ?: "",
+            status = str("status") ?: "draft",
+            createdAt = str("createdAt")?.toLongOrNull() ?: 0,
+            updatedAt = str("updatedAt")?.toLongOrNull() ?: 0,
+            startedAt = str("startedAt")?.toLongOrNull(),
+            finishedAt = str("finishedAt")?.toLongOrNull(),
+            flowId = str("flowId"),
             flow = o["flow"] as? JsonObject,
-            output = o["output"]?.jsonPrimitive?.content,
-            error = o["error"]?.jsonPrimitive?.content,
-            events = (o["events"] as? JsonArray)?.map {
-                val ev = it.jsonObject
+            output = str("output"),
+            error = str("error"),
+            events = (o["events"] as? JsonArray)?.mapNotNull {
+                val ev = it as? JsonObject ?: return@mapNotNull null
                 MissionEvent(
-                    ev["id"]?.jsonPrimitive?.content ?: "",
-                    ev["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
-                    ev["kind"]?.jsonPrimitive?.content ?: "",
-                    ev["text"]?.jsonPrimitive?.content ?: "",
+                    (ev["id"] as? JsonPrimitive)?.contentOrNull ?: "",
+                    (ev["at"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 0,
+                    (ev["kind"] as? JsonPrimitive)?.contentOrNull ?: "",
+                    (ev["text"] as? JsonPrimitive)?.contentOrNull ?: "",
                 )
             } ?: emptyList(),
-            reviews = (o["reviews"] as? JsonArray)?.map {
-                val rv = it.jsonObject
+            reviews = (o["reviews"] as? JsonArray)?.mapNotNull {
+                val rv = it as? JsonObject ?: return@mapNotNull null
                 MissionReview(
-                    index = rv["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                    verdict = rv["verdict"]?.jsonPrimitive?.content ?: "unverified",
-                    taskIds = (rv["taskIds"] as? JsonArray)?.map { t -> t.jsonPrimitive.content } ?: emptyList(),
-                    note = rv["note"]?.jsonPrimitive?.content ?: "",
-                    at = rv["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                    index = (rv["index"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0,
+                    verdict = (rv["verdict"] as? JsonPrimitive)?.contentOrNull ?: "unverified",
+                    taskIds = (rv["taskIds"] as? JsonArray)?.mapNotNull { t -> (t as? JsonPrimitive)?.contentOrNull } ?: emptyList(),
+                    note = (rv["note"] as? JsonPrimitive)?.contentOrNull ?: "",
+                    at = (rv["at"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 0,
                 )
             } ?: emptyList(),
-            acceptanceNote = (o["acceptance"] as? JsonObject)?.get("note")?.jsonPrimitive?.content,
-            supplements = (o["supplements"] as? JsonArray)?.map {
-                val sp = it.jsonObject
+            acceptanceNote = ((o["acceptance"] as? JsonObject)?.get("note") as? JsonPrimitive)?.contentOrNull,
+            supplements = (o["supplements"] as? JsonArray)?.mapNotNull {
+                val sp = it as? JsonObject ?: return@mapNotNull null
                 MissionSupplement(
-                    id = sp["id"]?.jsonPrimitive?.content ?: "",
-                    at = sp["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
-                    text = sp["text"]?.jsonPrimitive?.content ?: "",
-                    delivered = sp["delivered"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                    id = (sp["id"] as? JsonPrimitive)?.contentOrNull ?: "",
+                    at = (sp["at"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 0,
+                    text = (sp["text"] as? JsonPrimitive)?.contentOrNull ?: "",
+                    delivered = (sp["delivered"] as? JsonPrimitive)?.contentOrNull?.toBoolean() ?: false,
                 )
             } ?: emptyList(),
-            parentMissionId = o["parentMissionId"]?.jsonPrimitive?.contentOrNull,
-            reworkReason = o["reworkReason"]?.jsonPrimitive?.contentOrNull,
-            maxAutoRetries = o["maxAutoRetries"]?.jsonPrimitive?.intOrNull ?: 0,
-            autoRetryCount = o["autoRetryCount"]?.jsonPrimitive?.intOrNull ?: 0,
-            revision = o["revision"]?.jsonPrimitive?.intOrNull ?: 0,
+            parentMissionId = str("parentMissionId"),
+            reworkReason = str("reworkReason"),
+            maxAutoRetries = (o["maxAutoRetries"] as? JsonPrimitive)?.intOrNull ?: 0,
+            autoRetryCount = (o["autoRetryCount"] as? JsonPrimitive)?.intOrNull ?: 0,
+            revision = (o["revision"] as? JsonPrimitive)?.intOrNull ?: 0,
         )
     }
 
@@ -3456,7 +3467,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 决策卡 upsert：同 decisionId/条目 id 原位替换；permission 卡替代旧 Permission 条目 */
     private fun upsertDecision(item: ChatItem.Decision) {
         if (item.decisionType == "elicitation") {
-            val idx = chatItems.indexOfLast { it is ChatItem.Elicitation && it.requestId == item.requestId }
+            val idx = chatItems.indexOfLast { it is ChatItem.Elicitation && it.requestId == item.requestId && it.answered == null }
             if (idx >= 0) {
                 if (item.status != "pending") {
                     val e = chatItems[idx] as ChatItem.Elicitation
@@ -5312,10 +5323,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
             }
             "mission.update" -> {
-                val p = obj["params"]!!.jsonObject
-                val raw = p["mission"] as? JsonObject ?: return
-                missionEventRev++
-                upsertMission(parseMission(raw))
+                try {
+                    val p = obj["params"]!!.jsonObject
+                    val raw = p["mission"] as? JsonObject ?: return
+                    missionEventRev++
+                    upsertMission(parseMission(raw))
+                } catch (_: Exception) {
+                }
             }
         }
     }

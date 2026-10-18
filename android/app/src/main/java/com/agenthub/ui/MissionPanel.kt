@@ -402,7 +402,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                         if (m.status == "awaiting-acceptance") {
                             OutlinedTextField(value = acceptNote, onValueChange = { acceptNote = it }, label = { Text(S.missionReviewNote) }, modifier = Modifier.fillMaxWidth())
                             Button(
-                                onClick = { busy = true; vm.acceptMission(m.id, acceptNote) { busy = false } },
+                                onClick = { busy = true; vm.acceptMission(m.id, acceptNote) { ok -> busy = false; if (ok) acceptNote = "" } },
                                 enabled = allPassed && !busy,
                             ) { Text(S.missionAccept) }
                         }
@@ -424,7 +424,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             if (m.status == "draft") {
                                 TextButton(onClick = { confirmStop = m }, enabled = !busy) { Text(S.missionDraftClose, color = MaterialTheme.colorScheme.error) }
                             }
-                            if (m.status == "waiting-user" && m.flow?.get("phase")?.jsonPrimitive?.contentOrNull == "awaiting-retry") {
+                            if (m.status == "waiting-user" && (m.flow?.get("phase") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull == "awaiting-retry") {
                                 TextButton(onClick = { busy = true; vm.retryMission(m.id) { busy = false } }, enabled = !busy) { Text(S.missionRetry) }
                             }
                             if (m.status in listOf("running", "waiting-user", "awaiting-acceptance")) {
@@ -433,7 +433,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             if (m.status in listOf("running", "waiting-user")) {
                                 if (suppId == m.id) {
                                     OutlinedTextField(value = suppText, onValueChange = { suppText = it }, modifier = Modifier.fillMaxWidth())
-                                    TextButton(onClick = { busy = true; vm.supplementMission(m.id, suppText) { ok -> busy = false; if (ok) { suppId = null; suppText = "" } } }) { Text(S.missionSupplement) }
+                                    TextButton(onClick = { busy = true; vm.supplementMission(m.id, suppText) { ok -> busy = false; if (ok) { suppId = null; suppText = "" } } }, enabled = suppText.isNotBlank() && !busy) { Text(S.missionSupplement) }
                                 } else {
                                     TextButton(onClick = { suppId = m.id; suppText = "" }) { Text(S.missionSupplement) }
                                 }
@@ -525,7 +525,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                     busy = true
                     schedAutoConfirm = false
                     vm.createMissionSchedule(m.goal.take(40), m.roomId, rm?.name ?: m.roomId, "${S.missionSchedule}: ${m.goal.take(80)}", schedTime, m.id, true) { ok -> busy = false; if (ok) schedId = null }
-                }) { Text(S.missionAutoStart) }
+                }, enabled = !busy) { Text(S.missionAutoStart) }
             },
             dismissButton = { TextButton(onClick = { schedAutoConfirm = false }) { Text(S.cancel) } },
         )
