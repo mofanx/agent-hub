@@ -1302,6 +1302,7 @@ describe("openTopics 话题工作记忆", () => {
       rooms3.setStore(store);
       const emptySnap = JSON.parse(JSON.stringify(room)) as Room;
       emptySnap.blackboard = [];
+      emptySnap.eventSeq = 0;
       rooms3.import(emptySnap);
       const b3 = rooms3.getBlackboard(room.roomId);
       assert.deepEqual(

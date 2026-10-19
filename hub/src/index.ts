@@ -22,6 +22,7 @@ import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult, parseIsolatedChecks, runIsolatedCheck } from "./conductor.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
+import { startPerfMonitor } from "./monitor.js";
 import { AGENT_DEFS, spawnAgentProcess } from "./agent-defs.js";
 import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import {
@@ -2127,16 +2128,23 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const limit = Number(req.params?.limit ?? 200);
       const anchorAt = req.params?.anchorAt;
       const beforeAt = req.params?.before;
+      const afterAt = req.params?.after;
       const beforeId = req.params?.beforeId;
       const boundaryId =
         typeof beforeId === "number" && Number.isFinite(beforeId) ? beforeId : undefined;
+      const afterBound = typeof afterAt === "number" && Number.isFinite(afterAt) ? afterAt : undefined;
       let entries;
       if (typeof beforeAt === "number" && Number.isFinite(beforeAt)) {
         entries = store.readBefore("room", roomId, beforeAt, limit, boundaryId);
       } else if (typeof anchorAt === "number" && Number.isFinite(anchorAt)) {
         entries = store.readAround("room", roomId, anchorAt, limit);
+      } else if (afterBound !== undefined) {
+        entries = store.readAfter("room", roomId, afterBound, limit);
       } else {
         entries = store.read("room", roomId, limit);
+      }
+      if (afterBound !== undefined && entries.length > 0 && entries[0]!.at < afterBound) {
+        entries = entries.filter((e) => e.at >= afterBound);
       }
       const hasMore = entries.length > 0 ? store.hasMoreBefore("room", roomId, entries[0]!.at, entries[0]!.id) : false;
       return { entries, hasMore };
@@ -3242,6 +3250,14 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
     clearQuotaReports(baseConnection.id);
   });
 }
+
+// env 门控性能采样：ELD/RSS/在线量 30s 一行，供低配机卡顿定位与回归对比
+startPerfMonitor(() => ({
+  clients: clients.size,
+  agents: agents.size,
+  rooms: rooms.list().length,
+  maxBuffered: Math.max(0, ...[...clients].map((w) => w.bufferedAmount)),
+}));
 
 const wss = new WebSocketServer({ port: PORT, host: "0.0.0.0" });
 /** 经 gateway 中继的客户端连接（via=gateway）：connectInfo 不下发明文凭据 */

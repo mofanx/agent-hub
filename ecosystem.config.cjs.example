@@ -57,7 +57,7 @@ module.exports = {
       // 不监听文件变化，避免开发保存触发线上重启
       watch: false,
       // Node 堆上限 1024MB（与 max_memory_restart 对齐，避免 V8 先 OOM）
-      node_args: '--max-old-space-size=1024',
+      node_args: '--max-old-space-size=1024 --heapsnapshot-near-heap-limit=3',
       // 内存限制 1GB，超限时 PM2 自动重启；Hub 当前只维持 WS/ACP 连接，实际占用约 80MB，留足余量给多 worker/大消息
       max_memory_restart: '1G',
       // 优雅退出超时

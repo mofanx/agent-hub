@@ -121,6 +121,8 @@ export type Room = {
   artifacts?: Artifact[] | undefined;
   /** 房间事件时间轴 */
   events?: RoomEvent[] | undefined;
+  /** room_events 已应用水位（seq 高水位）：回放只拉 seq 大于它的增量，随房间快照原子持久化 */
+  eventSeq?: number | undefined;
 };
 
 export type RoomModeConfig = {
@@ -392,7 +394,10 @@ export class RoomManager {
   }
 
   private appendEvent(roomId: string, type: string, payload: Record<string, unknown>): void {
-    this.store?.appendRoomEvent(roomId, type, payload);
+    const seq = this.store?.appendRoomEvent(roomId, type, payload);
+    const room = this.rooms.get(roomId);
+    // 实时事件与内存态同步变更：水位与数组快照在同一份 state 中原子落库
+    if (room && seq !== undefined && seq > (room.eventSeq ?? 0)) room.eventSeq = seq;
   }
 
   create(
@@ -502,9 +507,11 @@ export class RoomManager {
 
   private replayRoomEvents(room: Room): void {
     if (!this.store) return;
-    const events = this.store.getRoomEvents(room.roomId);
+    // 增量回放：快照内数组已覆盖 seq ≤ eventSeq 的历史，只拉水位之后的增量
+    const events = this.store.getRoomEvents(room.roomId, room.eventSeq ?? 0);
     if (events.length === 0) return;
     for (const e of events) this.applyRoomEvent(room, e);
+    room.eventSeq = events[events.length - 1]!.seq;
     let maxAlias = 0;
     for (const a of room.artifacts ?? []) {
       const m = /^a(\d+)$/.exec(a.alias ?? "");
