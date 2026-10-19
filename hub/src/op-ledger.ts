@@ -3,6 +3,15 @@
  * opId 必须携带回合/内容限定符：重跑同一 turn 产生新 opId（不跳过），
  * 只有"同一 op 重复到达"才去重。内存有界 LRU，不落库（history 本身是事实源）。
  */
+/** inflight 去重：同 key 并发复用同一 Promise，settle 后自动清理可重试 */
+export function dedupInflight<K, V>(map: Map<K, Promise<V>>, key: K, factory: () => Promise<V>): Promise<V> {
+  const inflight = map.get(key);
+  if (inflight) return inflight;
+  const p = factory().finally(() => { map.delete(key); });
+  map.set(key, p);
+  return p;
+}
+
 export class OperationLedger {
   private ops = new Map<string, { kind: string; at: number }>();
 

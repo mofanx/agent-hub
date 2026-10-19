@@ -187,6 +187,8 @@ type Flow = {
   /** 结果以 taskId 为 key */
   results: Map<string, TaskResult>;
   artifactContext?: { refs?: string[] } | undefined;
+  /** 创建本 flow 的 mission id：mission 恢复/同步只认领归属自己的 flow */
+  missionId?: string | undefined;
   reviewReason?: string;
   /** 用户在流程执行中补充的信息，并入后续派发/验收/汇总 prompt */
   supplements: Supplement[];
@@ -287,10 +289,10 @@ function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
   }
   if (status === "exited_nonzero" && !Number.isInteger(o.exitCode)) return undefined;
   const reason = typeof o.reason === "string" && /^[a-z_]+$/.test(o.reason) ? o.reason : undefined;
+  const detail = typeof o.detail === "string" ? o.detail : undefined;
   const startedAt = Number(o.startedAt ?? 0);
   const finishedAt = Number(o.finishedAt ?? 0);
   if (status === "blocked" && o.commandHash === undefined) {
-    const detail = typeof o.detail === "string" ? o.detail : undefined;
     return {
       status: "blocked",
       runner: "bubblewrap",
@@ -314,6 +316,7 @@ function sanitizeAutomaticCheck(v: unknown): AutomaticCheck | undefined {
     startedAt,
     finishedAt,
     ...(reason ? { reason } : {}),
+    ...(detail ? { detail } : {}),
   };
 }
 
@@ -782,6 +785,7 @@ export class ConductorOrchestrator {
       flowId: flow.id,
       startedAt: flow.startedAt,
       phase: flow.phase,
+      ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
       ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
@@ -970,12 +974,14 @@ export class ConductorOrchestrator {
     goal: string,
     artifactContext?: { refs?: string[] },
     maxRounds?: number,
+    missionId?: string,
   ): Flow {
     const startedAt = Date.now();
     return {
       id: newFlowId(),
       roomId,
       startedAt,
+      ...(missionId !== undefined ? { missionId } : {}),
       phase: "planning",
       goal,
       acceptanceCriteria: [...DEFAULT_ACCEPTANCE_CRITERIA],
@@ -1058,19 +1064,20 @@ export class ConductorOrchestrator {
     text: string,
     initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[],
     artifactContext?: { refs?: string[] },
+    missionId?: string,
   ): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
     this.planningInFlight.delete(room.roomId);
     if (initialTasks && initialTasks.length > 0) {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
-      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds));
+      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId));
       const flow = this.flows.get(room.roomId)!;
       this.emitFlow?.(room.roomId);
       await this.dispatchFromTasks(flow, room, initialTasks, text);
       return;
     }
     const promptText = this.buildPlanningPrompt(room, text, artifactContext);
-    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds);
+    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId);
     this.flows.set(room.roomId, flow);
     this.emitFlow?.(room.roomId);
     this.planningInFlight.add(room.roomId);
@@ -2241,6 +2248,7 @@ export class ConductorOrchestrator {
       maxIterations: flow.maxIterations,
       rounds: flow.rounds,
       maxRounds: flow.maxRounds,
+      ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
       ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
       tasks: [...flow.tasks.values()].map((t) => ({
         id: t.id,
@@ -2340,6 +2348,9 @@ export class ConductorOrchestrator {
           typeof f.maxRounds === "number" && f.maxRounds > 0
             ? f.maxRounds
             : (room.maxRounds ?? DEFAULT_MAX_ROUNDS),
+        ...(typeof f.missionId === "string" && f.missionId
+          ? { missionId: f.missionId }
+          : {}),
         tasks: new Map(),
         results: new Map(),
         artifactContext,

@@ -2738,7 +2738,7 @@ describe("collab-e2e", () => {
         cancelActive: (id, reason) => h.manager.cancelActive(id, reason),
         cancel: (sid) => h.agent.cancel(sid),
         retryFailedTasks: (id, taskIds) => h.manager.retryFailedTasks(id, taskIds),
-        supplementActive: (room, text) => h.manager.supplementActive(room, text),
+        supplementActive: (room, text, mid) => h.manager.supplementActive(room, text, mid),
         broadcast: () => {},
       });
       h.manager.onFlowCard = (roomId, flow) => missions.syncFlow(roomId, flow);
@@ -2833,7 +2833,7 @@ describe("collab-e2e", () => {
         cancelActive: (id, reason) => manager.cancelActive(id, reason),
         cancel: (sid) => agent.cancel(sid),
         retryFailedTasks: (id, taskIds) => manager.retryFailedTasks(id, taskIds),
-        supplementActive: (room, text) => manager.supplementActive(room, text),
+        supplementActive: (room, text, mid) => manager.supplementActive(room, text, mid),
         broadcast: () => {},
       });
       manager.onFlowCard = (roomId, flow) => missions.syncFlow(roomId, flow);
@@ -2906,7 +2906,7 @@ describe("mission e2e v3", () => {
       cancelActive: (id, reason) => manager.cancelActive(id, reason),
       cancel: (sid) => agent.cancel(sid),
       retryFailedTasks: (id, taskIds) => manager.retryFailedTasks(id, taskIds),
-      supplementActive: (r, text) => manager.supplementActive(r, text),
+      supplementActive: (r, text, mid) => manager.supplementActive(r, text, mid),
       broadcast: () => {},
     });
     manager.onFlowCard = (roomId, flow) => missions.syncFlow(roomId, flow);
@@ -3049,6 +3049,50 @@ describe("mission e2e v3", () => {
       h.missions.reconcile();
       assert.equal(h.prompts.length, promptsBefore, "reconcile 不得派发 prompt");
       assert.equal(h.missions.get(m.id)!.status, "stopped", "无 flow 的运行态恢复为 stopped");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("归属预检：他源 missionId 的 dispatch/supplement 显式失败，不吸收不取消本 mission flow", async () => {
+    const h = mkHarness(
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    try {
+      const m = h.missions.create({ roomId: h.room.roomId, goal: "实现排序", acceptanceCriteria: ["单测过"] });
+      await h.missions.start(m.id);
+      const flowId = h.manager.getFlow(h.room.roomId)?.flowId;
+      assert.equal(h.manager.getFlow(h.room.roomId)?.missionId, m.id, "本 mission 派发产出带归属打标的 flow");
+      const promptsBefore = h.prompts.length;
+
+      // 他源 mission 的派发撞上本 mission 的活跃 flow → 显式失败
+      await assert.rejects(
+        () => h.manager.handle(h.room, "任务B", { missionId: "ms_other" }),
+        /occupied/,
+      );
+      assert.equal(h.prompts.length, promptsBefore, "不得派发新 prompt");
+      assert.deepEqual(h.cancelled, [], "不得取消他人 flow 的成员回合");
+      assert.equal(h.manager.getFlow(h.room.roomId)?.flowId, flowId, "原 flow 仍在");
+      const sups0 = (h.manager.getFlow(h.room.roomId) as FlowView | undefined)?.supplements ?? [];
+      assert.equal(sups0.length, 0, "不得吸收外来 mission 的 goal");
+
+      // 他源 mission 的补充 → supplementActive 拒绝投递
+      assert.equal(h.manager.supplementActive(h.room, "外来补充", "ms_other"), false);
+      // 本 mission 的补充 → 正常投递吸收
+      const r = await h.missions.supplement(m.id, "优先快排实现");
+      assert.equal(r.supplements[0]!.delivered, true);
+      // 无 missionId 的普通用户消息 → 维持吸收行为
+      const absorbed = await h.manager.handle(h.room, "顺便兼容旧数据", {});
+      assert.deepEqual(absorbed.sent, []);
+      const sups = (h.manager.getFlow(h.room.roomId) as FlowView | undefined)?.supplements ?? [];
+      assert.equal(sups.length, 2);
+      assert.match(sups[0]!, /^User supplement to mission ms_\w+:\n优先快排实现$/);
+      assert.equal(sups[1], "顺便兼容旧数据");
     } finally {
       h.cleanup();
     }

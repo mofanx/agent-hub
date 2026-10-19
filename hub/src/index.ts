@@ -46,7 +46,7 @@ import {
 } from "./slash.js";
 import { Scheduler, parseSchedule, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
-import { OperationLedger } from "./op-ledger.js";
+import { OperationLedger, dedupInflight } from "./op-ledger.js";
 import { DecisionCenter, sweepPendingDecisions, inferOptionScope, isRejectOption, type DecisionScope, type DecisionRequestParams } from "./decision.js";
 import { RelevanceFilter } from "./filter.js";
 import { presenceEvents, type PresenceStatus } from "./presence.js";
@@ -665,7 +665,7 @@ const missionManager = new MissionManager({
   cancelActive: (roomId, reason) => roomModeManager.cancelActive(roomId, reason),
   cancel: (sessionId) => agentOps.cancel(sessionId),
   retryFailedTasks: (roomId, taskIds) => roomModeManager.retryFailedTasks(roomId, taskIds),
-  supplementActive: (room, text) => roomModeManager.supplementActive(room, text),
+  supplementActive: (room, text, missionId) => roomModeManager.supplementActive(room, text, missionId),
   broadcast: (method, params) => broadcast({ method, params } as HubEvent),
 });
 missionManager.beginRestore();
@@ -685,8 +685,13 @@ roomModeManager.onFlowCard = (roomId, flow) => {
 };
 
 // 决策卡中心：permission/elicitation 统一为 kind:"decision" 房史条目 + 原位更新广播 + 审计
+const maxPendingDecisions = (() => {
+  const n = Number(process.env.HUB_MAX_PENDING_DECISIONS ?? "");
+  return Number.isInteger(n) && n > 0 ? n : 200;
+})();
 const decisionCenter = new DecisionCenter({
   store,
+  maxPending: maxPendingDecisions,
   broadcast: (method, params) => broadcast({ method, params } as HubEvent),
   audit: (scope, scopeId, ev) => {
     if (scope === "room") {
@@ -737,14 +742,19 @@ const restoreRuntime = savedRuntime
 restoreRuntime
   .catch((err) => logError("import runtime", err))
   .then(() => {
+    // 两个 sweep 独立收尾：任一抛错不得连锁跳过另一个
     try {
       sweepOrphanFlowCards();
+    } catch (err) {
+      logError("post-restore flow-card sweep", err);
+    }
+    try {
       sweepPendingDecisions({
         store,
         broadcast: (method, params) => broadcast({ method, params } as HubEvent),
       });
     } catch (err) {
-      logError("post-restore sweep", err);
+      logError("post-restore decision sweep", err);
     }
     try {
       missionManager.reconcile();
@@ -1118,10 +1128,12 @@ function onAgentEvent(event: HubEvent): void {
     // 决策卡叠加层：房间回合写房间历史，否则写会话历史；旧客户端不认识 decision.* 即丢弃
     const p = event.params as DecisionRequestParams;
     const roomId = roomModeManager.roomIdForTurn(sessionId) ?? rooms.roomsFor(sessionId)[0]?.roomId;
+    const missionId = roomId ? missionManager.missionIdForTurn(sessionId, roomId) : undefined;
     decisionCenter.open(p, {
       scope: roomId ? "room" : "session",
       scopeId: roomId ?? sessionId,
       requestedBy: displayNameFor(sessionId),
+      ...(missionId ? { missionId } : {}),
     });
     return;
   }
@@ -1648,15 +1660,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     }
     case "session.resume": {
       const sessionId = String(req.params?.sessionId ?? "");
-      const inflight = sessionResumes.get(sessionId);
-      if (inflight) return inflight;
-      const resumePromise = resumeSessionById(sessionId);
-      sessionResumes.set(sessionId, resumePromise);
-      try {
-        return await resumePromise;
-      } finally {
-        sessionResumes.delete(sessionId);
-      }
+      return dedupInflight(sessionResumes, sessionId, () => resumeSessionById(sessionId));
     }
     case "session.rename": {
       const sessionId = String(req.params?.sessionId ?? "");
@@ -2205,7 +2209,18 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       return { mission };
     }
     case "decision.list": {
-      return { decisions: decisionCenter.listPending() };
+      // 可选过滤：roomId/sessionId/missionId 命中任一即收窄；均不传返回全部 pending
+      const str = (k: string) => {
+        const v = req.params?.[k];
+        return typeof v === "string" && v ? v : undefined;
+      };
+      return {
+        decisions: decisionCenter.listPending({
+          roomId: str("roomId"),
+          sessionId: str("sessionId"),
+          missionId: str("missionId"),
+        }),
+      };
     }
     case "mission.retry": {
       const id = String(req.params?.id ?? req.params?.missionId ?? "");
@@ -2844,7 +2859,9 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         throw new Error("missionAutoStart requires a mission template");
       if (typeof req.params?.targetName === "string") patch.targetName = req.params.targetName;
       if (typeof req.params?.message === "string") patch.message = req.params.message;
-      if (req.params?.schedule) patch.schedule = parseSchedule(req.params.schedule);
+      // 与 task.create 同样校验：只要传了 schedule 字段就必须合法（null/0/"" 等
+      // falsy 值显式拒绝，不得静默忽略）
+      if (req.params?.schedule !== undefined) patch.schedule = parseSchedule(req.params.schedule);
       if (typeof req.params?.enabled === "boolean") patch.enabled = req.params.enabled;
       if (req.params?.missionAutoStart !== undefined)
         patch.missionAutoStart = req.params.missionAutoStart === true;

@@ -87,7 +87,12 @@ function makeHarness(
     isAvailable: () => true,
     dispatch: async (r, text, options) => {
       dispatched.push(options?.note === undefined ? { text } : { text, note: options.note });
-      return dispatchImpl(r, text);
+      const res = await dispatchImpl(r, text);
+      // 模拟 room-modes 的归属打标：本次派发产出的 flow 记上 missionId
+      if (options?.missionId && state.flow && state.flow.missionId === undefined) {
+        state.flow = { ...state.flow, missionId: options.missionId };
+      }
+      return res;
     },
     cancelActive: async (id) => {
       cancelActived.push(id);
@@ -148,8 +153,8 @@ function makeMission(h: Harness, extra: Record<string, unknown> = {}) {
   });
 }
 
-function flowView(flowId: string, phase: string, tasks: Record<string, unknown>[] = []) {
-  return { roomId: "x", flowId, phase, tasks };
+function flowView(flowId: string, phase: string, tasks: Record<string, unknown>[] = [], missionId?: string) {
+  return { roomId: "x", flowId, phase, tasks, ...(missionId !== undefined ? { missionId } : {}) };
 }
 
 describe("mission", () => {
@@ -250,8 +255,10 @@ describe("mission", () => {
     await assert.rejects(() => h.manager.start(m1.id), /member busy/);
     h.busy.clear();
     h.state.activeFlow = true;
-    await assert.rejects(() => h.manager.start(m1.id), /active flow/);
+    h.state.flow = flowView("fx", "working", [], "ms_other");
+    await assert.rejects(() => h.manager.start(m1.id), /occupied/);
     h.state.activeFlow = false;
+    h.state.flow = undefined;
     // 另一 mission 占用房间
     const occ = makeMission(h);
     await h.manager.start(occ.id);
@@ -292,8 +299,8 @@ describe("mission", () => {
     // 旧 done 卡再次广播（flowUpdate 重放）→ 不得终结
     h.manager.syncFlow(h.room.roomId, h.state.flow);
     assert.equal(h.manager.get(m.id)?.status, "running");
-    // 新 flow 出现 → 绑定
-    const nf = flowView("flow_new", "working", [{ id: "t1", status: "running" }]);
+    // 新 flow 出现 → 绑定（归属本 mission 的 flow 才被认领）
+    const nf = flowView("flow_new", "working", [{ id: "t1", status: "running" }], m.id);
     h.state.flow = nf;
     h.manager.syncFlow(h.room.roomId, nf);
     const cur = h.manager.get(m.id)!;
@@ -458,10 +465,10 @@ describe("mission", () => {
       hasActiveFlow: () => h2.state.activeFlow,
       isBusy: (sid) => h2.busy.has(sid),
       isAvailable: () => true,
-      dispatch: async () => {
+      dispatch: async (_r, _t, options) => {
         h2.busy.add("s1");
         h2.state.activeFlow = true;
-        h2.state.flow = flowView("fc", "working", []);
+        h2.state.flow = flowView("fc", "working", [], options?.missionId);
         return { sent: ["s1"], mentioned: [], skipped: [] };
       },
       cancelActive: async () => {
@@ -618,6 +625,124 @@ describe("mission", () => {
     assert.equal(snap.baselineFlowId, undefined);
   });
 
+  it("syncFlow 不认领他源 flow；仅 missionId 匹配才绑定", async () => {
+    const h = makeHarness(undefined, "conductor");
+    h.setDispatch(async () => {
+      h.busy.add("s1");
+      return { sent: ["s1"], mentioned: [], skipped: [] };
+    });
+    const m = makeMission(h);
+    await h.manager.start(m.id);
+    // 房间里出现与本 mission 无关的 flow（无归属标记）→ 不认领
+    h.state.activeFlow = true;
+    h.state.flow = flowView("fx", "working", [{ id: "t1", status: "running" }]);
+    h.manager.syncFlow(h.room.roomId, h.state.flow);
+    assert.equal(h.manager.get(m.id)!.flowId, undefined, "不认领无归属标记的 flow");
+    assert.equal(h.manager.get(m.id)!.status, "running");
+    // 其他 mission 的 flow 同样不认领
+    h.state.flow = flowView("fy", "working", [], "ms_other");
+    h.manager.syncFlow(h.room.roomId, h.state.flow);
+    assert.equal(h.manager.get(m.id)!.flowId, undefined, "不认领其他 mission 的 flow");
+    // 本 mission 的 flow 迟到出现 → 正常绑定并跟踪 phase
+    h.state.flow = flowView("f_own", "awaiting-input", [{ id: "t1", status: "running" }], m.id);
+    h.manager.syncFlow(h.room.roomId, h.state.flow);
+    const cur = h.manager.get(m.id)!;
+    assert.equal(cur.flowId, "f_own");
+    assert.equal(cur.status, "waiting-user");
+  });
+
+  it("onTurnDone：他源活跃 flow 不被认领，本 mission 按自身回合收敛", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    await h.manager.start(m.id); // mention：sent=[s1,s2]，无自有 flow
+    // 房间里他人的 flow 进行中
+    h.state.activeFlow = true;
+    h.state.flow = flowView("foreign", "working", [{ id: "t1", status: "running" }]);
+    h.busy.delete("s1");
+    h.manager.onTurnDone("s1", h.room.roomId, "a");
+    h.busy.delete("s2");
+    h.manager.onTurnDone("s2", h.room.roomId, "b");
+    const cur = h.manager.get(m.id)!;
+    assert.equal(cur.flowId, undefined, "不认领他源 flow");
+    assert.equal(cur.status, "awaiting-acceptance", "本 mission 回合全部完成即收敛");
+  });
+
+  it("归属预检：他源 missionId 活跃 flow 拒 dispatch/supplement 且不吸收；本 mission 流程正常吸收", async () => {
+    // dispatch：外来 missionId 的活跃 flow → 显式失败（occupied 语义），不派发不吸收
+    const h = makeHarness(undefined, "conductor");
+    h.state.activeFlow = true;
+    h.state.flow = flowView("fx", "working", [{ id: "t1", status: "running" }], "ms_other");
+    const m = makeMission(h);
+    await assert.rejects(() => h.manager.start(m.id), /occupied/);
+    assert.equal(h.manager.get(m.id)!.status, "draft", "拒绝后保持 draft，交还用户决策");
+    assert.equal(h.dispatched.length, 0, "不得派发不得吸收进他人 flow");
+    assert.deepEqual(h.cancelActived, [], "不得 cancelActive 他人 flow");
+
+    // supplement：外来 missionId 活跃 flow → 显式失败，不记录不投递
+    const h2 = makeHarness();
+    const m2 = makeMission(h2);
+    await h2.manager.start(m2.id); // running，无自有 flow
+    h2.state.activeFlow = true;
+    h2.state.flow = flowView("fx", "working", [], "ms_other");
+    await assert.rejects(() => h2.manager.supplement(m2.id, "补充：改用 WS"), /occupied/);
+    assert.equal(h2.manager.get(m2.id)!.supplements.length, 0, "显式失败不落 supplement 记录");
+    assert.equal(h2.supplementLog.length, 0, "不得投递进他人 flow");
+
+    // 无标记活跃 flow（兼容旧 flow）→ supplement 维持"只记录不投递"
+    h2.state.flow = flowView("fx", "working", []);
+    const r = await h2.manager.supplement(m2.id, "补充：改用 WS");
+    assert.equal(r.supplements.length, 1);
+    assert.equal(r.supplements[0]!.delivered, false);
+    assert.equal(h2.supplementLog.length, 0);
+
+    // 本 mission flow 迟到出现 → syncFlow 绑定后 supplement 正常投递
+    h2.state.flow = flowView("f_own", "working", [], m2.id);
+    h2.manager.syncFlow(h2.room.roomId, h2.state.flow);
+    assert.equal(h2.manager.get(m2.id)!.flowId, "f_own");
+    const r2 = await h2.manager.supplement(m2.id, "补充：加日志");
+    assert.equal(r2.supplements[1]!.delivered, true, "本 mission flow 正常吸收");
+    assert.match(h2.supplementLog.at(-1) ?? "", /补充：加日志/);
+
+    // dispatch：无标记/在途（无 flow 视图）的活跃编排不阻断 start（由 handle 吸收路径接管）
+    const h3 = makeHarness();
+    h3.state.activeFlow = true;
+    h3.state.flow = flowView("fx", "working", []);
+    const m3 = makeMission(h3);
+    await h3.manager.start(m3.id);
+    assert.equal(h3.dispatched.length, 1, "无标记 flow 不阻断派发");
+  });
+
+  it("reconcile：无 flowId 的 mission 仅按 missionId 归属恢复", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    await h.manager.start(m.id); // mention，无 flowId
+    const mk = (state: Harness["state"]) =>
+      new MissionManager({
+        store: h.store,
+        getRoom: (id) => h.rooms.get(id),
+        getFlow: () => state.flow,
+        hasActiveFlow: () => state.activeFlow,
+        isBusy: (sid) => h.busy.has(sid),
+        isAvailable: () => true,
+        dispatch: async () => ({ sent: [], mentioned: [], skipped: [] }),
+        cancelActive: async () => {},
+        cancel: async () => {},
+        retryFailedTasks: () => false,
+        supplementActive: () => false,
+        broadcast: () => {},
+      });
+    // 归属本 mission 的 flow → 补绑并保持 running（先断言：stopped 会持久化）
+    const r1 = mk({ flow: flowView("fm", "working", [{ id: "t1", status: "running" }], m.id), activeFlow: true });
+    r1.reconcile();
+    const cur = r1.get(m.id)!;
+    assert.equal(cur.status, "running");
+    assert.equal(cur.flowId, "fm", "按 missionId 归属补绑");
+    // 他源活跃 flow → 不认领 → stopped
+    const r2 = mk({ flow: flowView("fx", "working", []), activeFlow: true });
+    r2.reconcile();
+    assert.equal(r2.get(m.id)!.status, "stopped");
+  });
+
   it("flow sync 幂等：重复相同状态不追加历史", async () => {
     const h = makeHarness(undefined, "conductor");
     h.setDispatch(async () => {
@@ -681,7 +806,7 @@ describe("mission v2", () => {
     const stopped = await h.manager.stop(m.id);
     assert.equal(stopped.status, "stopped");
     h.busy.add("s1");
-    h.state.flow = flowView("f_new", "working", [{ id: "t1", status: "running" }]);
+    h.state.flow = flowView("f_new", "working", [{ id: "t1", status: "running" }], m.id);
     h.state.activeFlow = true;
     resolveDispatch({ sent: ["s1"], mentioned: [], skipped: [] });
     await started;
@@ -856,6 +981,14 @@ describe("mission v2", () => {
     const orig = h.manager.get(m.id)!;
     assert.equal(orig.status, "stopped");
     assert.ok(orig.events.some((e) => e.kind === "rework"));
+    // 首帧 mission.update 广播即带 parent/reworkReason（客户端无需等第二帧）
+    const firstFrame = h.broadcasts.find(
+      (b) => b.method === "mission.update" && (b.params.mission as Mission).id === nm.id,
+    );
+    assert.ok(firstFrame, "子单首帧广播存在");
+    const fm = firstFrame!.params.mission as Mission;
+    assert.equal(fm.parentMissionId, m.id, "首帧即带 parentMissionId");
+    assert.equal(fm.reworkReason, "范围不对，返工", "首帧即带 reworkReason");
     assert.equal(nm.status, "draft");
     assert.equal(nm.parentMissionId, m.id);
     assert.equal(nm.goal, m.goal);

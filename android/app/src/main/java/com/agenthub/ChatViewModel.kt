@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.util.Base64
+import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.File
@@ -403,6 +404,9 @@ data class Mission(
     val maxAutoRetries: Int = 0,
     val autoRetryCount: Int = 0,
     val revision: Int = 0,
+    // 旧 Hub 不下发 revision 字段时为 false：此时 revision=0 是缺省值而非真实版本，
+    // upsert 守卫不得据此吞掉更新
+    val hasRevision: Boolean = false,
 )
 
 data class PendingDecision(
@@ -1715,6 +1719,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     handleEvent(it)
                 } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
+                    Log.w("agenthub", "handleEvent dropped: ${it.toString().take(200)}", e)
                 }
             }
         }
@@ -1874,8 +1879,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call("task.list")
                 val list = result["tasks"]?.jsonArray ?: return@async
+                val parsed = list.map { parseTask(it.jsonObject) }
                 scheduledTasks.clear()
-                for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+                scheduledTasks.addAll(parsed)
             } catch (_: Exception) {
             }
         },
@@ -2186,7 +2192,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun upsertMission(m: Mission) {
         val local = missions.find { it.id == m.id }
-        if (local != null && local.revision >= m.revision) return
+        // 仅当双方 revision 均来自真实字段时才做新旧守卫；incoming 无 revision
+        // （旧 Hub）时直接接受更新，local 无 revision 时其 0 是缺省值不可信
+        if (local != null && m.hasRevision && local.hasRevision && local.revision >= m.revision) return
         missions.removeAll { it.id == m.id }
         missions.add(m)
     }
@@ -2271,6 +2279,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val strList = { key: String ->
             (o[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
         }
+        val revision = (o["revision"] as? JsonPrimitive)?.intOrNull
         return Mission(
             id = str("id") ?: "",
             roomId = str("roomId") ?: "",
@@ -2321,7 +2330,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             reworkReason = str("reworkReason"),
             maxAutoRetries = (o["maxAutoRetries"] as? JsonPrimitive)?.intOrNull ?: 0,
             autoRetryCount = (o["autoRetryCount"] as? JsonPrimitive)?.intOrNull ?: 0,
-            revision = (o["revision"] as? JsonPrimitive)?.intOrNull ?: 0,
+            revision = revision ?: 0,
+            hasRevision = revision != null,
         )
     }
 
@@ -2354,8 +2364,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = hub.call("task.list")
                 val list = result["tasks"]?.jsonArray ?: return@launch
+                val parsed = list.map { parseTask(it.jsonObject) }
                 scheduledTasks.clear()
-                for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+                scheduledTasks.addAll(parsed)
             } catch (_: Exception) {
             }
         }
@@ -5220,7 +5231,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val scope = p["scope"]?.jsonPrimitive?.contentOrNull
                 val scopeId = p["id"]?.jsonPrimitive?.contentOrNull
-                val entry = p["entry"]?.jsonObject ?: return
+                val entry = p["entry"] as? JsonObject ?: return
                 try {
                     val meta = Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
                     val did = meta["decisionId"]?.jsonPrimitive?.content
@@ -5319,8 +5330,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "task.update" -> {
                 val p = obj["params"]!!.jsonObject
                 val list = p["tasks"]?.jsonArray ?: return
+                // 先全部解析成功再整体替换：单条畸形 entry 不得造成部分填充
+                val parsed = list.map { parseTask(it.jsonObject) }
                 scheduledTasks.clear()
-                for (t in list) scheduledTasks.add(parseTask(t.jsonObject))
+                scheduledTasks.addAll(parsed)
             }
             "mission.update" -> {
                 try {

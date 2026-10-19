@@ -392,4 +392,58 @@ describe("listPending", () => {
       store.close();
     }
   });
+
+  it("按 roomId/sessionId/missionId 过滤；无参返回全部 pending", () => {
+    const store = tmpStore();
+    try {
+      const dc = new DecisionCenter({ store, broadcast: () => {} });
+      const req = (requestId: string, sessionId: string) => ({
+        requestId,
+        sessionId,
+        type: "permission" as const,
+        title: "t",
+        options: [{ id: "allow", label: "Allow" }],
+      });
+      dc.open(req("r-room", "s1"), { scope: "room", scopeId: "roomA", requestedBy: "x" });
+      dc.open(req("r-sess", "s9"), { scope: "session", scopeId: "s9", requestedBy: "x" });
+      dc.open(req("r-mis", "s2"), { scope: "room", scopeId: "roomB", requestedBy: "x", missionId: "ms_1" });
+      assert.equal(dc.listPending().length, 3, "无过滤返回全部");
+      assert.deepEqual(dc.listPending({ roomId: "roomA" }).map((d) => d.requestId), ["r-room"]);
+      assert.deepEqual(dc.listPending({ sessionId: "s9" }).map((d) => d.requestId), ["r-sess"]);
+      assert.deepEqual(dc.listPending({ missionId: "ms_1" }).map((d) => d.requestId), ["r-mis"]);
+      assert.equal(dc.listPending({ roomId: "nope" }).length, 0);
+      // OR 语义：命中任一即收窄
+      assert.equal(dc.listPending({ roomId: "roomA", sessionId: "s9" }).length, 2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("pending 超上限淘汰最旧：定稿 revoked + 原位覆写", () => {
+    const store = tmpStore();
+    try {
+      const dc = new DecisionCenter({ store, broadcast: () => {}, maxPending: 2 });
+      const req = (requestId: string) => ({
+        requestId,
+        sessionId: "s1",
+        type: "permission" as const,
+        title: requestId,
+        options: [{ id: "allow", label: "Allow" }],
+      });
+      dc.open(req("d1"), { scope: "room", scopeId: "r1", requestedBy: "x" });
+      dc.open(req("d2"), { scope: "room", scopeId: "r1", requestedBy: "x" });
+      dc.open(req("d3"), { scope: "room", scopeId: "r1", requestedBy: "x" });
+      const list = dc.listPending();
+      assert.deepEqual(list.map((d) => d.requestId), ["d2", "d3"], "最旧的 d1 被淘汰");
+      const entries = store.read("room", "r1");
+      const oldest = JSON.parse(entries[0]!.text) as DecisionMeta;
+      assert.equal(oldest.status, "revoked", "淘汰的 pending 定稿为 revoked 而非悬挂");
+      // resolved/answered 卡不占 pending 名额
+      dc.resolveByRequest("d2", "answered", { optionId: "allow" });
+      dc.open(req("d4"), { scope: "room", scopeId: "r1", requestedBy: "x" });
+      assert.deepEqual(dc.listPending().map((d) => d.requestId), ["d3", "d4"]);
+    } finally {
+      store.close();
+    }
+  });
 });

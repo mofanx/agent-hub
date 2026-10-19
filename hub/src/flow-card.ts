@@ -87,6 +87,7 @@ export function toCardSnapshot(
                     ? { snapshotCurrent: ac.snapshotCurrent }
                     : {}),
                   ...(clip(ac.reason, 64) ? { reason: clip(ac.reason, 64) } : {}),
+                  ...(clip(ac.detail, 120) ? { detail: clip(ac.detail, 120) } : {}),
                 },
               }
             : {}),

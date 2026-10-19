@@ -87,12 +87,12 @@ export type MissionDeps = {
   dispatch(
     room: Room,
     text: string,
-    options?: { note?: string },
+    options?: { note?: string; missionId?: string },
   ): Promise<ModeResult>;
   cancelActive(roomId: string, reason?: string): Promise<void>;
   cancel(sessionId: string): Promise<void>;
   retryFailedTasks(roomId: string, taskIds?: string[]): boolean;
-  supplementActive(room: Room, text: string): boolean;
+  supplementActive(room: Room, text: string, missionId?: string): boolean;
   broadcast(method: string, params: Record<string, unknown>): void;
 };
 
@@ -395,6 +395,8 @@ export class MissionManager {
     constraints?: unknown;
     ownerSessionId?: unknown;
     maxAutoRetries?: unknown;
+    parentMissionId?: unknown;
+    reworkReason?: unknown;
   }): MissionSnapshot {
     const roomId = optString(input.roomId, "roomId");
     if (!roomId) throw new Error("roomId required");
@@ -429,6 +431,12 @@ export class MissionManager {
       autoRetryCount: 0,
       revision: 0,
     };
+    // rework 子单：parent/reworkReason 必须在首次 commit 前落 record，
+    // 否则首帧 mission.update 广播缺 parent 字段
+    const parentMissionId = optString(input.parentMissionId, "parentMissionId");
+    if (parentMissionId) m.parentMissionId = parentMissionId;
+    const reworkReason = optString(input.reworkReason, "reworkReason");
+    if (reworkReason) m.reworkReason = reworkReason;
     this.log(m, "lifecycle", "draft created");
     this.missions.set(m.id, m);
     return this.commit(m);
@@ -488,12 +496,23 @@ export class MissionManager {
       if (other.id !== m.id && other.roomId === m.roomId && OCCUPYING.has(other.status))
         throw new Error(`room already occupied by mission ${other.id}`);
     }
-    if (this.deps.hasActiveFlow(m.roomId)) throw new Error("room has an active flow");
-    for (const mem of room.members) {
-      if (this.deps.isBusy(mem.sessionId)) throw new Error(`member busy: ${mem.name}`);
+    // 归属预检：仅明确归属他人的活跃 flow 显式拒绝（与 runMissionTask 的 occupied 语义一致），
+    // 不交给 handle 吸收/取消；无标记（兼容旧 flow）或本 mission 的 flow 走吸收路径，
+    // 吸收场景成员在跑旧流程属正常，不应用 member busy 阻断
+    const preFlow = this.deps.getFlow(m.roomId);
+    const flowOwner =
+      typeof preFlow?.missionId === "string" && preFlow.missionId !== "" && String(preFlow.phase ?? "") !== "done"
+        ? preFlow.missionId
+        : undefined;
+    const roomActive = this.deps.hasActiveFlow(m.roomId);
+    if (roomActive && flowOwner !== undefined && flowOwner !== m.id)
+      throw new Error(`room already occupied by an active flow of mission ${flowOwner}`);
+    if (!roomActive) {
+      for (const mem of room.members) {
+        if (this.deps.isBusy(mem.sessionId)) throw new Error(`member busy: ${mem.name}`);
+      }
     }
-    const baseline = this.deps.getFlow(m.roomId);
-    m.baselineFlowId = typeof baseline?.flowId === "string" ? baseline.flowId : undefined;
+    m.baselineFlowId = typeof preFlow?.flowId === "string" ? preFlow.flowId : undefined;
     m.status = "running";
     m.startedAt = Date.now();
     m.finishedAt = undefined;
@@ -509,7 +528,7 @@ export class MissionManager {
     this.commit(m);
     let result: ModeResult;
     try {
-      result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m) });
+      result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m), missionId: m.id });
     } catch (e) {
       m.dispatching = false;
       if (m.stopRequested) {
@@ -528,7 +547,8 @@ export class MissionManager {
     m.pending = m.sent.filter((s) => !m.earlyDone.includes(s) && !m.turnErrors.some((t) => t.sid === s));
     const flow = this.deps.getFlow(m.roomId);
     const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
-    if (flowId && flowId !== m.baselineFlowId) {
+    // 只绑定本 mission 派发创建的 flow（missionId 打标），不按 roomId 认领外来 flow
+    if (flowId && flowId !== m.baselineFlowId && flow?.missionId === m.id) {
       // dispatch await 期间 syncFlow 可能已绑定同一 flow：不重复记 bound 事件
       const alreadyBound = m.flowId === flowId;
       m.flowId = flowId;
@@ -599,6 +619,8 @@ export class MissionManager {
     const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
     if (!m.flowId) {
       if (!flowId || flowId === m.baselineFlowId) return;
+      // 无归属标记的 flow 不认领：同房间可能跑着与 mission 无关的编排
+      if (flow?.missionId !== m.id) return;
       if (!this.restoreDone) return;
       m.flowId = flowId;
       this.log(m, "flow", `bound flow ${flowId}`);
@@ -751,6 +773,12 @@ export class MissionManager {
     return false;
   }
 
+  /** 该 session 当前回合归属的 mission id（房间回合视角），无则 undefined */
+  missionIdForTurn(sessionId: string, roomId: string): string | undefined {
+    const m = this.activeFor(roomId);
+    return m && this.ownsTurn(m, sessionId) ? m.id : undefined;
+  }
+
   private isRoomMember(m: MissionRecord, sessionId: string): boolean {
     const room = this.deps.getRoom(m.roomId);
     return !!room && room.members.some((mem) => mem.sessionId === sessionId);
@@ -786,10 +814,15 @@ export class MissionManager {
         m.earlyDone.push(sessionId);
     }
     appendOutput(m, sessionId, output);
-    if (m.flowId || this.deps.hasActiveFlow(m.roomId)) {
-      const flow = this.deps.getFlow(m.roomId);
-      const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
-      if (!m.flowId && flowId && flowId !== m.baselineFlowId) {
+    const active = this.deps.hasActiveFlow(m.roomId);
+    const flow = this.deps.getFlow(m.roomId);
+    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+    const ownFlow = !!flowId && flow?.missionId === m.id;
+    // 明确归属他人且进行中的 flow 不再阻断本 mission 的回合收敛；
+    // 活跃但视图缺席（auto 决策在途）或仅残留 done 快照时仍按原语义等待
+    const foreignActive = active && !!flow && !ownFlow && String(flow.phase ?? "") !== "done";
+    if (m.flowId || (active && !foreignActive)) {
+      if (!m.flowId && ownFlow && flowId !== m.baselineFlowId) {
         m.flowId = flowId;
         this.log(m, "flow", `bound flow ${flowId}`);
       }
@@ -814,7 +847,16 @@ export class MissionManager {
     if (!m.turnErrors.some((t) => t.sid === sessionId)) {
       m.turnErrors.push({ sid: sessionId, message });
     }
-    if (m.flowId || this.deps.hasActiveFlow(m.roomId) || m.dispatching) {
+    const active = this.deps.hasActiveFlow(m.roomId);
+    const flow = this.deps.getFlow(m.roomId);
+    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+    const ownFlow = !!flowId && flow?.missionId === m.id;
+    const foreignActive = active && !!flow && !ownFlow && String(flow.phase ?? "") !== "done";
+    if (m.flowId || (active && !foreignActive) || m.dispatching) {
+      if (!m.flowId && ownFlow && flowId !== m.baselineFlowId) {
+        m.flowId = flowId;
+        this.log(m, "flow", `bound flow ${flowId}`);
+      }
       this.log(m, "error", `turn error on ${sessionId}: ${message.slice(0, 300)}`);
       this.commit(m);
       return;
@@ -833,7 +875,11 @@ export class MissionManager {
           const flow = this.deps.getFlow(m.roomId);
           const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
           const active = this.deps.hasActiveFlow(m.roomId);
-          if (m.flowId && active && flowId === m.flowId) {
+          // 认领依据：mission 显式持有的 flowId 匹配，或 flow 打标 missionId 归属
+          // （派发窗口内崩溃导致 flowId 未落盘的场景可按归属恢复）；roomId 匹配不算数
+          const bound = (!!m.flowId && flowId === m.flowId) || (!!flowId && flow?.missionId === m.id);
+          if (active && bound && flow) {
+            if (!m.flowId && flowId) m.flowId = flowId;
             m.lastFlowSig = "";
             m.lastPhase = "";
             this.syncFlow(m.roomId, flow);
@@ -918,7 +964,8 @@ export class MissionManager {
     if (typeof note !== "string" || !note.trim()) throw new Error("rework requires a non-empty reason");
     if (m.status !== "awaiting-acceptance" && m.status !== "failed" && m.status !== "stopped")
       throw new Error(`rework requires a closed mission: ${m.status}`);
-    // 先创建子 draft（完成全部校验），成功后再关闭原任务：失败时零副作用
+    // 先创建子 draft（完成全部校验），成功后再关闭原任务：失败时零副作用；
+    // parent/reworkReason 随 create 入参写入，保证首帧广播即带 parent 字段
     const draft = this.create({
       roomId: m.roomId,
       goal: m.goal,
@@ -927,10 +974,10 @@ export class MissionManager {
       constraints: m.constraints,
       ownerSessionId: m.ownerSessionId,
       maxAutoRetries: m.maxAutoRetries,
+      parentMissionId: m.id,
+      reworkReason: note.trim(),
     });
     const nm = this.missions.get(draft.id)!;
-    nm.parentMissionId = m.id;
-    nm.reworkReason = note.trim();
     this.log(nm, "rework", `rework of ${m.id}: ${note.trim().slice(0, 300)}`);
     if (m.status === "awaiting-acceptance") {
       this.transition(m, "stopped", "lifecycle", "closed for rework");
@@ -949,6 +996,15 @@ export class MissionManager {
     const room = this.deps.getRoom(m.roomId);
     if (!room) throw new Error(`unknown room: ${m.roomId}`);
     const t = text.trim();
+    // 归属预检：明确归属他人的活跃 flow 显式失败，补充不得被他人流程吞掉；
+    // 无标记（兼容旧 flow）或本 mission 的 flow 维持 supplementActive 吸收语义
+    const flow = this.deps.getFlow(m.roomId);
+    const flowOwner =
+      typeof flow?.missionId === "string" && flow.missionId !== "" && String(flow.phase ?? "") !== "done"
+        ? flow.missionId
+        : undefined;
+    if (this.deps.hasActiveFlow(m.roomId) && flowOwner !== undefined && flowOwner !== m.id)
+      throw new Error(`room already occupied by an active flow of mission ${flowOwner}`);
     const sup: MissionSupplement = {
       id: `sp_${randomUUID().slice(0, 8)}`,
       at: Date.now(),
@@ -958,12 +1014,11 @@ export class MissionManager {
     m.supplements.push(sup);
     m.updatedAt = Date.now();
     this.persist();
-    const flow = this.deps.getFlow(m.roomId);
     const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
     const bound = !!m.flowId && flowId === m.flowId && this.deps.hasActiveFlow(m.roomId);
     if (bound) {
       try {
-        if (this.deps.supplementActive(room, `User supplement to mission ${m.id}:\n${t}`)) {
+        if (this.deps.supplementActive(room, `User supplement to mission ${m.id}:\n${t}`, m.id)) {
           sup.delivered = true;
         }
       } catch (e) {

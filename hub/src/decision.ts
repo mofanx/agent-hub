@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { logWarn } from "./logger.js";
 import type { Store } from "./store.js";
 
 export type DecisionType = "permission" | "elicitation";
@@ -17,6 +18,8 @@ export type DecisionMeta = {
   requestedBy: string;
   sessionId: string;
   roomId?: string | undefined;
+  /** 决策归属的 mission（如有），decision.list 过滤用 */
+  missionId?: string | undefined;
   status: DecisionStatus;
   scope: DecisionScope;
   answer?: { optionId?: string | undefined; label?: string | undefined; action?: string | undefined } | undefined;
@@ -57,6 +60,7 @@ type Tracked = {
 
 const CLIP = 300;
 const CARD_LIMIT = 500;
+const DEFAULT_MAX_PENDING = 200;
 
 const clipStr = (v: unknown, max = CLIP): string | undefined =>
   typeof v === "string" && v ? v.slice(0, max) : undefined;
@@ -157,8 +161,11 @@ export function inferOptionScope(
   return /always/i.test(`${option?.kind ?? ""} ${option?.label ?? ""}`) ? "always" : "once";
 }
 
+/** 拒绝类选项：词边界匹配 reject/deny/decline/block/cancel（含 ed/d/led/ing/s 与 _once 类 kind 后缀），un- 前缀不误伤 */
+export const REJECT_OPTION_RE = /(?<![\w-])(?:reject|deny|denied|decline|block|cancel)(?:ed|d|led|ing|s|[_-]\w+)?(?![\w-])/i;
+
 export function isRejectOption(option?: { label?: string | undefined; kind?: string | undefined }): boolean {
-  return /reject|deny|denied|block|cancel/i.test(`${option?.kind ?? ""} ${option?.label ?? ""}`);
+  return REJECT_OPTION_RE.test(`${option?.kind ?? ""} ${option?.label ?? ""}`);
 }
 
 function verdictWord(t: Tracked): string {
@@ -194,12 +201,20 @@ export class DecisionCenter {
         scopeId: string,
         ev: { author: string; summary: string },
       ) => void;
+      /** 待决决策硬上限：超限丢弃最旧 pending（默认 200，HUB_MAX_PENDING_DECISIONS 覆盖） */
+      maxPending?: number;
     },
   ) {}
 
   open(
     req: DecisionRequestParams,
-    placement: { scope: "room" | "session"; scopeId: string; requestedBy: string },
+    placement: {
+      scope: "room" | "session";
+      scopeId: string;
+      requestedBy: string;
+      /** 发起该决策的回合归属的 mission（如有），decision.list 过滤用 */
+      missionId?: string;
+    },
   ): DecisionMeta | undefined {
     const meta: DecisionMeta = {
       v: 1,
@@ -217,6 +232,7 @@ export class DecisionCenter {
       requestedBy: placement.requestedBy,
       sessionId: req.sessionId,
       ...(placement.scope === "room" ? { roomId: placement.scopeId } : {}),
+      ...(placement.missionId ? { missionId: placement.missionId } : {}),
       status: req.auto ? "answered" : "pending",
       scope: req.grantScope ?? "once",
       at: Date.now(),
@@ -246,6 +262,7 @@ export class DecisionCenter {
     const t: Tracked = { meta, rowId, scope: placement.scope, scopeId: placement.scopeId };
     this.byId.set(meta.decisionId, t);
     this.byRequest.set(req.requestId, meta.decisionId);
+    this.capPending();
     this.cap();
     this.push(t);
     this.audit(
@@ -295,10 +312,29 @@ export class DecisionCenter {
     return this.byId.get(decisionId);
   }
 
-  /** 当前待处理决策（仅活跃 pending；重启后请求已消失的不在此列，由 sweep 收敛） */
-  listPending(): DecisionMeta[] {
+  /**
+   * 当前待处理决策（仅活跃 pending；重启后请求已消失的不在此列，由 sweep 收敛）。
+   * filter 命中任一字段即收窄（OR 语义）；不传 filter 返回全部 pending。
+   */
+  listPending(filter?: {
+    roomId?: string | undefined;
+    sessionId?: string | undefined;
+    missionId?: string | undefined;
+  }): DecisionMeta[] {
+    const hasFilter =
+      filter?.roomId !== undefined ||
+      filter?.sessionId !== undefined ||
+      filter?.missionId !== undefined;
     return [...this.byId.values()]
       .filter((t) => t.meta.status === "pending")
+      .filter(
+        (t) =>
+          !hasFilter ||
+          (filter?.roomId !== undefined && t.meta.roomId === filter.roomId) ||
+          (filter?.sessionId !== undefined && t.meta.sessionId === filter.sessionId) ||
+          (filter?.missionId !== undefined &&
+            (t.meta.missionId === filter.missionId || t.meta.context?.missionId === filter.missionId)),
+      )
       .sort((a, b) => a.meta.at - b.meta.at)
       .map((t) => JSON.parse(JSON.stringify(t.meta)) as DecisionMeta);
   }
@@ -329,6 +365,24 @@ export class DecisionCenter {
 
   private audit(t: Tracked, summary: string): void {
     this.deps.audit?.(t.scope, t.scopeId, { author: t.meta.requestedBy, summary });
+  }
+
+  /** pending 硬上限：超限按时间淘汰最旧 pending（原位定稿为 revoked 并留痕） */
+  private capPending(): void {
+    const max = this.deps.maxPending ?? DEFAULT_MAX_PENDING;
+    const pending = [...this.byId.values()]
+      .filter((t) => t.meta.status === "pending")
+      .sort((a, b) => a.meta.at - b.meta.at);
+    for (const t of pending.slice(0, Math.max(0, pending.length - max))) {
+      t.meta.status = "revoked";
+      this.byRequest.delete(t.meta.requestId);
+      this.commit(t);
+      logWarn(
+        "decision",
+        `pending decisions over limit ${max}; dropped oldest ${t.meta.decisionId}「${t.meta.title}」`,
+      );
+      this.audit(t, `超出待决上限（${max}），自动撤销最旧决策「${t.meta.title}」`);
+    }
   }
 
   private cap(): void {

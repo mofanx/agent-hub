@@ -180,6 +180,9 @@ describe("mission schedule", () => {
     assert.throws(() => parseSchedule({ mode: "simple", kind: "interval", intervalMinutes: 1.5 }), /intervalMinutes/);
     assert.throws(() => parseSchedule({ mode: "simple", kind: "once" }), /at/);
     assert.throws(() => parseSchedule({ mode: "simple", kind: "once", at: "tomorrow" }), /at/);
+    // 过去时间戳会在下个 tick 立即触发并自禁用 → 校验期拒绝
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "once", at: Date.now() - 1000 }), /future/);
+    assert.throws(() => parseSchedule({ mode: "simple", kind: "once", at: 0 }), /future/);
     assert.throws(() => parseSchedule({ mode: "cron" }), /expr/);
     assert.throws(() => parseSchedule({ mode: "cron", expr: "* * *" }), /cron/);
     assert.throws(() => parseSchedule({ mode: "cron", expr: "99 * * * *" }), /cron/);

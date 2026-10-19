@@ -154,6 +154,7 @@ export interface FlowTask {
     snapshotHash?: string;
     snapshotCurrent?: boolean;
     reason?: string;
+    detail?: string;
     stdoutTruncated?: boolean;
     stderrTruncated?: boolean;
   };

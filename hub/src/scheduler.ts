@@ -170,6 +170,10 @@ export function parseSchedule(raw: unknown): Schedule {
     if (s.kind === "once") {
       if (typeof s.at !== "number" || !Number.isFinite(s.at))
         throw new Error("schedule once requires a numeric at timestamp");
+      // 过去时间戳会在下个 tick 立即触发并自动禁用，等效于"现在就跑"，
+      // 违背一次性定时的语义 → 校验期显式拒绝
+      if (s.at <= Date.now())
+        throw new Error("schedule once requires a future at timestamp");
       return { mode: "simple", kind: "once", at: s.at };
     }
     throw new Error(`unknown schedule kind: ${String(s.kind)}`);

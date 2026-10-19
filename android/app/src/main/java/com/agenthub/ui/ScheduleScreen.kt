@@ -61,7 +61,6 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -294,9 +293,9 @@ private fun TaskCard(
                 val tplScope = (tpl["scope"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: ""
                 val tplConstraints = (tpl["constraints"] as? kotlinx.serialization.json.JsonArray)
                     ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: emptyList()
-                Text("${S.missionFrozenContract}: ${tpl["goal"]?.jsonPrimitive?.contentOrNull ?: ""}" +
+                Text("${S.missionFrozenContract}: ${(tpl["goal"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: ""}" +
                     "${if (tplScope.isNotBlank()) " · ${S.missionScope}: $tplScope" else ""}" +
-                    "${if (tplConstraints.isNotEmpty()) " · ${tplConstraints.joinToString("；")}" else ""}" +
+                    "${if (tplConstraints.isNotEmpty()) " · ${tplConstraints.joinToString("; ")}" else ""}" +
                     " · ${if (task.missionAutoStart) S.missionAutoStart else S.taskTemplateDraftOnly}",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(S.taskTemplateRebuild, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

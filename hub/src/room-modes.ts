@@ -53,6 +53,8 @@ type PromptOptions = {
   artifactContext?: { taskId?: string; dependsOn?: string[]; refs?: string[] } | undefined;
   /** mission 等用户显式批准的派发：跳过相关性过滤 */
   bypassFilter?: boolean | undefined;
+  /** 派发来源 mission id：由此创建的 flow 记录归属，mission 仅认领 missionId 匹配的 flow */
+  missionId?: string | undefined;
 };
 
 export function parseTaskCommand(
@@ -167,6 +169,8 @@ type ParallelFlow = {
   artifactContext?: PromptOptions["artifactContext"];
   /** 流程进行期间用户补充的信息，并入汇总 prompt */
   extras?: string[] | undefined;
+  /** 创建本 flow 的 mission id（无则非 mission 派发） */
+  missionId?: string | undefined;
 };
 
 type PipelineFlow = {
@@ -186,6 +190,8 @@ type PipelineFlow = {
   artifactContext?: PromptOptions["artifactContext"];
   /** 流程进行期间用户补充的信息，并入后续阶段 prompt */
   extras?: string[] | undefined;
+  /** 创建本 flow 的 mission id（无则非 mission 派发） */
+  missionId?: string | undefined;
 };
 
 type DebateOutput = {
@@ -216,6 +222,8 @@ type DebateFlow = {
   artifactContext?: PromptOptions["artifactContext"];
   /** 流程进行期间用户补充的信息，并入后续发言 prompt */
   extras?: string[] | undefined;
+  /** 创建本 flow 的 mission id（无则非 mission 派发） */
+  missionId?: string | undefined;
 };
 
 /** 活跃流程中的显式取消指令（除此之外的新消息视为补充/答复） */
@@ -555,6 +563,7 @@ export class RoomModeManager {
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
+      ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
     };
   }
 
@@ -594,6 +603,7 @@ export class RoomModeManager {
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
+      ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
     };
   }
 
@@ -657,6 +667,7 @@ export class RoomModeManager {
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
+      ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
     };
   }
 
@@ -829,10 +840,20 @@ export class RoomModeManager {
    * 仅把补充并入当前活跃编排（clarification/user-help/supplements/extras/决策上下文），
    * 不触发 cancel/restart；无吸收路径（含 awaiting-retry）返回 false。
    */
-  supplementActive(room: Room, text: string): boolean {
+  /** 活跃 flow 的归属校验：明确归属他人（missionId 打标且非 done 快照）时返回其 id */
+  private foreignFlowOwner(roomId: string, missionId: string): string | undefined {
+    const flow = this.getFlow(roomId);
+    if (!flow || String(flow.phase ?? "") === "done") return undefined;
+    const owner = flow.missionId;
+    return typeof owner === "string" && owner !== "" && owner !== missionId ? owner : undefined;
+  }
+
+  supplementActive(room: Room, text: string, missionId?: string): boolean {
     if (!this.hasActiveFlow(room.roomId)) return false;
     const flow = this.getFlow(room.roomId);
     if (flow?.phase === "awaiting-retry") return false;
+    // 归属预检：明确归属他人的活跃 flow 不吸收外来 mission 的补充
+    if (missionId && this.foreignFlowOwner(room.roomId, missionId) !== undefined) return false;
     const absorbed = this.absorbActiveMessage(room, text, {});
     if (absorbed === undefined) return false;
     this.emitFlowUpdate(room.roomId);
@@ -862,7 +883,17 @@ export class RoomModeManager {
 
     // 活跃流程中的新消息默认视为补充/答复，不再取消编排；显式取消词或 /stop 除外
     if (this.hasActiveFlow(room.roomId)) {
-      if (CANCEL_TEXT.test(text.trim()) && !helpAnswerIntent(text, options?.params)) {
+      // 归属预检：mission 派发遇明确归属他人的活跃 flow → 显式失败；
+      // 既不 absorb 吞掉契约，也不走 cancelActive 误杀他人流程（无标记 flow 兼容吸收）。
+      // mission 契约文本不识别取消词——否则「取消某功能」类 goal 会误杀在跑的 flow
+      const mid = options?.missionId;
+      if (mid) {
+        const owner = this.foreignFlowOwner(room.roomId, mid);
+        if (owner !== undefined) {
+          throw new Error(`room ${room.roomId} occupied by an active flow of mission ${owner}`);
+        }
+      }
+      if (!mid && CANCEL_TEXT.test(text.trim()) && !helpAnswerIntent(text, options?.params)) {
         await this.cancelActive(room.roomId, "用户取消当前流程");
         this.emitFlowUpdate(room.roomId);
         return { sent: [], mentioned: [], skipped: [] };
@@ -971,6 +1002,7 @@ export class RoomModeManager {
         sessionNote: autoCtx.sessionNote,
         params,
         artifactContext: autoCtx.artifactContext,
+        missionId: autoCtx.missionId,
       });
       logWarn("room-modes auto", `executeMode 完成：sent=[${result.sent.join(", ")}]，skipped=[${result.skipped.join(", ")}]`);
       this.emitFlowUpdate(room.roomId);
@@ -1427,13 +1459,13 @@ export class RoomModeManager {
         if (m) sent.add(m.sessionId);
         else skipped.push(t.to);
       }
-      this.conductor.start(room, task, initialTasks, options?.artifactContext).catch((err) => {
+      this.conductor.start(room, task, initialTasks, options?.artifactContext, options?.missionId).catch((err) => {
         logError("room-modes conductor start", err);
       });
       return { sent: [...sent], mentioned: [], skipped };
     }
 
-    this.conductor.start(room, task, undefined, options?.artifactContext).catch((err) => {
+    this.conductor.start(room, task, undefined, options?.artifactContext, options?.missionId).catch((err) => {
       logError("room-modes conductor start", err);
     });
     return { sent: [room.conductorId], mentioned: [], skipped: [] };
@@ -1524,6 +1556,7 @@ export class RoomModeManager {
       quote: options?.quote,
       content: options?.content,
       artifactContext: options?.artifactContext,
+      missionId: options?.missionId,
     };
     this.parallelFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "parallel", summarizer, undefined);
@@ -1620,6 +1653,7 @@ export class RoomModeManager {
       quote: options?.quote,
       content: options?.content,
       artifactContext: options?.artifactContext,
+      missionId: options?.missionId,
     };
     this.pipelineFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "pipeline", first, undefined);
@@ -1727,6 +1761,7 @@ export class RoomModeManager {
       quote: options?.quote,
       content: options?.content,
       artifactContext: options?.artifactContext,
+      missionId: options?.missionId,
     };
     this.debateFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "debate", sideA, undefined);
@@ -1884,6 +1919,7 @@ export class RoomModeManager {
       content: options?.content,
       sessionNote: options?.sessionNote,
       artifactContext: options?.artifactContext,
+      missionId: options?.missionId,
     };
     this.autoDecisions.set(conductorId, autoCtx);
     const prompt = this.buildAutoPrompt(room, text, options);
