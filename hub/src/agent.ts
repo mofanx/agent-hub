@@ -127,6 +127,70 @@ export type HubEvent =
 
 type PermissionOption = { optionId: string; name: string; kind: string };
 
+export type PermissionRequestParams = {
+  sessionId: string;
+  toolCall: unknown;
+  options: PermissionOption[];
+};
+
+function firstString(...vals: unknown[]): string | undefined {
+  for (const v of vals) {
+    if (typeof v === "string" && v) return v;
+  }
+  return undefined;
+}
+
+/**
+ * session/request_permission 的宽容解析：替代 SDK zod 严格校验（kind 限定
+ * 四值字面量，任何结构偏差都会被 invalidParams 直接打回，决策卡永远到不了
+ * 客户端）。接受 optionId/id、name/label、kind/type 字段别名，过滤无
+ * optionId 的选项；输出恒为安全结构（options 可为空数组，由 handler 兜底）。
+ */
+export function normalizePermissionParams(raw: unknown): PermissionRequestParams {
+  const p =
+    typeof raw === "object" && raw !== null
+      ? (raw as Record<string, unknown>)
+      : {};
+  const rawOptions = Array.isArray(p.options) ? p.options : [];
+  const options: PermissionOption[] = [];
+  for (const item of rawOptions) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    const optionId = firstString(o.optionId, o.id);
+    if (!optionId) continue;
+    options.push({
+      optionId,
+      name: firstString(o.name, o.label) ?? optionId,
+      kind: firstString(o.kind, o.type) ?? "",
+    });
+  }
+  if (rawOptions.length > 0 && options.length === 0) {
+    logWarn(
+      "permission",
+      `normalizePermissionParams: all ${rawOptions.length} options dropped (missing optionId)`,
+    );
+  }
+  const sessionId = firstString(p.sessionId) ?? "";
+  if (!sessionId) {
+    logWarn("permission", "normalizePermissionParams: empty sessionId");
+  }
+  return {
+    sessionId,
+    toolCall: p.toolCall,
+    options,
+  };
+}
+
+/** 拒绝类选项：词边界匹配 reject/deny/decline/block/cancel（含 ed/d/led/ing/s 与 _once 类 kind 后缀），un- 前缀（unblock）不误选 */
+const REJECT_OPTION_RE = /(?<![\w-])(?:reject|deny|denied|decline|block|cancel)(?:ed|d|led|ing|s|[_-]\w+)?(?![\w-])/i;
+
+/** 优先选明确的拒绝类选项（kind/name 正则），无则由调用方决定兜底 */
+function rejectOptionOf(options: PermissionOption[]): PermissionOption | undefined {
+  return options.find(
+    (o) => REJECT_OPTION_RE.test(o.kind) || REJECT_OPTION_RE.test(o.name),
+  );
+}
+
 type SessionEntry = {
   cwd: string;
   name: string;
@@ -157,7 +221,16 @@ export function stripLoneSurrogates(s: string): string {
   );
 }
 
-const PERMISSION_TIMEOUT_MS = 120_000;
+// 默认收紧为 60s：超时路径 fail-closed（只选明确 reject 否则 cancelled），慢响应会话用 HUB_PERMISSION_TIMEOUT_MS 调大
+let permissionTimeoutMs = Number(process.env.HUB_PERMISSION_TIMEOUT_MS ?? 60_000);
+
+export function setPermissionTimeoutMs(v: number): void {
+  permissionTimeoutMs = v;
+}
+
+export function getPermissionTimeoutMs(): number {
+  return permissionTimeoutMs;
+}
 let promptAckTimeoutMs = Number(process.env.HUB_PROMPT_ACK_TIMEOUT_MS ?? 180_000);
 
 export function setPromptAckTimeoutMs(v: number): void {
@@ -332,9 +405,7 @@ function findAutoAllowOption(options: PermissionOption[]): PermissionOption | un
   if (allow) return allow;
   // 最后兜底：选择第一个非 reject/deny/block 的选项
   return options.find(
-    (o) =>
-      !/reject|deny|denied|block/i.test(o.kind) &&
-      !/reject|deny|denied|block/i.test(o.name),
+    (o) => !REJECT_OPTION_RE.test(o.kind) && !REJECT_OPTION_RE.test(o.name),
   );
 }
 
@@ -426,8 +497,12 @@ export class AcpAgent {
 
     const app = acp
       .client({ name: "agent-hub" })
-      .onRequest(acp.methods.client.session.requestPermission, (ctx) =>
-        this.handlePermission(ctx.params),
+      // 自定义宽容 parser 替代 SDK zod 校验：dsh 等 agent 发送非标准
+      // options/kind 结构时不再被 invalidParams 打回（决策卡缺席的假死）
+      .onRequest(
+        acp.methods.client.session.requestPermission,
+        normalizePermissionParams,
+        (ctx) => this.handlePermission(ctx.params),
       )
       .onRequest(acp.methods.client.fs.readTextFile, (ctx) =>
         this.handleReadTextFile(ctx.params),
@@ -726,15 +801,24 @@ export class AcpAgent {
     if (entry) entry.turnGotUpdate = true;
   }
 
-  private handlePermission(params: {
-    sessionId: string;
-    toolCall: unknown;
-    options: PermissionOption[];
-  }): Promise<{ outcome: { outcome: "selected"; optionId: string } }> {
+  private handlePermission(
+    params: PermissionRequestParams,
+  ): Promise<acp.RequestPermissionResponse> {
     const requestId = randomUUID();
     this.markTurnAlive(params.sessionId);
     const grantKey = permissionKeyOf(params.toolCall);
     const title = permissionTitleOf(params.toolCall);
+
+    // 无可答选项：卡片永远无解，不发卡，立即 fail-closed 收尾（cancelled
+    // 是 ACP 标准 outcome，dsh 映射为 'cancelled'，其余 agent 按拒绝处理）
+    if (params.options.length === 0) {
+      logWarn(
+        "permission",
+        `no usable options for ${title} in session ${params.sessionId}; answering cancelled`,
+      );
+      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    }
+
     const decisionOptions = params.options.map((o) => ({
       id: o.optionId,
       label: o.name,
@@ -773,21 +857,26 @@ export class AcpAgent {
       });
     }
 
-    // 决策卡 scope=always/task 授权命中：同类请求自动放行（落一张已答卡留痕）
+    // 决策卡 scope=always/task 授权命中：存在可自动放行的 allow 类选项才
+    // 自动应答（落一张已答卡留痕）；找不到时降级为人工决策卡，不得为
+    // "always" 授权盲选一个 reject/任意选项
     const grantScope = this.permissionGrants.get(params.sessionId)?.get(grantKey);
     if (grantScope) {
-      const chosen =
-        findAutoAllowOption(params.options) ??
-        params.options[params.options.length - 1];
-      const optionId = chosen?.optionId ?? "";
-      emitDecisionRequest({ grantScope, auto: true, autoOptionId: optionId });
+      const chosen = findAutoAllowOption(params.options);
+      if (chosen) {
+        emitDecisionRequest({ grantScope, auto: true, autoOptionId: chosen.optionId });
+        logWarn(
+          "permission",
+          `grant(scope=${grantScope}) hit for ${grantKey} in session ${params.sessionId} -> "${chosen.name}"`,
+        );
+        return Promise.resolve({
+          outcome: { outcome: "selected", optionId: chosen.optionId },
+        });
+      }
       logWarn(
         "permission",
-        `grant(scope=${grantScope}) hit for ${grantKey} in session ${params.sessionId} -> "${chosen?.name ?? optionId}"`,
+        `grant(scope=${grantScope}) hit for ${grantKey} in session ${params.sessionId} but no allow option; falling back to interactive card`,
       );
-      return Promise.resolve({
-        outcome: { outcome: "selected", optionId },
-      });
     }
 
     emitDecisionRequest();
@@ -803,21 +892,25 @@ export class AcpAgent {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingPermissions.delete(requestId);
-        const fallback =
-          params.options.find((o) => o.kind.startsWith("reject")) ??
-          params.options[params.options.length - 1];
-        const optionId = fallback?.optionId ?? "";
+        // 超时兜底只选明确的拒绝类选项；没有 reject 选项时回 cancelled，
+        // 绝不盲选列表末位（可能是 allow）导致超时静默放行
+        const fallback = rejectOptionOf(params.options);
         this.emit({
           method: "decision.resolve",
-          params: { requestId, outcome: "expired", ...(optionId ? { optionId } : {}) },
+          params: {
+            requestId,
+            outcome: "expired",
+            ...(fallback ? { optionId: fallback.optionId } : {}),
+          },
         });
-        if (!fallback) {
-          resolve({ outcome: { outcome: "selected", optionId: "" } });
-          return;
+        if (fallback) {
+          logWarn("agent", `permission ${requestId} timed out -> ${fallback.optionId}`);
+          resolve({ outcome: { outcome: "selected", optionId: fallback.optionId } });
+        } else {
+          logWarn("agent", `permission ${requestId} timed out with no reject option -> cancelled`);
+          resolve({ outcome: { outcome: "cancelled" } });
         }
-        logWarn("agent", `permission ${requestId} timed out -> ${fallback.optionId}`);
-        resolve({ outcome: { outcome: "selected", optionId: fallback.optionId } });
-      }, PERMISSION_TIMEOUT_MS);
+      }, permissionTimeoutMs);
       this.pendingPermissions.set(requestId, {
         optionIds: new Set(params.options.map((o) => o.optionId)),
         respond: (optionId, outcome = "answered") => {
@@ -827,7 +920,19 @@ export class AcpAgent {
             method: "decision.resolve",
             params: { requestId, outcome, ...(optionId ? { optionId } : {}) },
           });
-          resolve({ outcome: { outcome: "selected", optionId } });
+          // 空 optionId（revoke/断连收尾）按 ACP 标准 cancelled 语义回报，
+          // 而非伪造一个 selected 空选
+          if (!optionId) {
+            logWarn(
+              "permission",
+              `permission ${requestId} ${outcome} in session ${params.sessionId}: no option -> cancelled`,
+            );
+          }
+          resolve(
+            optionId
+              ? { outcome: { outcome: "selected", optionId } }
+              : { outcome: { outcome: "cancelled" } },
+          );
         },
       });
     });
@@ -925,6 +1030,7 @@ export class AcpAgent {
           method: "decision.resolve",
           params: { requestId, outcome: "expired", action: "cancel" },
         });
+        logWarn("agent", `elicitation ${requestId} timed out in session ${sessionId} -> cancel`);
         resolve({ action: "cancel" });
       }, ELICITATION_TIMEOUT_MS);
       this.pendingElicitations.set(requestId, (resp, outcome = "answered") => {
