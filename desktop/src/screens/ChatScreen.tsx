@@ -1591,6 +1591,9 @@ function dateLabel(S: Strings, at: number | undefined): string {
   return d.toLocaleDateString();
 }
 
+/** markdown HTML 渲染缓存：key=lang:highlight，按 item 对象身份弱引用，条目移除自动 GC */
+const mdHtmlCache = new WeakMap<ChatItem, { key: string; html: string }>();
+
 function ChatMessage({
   item,
   showAuthor,
@@ -1710,7 +1713,16 @@ function ChatMessage({
     }
   };
 
-  const markdownHtml = (text: string) => (highlight ? highlightHtml(renderMarkdown(text, S), highlight) : renderMarkdown(text, S));
+  // 已渲染条目的 markdown HTML 缓存：item 对象在 setState 批量中保持同一引用，
+  // 未变条目直接命中，marked 只对新增/变化文本跑一次
+  const markdownHtml = (item: ChatItem & { text: string }) => {
+    const key = `${store.lang}:${highlight ?? ""}`;
+    const hit = mdHtmlCache.get(item);
+    if (hit && hit.key === key) return hit.html;
+    const html = highlight ? highlightHtml(renderMarkdown(item.text, S), highlight) : renderMarkdown(item.text, S);
+    mdHtmlCache.set(item, { key, html });
+    return html;
+  };
 
   switch (item.kind) {
     case "system": {
@@ -1732,7 +1744,7 @@ function ChatMessage({
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
-            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
+            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
           </div>
           {attachmentsEl}
           {menuEl}
@@ -1751,7 +1763,11 @@ function ChatMessage({
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
-            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
+            {item.streaming ? (
+              <div className="text stream-plain" onClick={onTextClick}>{item.text}</div>
+            ) : (
+              <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
+            )}
             {usageText}
           </div>
           {menuEl}
@@ -1772,9 +1788,11 @@ function ChatMessage({
             <button className="thought-toggle" onClick={onToggleThought}>
               {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {S.thoughtProcess}
             </button>
-            {expanded && (
-              <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item.text) }} />
-            )}
+            {expanded && (item.streaming ? (
+              <div className="text stream-plain" onClick={onTextClick}>{item.text}</div>
+            ) : (
+              <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
+            ))}
           </div>
           {menuEl}
           {selectModal}

@@ -372,8 +372,8 @@ export interface SessionConfigOption {
 export type ChatItem =
   | { kind: "user"; at?: number; historyId?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string }
   | { kind: "system"; at?: number; historyId?: number; text: string; author: string }
-  | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string }
-  | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string }
+  | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string; /** 流式进行中：渲染层用轻量纯文本，turn 结束后完整 markdown 重排 */ streaming?: boolean }
+  | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string; streaming?: boolean }
   | { kind: "tool"; at?: number; historyId?: number; toolCallId: string; title: string; status: string; author: string }
   | { kind: "plan"; at?: number; historyId?: number; entries: string[]; author: string }
   | { kind: "error"; at?: number; historyId?: number; text: string; author: string }

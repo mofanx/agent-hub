@@ -1,5 +1,6 @@
 package com.agenthub.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import java.time.Instant
@@ -16,6 +17,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -1354,17 +1358,24 @@ private suspend fun LazyListState.scrollToLast() {
 
 @Composable
 fun AttachmentImage(attachment: Attachment, modifier: Modifier = Modifier) {
-    val bitmap = remember(attachment.base64) {
-        try {
-            val bytes = Base64.decode(attachment.base64, Base64.NO_WRAP)
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-        } catch (_: Exception) {
-            null
+    val bitmap by produceState<Bitmap?>(null, attachment.base64) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                val bytes = Base64.decode(attachment.base64, Base64.NO_WRAP)
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                var sample = 1
+                while (kotlin.math.max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1024) sample *= 2
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+            } catch (_: Exception) {
+                null
+            }
         }
     }
-    if (bitmap != null) {
+    val bmp = bitmap
+    if (bmp != null) {
         Image(
-            bitmap = bitmap.asImageBitmap(),
+            bitmap = bmp.asImageBitmap(),
             contentDescription = attachment.name,
             modifier = modifier,
             contentScale = ContentScale.Crop,
@@ -2189,6 +2200,7 @@ private fun RawChatBubble(
                         fontSize = MaterialTheme.typography.bodyLarge.fontSize,
                         highlight = highlight,
                         onMatchKeywordY = keywordCallback,
+                        streaming = vm.generating && vm.chatItems.lastOrNull() === item,
                     )
                 }
             }

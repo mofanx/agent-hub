@@ -777,6 +777,60 @@ export const useHubStore = create<State & Actions>((set, get) => {
     } catch {}
   };
 
+  /** 流式 chunk 合帧：~33ms 窗口内按会话攒批，一次 set 落库，切断每 token 全树重渲染 */
+  const STREAM_WINDOW_MS = 33;
+  const streamQueue = new Map<string, Record<string, unknown>[]>();
+  let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const applyStreamBatch = (sessionId: string) => {
+    const q = streamQueue.get(sessionId);
+    if (!q?.length) return;
+    streamQueue.delete(sessionId);
+    // 33ms 窗口内用户可能已切换会话/房间：scope 校验与事件入口一致，防止 A 的缓冲写进 B 的 chatItems
+    if (!get().inScope(sessionId) || !get().shouldShowInRoom(sessionId)) return;
+    const author = get().sessionName(sessionId);
+    const items = [...get().chatItems];
+    let seq = get().itemSeq;
+    for (const u of q) {
+      const text = String((u.content as Record<string, unknown> | undefined)?.text ?? "");
+      if (!text) continue;
+      const kind = u.sessionUpdate === "agent_thought_chunk" ? "thought" : "assistant";
+      const last = items[items.length - 1];
+      if (last?.kind === kind && last.author === author) {
+        items[items.length - 1] = { ...last, text: last.text + text, streaming: true };
+      } else {
+        items.push({ kind, at: Date.now(), id: ++seq, text, author, streaming: true });
+      }
+    }
+    set({ chatItems: items, itemSeq: seq });
+  };
+
+  const flushAllStreams = () => {
+    for (const sid of [...streamQueue.keys()]) applyStreamBatch(sid);
+  };
+
+  const scheduleStreamFlush = () => {
+    streamFlushTimer ??= setTimeout(() => {
+      streamFlushTimer = null;
+      flushAllStreams();
+    }, STREAM_WINDOW_MS);
+  };
+
+  /** turn 终止时清除该作者的 streaming 标记，恢复完整 markdown 渲染 */
+  const clearStreaming = (author: string) => {
+    const items = get().chatItems;
+    let changed = false;
+    const next = items.map((it) => {
+      if ((it.kind === "assistant" || it.kind === "thought") && it.streaming && it.author === author) {
+        changed = true;
+        const { streaming: _drop, ...rest } = it;
+        return rest as ChatItem;
+      }
+      return it;
+    });
+    if (changed) set({ chatItems: next });
+  };
+
   const handleEvent = (obj: Record<string, unknown>) => {
     const method = typeof obj.method === "string" ? obj.method : "";
     const params = (obj.params as Record<string, unknown> | undefined) ?? {};
@@ -813,6 +867,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
       case "prompt.done": {
         const sid = String(params.sessionId ?? "");
+        applyStreamBatch(sid);
+        clearStreaming(get().sessionName(sid));
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
         const sess = get().sessions.find((s) => s.sessionId === sid);
@@ -850,6 +906,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
       case "prompt.error": {
         const sid = String(params.sessionId ?? "");
+        applyStreamBatch(sid);
+        clearStreaming(get().sessionName(sid));
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         if ((get().inScope(sid) || !sid) && get().shouldShowInRoom(sid)) {
           const msg = String(params.message ?? "error");
@@ -2624,40 +2682,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
     applyUpdate: (sessionId: string, u: Record<string, unknown>) => {
       const author = get().sessionName(sessionId);
       const updateType = String(u.sessionUpdate ?? "");
+      // 流式 chunk 进合帧队列；非流式条目必须落在已缓冲文本之后，先冲刷保持时间序
+      if (updateType === "agent_message_chunk" || updateType === "agent_thought_chunk") {
+        const text = String((u.content as Record<string, unknown> | undefined)?.text ?? "");
+        if (!text) return;
+        const q = streamQueue.get(sessionId) ?? [];
+        if (q.length === 0) streamQueue.set(sessionId, q);
+        q.push(u);
+        scheduleStreamFlush();
+        return;
+      }
+      applyStreamBatch(sessionId);
       const items = [...get().chatItems];
-      const seq = get().itemSeq;
 
       switch (updateType) {
-        case "agent_message_chunk": {
-          const text = String((u.content as Record<string, unknown> | undefined)?.text ?? "");
-          if (!text) return;
-          const last = items[items.length - 1];
-          if (last?.kind === "assistant" && last.author === author) {
-            items[items.length - 1] = { ...last, text: last.text + text };
-            set({ chatItems: items });
-          } else {
-            set({
-              chatItems: [...items, { kind: "assistant", at: Date.now(), id: seq + 1, text, author }],
-              itemSeq: seq + 1,
-            });
-          }
-          break;
-        }
-        case "agent_thought_chunk": {
-          const text = String((u.content as Record<string, unknown> | undefined)?.text ?? "");
-          if (!text) return;
-          const last = items[items.length - 1];
-          if (last?.kind === "thought" && last.author === author) {
-            items[items.length - 1] = { ...last, text: last.text + text };
-            set({ chatItems: items });
-          } else {
-            set({
-              chatItems: [...items, { kind: "thought", at: Date.now(), id: seq + 1, text, author }],
-              itemSeq: seq + 1,
-            });
-          }
-          break;
-        }
         case "tool_call": {
           set({
             chatItems: [

@@ -219,6 +219,11 @@
   font-size: 0.9rem;
 }
 
+/* 流式进行中的轻量纯文本渲染：跳过 marked，等 turn 结束再完整重排 */
+.message .text.stream-plain {
+  white-space: pre-wrap;
+}
+
 /* 用户消息：右侧气泡 */
 .message.user {
   align-self: flex-end;

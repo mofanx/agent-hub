@@ -31,8 +31,15 @@ fun MarkdownText(
     fontSize: TextUnit = MaterialTheme.typography.bodyLarge.fontSize,
     highlight: String = "",
     onMatchKeywordY: ((Float) -> Unit)? = null,
+    streaming: Boolean = false,
 ) {
-    if (highlight.isNotBlank()) {
+    if (streaming && highlight.isBlank()) {
+        Text(
+            text = text,
+            style = TextStyle(fontSize = fontSize, color = textColor),
+            modifier = modifier,
+        )
+    } else if (highlight.isNotBlank()) {
         HighlightText(
             text = text,
             highlight = highlight,

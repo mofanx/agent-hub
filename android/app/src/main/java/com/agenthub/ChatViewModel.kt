@@ -5072,6 +5072,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun handleEvent(obj: JsonObject) {
+        if (obj["method"]?.jsonPrimitive?.content != "session.update") flushStreamChunks()
         when (obj["method"]?.jsonPrimitive?.content) {
             "agent.status" -> {
                 val p = obj["params"]!!.jsonObject
@@ -5347,28 +5348,67 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun applyUpdate(sessionId: String, u: JsonObject) {
-        val author = sessionName(sessionId)
-        when (u["sessionUpdate"]?.jsonPrimitive?.content) {
-            "agent_message_chunk" -> {
-                val text = u["content"]?.jsonObject?.get("text")?.jsonPrimitive?.content ?: return
-                val last = chatItems.lastOrNull()
+    /** 流式合帧的有序 run：连续同 (sessionId,kind) 合并，保留 message/thought 交错与跨会话到达序 */
+    private data class StreamRun(val sessionId: String, val kind: String, val text: StringBuilder)
+
+    private val streamRuns = mutableListOf<StreamRun>()
+    private var streamFlushJob: kotlinx.coroutines.Job? = null
+
+    private fun queueChunk(sessionId: String, kind: String, text: String) {
+        val last = streamRuns.lastOrNull()
+        if (last != null && last.sessionId == sessionId && last.kind == kind) {
+            last.text.append(text)
+        } else {
+            streamRuns.add(StreamRun(sessionId, kind, StringBuilder(text)))
+        }
+        if (streamFlushJob?.isActive != true) {
+            streamFlushJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(80)
+                flushStreamChunks()
+            }
+        }
+    }
+
+    private fun flushStreamChunks() {
+        if (streamRuns.isEmpty()) return
+        val runs = streamRuns.toList()
+        streamRuns.clear()
+        for (run in runs) {
+            // 80ms 窗口内可能已切换会话/房间：scope 校验与事件入口一致，防止缓冲写进新 scope 的 chatItems
+            if (!inScope(run.sessionId) || !shouldShowInRoom(run.sessionId)) continue
+            val author = sessionName(run.sessionId)
+            val text = run.text.toString()
+            if (text.isEmpty()) continue
+            val last = chatItems.lastOrNull()
+            if (run.kind == "t") {
+                if (last is ChatItem.Thought && last.author == author) {
+                    chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
+                } else {
+                    chatItems.add(ChatItem.Thought(++itemSeq, text, author))
+                }
+            } else {
                 if (last is ChatItem.Assistant && last.author == author) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
                 } else {
                     chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
                 }
             }
+        }
+    }
+
+    private fun applyUpdate(sessionId: String, u: JsonObject) {
+        val author = sessionName(sessionId)
+        when (u["sessionUpdate"]?.jsonPrimitive?.content) {
+            "agent_message_chunk" -> {
+                val text = u["content"]?.jsonObject?.get("text")?.jsonPrimitive?.content ?: return
+                queueChunk(sessionId, "m", text)
+            }
             "agent_thought_chunk" -> {
                 val text = u["content"]?.jsonObject?.get("text")?.jsonPrimitive?.content ?: return
-                val last = chatItems.lastOrNull()
-                if (last is ChatItem.Thought && last.author == author) {
-                    chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
-                } else {
-                    chatItems.add(ChatItem.Thought(++itemSeq, text, author))
-                }
+                queueChunk(sessionId, "t", text)
             }
             "tool_call" -> {
+                flushStreamChunks()
                 chatItems.add(
                     ChatItem.Tool(++itemSeq, 
                         u["toolCallId"]!!.jsonPrimitive.content,
@@ -5379,6 +5419,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             "tool_call_update" -> {
+                flushStreamChunks()
                 val id = u["toolCallId"]!!.jsonPrimitive.content
                 val idx = chatItems.indexOfLast { it is ChatItem.Tool && it.toolCallId == id }
                 if (idx >= 0) {
@@ -5390,6 +5431,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "plan" -> {
+                flushStreamChunks()
                 val entries = u["entries"]?.jsonArray?.map {
                     val e = it.jsonObject
                     val status = e["status"]?.jsonPrimitive?.content ?: ""

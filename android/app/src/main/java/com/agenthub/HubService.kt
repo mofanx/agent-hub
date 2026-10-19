@@ -53,10 +53,6 @@ class HubService : Service() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
         try { cm.registerNetworkCallback(request, networkCallback) } catch (_: Exception) { }
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AgentHub:HubService").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -132,6 +128,12 @@ class HubService : Service() {
             }
         }
         val url = buildWsUrl(address, token)
+        if (wakeLock?.isHeld != true) {
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AgentHub:HubService").apply {
+                setReferenceCounted(false)
+                acquire(30L * 60 * 1000)
+            }
+        }
         val client = hub ?: HubClient(scope) {
             stringsFor(getSharedPreferences("agent-hub", MODE_PRIVATE).getString("lang", "zh") ?: "zh")
         }.also { hub = it }
