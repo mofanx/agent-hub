@@ -4,6 +4,7 @@ import type { Stream } from "@agentclientprotocol/sdk";
 import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { logWarn } from "./logger.js";
 
 export type TokenUsage = {
@@ -265,6 +266,57 @@ export function sliceTextFile(
   const lines = content.split("\n");
   const count = limit == null ? lines.length : Math.max(0, Math.floor(limit));
   return lines.slice(start, start + count).join("\n");
+}
+
+const FILE_READ_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * 有界区间读取：line/limit 与 sliceTextFile 语义一致，但只按需扫描文件：
+ * limit 已知时收集够行数即停止，不再读文件尾部；峰值内存与返回内容同级，
+ * 而非整文件 + 全行数组。
+ */
+export function readTextFileRange(
+  target: string,
+  line?: number | null,
+  limit?: number | null,
+): string {
+  const start = Math.max(1, Math.floor(line ?? 1));
+  const count = limit == null ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(limit));
+  if (count <= 0) return "";
+  const fd = fs.openSync(target, "r");
+  try {
+    const decoder = new StringDecoder("utf-8");
+    const buf = Buffer.alloc(FILE_READ_CHUNK_BYTES);
+    const out: string[] = [];
+    let curLine = 1;
+    let carry = "";
+    let done = false;
+    while (!done) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      const text = n > 0 ? carry + decoder.write(buf.subarray(0, n)) : carry + decoder.end();
+      const lines = text.split("\n");
+      if (n === 0) {
+        for (const l of lines) {
+          if (curLine >= start) out.push(l);
+          curLine++;
+          if (out.length >= count) break;
+        }
+        break;
+      }
+      carry = lines.pop() ?? "";
+      for (const l of lines) {
+        if (curLine >= start) out.push(l);
+        curLine++;
+        if (out.length >= count) {
+          done = true;
+          break;
+        }
+      }
+    }
+    return out.join("\n");
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function enumOptions(list: unknown): { value: string; label: string }[] | undefined {
@@ -1133,8 +1185,12 @@ export class AcpAgent {
   }): { content: string } {
     this.markTurnAlive(params.sessionId);
     const target = this.resolveSessionPath(params.sessionId, params.path);
-    const content = fs.readFileSync(target, "utf-8");
-    return { content: sliceTextFile(content, params.line, params.limit) };
+    // 未给区间时保持整文件语义；有 line/limit 时有界读取，不再整文件进内存
+    const content =
+      params.line == null && params.limit == null
+        ? fs.readFileSync(target, "utf-8")
+        : readTextFileRange(target, params.line, params.limit);
+    return { content };
   }
 
   private handleWriteTextFile(params: {

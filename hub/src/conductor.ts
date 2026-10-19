@@ -227,6 +227,9 @@ const TOOL_COMMAND_MAX = 8192;
 const TOOL_OUTPUT_MAX = 262144;
 const MAX_BACKEND_RUNS = 20;
 const MAX_PENDING_TOOL_CALLS = 20;
+/** 工作区快照哈希跨调用 TTL：getFlow 每次 flowUpdate 不再全树遍历 */
+const SNAPSHOT_HASH_TTL_MS = 4000;
+const SNAPSHOT_HASH_CACHE_MAX = 64;
 const ISOLATED_CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const ISOLATED_CHECK_MAX = 32;
 const PLAN_FORMAT_RETRY_LIMIT = 1;
@@ -418,6 +421,13 @@ export function newFlowId(): string {
 export class ConductorOrchestrator {
   private flows = new Map<string, Flow>();
   private pendingToolCalls = new Map<string, Map<string, PendingToolCall>>();
+  /** cwd → {at, hash, fp}：快照哈希跨调用缓存。命中需同时满足 TTL 窗口内 +
+   * 廉价指纹未变（fp 为递归 lstat 遍历，无 git spawn、不读内容）；指纹失配即回退
+   * 全量哈希，保证 snapshotCurrent 不因缓存对工作区变化撒谎 */
+  private snapHashCache = new Map<
+    string,
+    { at: number; hash: string | undefined; fp: Map<string, string> | undefined }
+  >();
   private readonly promptRetryMs: number;
   private readonly emitFlow: ((roomId: string) => void) | undefined;
   private store?: Store;
@@ -678,6 +688,36 @@ export class ConductorOrchestrator {
     return found;
   }
 
+  private fingerprintMatches(cwd: string, cached: Map<string, string>): boolean {
+    const cur = workspaceFingerprint(cwd);
+    if (!cur || cur.size !== cached.size) return false;
+    for (const [k, v] of cur) {
+      if (cached.get(k) !== v) return false;
+    }
+    return true;
+  }
+
+  private workspaceHashCached(cwd: string): string | undefined {
+    const hit = this.snapHashCache.get(cwd);
+    const now = Date.now();
+    if (
+      hit &&
+      now - hit.at < SNAPSHOT_HASH_TTL_MS &&
+      hit.fp !== undefined &&
+      this.fingerprintMatches(cwd, hit.fp)
+    ) {
+      return hit.hash;
+    }
+    const hash = workspaceSnapshotHash(cwd);
+    const fp = workspaceFingerprint(cwd);
+    if (!hit && this.snapHashCache.size >= SNAPSHOT_HASH_CACHE_MAX) {
+      const oldest = this.snapHashCache.keys().next().value;
+      if (oldest !== undefined) this.snapHashCache.delete(oldest);
+    }
+    this.snapHashCache.set(cwd, { at: now, hash, fp });
+    return hash;
+  }
+
   /** 获取可用于前端展示的 flow 状态 */
   private snapshotCurrentFor(
     task: FlowTask,
@@ -689,7 +729,7 @@ export class ConductorOrchestrator {
     if (typeof snap !== "string" || !/^[0-9a-f]{64}$/.test(snap)) return undefined;
     const cwd = this.agent.cwd?.(task.sessionId);
     if (!cwd) return false;
-    if (!cache.has(cwd)) cache.set(cwd, workspaceSnapshotHash(cwd));
+    if (!cache.has(cwd)) cache.set(cwd, this.workspaceHashCached(cwd));
     const cur = cache.get(cwd);
     return cur !== undefined && cur === snap;
   }
@@ -3053,6 +3093,49 @@ export function workspaceSnapshotHash(realCwd: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * 廉价工作区指纹：递归 lstat 遍历（跳过 ISO_EXCLUDED_DIRS，.git 含在其中），
+ * 不 spawn git、不读文件内容。与 snapshotWorkspace 的哈希输入同变——非忽略文件的
+ * 增/删/改/类型变化都会失配；指纹只可能过度敏感（忽略文件变化多触发一次重算），方向安全。
+ * 遍历超限或不可读返回 undefined（调用方退化为不复用缓存）。
+ */
+function workspaceFingerprint(cwd: string): Map<string, string> | undefined {
+  const fp = new Map<string, string>();
+  const stack = [""];
+  let count = 0;
+  while (stack.length > 0) {
+    const rel = stack.pop()!;
+    const abs = rel ? path.join(cwd, rel) : cwd;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const e of entries) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (!ISO_EXCLUDED_DIRS.has(e.name)) stack.push(r);
+        continue;
+      }
+      let st: fs.Stats;
+      try {
+        st = fs.lstatSync(path.join(abs, e.name));
+      } catch {
+        fp.set(r, "GONE");
+        continue;
+      }
+      fp.set(
+        r,
+        `${st.mtimeMs}:${st.size}:${st.isSymbolicLink() ? "L" : st.isFile() ? "F" : "O"}`,
+      );
+      count++;
+      if (count > ISO_MAX_FILES) return undefined;
+    }
+  }
+  return fp;
 }
 
 function gitRepoLayout(realCwd: string): { repoName: string; relCwd: string } {

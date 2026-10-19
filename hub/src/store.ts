@@ -114,6 +114,11 @@ const BUILTIN_ROLES: Role[] = [
 type State = { sessions: SessionMeta[]; rooms: Room[]; runtime?: Record<string, unknown> | undefined };
 
 const HISTORY_LIMIT = 200;
+/** 启动清理：每个 (scope, scope_id) 保留的最新 history 条数 / 每个房间保留的最新 room_events 条数 */
+const HISTORY_PRUNE_KEEP = 5000;
+const ROOM_EVENTS_PRUNE_KEEP = 2000;
+/** 启动时孤儿卡/未决卡收尾的回溯扫描上限：非终态卡必然在近期尾部，更早的按遗弃处理 */
+const ORPHAN_CARD_SCAN_LIMIT = 500;
 const RESTART_INTERRUPTED_MARKER = "[Hub 重启中断了此回复；以上为已保存片段，未自动重试]";
 const INTERRUPTED_REPLY_MARKER = "[回复中断；以上为已保存片段，未自动重试]";
 
@@ -241,6 +246,38 @@ export class Store {
     this.migrateSchema();
     this.seedRoles();
     this.migrateLegacy();
+    this.prune();
+  }
+
+  /** 表只增不删会无限膨胀；启动时把每组历史/每房事件裁剪到最近 N 条（保留 seq 最新的尾部） */
+  private prune(): void {
+    try {
+      this.db.transaction(() => {
+        const h = this.db
+          .prepare(
+            `DELETE FROM history WHERE id IN (
+              SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY scope, scope_id ORDER BY id DESC) AS rn
+                FROM history
+              ) WHERE rn > ?)`,
+          )
+          .run(HISTORY_PRUNE_KEEP);
+        const e = this.db
+          .prepare(
+            `DELETE FROM room_events WHERE id IN (
+              SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY room_id ORDER BY id DESC) AS rn
+                FROM room_events
+              ) WHERE rn > ?)`,
+          )
+          .run(ROOM_EVENTS_PRUNE_KEEP);
+        if (h.changes > 0 || e.changes > 0) {
+          console.log(`[store] pruned ${h.changes} history, ${e.changes} room_events rows`);
+        }
+      })();
+    } catch (err) {
+      logWarn("store", `prune failed: ${String(err)}`);
+    }
   }
 
   private migrateSchema(): void {
@@ -531,14 +568,14 @@ export class Store {
     }
   }
 
-  /** 非终态编排卡条目（phase 非 done/cancelled），供启动时的孤儿卡收尾 */
+  /** 非终态编排卡条目（phase 非 done/cancelled），供启动时的孤儿卡收尾；只扫最近若干条避免全表加载 */
   findUnfinishedFlowCards(): { id: number; scopeId: string; at: number; text: string }[] {
     try {
       const rows = this.db
         .prepare(
-          "SELECT id, scope_id AS scopeId, at, text FROM history WHERE scope = 'room' AND kind = 'flow'",
+          "SELECT id, scope_id AS scopeId, at, text FROM history WHERE scope = 'room' AND kind = 'flow' ORDER BY id DESC LIMIT ?",
         )
-        .all() as { id: number; scopeId: string; at: number; text: string }[];
+        .all(ORPHAN_CARD_SCAN_LIMIT) as { id: number; scopeId: string; at: number; text: string }[];
       return rows.filter((r) => {
         try {
           const phase = String((JSON.parse(r.text) as Record<string, unknown>).phase ?? "");
@@ -553,14 +590,14 @@ export class Store {
     }
   }
 
-  /** 未决决策卡条目（kind='decision' 且 meta.status='pending'），供启动时的过期收尾 */
+  /** 未决决策卡条目（kind='decision' 且 meta.status='pending'），供启动时的过期收尾；只扫最近若干条避免全表加载 */
   findPendingDecisionCards(): { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[] {
     try {
       const rows = this.db
         .prepare(
-          "SELECT id, scope, scope_id AS scopeId, at, text FROM history WHERE kind = 'decision'",
+          "SELECT id, scope, scope_id AS scopeId, at, text FROM history WHERE kind = 'decision' ORDER BY id DESC LIMIT ?",
         )
-        .all() as { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[];
+        .all(ORPHAN_CARD_SCAN_LIMIT) as { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[];
       return rows.filter((r) => {
         try {
           return String((JSON.parse(r.text) as Record<string, unknown>).status ?? "") === "pending";

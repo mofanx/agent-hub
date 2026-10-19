@@ -262,6 +262,8 @@ const EVENT_LIMIT = 200;
 const FILE_REF_LIMIT = 5;
 const FILE_REF_CHAR_LIMIT = 10000;
 const FILE_REF_TOTAL_LIMIT = 50000;
+/** findFileByRelPath 全盘 BFS 的遍历节点上限，防 workspace 过大时事件循环被长时间阻塞 */
+const FIND_FILE_SCAN_LIMIT = 20000;
 
 export function isEventAction(action: string | undefined): action is EventAction {
   return (
@@ -652,6 +654,7 @@ export class RoomManager {
       if (!room.members.some((m) => m.sessionId === sessionId)) continue;
       if ((room.mode === "conductor" || room.mode === "auto") && room.conductorId === sessionId) {
         this.rooms.delete(room.roomId);
+        this.removeArtifactCache(room.roomId);
         dissolved.push(room.roomId);
         continue;
       }
@@ -661,6 +664,7 @@ export class RoomManager {
       }
       if (room.members.length < 2) {
         this.rooms.delete(room.roomId);
+        this.removeArtifactCache(room.roomId);
         dissolved.push(room.roomId);
       }
     }
@@ -672,7 +676,21 @@ export class RoomManager {
   }
 
   delete(roomId: string): boolean {
-    return this.rooms.delete(roomId);
+    const ok = this.rooms.delete(roomId);
+    if (ok) this.removeArtifactCache(roomId);
+    return ok;
+  }
+
+  /** 清理 artifact 的磁盘缓存目录；artifactId 缺省时清整个房间的缓存目录 */
+  private removeArtifactCache(roomId: string, artifactId?: string): void {
+    const dir = artifactId
+      ? path.join(FILES_DIR, roomId, artifactId)
+      : path.join(FILES_DIR, roomId);
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // 缓存清理失败不阻塞主流程
+    }
   }
 
   rename(roomId: string, name: string): Room {
@@ -838,19 +856,20 @@ export class RoomManager {
     if (!room) return undefined;
     const list = (room.artifacts ??= []);
     const author = this.resolveMember(room, file.author)?.sessionId ?? file.author;
-    if (file.path) {
-      const existing = list.find((a) => a.path === file.path);
+    const { content, ...rest } = file;
+    if (rest.path) {
+      const existing = list.find((a) => a.path === rest.path);
       if (existing) {
         existing.author = author;
-        existing.summary = file.summary;
+        existing.summary = rest.summary;
         existing.at = Date.now();
-        if (file.taskId) existing.taskId = file.taskId;
-        if (file.content && existing.path) {
+        if (rest.taskId) existing.taskId = rest.taskId;
+        if (content && existing.path) {
           const fileName = path.basename(existing.path);
           const destDir = path.join(FILES_DIR, roomId, existing.id);
           try {
             fs.mkdirSync(destDir, { recursive: true });
-            fs.writeFileSync(path.join(destDir, fileName), file.content, "utf-8");
+            fs.writeFileSync(path.join(destDir, fileName), content, "utf-8");
           } catch {
             // 缓存写入失败不阻塞 artifact 更新
           }
@@ -863,24 +882,27 @@ export class RoomManager {
       }
     }
     const item: Artifact = {
-      ...file,
+      ...rest,
       author,
       id: randomUUID().slice(0, 8),
       alias: this.nextAlias(roomId),
       at: Date.now(),
     };
-    if (file.content && item.path) {
+    if (content && item.path) {
       const fileName = path.basename(item.path);
       const destDir = path.join(FILES_DIR, roomId, item.id);
       try {
         fs.mkdirSync(destDir, { recursive: true });
-        fs.writeFileSync(path.join(destDir, fileName), file.content, "utf-8");
+        fs.writeFileSync(path.join(destDir, fileName), content, "utf-8");
       } catch {
         // 缓存写入失败不阻塞 artifact 注册
       }
     }
     list.push(item);
-    if (list.length > ARTIFACT_LIMIT) list.shift();
+    if (list.length > ARTIFACT_LIMIT) {
+      const evicted = list.shift();
+      if (evicted) this.removeArtifactCache(roomId, evicted.id);
+    }
     this.appendEvent(roomId, "artifact", { op: "add", artifact: this.serializeArtifact(item) });
     return item;
   }
@@ -1013,6 +1035,7 @@ export class RoomManager {
     const before = room.artifacts.length;
     room.artifacts = room.artifacts.filter((a) => a.id !== artifactId);
     if (room.artifacts.length < before) {
+      this.removeArtifactCache(roomId, artifactId);
       this.appendEvent(roomId, "artifact", { op: "remove", artifactId });
       return true;
     }
@@ -1025,6 +1048,7 @@ export class RoomManager {
     if (!room || !room.artifacts) return 0;
     const before = room.artifacts.length;
     room.artifacts = [];
+    this.removeArtifactCache(roomId);
     if (before > 0) this.appendEvent(roomId, "artifact", { op: "clear" });
     return before;
   }
@@ -1150,9 +1174,11 @@ export class RoomManager {
     const parts = relPath.split(/[\\/]/).filter(Boolean);
     if (parts.length === 0) return undefined;
     const joined = parts.join("/");
+    let visited = 0;
     for (const root of roots) {
       const queue: string[] = [root];
       while (queue.length) {
+        if (visited >= FIND_FILE_SCAN_LIMIT) return undefined;
         const dir = queue.shift()!;
         let entries: fs.Dirent[];
         try {
@@ -1160,10 +1186,11 @@ export class RoomManager {
         } catch {
           continue;
         }
+        visited += entries.length;
         for (const e of entries) {
           const child = path.join(dir, e.name);
           if (e.isDirectory()) {
-            if (SKIP_NAMES.has(e.name)) continue;
+            if (shouldSkipFile(e.name)) continue;
             queue.push(child);
           } else if (e.isFile()) {
             try {
@@ -1310,6 +1337,7 @@ export class RoomManager {
     const removed = (room.artifacts ?? []).filter((a) => a.path === rel);
     room.artifacts = (room.artifacts ?? []).filter((a) => a.path !== rel);
     for (const a of removed) {
+      this.removeArtifactCache(roomId, a.id);
       this.appendEvent(roomId, "artifact", { op: "remove", artifactId: a.id });
     }
     this.addEvent(roomId, {

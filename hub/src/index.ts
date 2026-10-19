@@ -320,13 +320,51 @@ function enrichRoom(room: Room): Record<string, unknown> {
   };
 }
 
-function persistState(): void {
+const PERSIST_DEBOUNCE_MS = 500;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function persistStateNow(): void {
   store.save({
     sessions: sessionLedger.attachTo([...sessionMetas.values()]),
     rooms: rooms.list(),
     runtime: roomModeManager.exportRuntime(),
   });
 }
+
+/** 防抖合并持久化：高频路径（tool_call/file write/decision）500ms 内合并为一次全量写 */
+function persistState(): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    // 延迟写盘脱离请求调用栈：DB 错误在此抛出即 uncaughtException，必须就地收敛
+    try {
+      persistStateNow();
+    } catch (err) {
+      logError("persistState (deferred)", err);
+    }
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+function flushPersistState(): void {
+  if (!persistTimer) return;
+  clearTimeout(persistTimer);
+  persistTimer = null;
+  try {
+    persistStateNow();
+  } catch (err) {
+    logError("persistState (flush)", err);
+  }
+}
+
+process.on("exit", flushPersistState);
+process.on("SIGINT", () => {
+  flushPersistState();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  flushPersistState();
+  process.exit(143);
+});
 
 function isSessionNameTaken(name: string, excludeSessionId?: string): boolean {
   for (const meta of sessionMetas.values()) {
@@ -440,9 +478,17 @@ async function startLocalAgent(connection: Connection): Promise<void> {
   localAgentErrors.delete(connection.id);
 
   const proc = spawnAgentProcess(def);
-  const stderrChunks: Buffer[] = [];
+  // 只留尾部 ~8KB 供退出诊断：agent stderr（如 devin INFO 日志）长期累积会撑爆堆
+  const STDERR_TAIL_BYTES = 8 * 1024;
+  const stderrTail: Buffer[] = [];
+  let stderrTailLen = 0;
   proc.stderr!.on("data", (chunk: Buffer) => {
-    stderrChunks.push(chunk);
+    stderrTail.push(chunk);
+    stderrTailLen += chunk.length;
+    while (stderrTailLen > STDERR_TAIL_BYTES && stderrTail.length > 1) {
+      stderrTailLen -= stderrTail[0]!.length;
+      stderrTail.shift();
+    }
     process.stderr.write(chunk);
   });
 
@@ -498,8 +544,9 @@ async function startLocalAgent(connection: Connection): Promise<void> {
 
     proc.on("close", (code, signal) => {
       if (!settled) {
-        const lastErr = Buffer.concat(stderrChunks)
+        const lastErr = Buffer.concat(stderrTail)
           .toString("utf-8")
+          .slice(-STDERR_TAIL_BYTES)
           .trim()
           .split(/\r?\n/)
           .pop();
@@ -881,7 +928,32 @@ function listAllSessions(): {
   return [...online, ...offline];
 }
 
-const turnDrafts = new Map<string, { sessionDraftId?: number; roomDraftId?: number }>();
+type TurnDraft = {
+  sessionDraftId?: number | undefined;
+  roomDraftId?: number | undefined;
+  /** 最近一次进度回调的全文（节流期间暂存，flush/中断收尾时补写尾部增量） */
+  lastText?: string | undefined;
+  lastWriteAt?: number | undefined;
+  lastWriteLen?: number | undefined;
+  flushTimer?: ReturnType<typeof setTimeout> | undefined;
+};
+const turnDrafts = new Map<string, TurnDraft>();
+/** 流式草稿落库节流：避免每个 chunk 同步 UPDATE 全量文本（O(n²) 写放大阻塞主线程） */
+const DRAFT_FLUSH_MS = 300;
+const DRAFT_FLUSH_CHARS = 4096;
+
+function clearDraftFlush(draft: TurnDraft): void {
+  if (draft.flushTimer) {
+    clearTimeout(draft.flushTimer);
+    draft.flushTimer = undefined;
+  }
+}
+
+function dropTurnDraft(sessionId: string): void {
+  const draft = turnDrafts.get(sessionId);
+  if (draft) clearDraftFlush(draft);
+  turnDrafts.delete(sessionId);
+}
 const turnProcess = new TurnProcessRecorder();
 const opLedger = new OperationLedger();
 /** 每会话当前 turn 起始时刻（首个 turn 事件记录，turn 结束清除），operation ledger 的 opId 限定符 */
@@ -936,25 +1008,19 @@ function displayNameFor(sessionId: string): string {
   return origin ? `${baseName} (${origin})` : baseName;
 }
 
-function onTurnProgress(sessionId: string, fullText: string): void {
-  if (!fullText.trim()) return;
-  markTurnStart(sessionId);
+function writeTurnDraft(sessionId: string, draft: TurnDraft): void {
   const displayName = displayNameFor(sessionId);
-  let draft = turnDrafts.get(sessionId);
-  if (!draft) {
-    draft = {};
-    turnDrafts.set(sessionId, draft);
-  }
+  const text = draft.lastText ?? "";
   if (draft.sessionDraftId === undefined) {
     const id = store.beginReplyDraft("session", sessionId, {
       at: Date.now(),
       kind: "assistant",
       author: displayName,
-      text: fullText,
+      text,
     });
     if (id > 0) draft.sessionDraftId = id;
   } else {
-    store.updateReplyDraft(draft.sessionDraftId, fullText);
+    store.updateReplyDraft(draft.sessionDraftId, text);
   }
   const roomId = roomModeManager.roomIdForTurn(sessionId);
   if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
@@ -963,12 +1029,43 @@ function onTurnProgress(sessionId: string, fullText: string): void {
         at: Date.now(),
         kind: "assistant",
         author: displayName,
-        text: fullText,
+        text,
       });
       if (id > 0) draft.roomDraftId = id;
     } else {
-      store.updateReplyDraft(draft.roomDraftId, fullText);
+      store.updateReplyDraft(draft.roomDraftId, text);
     }
+  }
+  draft.lastWriteAt = Date.now();
+  draft.lastWriteLen = text.length;
+}
+
+function onTurnProgress(sessionId: string, fullText: string): void {
+  if (!fullText.trim()) return;
+  markTurnStart(sessionId);
+  let draft = turnDrafts.get(sessionId);
+  if (!draft) {
+    draft = {};
+    turnDrafts.set(sessionId, draft);
+  }
+  draft.lastText = fullText;
+  // 首个 chunk 立即落行建立草稿；之后按 300ms/4KB 节流写库
+  if (draft.sessionDraftId === undefined) {
+    writeTurnDraft(sessionId, draft);
+    return;
+  }
+  const elapsed = Date.now() - (draft.lastWriteAt ?? 0);
+  const grown = fullText.length - (draft.lastWriteLen ?? 0);
+  if (elapsed >= DRAFT_FLUSH_MS || grown >= DRAFT_FLUSH_CHARS) {
+    clearDraftFlush(draft);
+    writeTurnDraft(sessionId, draft);
+    return;
+  }
+  if (!draft.flushTimer) {
+    draft.flushTimer = setTimeout(() => {
+      draft.flushTimer = undefined;
+      if (turnDrafts.get(sessionId) === draft) writeTurnDraft(sessionId, draft);
+    }, DRAFT_FLUSH_MS - elapsed);
   }
 }
 
@@ -977,7 +1074,9 @@ function interruptTurnDrafts(sessionId: string): void {
   flushTurnProcess(sessionId, "interrupted");
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
-  turnDrafts.delete(sessionId);
+  dropTurnDraft(sessionId);
+  // 中断收尾前补写节流期内未落库的尾部增量，保留最新片段
+  if (draft.lastText) writeTurnDraft(sessionId, draft);
   if (draft.sessionDraftId !== undefined) {
     store.interruptReplyDraft(draft.sessionDraftId);
   }
@@ -996,9 +1095,11 @@ function onTurnEnd(
   turnStarts.delete(sessionId);
   flushTurnProcess(sessionId, status);
   const draft = turnDrafts.get(sessionId);
-  turnDrafts.delete(sessionId);
+  dropTurnDraft(sessionId);
   if (status === "interrupted") {
-    // 取消/中断回合：过程卡标 interrupted，流式草稿保留已出文本但标记中断
+    // 取消/中断回合：过程卡标 interrupted，流式草稿保留已出文本但标记中断；
+    // 收尾前先补写节流期内未落库的尾部增量
+    if (draft?.lastText) writeTurnDraft(sessionId, draft);
     if (draft?.sessionDraftId !== undefined) {
       store.interruptReplyDraft(draft.sessionDraftId);
     }
@@ -1301,15 +1402,52 @@ function broadcastRoomNotice(roomId: string, message: string, meta?: unknown): v
   }
 }
 
+/** 单客户端发送缓冲上限：超过即认为对端消费跟不上，丢高频可丢事件防队列无限堆积 */
+const WS_BUFFER_LIMIT = 8 * 1024 * 1024;
+/** 可丢事件：丢一帧不影响终态（done/卡片/历史条目仍可靠送达） */
+const DROPPABLE_METHODS = new Set<string>([
+  "session.update",
+  "session.usage",
+  "member.status",
+]);
+let lastDropWarnAt = 0;
+
+function warnBufferThrottled(ws: WebSocket, detail: string): void {
+  const now = Date.now();
+  if (now - lastDropWarnAt <= 5000) return;
+  lastDropWarnAt = now;
+  logWarn(
+    "ws",
+    `client send buffer ${(ws.bufferedAmount / 1048576).toFixed(1)}MB; ${detail}`,
+  );
+}
+
 function broadcast(event: HubEvent): void {
   const data = JSON.stringify(event);
   for (const ws of clients) {
-    if (ws.readyState === ws.OPEN) ws.send(data);
+    if (ws.readyState !== ws.OPEN) continue;
+    // 硬上限：积压 4 倍于软上限说明对端实质卡死（可丢事件也已无意义），
+    // 直接 terminate 回收内存——否则非可丢事件仍会无限排队
+    if (ws.bufferedAmount > WS_BUFFER_LIMIT * 4) {
+      warnBufferThrottled(ws, "bufferedAmount 4x limit; terminating stuck client");
+      ws.terminate();
+      continue;
+    }
+    if (ws.bufferedAmount > WS_BUFFER_LIMIT && DROPPABLE_METHODS.has(event.method)) {
+      warnBufferThrottled(ws, `dropping ${event.method}`);
+      continue;
+    }
+    ws.send(data);
   }
 }
 
 function send(ws: WebSocket, msg: unknown): void {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+  if (ws.readyState !== ws.OPEN) return;
+  // 响应不可丢，但记录异常积压便于排查慢客户端
+  if (ws.bufferedAmount > WS_BUFFER_LIMIT) {
+    warnBufferThrottled(ws, "response still queued");
+  }
+  ws.send(JSON.stringify(msg));
 }
 
 function sessionBackend(sessionId: string): ModelBackend | undefined {
@@ -1697,7 +1835,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       owners.delete(sessionId);
       sessionMetas.delete(sessionId);
       sessionLedger.drop(sessionId);
-      turnDrafts.delete(sessionId);
+      dropTurnDraft(sessionId);
       turnStarts.delete(sessionId);
       turnProcess.clear(sessionId);
       modelManager.clearSessionConfig(sessionId);
@@ -1730,7 +1868,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         owners.delete(sessionId);
         sessionMetas.delete(sessionId);
         sessionLedger.drop(sessionId);
-        turnDrafts.delete(sessionId);
+        dropTurnDraft(sessionId);
         turnStarts.delete(sessionId);
         turnProcess.clear(sessionId);
         modelManager.clearSessionConfig(sessionId);
@@ -3108,8 +3246,36 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
 const wss = new WebSocketServer({ port: PORT, host: "0.0.0.0" });
 /** 经 gateway 中继的客户端连接（via=gateway）：connectInfo 不下发明文凭据 */
 const relayedClients = new Set<WebSocket>();
+type LiveSocket = WebSocket & { isAlive?: boolean };
+/** 服务端心跳：NAT/休眠断连后让 close 尽快触发，释放 owners/agents 等关联状态 */
+const WS_PING_INTERVAL_MS = 30_000;
+
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    const s = ws as LiveSocket;
+    if (s.isAlive === false) {
+      ws.terminate();
+      continue;
+    }
+    s.isAlive = false;
+    try {
+      ws.ping();
+    } catch {
+      ws.terminate();
+    }
+  }
+}, WS_PING_INTERVAL_MS);
+heartbeat.unref();
 
 wss.on("connection", (ws, req) => {
+  const live = ws as LiveSocket;
+  live.isAlive = true;
+  ws.on("pong", () => {
+    live.isAlive = true;
+  });
+  // 无 error 监听时 ws 会把 socket 错误抛成 uncaughtException 直接打崩进程；
+  // 挂在 connection 入口，同时覆盖 client 连接与 worker announce 前的窗口期
+  ws.on("error", (err) => logWarn("ws", `socket error: ${String(err)}`));
   const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname === WORKER_PATH) {
     handleWorker(ws, req);

@@ -98,6 +98,8 @@ export type MissionDeps = {
 
 const META_KEY = "missions.v1";
 const OUTPUT_CAP = 4000;
+/** 单 mission 事件日志上限：超限淘汰最旧，防长跑 mission 的记录随时间无限膨胀 */
+const MISSION_EVENT_LIMIT = 200;
 const OCCUPYING: ReadonlySet<MissionStatus> = new Set([
   "running",
   "waiting-user",
@@ -327,6 +329,9 @@ export class MissionManager {
 
   private log(m: MissionRecord, kind: string, text: string): void {
     m.events.push({ id: `e${randomUUID().slice(0, 8)}`, at: Date.now(), kind, text });
+    if (m.events.length > MISSION_EVENT_LIMIT) {
+      m.events.splice(0, m.events.length - MISSION_EVENT_LIMIT);
+    }
     m.updatedAt = Date.now();
   }
 

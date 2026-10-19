@@ -68,6 +68,8 @@ export type TurnProcessItem = {
 
 /** 单回合过程项上限：超限丢弃最旧，防超大 turn 撑爆聚合卡 */
 const MAX_PROCESS_ITEMS = 50;
+/** 单条 thought 的拼接长度上限：思维链 chunk 逐次 += 累积，不封顶会长成超长字符串 */
+const MAX_THOUGHT_TEXT_LEN = 8192;
 
 export class TurnProcessRecorder {
   private buffers = new Map<string, TurnProcessItem[]>();
@@ -93,9 +95,16 @@ export class TurnProcessRecorder {
         if (!text) return;
         const last = buf[buf.length - 1];
         if (last && last.kind === "thought" && last.author === author) {
-          last.text += text;
+          if (last.text.length < MAX_THOUGHT_TEXT_LEN) {
+            last.text = (last.text + text).slice(0, MAX_THOUGHT_TEXT_LEN);
+          }
         } else {
-          this.push(sessionId, { at: Date.now(), kind: "thought", author, text });
+          this.push(sessionId, {
+            at: Date.now(),
+            kind: "thought",
+            author,
+            text: text.slice(0, MAX_THOUGHT_TEXT_LEN),
+          });
         }
         break;
       }
