@@ -1914,6 +1914,15 @@ function ChatMessage({
   }
 }
 
+/** 过程步文本截断上限（与 hub buildProcessMeta 的 120 对齐），超长留 title 悬浮全文 */
+const PROC_STEP_TEXT_MAX = 120;
+const stepText = (t: string): string => {
+  const chars = [...t];
+  return chars.length > PROC_STEP_TEXT_MAX
+    ? chars.slice(0, PROC_STEP_TEXT_MAX).join("") + "…"
+    : t;
+};
+
 /** 已加载的过程步骤（会话历史项），紧凑渲染 */
 function ProcessSteps({ items }: { items: ChatItem[] }) {
   const store = useHubStore();
@@ -1924,23 +1933,19 @@ function ProcessSteps({ items }: { items: ChatItem[] }) {
         switch (it.kind) {
           case "tool":
             return (
-              <div key={i} className="process-step-line process-tool">
-                <Wrench size={11} /> {it.title} · {toolStatusLabel(S, it.status)}
+              <div key={i} className="process-step-line process-tool" title={it.title}>
+                <Wrench size={11} /> {stepText(it.title)} · {toolStatusLabel(S, it.status)}
               </div>
             );
           case "plan":
             return (
-              <div key={i} className="process-step-line">
-                <ListTodo size={11} /> {it.entries.map((e) => planEntryLabel(S, e)).join("；")}
+              <div key={i} className="process-step-line" title={it.entries.map((e) => planEntryLabel(S, e)).join("；")}>
+                <ListTodo size={11} /> {stepText(it.entries.map((e) => planEntryLabel(S, e)).join("；"))}
               </div>
-            );
-          case "error":
-            return (
-              <div key={i} className="process-step-line process-error">{it.text}</div>
             );
           default:
             return "text" in it && it.text ? (
-              <div key={i} className="process-step-line">{it.text}</div>
+              <div key={i} className="process-step-line" title={it.text}>{stepText(it.text)}</div>
             ) : null;
         }
       })}
@@ -3341,11 +3346,26 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     setProcLoading(false);
   };
   const procScrollRef = useRef<HTMLDivElement | null>(null);
+  // 「已在底部才跟随」：记录视口是否贴底（24px 阈值），running 轮询新条目仅贴底时才滚；
+  // 首滚等双帧 reflow 后瞬时定位
+  const procAtBottom = useRef(true);
+  const procScrolledOnce = useRef(false);
   useEffect(() => {
-    if (!procOpen || !procScrollRef.current) return;
-    const el = procScrollRef.current.firstElementChild as HTMLElement | null;
-    const target = el && el.scrollHeight > 0 ? el : procScrollRef.current;
-    target.scrollTop = target.scrollHeight;
+    if (!procOpen) {
+      procScrolledOnce.current = false;
+      procAtBottom.current = true;
+      return;
+    }
+    const el = procScrollRef.current;
+    if (!el || !procItems?.length) return;
+    const first = !procScrolledOnce.current;
+    if (!first && !procAtBottom.current) return;
+    procScrolledOnce.current = true;
+    const doScroll = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    if (first) requestAnimationFrame(() => requestAnimationFrame(doScroll));
+    else doScroll();
   }, [procOpen, procItems]);
   // running 任务：展开期间 2s 轮询内存缓冲，收起/收尾/卸载即停
   useEffect(() => {
@@ -3531,7 +3551,14 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
               {task.status === "running" ? S.processRunning : S.processUnavailable}
             </div>
           ) : (
-            <div ref={procScrollRef} className="proc-scroll">
+            <div
+              ref={procScrollRef}
+              className="proc-scroll"
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                procAtBottom.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+              }}
+            >
               <ProcessSteps items={procItems} />
             </div>
           ))}

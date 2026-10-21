@@ -132,6 +132,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -2016,7 +2017,18 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
         }
     }
     val procScroll = rememberScrollState()
-    LaunchedEffect(items?.size) { procScroll.animateScrollTo(procScroll.maxValue) }
+    // 首次拿到条目滚底；之后仅视口本已贴底（canScrollForward==false）时跟随新条目，
+    // 用户上翻不打断。canScrollForward 须在等帧前采样——等帧后新条目已布局，
+    // maxValue 变大，贴底判定会永远为 false
+    val initialScrolled = remember(key) { mutableStateOf(false) }
+    LaunchedEffect(items) {
+        if (items.isNullOrEmpty()) return@LaunchedEffect
+        val follow = !initialScrolled.value || !procScroll.canScrollForward
+        if (!follow) return@LaunchedEffect
+        initialScrolled.value = true
+        withFrameNanos { }
+        procScroll.scrollTo(procScroll.maxValue)
+    }
     Column(
         Modifier
             .padding(start = 20.dp, top = 2.dp)
@@ -2025,7 +2037,7 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
     ) {
         when {
             !items.isNullOrEmpty() -> items.forEach { child ->
-                RawChatBubble(child, vm, showAuthor = false, grouped = true, compact = true)
+                RawChatBubble(child, vm, showAuthor = false, grouped = true, compact = true, innerScroll = false)
             }
             unavailable -> Text(
                 S.processUnavailable,
@@ -2071,6 +2083,8 @@ private fun RawChatBubble(
     onMatchKeywordY: ((Float) -> Unit)? = null,
     grouped: Boolean = false,
     compact: Boolean = false,
+    /** 外层已有滚动容器（如过程钻取区）时置 false：子项不再自带限高内滚动，避免嵌套滚动裁切/空白 */
+    innerScroll: Boolean = true,
 ) {
     val S = LocalStrings.current
     val keywordCallback = if (isCurrentMatch) onMatchKeywordY else null
@@ -2193,8 +2207,7 @@ private fun RawChatBubble(
                     MarkdownText(
                         text = item.text,
                         modifier = Modifier
-                            .heightIn(max = 400.dp)
-                            .verticalScroll(rememberScrollState())
+                            .then(if (innerScroll) Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()) else Modifier)
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         textColor = textColor,
                         fontSize = MaterialTheme.typography.bodyLarge.fontSize,
@@ -2245,8 +2258,7 @@ private fun RawChatBubble(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 360.dp)
-                                    .verticalScroll(rememberScrollState())
+                                    .then(if (innerScroll) Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()) else Modifier)
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                             ) {
                                 HighlightText(
@@ -3275,7 +3287,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                         }
                     }
                 }
-                task.output?.let {
+                task.output?.takeIf { it.isNotBlank() }?.let {
                     Spacer(Modifier.height(2.dp))
                     Text(
                         it,

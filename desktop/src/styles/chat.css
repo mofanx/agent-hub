@@ -2640,3 +2640,5 @@ div.turn-tail {
 
 /* 任务过程区展开的外层滚动容器：限高 18rem，超高部分在此滚动；展开时由 useEffect 自动滚到底部 */
 .proc-scroll { min-width: 0; max-height: 18rem; overflow-y: auto; }
+/* 嵌套滚动消除：外层已滚动时内层不再限高自滚，否则内层 320px>外层 288px 底部被裁呈空白 */
+.proc-scroll .process-steps { max-height: none; overflow-y: visible; }

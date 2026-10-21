@@ -347,6 +347,8 @@ let missionRev = 0;
 let decisionRev = 0;
 let usageRefreshGeneration = 0;
 const flowCache = new Map<string, FlowInfo | null>();
+/** 过程钻取区只保留的条目 kind（与 android fetchProcessItems 白名单一致） */
+const PROCESS_ITEM_KINDS = new Set(["thought", "tool", "plan"]);
 const panelsCache = new Map<
   string,
   { artifacts: ArtifactInfo[]; events: EventInfo[]; blackboard: BlackboardInfo[] }
@@ -2775,6 +2777,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
     },
 
+    // 过程区条目白名单：与 android fetchProcessItems 对齐，滤掉 assistant/error/process 卡等无关 kind
     fetchProcessItems: async (sessionId, opts) => {
       try {
         if (opts?.running) {
@@ -2783,7 +2786,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
             ((res.entries ?? res.items ?? res.steps) as unknown[] | undefined) ?? [];
           return list
             .map((it) => entryToChatItem(it as Record<string, unknown>))
-            .filter((it): it is ChatItem => it !== null);
+            .filter(
+              (it): it is ChatItem =>
+                it !== null && PROCESS_ITEM_KINDS.has(it.kind),
+            );
         }
         const params: Record<string, unknown> = { sessionId, limit: 200 };
         if (opts?.from != null) params.after = opts.from;
@@ -2792,7 +2798,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const list = ((res.entries ?? res.items) as unknown[] | undefined) ?? [];
         return list
           .map((it) => entryToChatItem(it as Record<string, unknown>))
-          .filter((it): it is ChatItem => it !== null)
+          .filter(
+            (it): it is ChatItem =>
+              it !== null && PROCESS_ITEM_KINDS.has(it.kind),
+          )
           .filter(
             (it) =>
               (opts?.from == null || it.at == null || it.at >= opts.from) &&
