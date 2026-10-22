@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Worker } from "node:worker_threads";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
@@ -230,6 +231,72 @@ const MAX_PENDING_TOOL_CALLS = 20;
 /** 工作区快照哈希跨调用 TTL：getFlow 每次 flowUpdate 不再全树遍历 */
 const SNAPSHOT_HASH_TTL_MS = 4000;
 const SNAPSHOT_HASH_CACHE_MAX = 64;
+
+/** snapshot 哈希 worker：常驻复用单例；创建失败/崩溃后永久回退同步计算 */
+type SnapshotReply = { id: number; hash?: string; fp?: Map<string, string>; error?: boolean };
+const SNAP_WORKER_TIMEOUT_MS = 40_000;
+let snapWorker: Worker | null | undefined;
+let snapWorkerSeq = 0;
+const snapWorkerPending = new Map<number, (r: SnapshotReply) => void>();
+
+function snapshotWorkerClient(): Worker | null {
+  if (snapWorker !== undefined) return snapWorker;
+  try {
+    const ext = import.meta.url.endsWith(".ts") ? "ts" : "js";
+    const w = new Worker(new URL(`./snapshot-worker.${ext}`, import.meta.url), {
+      // 继承 tsx/loader 注册参数让 worker 能加载 .ts；只剔除测试运行器参数，
+      // 其余原样保留（--import/--require 与其值成对出现，拆对会触发 ERR_WORKER_INVALID_EXEC_ARGV）
+      execArgv: process.execArgv.filter((a) => a !== "--test" && !a.startsWith("--test-")),
+    });
+    w.on("message", (r: SnapshotReply) => {
+      const cb = snapWorkerPending.get(r.id);
+      if (cb) {
+        snapWorkerPending.delete(r.id);
+        cb(r);
+      }
+    });
+    const dead = () => {
+      if (snapWorker !== w) return;
+      snapWorker = null;
+      for (const cb of snapWorkerPending.values()) cb({ id: -1, error: true });
+      snapWorkerPending.clear();
+    };
+    w.on("error", dead);
+    w.on("exit", dead);
+    w.unref();
+    snapWorker = w;
+  } catch {
+    snapWorker = null;
+  }
+  return snapWorker;
+}
+
+/** 异步计算快照哈希+指纹；已调度返回 true，worker 不可用返回 false（调用方回退同步） */
+function requestWorkspaceSnapshot(
+  cwd: string,
+  done: (hash: string | undefined, fp: Map<string, string> | undefined) => void,
+): boolean {
+  const w = snapshotWorkerClient();
+  if (!w) return false;
+  const id = ++snapWorkerSeq;
+  const timer = setTimeout(() => {
+    snapWorkerPending.delete(id);
+    done(undefined, undefined);
+  }, SNAP_WORKER_TIMEOUT_MS);
+  timer.unref();
+  snapWorkerPending.set(id, (r) => {
+    clearTimeout(timer);
+    done(r.error ? undefined : r.hash, r.fp);
+  });
+  try {
+    w.postMessage({ id, cwd });
+  } catch {
+    snapWorkerPending.delete(id);
+    clearTimeout(timer);
+    return false;
+  }
+  return true;
+}
 const ISOLATED_CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const ISOLATED_CHECK_MAX = 32;
 const PLAN_FORMAT_RETRY_LIMIT = 1;
@@ -697,6 +764,9 @@ export class ConductorOrchestrator {
     return true;
   }
 
+  /** cwd → 已派发给 worker 的在途重算任务（同 cwd 去重） */
+  private readonly snapInflight = new Set<string>();
+
   private workspaceHashCached(cwd: string): string | undefined {
     const hit = this.snapHashCache.get(cwd);
     const now = Date.now();
@@ -708,6 +778,26 @@ export class ConductorOrchestrator {
     ) {
       return hit.hash;
     }
+    // 指纹不可读的缓存退化为纯 TTL 复用，避免每调用重发 worker 任务
+    if (hit && hit.fp === undefined && now - hit.at < SNAPSHOT_HASH_TTL_MS) return hit.hash;
+    if (hit) {
+      // 有旧值但指纹失配/过期：worker 异步重算，回填前返回 undefined（保守报"未核对"）
+      if (!this.snapInflight.has(cwd)) {
+        const scheduled = requestWorkspaceSnapshot(cwd, (hash, fp) => {
+          this.snapInflight.delete(cwd);
+          this.snapHashCache.set(cwd, { at: Date.now(), hash, fp });
+          // 回填后立即重广播 flow，snapshotCurrent 不必等下一个自然事件
+          for (const roomId of this.flows.keys()) this.emitFlow?.(roomId);
+        });
+        if (scheduled) {
+          this.snapInflight.add(cwd);
+          return undefined;
+        }
+      } else {
+        return undefined;
+      }
+    }
+    // 无缓存冷启动 / worker 不可用：同步计算，保持首算即时的既有语义
     const hash = workspaceSnapshotHash(cwd);
     const fp = workspaceFingerprint(cwd);
     if (!hit && this.snapHashCache.size >= SNAPSHOT_HASH_CACHE_MAX) {
@@ -3030,7 +3120,7 @@ function gitLsFiles(realCwd: string): string[] {
   }
 }
 
-function snapshotWorkspace(srcRoot: string, dstRoot?: string): string {
+export function snapshotWorkspace(srcRoot: string, dstRoot?: string): string {
   const seen = new Set<string>();
   const rels: string[] = [];
   for (const raw of gitLsFiles(srcRoot)) {
@@ -3101,7 +3191,7 @@ export function workspaceSnapshotHash(realCwd: string): string | undefined {
  * 增/删/改/类型变化都会失配；指纹只可能过度敏感（忽略文件变化多触发一次重算），方向安全。
  * 遍历超限或不可读返回 undefined（调用方退化为不复用缓存）。
  */
-function workspaceFingerprint(cwd: string): Map<string, string> | undefined {
+export function workspaceFingerprint(cwd: string): Map<string, string> | undefined {
   const fp = new Map<string, string>();
   const stack = [""];
   let count = 0;

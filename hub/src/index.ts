@@ -1889,6 +1889,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       rooms.delete(roomId);
       roomModeManager.onRoomRemoved(roomId);
       store.deleteHistory("room", roomId);
+      store.deleteRoomEvents(roomId);
       persistState();
       return { deleted: true };
     }
@@ -1904,6 +1905,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         rooms.delete(roomId);
         roomModeManager.onRoomRemoved(roomId);
         store.deleteHistory("room", roomId);
+        store.deleteRoomEvents(roomId);
       }
       persistState();
       return { deleted: true, count: uniqueIds.length };

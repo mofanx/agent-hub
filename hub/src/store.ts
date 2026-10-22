@@ -455,29 +455,78 @@ export class Store {
       .run(key, value);
   }
 
+  /** 已落库的 state 拆行行快照（key→json），save 时按行 diff 只写脏项 */
+  private savedRows = new Map<string, string>();
+
   load(): State {
     try {
+      const rows = this.db
+        .prepare("SELECT key, value FROM meta WHERE key LIKE 'state:%'")
+        .all() as { key: string; value: string }[];
+      if (rows.length > 0) {
+        const state: State = { sessions: [], rooms: [] };
+        for (const r of rows) {
+          this.savedRows.set(r.key, r.value);
+          if (r.key.startsWith("state:session:")) {
+            state.sessions.push(JSON.parse(r.value) as SessionMeta);
+          } else if (r.key.startsWith("state:room:")) {
+            state.rooms.push(JSON.parse(r.value) as Room);
+          } else if (r.key === "state:runtime") {
+            state.runtime = JSON.parse(r.value) as Record<string, unknown>;
+          }
+        }
+        return state;
+      }
       const row = this.db
         .prepare("SELECT value FROM meta WHERE key = 'state'")
         .get() as { value: string } | undefined;
       if (!row) return { sessions: [], rooms: [] };
       const obj = JSON.parse(row.value);
-      return {
+      const state: State = {
         sessions: obj.sessions ?? [],
         rooms: obj.rooms ?? [],
         runtime: typeof obj.runtime === "object" ? obj.runtime : undefined,
       };
+      // 一次性迁移：旧版单 blob 拆为 per-scope 行并删除 'state' 键
+      this.save(state);
+      return state;
     } catch {
       return { sessions: [], rooms: [] };
     }
   }
 
   save(state: State): void {
-    this.db
-      .prepare(
-        "INSERT INTO meta(key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      )
-      .run(JSON.stringify(state));
+    const wanted = new Map<string, string>();
+    for (const s of state.sessions) {
+      wanted.set(`state:session:${s.sessionId}`, JSON.stringify(s));
+    }
+    for (const r of state.rooms) {
+      wanted.set(`state:room:${r.roomId}`, JSON.stringify(r));
+    }
+    if (state.runtime !== undefined) {
+      wanted.set("state:runtime", JSON.stringify(state.runtime));
+    }
+    const changed: [string, string][] = [];
+    for (const [k, v] of wanted) {
+      if (this.savedRows.get(k) !== v) changed.push([k, v]);
+    }
+    const stale: string[] = [];
+    for (const k of this.savedRows.keys()) {
+      if (!wanted.has(k)) stale.push(k);
+    }
+    this.db.transaction(() => {
+      const up = this.db.prepare(
+        "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      );
+      for (const [k, v] of changed) up.run(k, v);
+      const del = this.db.prepare("DELETE FROM meta WHERE key = ?");
+      for (const k of stale) del.run(k);
+      del.run("state");
+    })();
+    // 事务成功后才同步内存镜像：若事务抛错（回滚），savedRows 不超前于 DB，
+    // 否则下次 save 会因误判"未脏"而永久跳过该行写入
+    for (const [k, v] of changed) this.savedRows.set(k, v);
+    for (const k of stale) this.savedRows.delete(k);
   }
 
   append(scope: "session" | "room", id: string, entry: HistoryEntry): number {
@@ -730,6 +779,10 @@ export class Store {
       )
       .get(scope, id, at, at, beforeId ?? -1);
     return row != null;
+  }
+
+  deleteRoomEvents(roomId: string): void {
+    this.db.prepare("DELETE FROM room_events WHERE room_id = ?").run(roomId);
   }
 
   deleteHistory(scope: "session" | "room", id: string): void {
