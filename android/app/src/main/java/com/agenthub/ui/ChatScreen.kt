@@ -1359,10 +1359,10 @@ private suspend fun LazyListState.scrollToLast() {
 
 @Composable
 fun AttachmentImage(attachment: Attachment, modifier: Modifier = Modifier) {
-    val bitmap by produceState<Bitmap?>(null, attachment.base64) {
+    val bitmap by produceState<Bitmap?>(null, attachment.localPath ?: attachment.base64) {
         value = withContext(Dispatchers.IO) {
             try {
-                val bytes = Base64.decode(attachment.base64, Base64.NO_WRAP)
+                val bytes = Base64.decode(attachment.readBase64(), Base64.NO_WRAP)
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 var sample = 1
@@ -1401,7 +1401,7 @@ fun AttachmentPreviews(
 ) {
     val S = LocalStrings.current
     LazyRow(modifier = modifier.fillMaxWidth().height(96.dp)) {
-        items(attachments, key = { it.base64.hashCode() }) { a ->
+        items(attachments, key = { (it.localPath ?: it.base64).hashCode() }) { a ->
             Box(Modifier.padding(4.dp).size(88.dp)) {
                 AttachmentImage(
                     a,
@@ -1724,12 +1724,13 @@ private fun MessageBlock(
                                 fontSize = MaterialTheme.typography.bodyLarge.fontSize,
                                 highlight = highlight,
                                 onMatchKeywordY = keywordCallback,
+                                streaming = vm.isStreamingTail(item.originalId),
                             )
                         }
                         if (item.isFirst && item.attachments.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
                             LazyRow(Modifier.height(120.dp)) {
-                                items(item.attachments, key = { it.base64.hashCode() }) { a ->
+                                items(item.attachments, key = { (it.localPath ?: it.base64).hashCode() }) { a ->
                                     AttachmentImage(
                                         a,
                                         Modifier
@@ -1998,6 +1999,57 @@ private fun ProcessStepList(
 
 
 
+/** 过程区紧凑步骤行（与 desktop ProcessSteps 同构）：图标 + 一行标题/状态，不走气泡 chrome */
+@Composable
+private fun ProcessStepLine(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, modifier: Modifier = Modifier) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(12.dp), tint = color)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun ProcessStepRow(item: ChatItem) {
+    val S = LocalStrings.current
+    when (item) {
+        is ChatItem.Tool -> ProcessStepLine(
+            Icons.Filled.Build,
+            "${item.title} · ${toolStatusLabel(S, item.status)}",
+        )
+        is ChatItem.Plan -> ProcessStepLine(
+            Icons.Filled.Menu,
+            item.entries.joinToString("；") { planEntryLabel(S, it) },
+        )
+        is ChatItem.Thought -> {
+            var expanded by remember(item.id) { mutableStateOf(false) }
+            Column {
+                ProcessStepLine(
+                    Icons.Filled.Bolt,
+                    item.text.replace("\n", " "),
+                    Modifier.clickable { expanded = !expanded },
+                )
+                if (expanded) {
+                    Text(
+                        item.text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 18.dp, top = 1.dp, bottom = 2.dp),
+                    )
+                }
+            }
+        }
+        else -> {}
+    }
+}
+
 @Composable
 private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel) {
     val S = LocalStrings.current
@@ -2037,7 +2089,7 @@ private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel
     ) {
         when {
             !items.isNullOrEmpty() -> items.forEach { child ->
-                RawChatBubble(child, vm, showAuthor = false, grouped = true, compact = true, innerScroll = false)
+                ProcessStepRow(child)
             }
             unavailable -> Text(
                 S.processUnavailable,
@@ -2171,7 +2223,7 @@ private fun RawChatBubble(
                         if (item.attachments.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
                             LazyRow(Modifier.height(120.dp)) {
-                                items(item.attachments, key = { it.base64.hashCode() }) { a ->
+                                items(item.attachments, key = { (it.localPath ?: it.base64).hashCode() }) { a ->
                                     AttachmentImage(
                                         a,
                                         Modifier

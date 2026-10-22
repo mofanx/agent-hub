@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import {
   Activity,
@@ -181,6 +181,12 @@ export function ChatScreen() {
   const [input, setInput] = useState("");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [showThought, setShowThought] = useState<Record<number, boolean>>({});
+  const toggleThought = useCallback((i: number) => {
+    setShowThought((p) => ({ ...p, [i]: !p[i] }));
+  }, []);
+  const handleImageClick = useCallback((src: string, name?: string) => {
+    setLightbox({ src, name });
+  }, []);
   const [inChatSearchQuery, setInChatSearchQuery] = useState("");
   const [chatSearchMatchIndex, setChatSearchMatchIndex] = useState(-1);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -566,7 +572,7 @@ export function ChatScreen() {
     saveBlob(name, blob);
   };
 
-  const handleFilePillClick = async (ref: string) => {
+  const handleFilePillClick = useCallback(async (ref: string) => {
     const client = store.client;
     const room = store.currentRoom;
     const session = store.currentSession;
@@ -600,7 +606,7 @@ export function ChatScreen() {
         setSidePanel("files");
       } catch {}
     }
-  };
+  }, [store.client, store.currentRoom, store.currentSession]);
 
   useEffect(() => {
     if (mention || (slash && slash.length > 0) || (fileRef && fileRef.candidates.length > 0)) {
@@ -1010,18 +1016,17 @@ export function ChatScreen() {
                     )}
                   <ChatMessage
                     item={item}
+                    index={i}
                     showAuthor={isRoom}
                     fullWidth={isHostAuthor(item.author)}
                     grouped={grouped}
                     turnPos={turnPos}
                     expanded={showThought[i] ?? false}
                     isQuoted={isQuoted}
-                    onToggleThought={() =>
-                      setShowThought({ ...showThought, [i]: !showThought[i] })
-                    }
+                    onToggleThought={toggleThought}
                     highlight={inChatSearchQuery}
                     isCurrentMatch={currentMatchIndex === i}
-                    onImageClick={(src, name) => setLightbox({ src, name })}
+                    onImageClick={handleImageClick}
                     onFilePillClick={handleFilePillClick}
                   />
                   </Fragment>
@@ -1594,8 +1599,9 @@ function dateLabel(S: Strings, at: number | undefined): string {
 /** markdown HTML 渲染缓存：key=lang:highlight，按 item 对象身份弱引用，条目移除自动 GC */
 const mdHtmlCache = new WeakMap<ChatItem, { key: string; html: string }>();
 
-function ChatMessage({
+const ChatMessage = memo(function ChatMessage({
   item,
+  index,
   showAuthor,
   fullWidth = false,
   grouped = false,
@@ -1609,20 +1615,23 @@ function ChatMessage({
   onFilePillClick,
 }: {
   item: ChatItem;
+  index: number;
   showAuthor: boolean;
   fullWidth?: boolean;
   grouped?: boolean;
   turnPos?: "head" | "mid" | "tail" | "solo";
   expanded: boolean;
   isQuoted: boolean;
-  onToggleThought: () => void;
+  onToggleThought: (i: number) => void;
   highlight?: string;
   isCurrentMatch?: boolean;
   onImageClick?: (src: string, name?: string) => void;
   onFilePillClick?: (path: string) => void;
 }) {
-  const store = useHubStore();
-  const S = stringsFor(store.lang);
+  const lang = useHubStore((s) => s.lang);
+  const setQuote = useHubStore((s) => s.setQuote);
+  const answerPermission = useHubStore((s) => s.answerPermission);
+  const S = stringsFor(lang);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [selectOpen, setSelectOpen] = useState(false);
   const currentMatchClass = isCurrentMatch ? "current-match" : "";
@@ -1645,7 +1654,7 @@ function ChatMessage({
   };
 
   const doQuote = () => {
-    if (canQuote) store.setQuote([item.author || S.meLabel, getItemText(item, S)]);
+    if (canQuote) setQuote([item.author || S.meLabel, getItemText(item, S)]);
     setMenu(null);
   };
 
@@ -1716,7 +1725,7 @@ function ChatMessage({
   // 已渲染条目的 markdown HTML 缓存：item 对象在 setState 批量中保持同一引用，
   // 未变条目直接命中，marked 只对新增/变化文本跑一次
   const markdownHtml = (item: ChatItem & { text: string }) => {
-    const key = `${store.lang}:${highlight ?? ""}`;
+    const key = `${lang}:${highlight ?? ""}`;
     const hit = mdHtmlCache.get(item);
     if (hit && hit.key === key) return hit.html;
     const html = highlight ? highlightHtml(renderMarkdown(item.text, S), highlight) : renderMarkdown(item.text, S);
@@ -1785,7 +1794,7 @@ function ChatMessage({
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
-            <button className="thought-toggle" onClick={onToggleThought}>
+            <button className="thought-toggle" onClick={() => onToggleThought(index)}>
               {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {S.thoughtProcess}
             </button>
             {expanded && (item.streaming ? (
@@ -1876,7 +1885,7 @@ function ChatMessage({
                 {item.options.map(([id, name]) => (
                   <button
                     key={id}
-                    onClick={() => store.answerPermission(item.requestId, id, name)}
+                    onClick={() => answerPermission(item.requestId, id, name)}
                   >
                     {name}
                   </button>
@@ -1912,7 +1921,7 @@ function ChatMessage({
     default:
       return null;
   }
-}
+});
 
 /** 过程步文本截断上限（与 hub buildProcessMeta 的 120 对齐），超长留 title 悬浮全文 */
 const PROC_STEP_TEXT_MAX = 120;

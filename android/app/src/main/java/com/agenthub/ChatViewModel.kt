@@ -52,7 +52,18 @@ data class Attachment(
     val mimeType: String,
     val base64: String,
     val name: String = "",
-)
+    /** base64 源文件（cacheDir）；非空时大附件不驻内存，发送/渲染按需读盘 */
+    val localPath: String? = null,
+) {
+    fun readBase64(): String =
+        if (base64.isNotEmpty()) base64
+        else localPath?.let { runCatching { java.io.File(it).readText() }.getOrNull() } ?: ""
+
+    /** 估算解码后字节数：内存态按 base64 长度，落盘态按 .b64 文件长度（同为 base64 文本） */
+    val byteSize: Long
+        get() = (if (base64.isNotEmpty()) base64.length.toLong()
+            else localPath?.let { runCatching { java.io.File(it).length() }.getOrNull() } ?: 0L) * 3L / 4
+}
 
 data class QueuedMessage(
     val scope: String,
@@ -3794,6 +3805,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             .map { it.sessionId }
             .toSet()
         busyIds.removeAll { !busy.contains(it) && currentIds.contains(it) }
+        streamingTail?.let { if (!busyIds.contains(it.first)) streamingTail = null }
         busy.forEach { if (!busyIds.contains(it)) busyIds.add(it) }
     }
 
@@ -4127,27 +4139,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 a.mimeType.startsWith("image/") -> add(buildJsonObject {
                                     put("type", "image")
                                     put("mimeType", a.mimeType)
-                                    put("data", a.base64)
+                                    put("data", a.readBase64())
                                 })
                                 a.mimeType == "application/pdf" -> add(buildJsonObject {
                                     put("type", "resource")
                                     put("resource", buildJsonObject {
                                         put("mimeType", a.mimeType)
                                         put("uri", a.name)
-                                        put("blob", a.base64)
+                                        put("blob", a.readBase64())
                                     })
                                 })
                                 attachTextLike(a.mimeType, a.name) -> add(buildJsonObject {
                                     put("type", "text")
                                     put("text", "\n（附件 ${'$'}{a.name}）\n" +
-                                        String(Base64.decode(a.base64, Base64.NO_WRAP)).take(200_000))
+                                        String(Base64.decode(a.readBase64(), Base64.NO_WRAP)).take(200_000))
                                 })
                                 else -> add(buildJsonObject {
                                     put("type", "resource")
                                     put("resource", buildJsonObject {
                                         put("mimeType", a.mimeType)
                                         put("uri", a.name)
-                                        put("blob", a.base64)
+                                        put("blob", a.readBase64())
                                     })
                                 })
                             }
@@ -4235,27 +4247,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             a.mimeType.startsWith("image/") -> add(buildJsonObject {
                                 put("type", "image")
                                 put("mimeType", a.mimeType)
-                                put("data", a.base64)
+                                put("data", a.readBase64())
                             })
                             a.mimeType == "application/pdf" -> add(buildJsonObject {
                                 put("type", "resource")
                                 put("resource", buildJsonObject {
                                     put("mimeType", a.mimeType)
                                     put("uri", a.name)
-                                    put("blob", a.base64)
+                                    put("blob", a.readBase64())
                                 })
                             })
                             attachTextLike(a.mimeType, a.name) -> add(buildJsonObject {
                                 put("type", "text")
                                 put("text", "\n（附件 ${'$'}{a.name}）\n" +
-                                    String(Base64.decode(a.base64, Base64.NO_WRAP)).take(200_000))
+                                    String(Base64.decode(a.readBase64(), Base64.NO_WRAP)).take(200_000))
                             })
                             else -> add(buildJsonObject {
                                 put("type", "resource")
                                 put("resource", buildJsonObject {
                                     put("mimeType", a.mimeType)
                                     put("uri", a.name)
-                                    put("blob", a.base64)
+                                    put("blob", a.readBase64())
                                 })
                             })
                         }
@@ -4906,9 +4918,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (bytes.isEmpty()) throw Exception("empty file")
                 if (bytes.size > attachMaxBytes) { attachError = S.attachTooLarge; return@launch }
-                val total = pendingAttachments.sumOf { it.base64.length * 3L / 4 } + bytes.size
+                val total = pendingAttachments.sumOf { it.byteSize } + bytes.size
                 if (total > attachMaxTotal) { attachError = S.attachTotalTooLarge; return@launch }
-                pendingAttachments.add(Attachment(mime, Base64.encodeToString(bytes, Base64.NO_WRAP), name))
+                val attFile = java.io.File(
+                    getApplication<Application>().cacheDir,
+                    "att_${System.nanoTime()}_${name.hashCode()}.b64",
+                )
+                attFile.writeText(Base64.encodeToString(bytes, Base64.NO_WRAP))
+                pendingAttachments.add(Attachment(mime, "", name, attFile.absolutePath))
                 attachError = null
             } catch (e: Exception) {
                 attachError = e.message ?: S.attachFailed
@@ -4919,6 +4936,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun clearAttachError() { attachError = null }
 
     fun removeAttachment(attachment: Attachment) {
+        attachment.localPath?.let { runCatching { java.io.File(it).delete() } }
         pendingAttachments.remove(attachment)
     }
 
@@ -5089,6 +5107,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (!busyIds.contains(sid)) busyIds.add(sid)
                 } else {
                     busyIds.remove(sid)
+                    clearStreamingTailIfIdle(sid)
                     refreshAll()
                 }
             }
@@ -5108,6 +5127,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 busyIds.remove(sid)
+                clearStreamingTailIfIdle(sid)
                 val usage = parseTokenUsage(p["usage"] as? JsonObject)
                 if (usage != null) {
                     val author = sessionName(sid)
@@ -5125,6 +5145,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 busyIds.remove(sid)
+                clearStreamingTailIfIdle(sid)
                 if ((inScope(sid) || sid.isEmpty()) && shouldShowInRoom(sid)) {
                     chatItems.add(
                         ChatItem.Error(++itemSeq, p["message"]!!.jsonPrimitive.content, sessionName(sid))
@@ -5353,6 +5374,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val streamRuns = mutableListOf<StreamRun>()
     private var streamFlushJob: kotlinx.coroutines.Job? = null
+    private fun clearStreamingTailIfIdle(sid: String) {
+        if (streamingTail?.first == sid && !busyIds.contains(sid)) streamingTail = null
+    }
+
+    /** 仍在接收流式 chunk 的尾部 item（sessionId to itemId）；busyIds 离组即自愈，无需显式清理 */
+    private var streamingTail: Pair<String, Long>? = null
+
+    /** UI 层判定：该 ChatItem id 是否为仍在流式增长的尾部 item（与 UI streaming 标记同语义） */
+    fun isStreamingTail(id: Long): Boolean =
+        streamingTail?.second == id && busyIds.contains(streamingTail?.first)
 
     private fun queueChunk(sessionId: String, kind: String, text: String) {
         val last = streamRuns.lastOrNull()
@@ -5383,14 +5414,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (run.kind == "t") {
                 if (last is ChatItem.Thought && last.author == author) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
+                    streamingTail = run.sessionId to last.id
                 } else {
-                    chatItems.add(ChatItem.Thought(++itemSeq, text, author))
+                    val id = ++itemSeq
+                    chatItems.add(ChatItem.Thought(id, text, author))
+                    streamingTail = run.sessionId to id
                 }
             } else {
                 if (last is ChatItem.Assistant && last.author == author) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
+                    streamingTail = run.sessionId to last.id
                 } else {
-                    chatItems.add(ChatItem.Assistant(++itemSeq, text, author))
+                    val id = ++itemSeq
+                    chatItems.add(ChatItem.Assistant(id, text, author))
+                    streamingTail = run.sessionId to id
                 }
             }
         }
@@ -5475,7 +5512,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 result.addAll(
                     when (item) {
                         is ChatItem.User -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = true) }
-                        is ChatItem.Assistant -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
+                        is ChatItem.Assistant ->
+                            // 流式中的尾部 item：跳过 splitMessageBlocks 块解析，整段作为单块直出；
+                            // busyIds 离组（done/中断）后下次展开即恢复完整解析
+                            if (i == items.lastIndex && isStreamingTail(item.id)) {
+                                listOf(
+                                    ChatListItem.Message(
+                                        id = item.id.toString(),
+                                        originalId = item.id,
+                                        author = item.author,
+                                        text = item.text,
+                                        content = item.text,
+                                        at = item.at,
+                                        isUser = false,
+                                        isFirst = true,
+                                        isLast = true,
+                                        usage = item.usage,
+                                    ),
+                                )
+                            } else {
+                                chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
+                            }
                         is ChatItem.Flow -> listOf(ChatListItem.FlowCard(item))
                         else -> listOf(ChatListItem.Other(item))
                     },

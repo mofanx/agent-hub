@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
@@ -41,6 +42,16 @@ class HubClient(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val _events = MutableSharedFlow<JsonObject>(extraBufferCapacity = 512)
+    /** 背压溢出时的保序异步 emit 链尾；非空期间控制事件一律排队防超车 */
+    private var emitTail: kotlinx.coroutines.Job? = null
+
+    /** buffer 满时可安全丢弃的事件：高频流式 chunk（丢一条仅少一次合帧刷新，后续 chunk/终态自愈） */
+    private fun isDroppableEvent(obj: JsonObject): Boolean {
+        if (obj["method"]?.jsonPrimitive?.contentOrNull != "session.update") return false
+        val t = obj["params"]?.jsonObject?.get("update")?.jsonObject
+            ?.get("sessionUpdate")?.jsonPrimitive?.contentOrNull
+        return t == "agent_message_chunk" || t == "agent_thought_chunk"
+    }
     val events = _events.asSharedFlow()
 
     var onClosed: (() -> Unit)? = null
@@ -100,7 +111,22 @@ class HubClient(
                     pending.remove(id)?.complete(obj)
                     return
                 }
-                scope.launch { _events.emit(obj) }
+                // 背压：buffer 满时高频流式 chunk 直接丢弃（可丢，后续 chunk 自愈）；
+                // 控制/终态事件必须保序送达——一旦有在途异步 emit，后续控制事件串行排队
+                // （直接 scope.launch{emit} 会被随后的 tryEmit 超车，IO 调度下顺序无保证）
+                val tailDone = emitTail?.isCompleted != false
+                if (tailDone) emitTail = null
+                if (emitTail == null) {
+                    if (_events.tryEmit(obj)) return
+                    if (isDroppableEvent(obj)) return
+                } else {
+                    if (isDroppableEvent(obj)) return
+                }
+                val prev = emitTail
+                emitTail = scope.launch {
+                    prev?.join()
+                    _events.emit(obj)
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
