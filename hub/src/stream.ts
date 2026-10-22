@@ -1,6 +1,30 @@
 import type { Stream, AnyMessage } from "@agentclientprotocol/sdk";
 import type { WebSocket } from "ws";
 
+/** 发送缓冲背压阈值：超过即挂起 write 等对端消费，向 ACP 生产端传导背压 */
+const WS_SEND_DRAIN_LIMIT = 8 * 1024 * 1024;
+/** 背压等待上限：死连接不永久卡死生产端，超时后维持原语义（消息照发） */
+const WS_DRAIN_WAIT_MS = 10_000;
+
+function waitForSendDrain(ws: WebSocket): Promise<void> {
+  if (ws.bufferedAmount <= WS_SEND_DRAIN_LIMIT) return Promise.resolve();
+  return new Promise((resolve) => {
+    const poll = setInterval(() => {
+      if (ws.bufferedAmount <= WS_SEND_DRAIN_LIMIT || ws.readyState !== ws.OPEN) {
+        clearInterval(poll);
+        clearTimeout(cap);
+        resolve();
+      }
+    }, 25);
+    const cap = setTimeout(() => {
+      clearInterval(poll);
+      resolve();
+    }, WS_DRAIN_WAIT_MS);
+    poll.unref();
+    cap.unref();
+  });
+}
+
 export function webSocketStream(ws: WebSocket): Stream {
   const readable = new ReadableStream<AnyMessage>({
     start(controller) {
@@ -37,11 +61,11 @@ export function webSocketStream(ws: WebSocket): Stream {
   });
 
   const writable = new WritableStream<AnyMessage>({
-    write(msg) {
+    async write(msg) {
       if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify(msg));
+        await waitForSendDrain(ws);
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
       }
-      return Promise.resolve();
     },
     close() {
       ws.close();
@@ -159,11 +183,13 @@ export function multiplexWebSocketStream(
     });
 
     const writable = new WritableStream<AnyMessage>({
-      write(msg) {
+      async write(msg) {
         if (ws.readyState === ws.OPEN) {
-          ws.send(JSON.stringify({ channel: ch, payload: msg } as MultiplexFrame));
+          await waitForSendDrain(ws);
+          if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ channel: ch, payload: msg } as MultiplexFrame));
+          }
         }
-        return Promise.resolve();
       },
       close() {
         closed.add(ch);

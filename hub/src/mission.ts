@@ -106,6 +106,11 @@ const OCCUPYING: ReadonlySet<MissionStatus> = new Set([
   "awaiting-acceptance",
 ]);
 const TERMINAL: ReadonlySet<MissionStatus> = new Set(["accepted", "stopped", "failed"]);
+
+/** 终态 mission 保留条数上限（防止长跑实例的 meta blob 线性膨胀） */
+const TERMINAL_KEEP = 50;
+/** 终态 mission 存活时长上限（30 天） */
+const TERMINAL_TTL_MS = 30 * 24 * 3600 * 1000;
 const STATUSES: ReadonlySet<string> = new Set([
   "draft",
   "running",
@@ -323,7 +328,20 @@ export class MissionManager {
     }
   }
 
+  /** 终态 mission 惰性清理：随 persist 执行——保留最近 TERMINAL_KEEP 条，
+   * 且任何超过 TERMINAL_TTL_MS 的终态一律清除（events/reviews 等负载随 Map 释放）。
+   * 只碰 TERMINAL 状态，activeFor/reconcile 等非终态消费路径不受影响 */
+  private sweepTerminal(now: number): void {
+    const terminal = [...this.missions.values()].filter((m) => TERMINAL.has(m.status));
+    terminal.sort((a, b) => (b.finishedAt ?? b.updatedAt) - (a.finishedAt ?? a.updatedAt));
+    for (const [i, m] of terminal.entries()) {
+      const at = m.finishedAt ?? m.updatedAt;
+      if (i >= TERMINAL_KEEP || now - at > TERMINAL_TTL_MS) this.missions.delete(m.id);
+    }
+  }
+
   private persist(): void {
+    this.sweepTerminal(Date.now());
     this.deps.store.setMeta(META_KEY, JSON.stringify([...this.missions.values()]));
   }
 

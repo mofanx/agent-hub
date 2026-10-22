@@ -837,7 +837,7 @@ describe("conductor", () => {
     assert.equal(notices.at(-1), "这个问题不需要派工，答案是 42。");
   });
 
-  it("部分失败时降级汇总：有 done 任务时进入 summarize 而非直接结束", async () => {
+  it("部分失败时：task 连续派发失败 3 次即交还用户 awaiting-retry", async () => {
     const rooms = new RoomManager();
     const qRoom = rooms.create(
       "partial-fail",
@@ -878,29 +878,28 @@ describe("conductor", () => {
       const flow = orchestrator.getFlow(qRoom.roomId);
       if (!flow) break;
       const t2 = (flow.tasks as { id: string; status: string }[]).find((t) => t.id === "t2");
-      if (t2?.status === "failed" && (flow as { phase: string }).phase === "summarizing") break;
+      if (t2?.status === "failed" && (flow as { phase: string }).phase === "awaiting-retry") break;
     }
-
-    assert.ok(
-      notices.some((m) => m.includes("降级汇总")),
-      "should notify partial summary",
-    );
-    assert.ok(
-      !notices.some((m) => m.includes("所有子任务均失败")),
-      "should not report all-failed when some tasks done",
-    );
 
     const flow = orchestrator.getFlow(qRoom.roomId);
     assert.ok(flow);
-    assert.equal((flow as { phase: string }).phase, "summarizing");
-
-    const summaryPrompt = conductorPrompts.find((p) => p.includes("部分完成、部分失败"));
-    assert.ok(summaryPrompt, "conductor should receive partial-failure prompt");
-    assert.ok(summaryPrompt!.includes("未能完成"), "prompt should mention failed tasks");
-    assert.ok(summaryPrompt!.includes("建议用户是否需要重新派发"), "prompt should suggest retry");
+    // 新语义：task 连续派发失败 3 次 → 任务标 failed 且 flow 交还用户
+    assert.equal((flow as { phase: string }).phase, "awaiting-retry");
+    const tasks = flow.tasks as { id: string; status: string }[];
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "failed");
+    // t1 的 done 与 t2 的失败风暴并发竞态：断言它未被误伤为 failed 即可
+    assert.notEqual(tasks.find((t) => t.id === "t1")?.status, "failed");
+    assert.ok(
+      notices.some((m) => m.includes("连续派发失败") && m.includes("重试")),
+      "should notify handback with retry hint",
+    );
+    assert.ok(
+      !conductorPrompts.some((p) => p.includes("部分完成、部分失败")),
+      "dispatch-failure handback 不走降级汇总",
+    );
   });
 
-  it("全部失败时不汇总，直接通知并结束 flow", async () => {
+  it("全部失败时：派发重试链交还用户 awaiting-retry", async () => {
     const rooms = new RoomManager();
     const qRoom = rooms.create(
       "all-fail",
@@ -935,23 +934,29 @@ describe("conductor", () => {
 
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1));
-      if ((orchestrator.getFlow(qRoom.roomId) as { phase?: string } | undefined)?.phase === "done") break;
+      if ((orchestrator.getFlow(qRoom.roomId) as { phase?: string } | undefined)?.phase === "awaiting-retry") break;
     }
 
+    const failedFlow = orchestrator.getFlow(qRoom.roomId) as
+      | { phase: string; tasks: { status: string }[] }
+      | undefined;
     assert.ok(
-      notices.some((m) => m.includes("所有子任务均失败")),
-      "should notify all-failed",
+      (failedFlow?.tasks ?? []).some((t) => t.status === "failed"),
+      "should have at least one failed task",
+    );
+    assert.ok(
+      notices.some((m) => m.includes("连续派发失败") || m.includes("安全上限")),
+      "should notify handback",
     );
     const terminal = orchestrator.getFlow(qRoom.roomId) as { phase: string } | undefined;
-    assert.equal(terminal?.phase, "done", "all-failed flow should stay as done evidence");
-    assert.equal(orchestrator.hasActiveFlow(qRoom.roomId), false);
+    assert.equal(terminal?.phase, "awaiting-retry", "连续派发失败应交还用户");
     assert.ok(
       !conductorPrompts.some((p) => p.includes("汇总")),
       "should not summarize when all tasks failed",
     );
   });
 
-  it("降级汇总后进入 awaiting-retry，重试指令恢复 failed 任务", async () => {
+  it("派发失败交还用户后，重试指令恢复 failed 任务", async () => {
     const rooms = new RoomManager();
     const qRoom = rooms.create(
       "retry-test",
@@ -996,12 +1001,8 @@ describe("conductor", () => {
 
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1));
-      if (notices.some((m) => m.includes("降级汇总"))) break;
+      if (orchestrator.hasAwaitingRetry(qRoom.roomId)) break;
     }
-    assert.ok(notices.some((m) => m.includes("降级汇总")), "should enter partial summary");
-
-    await orchestrator.onPromptDone("conductor", "汇总完成，t2 失败");
-    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 
     assert.ok(orchestrator.hasAwaitingRetry(qRoom.roomId), "should be awaiting-retry");
     assert.ok(
@@ -1048,7 +1049,7 @@ describe("conductor", () => {
         prompt: async (sessionId, content) => {
           if (sessionId !== "conductor") {
             workerPrompts.push({ sessionId, content: String(content) });
-            if (failWorkers && (sessionId === "worker2" || sessionId === "worker3")) {
+            if (failWorkers && sessionId === "worker2") {
               throw new Error("worker unavailable");
             }
           }
@@ -1072,34 +1073,26 @@ describe("conductor", () => {
     );
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1));
-      const flow = orchestrator.getFlow(qRoom.roomId);
-      if (!flow) break;
-      const tasks = flow.tasks as { id: string; status: string }[];
-      const allTerminal = ["t2", "t3"].every(
-        (id) => tasks.find((t) => t.id === id)?.status === "failed",
-      );
-      if (allTerminal && (flow as { phase: string }).phase === "summarizing") break;
+      if (orchestrator.hasAwaitingRetry(qRoom.roomId)) break;
     }
-
-    await orchestrator.onPromptDone("conductor", "汇总");
-    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 
     assert.ok(orchestrator.hasAwaitingRetry(qRoom.roomId));
 
     failWorkers = false;
     workerPrompts.length = 0;
-    const retried = orchestrator.retryFailedTasks(qRoom.roomId, ["t3"]);
+    // 过滤语义：未失败的任务（done/running）不得被"重试"恢复
+    assert.equal(orchestrator.retryFailedTasks(qRoom.roomId, ["t1"]), false);
+    assert.equal(orchestrator.retryFailedTasks(qRoom.roomId, ["t3"]), false);
+    const retried = orchestrator.retryFailedTasks(qRoom.roomId, ["t2"]);
     assert.ok(retried);
     for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 
     const flow = orchestrator.getFlow(qRoom.roomId);
     const tasks = flow!.tasks as { id: string; status: string }[];
     assert.equal(tasks.find((t) => t.id === "t1")?.status, "done");
-    assert.equal(tasks.find((t) => t.id === "t2")?.status, "failed");
-    assert.equal(tasks.find((t) => t.id === "t3")?.status, "running");
+    assert.equal(tasks.find((t) => t.id === "t2")?.status, "running");
 
-    assert.ok(workerPrompts.some((p) => p.sessionId === "worker3"));
-    assert.ok(!workerPrompts.some((p) => p.sessionId === "worker2"));
+    assert.ok(workerPrompts.some((p) => p.sessionId === "worker2" && p.content.includes("任务二")));
   });
 
   it("planner prompt 要求输出 goal 与 acceptanceCriteria", async () => {

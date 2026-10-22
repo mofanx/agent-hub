@@ -165,6 +165,8 @@ type FlowTask = {
   dispatchedAt?: number;
   /** 进入终态（done/failed）的时刻，作为过程钻取窗口上界 */
   finishedAt?: number;
+  /** 最近一次派发失败时刻（重试链统计用，成功派发清零） */
+  lastRetryAt?: number;
 };
 
 type Flow = {
@@ -197,6 +199,10 @@ type Flow = {
   help: Map<string, HelpExchange>;
   /** 是否已有求助派发重试定时器在跑 */
   helpRetrying?: boolean;
+  /** 派发失败滑动窗口（时间戳）：窗口内累计超限触发交还用户 */
+  retryWindow?: number[] | undefined;
+  /** 重试/重排定时器句柄集合：done/cancelled/删除时统一 clear 防悬挂 */
+  retryTimers?: Set<ReturnType<typeof setTimeout>> | undefined;
   clarification?: { id: string; questions: string[] };
   clarificationAsked?: boolean;
   clarificationAnswer?: string;
@@ -220,6 +226,11 @@ const DEFAULT_MAX_ROUNDS = 8;
 const MAX_HELP_ROUNDS = 2;
 const DEFAULT_ACCEPTANCE_CRITERIA = ["交付结果满足用户目标，并包含必要的实现与验证证据"];
 const BUSY_RETRY_MS = 5000;
+/** 派发失败重试链：同一 task 连续失败上限（超限标 failed 并交还用户） */
+const DISPATCH_RETRY_TASK_MAX = 3;
+/** flow 级滑动窗口：窗口内累计失败超上限同样交还用户（防多任务轮换失败造成的重试风暴） */
+const DISPATCH_RETRY_WINDOW_MS = 10 * 60 * 1000;
+const DISPATCH_RETRY_WINDOW_MAX = 8;
 
 const PROMPT_RETRY_MS = 5000;
 const SUMMARIZE_RETRY_MS = 5000;
@@ -545,7 +556,7 @@ export class ConductorOrchestrator {
   clearCompleted(roomId: string): void {
     const flow = this.flows.get(roomId);
     if (flow?.phase !== "done") return;
-    this.flows.delete(roomId);
+    this.removeFlow(roomId);
     this.emitFlow?.(roomId);
   }
 
@@ -559,7 +570,7 @@ export class ConductorOrchestrator {
         touched.add(t.sessionId);
       }
     }
-    this.flows.delete(roomId);
+    this.removeFlow(roomId);
     this.planningInFlight.delete(roomId);
     for (const sid of touched) this.pendingToolCalls.delete(sid);
     this.emitFlow?.(roomId);
@@ -569,7 +580,7 @@ export class ConductorOrchestrator {
 
   /** 房间删除/解散：无条件清掉该房间的 flow、planning 标记与 pendingToolCalls 残留 */
   dropRoom(roomId: string): void {
-    const hadFlow = this.flows.delete(roomId);
+    const hadFlow = this.removeFlow(roomId);
     const hadPlanning = this.planningInFlight.delete(roomId);
     for (const [sid, m] of this.pendingToolCalls) {
       for (const [tid, p] of m) if (p.roomId === roomId) m.delete(tid);
@@ -753,6 +764,74 @@ export class ConductorOrchestrator {
       }
     }
     return found;
+  }
+
+  /** 登记重试/重排定时器到 flow，done/cancelled/删除时统一清理防悬挂 */
+  private trackFlowTimer(flow: Flow, timer: ReturnType<typeof setTimeout>): void {
+    (flow.retryTimers ??= new Set()).add(timer);
+  }
+
+  private clearFlowRetryTimers(flow: Flow): void {
+    if (!flow.retryTimers) return;
+    for (const t of flow.retryTimers) clearTimeout(t);
+    flow.retryTimers.clear();
+  }
+
+  private removeFlow(roomId: string): boolean {
+    const f = this.flows.get(roomId);
+    if (f) this.clearFlowRetryTimers(f);
+    return this.flows.delete(roomId);
+  }
+
+  /** 追踪式重排：登记句柄并在回调前确认 flow 仍存在且未终态 */
+  private scheduleReschedule(flow: Flow, ms: number, run: () => void): void {
+    const timer = setTimeout(() => {
+      flow.retryTimers?.delete(timer);
+      const f = this.flows.get(flow.roomId);
+      if (f !== flow || f.phase === "done") return;
+      run();
+    }, ms);
+    timer.unref();
+    this.trackFlowTimer(flow, timer);
+  }
+
+  /** 交还用户：复用 maxRounds 的 awaiting-retry 语义（waitingFor=user 由快照层派生） */
+  private handbackFlowToUser(flow: Flow, reason: string): void {
+    flow.phase = "awaiting-retry";
+    this.clearFlowRetryTimers(flow);
+    this.emitFlow?.(flow.roomId);
+    this.notice({ roomId: flow.roomId, message: reason });
+  }
+
+  /**
+   * 派发失败计数：同 task 连续 3 次（标 failed）或 flow 滑动窗口内累计 8 次 → 交还用户。
+   * 计数挂在 task/flow 上，agent 重连/断线不重置。返回 true 表示已交还（调用方不再排重试）。
+   */
+  private noteDispatchFailure(flow: Flow, task: FlowTask, msg: string): boolean {
+    const now = Date.now();
+    task.retries = (task.retries ?? 0) + 1;
+    task.lastRetryAt = now;
+    const win = (flow.retryWindow ??= []);
+    win.push(now);
+    while (win.length > 0 && now - win[0]! > DISPATCH_RETRY_WINDOW_MS) win.shift();
+    if (task.retries >= DISPATCH_RETRY_TASK_MAX) {
+      task.status = "failed";
+      task.failureMessage = msg;
+      task.finishedAt = now;
+      this.handbackFlowToUser(
+        flow,
+        `子任务 ${task.id} 连续派发失败 ${task.retries} 次（${msg.slice(0, 200)}），发送"重试"重新派发失败任务，或发送新消息继续`,
+      );
+      return true;
+    }
+    if (win.length >= DISPATCH_RETRY_WINDOW_MAX) {
+      this.handbackFlowToUser(
+        flow,
+        `派发失败次数超过安全上限（${win.length} 次/10 分钟），发送"重试"重新派发失败任务，或发送新消息继续`,
+      );
+      return true;
+    }
+    return false;
   }
 
   private fingerprintMatches(cwd: string, cached: Map<string, string>): boolean {
@@ -1047,12 +1126,12 @@ export class ConductorOrchestrator {
     for (const [roomId, flow] of [...this.flows]) {
       const room = this.rooms.get(roomId);
       if (!room) {
-        this.flows.delete(roomId);
+        this.removeFlow(roomId);
         continue;
       }
       if (flow.phase === "done") continue;
       if (sessionId === room.conductorId) {
-        this.flows.delete(roomId);
+        this.removeFlow(roomId);
         this.planningInFlight.delete(roomId);
         this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
         return roomId;
@@ -1181,11 +1260,10 @@ export class ConductorOrchestrator {
       const cur = this.flows.get(flow.roomId);
       if (cur !== flow || cur.phase !== "planning") return;
       this.planningInFlight.delete(flow.roomId);
-      setTimeout(() => {
-        const f = this.flows.get(flow.roomId);
-        if (f !== flow || f.phase !== "planning") return;
-        this.sendPlanningPrompt(f, room);
-      }, this.promptRetryMs);
+      this.scheduleReschedule(flow, this.promptRetryMs, () => {
+        if (flow.phase !== "planning") return;
+        this.sendPlanningPrompt(flow, room);
+      });
     });
   }
 
@@ -1228,7 +1306,7 @@ export class ConductorOrchestrator {
     for (const flow of this.flows.values()) {
       const room = this.rooms.get(flow.roomId);
       if (!room) {
-        this.flows.delete(flow.roomId);
+        this.removeFlow(flow.roomId);
         continue;
       }
       if (flow.phase === "done") continue;
@@ -1261,6 +1339,7 @@ export class ConductorOrchestrator {
             });
           } else {
             flow.phase = "done";
+            this.clearFlowRetryTimers(flow);
             flow.finishedAt = Date.now();
             this.emitFlow?.(roomId);
           }
@@ -1539,13 +1618,12 @@ export class ConductorOrchestrator {
     );
     if (!hasPending) return;
     flow.helpRetrying = true;
-    setTimeout(() => {
+    this.scheduleReschedule(flow, this.promptRetryMs, () => {
       flow.helpRetrying = false;
-      const f = this.flows.get(flow.roomId);
-      if (!f || f.phase !== "working") return;
-      this.dispatchPendingHelp(f, room);
-      this.ensureHelpDispatch(f, room);
-    }, this.promptRetryMs);
+      if (flow.phase !== "working") return;
+      this.dispatchPendingHelp(flow, room);
+      this.ensureHelpDispatch(flow, room);
+    });
   }
 
   /** 求助获得答复后唤醒原 worker，把答案注入并让其继续完成任务 */
@@ -1571,26 +1649,20 @@ export class ConductorOrchestrator {
       taskId: task.id,
       dependsOn: task.dependsOn,
     });
-    this.sendPrompt(flow.roomId, task.sessionId, prompt).catch((err: unknown) => {
-      task.retries = (task.retries ?? 0) + 1;
-      const msg = String(err);
-      if (task.retries >= 3) {
-        task.status = "failed";
-        task.failureMessage = msg;
-        task.finishedAt = Date.now();
-        this.emitFlow?.(flow.roomId);
-        this.scheduleTasks(flow, room).catch((e2) =>
-          logError("conductor schedule after help fail", e2),
-        );
-        return;
-      }
-      // 恢复等待标记后重试唤醒
-      task.waitingForHelp = e.id;
-      setTimeout(() => {
-        const f = this.flows.get(flow.roomId);
-        if (f) this.repromptAsker(f, room, e);
-      }, this.promptRetryMs);
-    });
+    this.sendPrompt(flow.roomId, task.sessionId, prompt)
+      .then(() => {
+        task.retries = 0;
+        delete task.lastRetryAt;
+      })
+      .catch((err: unknown) => {
+        const msg = String(err);
+        if (this.noteDispatchFailure(flow, task, msg)) return;
+        // 恢复等待标记后重试唤醒
+        task.waitingForHelp = e.id;
+        this.scheduleReschedule(flow, this.promptRetryMs, () => {
+          this.repromptAsker(flow, room, e);
+        });
+      });
     this.emitFlow?.(flow.roomId);
   }
 
@@ -1662,7 +1734,7 @@ export class ConductorOrchestrator {
         this.sendPlanningPrompt(flow, room);
         return;
       }
-      this.flows.delete(flow.roomId);
+      this.removeFlow(flow.roomId);
       this.emitFlow?.(flow.roomId);
       this.notice({
         roomId: flow.roomId,
@@ -1686,7 +1758,7 @@ export class ConductorOrchestrator {
       return;
     }
     if (plan.questions.length > 0) {
-      this.flows.delete(flow.roomId);
+      this.removeFlow(flow.roomId);
       this.emitFlow?.(flow.roomId);
       this.notice({
         roomId: flow.roomId,
@@ -1702,6 +1774,7 @@ export class ConductorOrchestrator {
     }
     if (tasks.length === 0) {
       flow.phase = "done";
+      this.clearFlowRetryTimers(flow);
       flow.finishedAt = Date.now();
       this.emitFlow?.(flow.roomId);
       const answer = conductorOutput.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
@@ -1721,7 +1794,7 @@ export class ConductorOrchestrator {
     originalText?: string,
   ): Promise<void> {
     if (tasks.length === 0) {
-      this.flows.delete(flow.roomId);
+      this.removeFlow(flow.roomId);
       return;
     }
     flow.phase = "working";
@@ -1750,7 +1823,7 @@ export class ConductorOrchestrator {
     }
 
     if (flow.tasks.size === 0) {
-      this.flows.delete(flow.roomId);
+      this.removeFlow(flow.roomId);
       return;
     }
 
@@ -1896,6 +1969,7 @@ export class ConductorOrchestrator {
           message: `所有子任务均失败（${names.join("、")}），无法汇总`,
         });
         flow.phase = "done";
+        this.clearFlowRetryTimers(flow);
         flow.finishedAt = Date.now();
         this.emitFlow?.(flow.roomId);
       }
@@ -1972,27 +2046,25 @@ export class ConductorOrchestrator {
         undefined,
         artifactContext,
       );
-      this.sendPrompt(flow.roomId, t.sessionId, prompt).catch((err: unknown) => {
-        t.retries = (t.retries ?? 0) + 1;
-        const msg = String(err);
-        if (t.retries >= 3) {
-          t.status = "failed";
-          t.failureMessage = msg;
-          t.finishedAt = Date.now();
-        } else {
+      this.sendPrompt(flow.roomId, t.sessionId, prompt)
+        .then(() => {
+          t.retries = 0;
+          delete t.lastRetryAt;
+        })
+        .catch((err: unknown) => {
+          const msg = String(err);
+          if (this.noteDispatchFailure(flow, t, msg)) return;
           t.status = "pending";
-        }
-        this.notice({
-          roomId: flow.roomId,
-          message: `子任务派发失败（重试 ${t.retries}/3）：${msg}`,
-        });
-        setTimeout(() => {
-          if (!this.flows.has(flow.roomId)) return;
-          this.scheduleTasks(flow, room).catch((e) => {
-            logError("conductor schedule after fail", e);
+          this.notice({
+            roomId: flow.roomId,
+            message: `子任务派发失败（重试 ${t.retries}/3）：${msg}`,
           });
-        }, this.promptRetryMs);
-      });
+          this.scheduleReschedule(flow, this.promptRetryMs, () => {
+            this.scheduleTasks(flow, room).catch((e) => {
+              logError("conductor schedule after fail", e);
+            });
+          });
+        });
     }
 
     if (assignments.length > 0) {
@@ -2009,12 +2081,11 @@ export class ConductorOrchestrator {
 
     // Bug 4: 有 runnable task 因 isBusy 被跳过时，定时轮询重试
     if (skippedBusy) {
-      setTimeout(() => {
-        if (!this.flows.has(flow.roomId)) return;
+      this.scheduleReschedule(flow, BUSY_RETRY_MS, () => {
         this.scheduleTasks(flow, room).catch((e) =>
           logError("conductor busy retry reschedule", e),
         );
-      }, BUSY_RETRY_MS);
+      });
     }
 
     this.emitFlow?.(flow.roomId);
@@ -2104,6 +2175,7 @@ export class ConductorOrchestrator {
     if (room.conductorId && (!this.agent.has || this.agent.has(room.conductorId))) return false;
     this.notice({ roomId: flow.roomId, message: "主持人会话已失效，本次编排终止" });
     flow.phase = "done";
+    this.clearFlowRetryTimers(flow);
     flow.finishedAt = Date.now();
     this.emitFlow?.(flow.roomId);
     return true;
@@ -2169,11 +2241,10 @@ export class ConductorOrchestrator {
     } catch (err) {
       logError("conductor review prompt", err);
       this.notice({ roomId: flow.roomId, message: `指挥家验收派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
-      setTimeout(() => {
-        if (!this.flows.has(flow.roomId)) return;
+      this.scheduleReschedule(flow, this.promptRetryMs, () => {
         if (flow.phase !== "reviewing") return;
         this.review(flow, room).catch((e) => logError("conductor review retry", e));
-      }, this.promptRetryMs);
+      });
     }
   }
 
@@ -2296,11 +2367,10 @@ export class ConductorOrchestrator {
     } catch (err) {
       logError("conductor summarize prompt", err);
       this.notice({ roomId: flow.roomId, message: `指挥家汇总派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
-      setTimeout(() => {
-        if (!this.flows.has(flow.roomId)) return;
+      this.scheduleReschedule(flow, this.promptRetryMs, () => {
         if (flow.phase !== "summarizing") return;
         this.summarize(flow, room).catch((e) => logError("conductor summarize retry", e));
-      }, this.promptRetryMs);
+      });
     }
   }
 
@@ -2333,7 +2403,7 @@ export class ConductorOrchestrator {
     if (!flow || flow.phase !== "awaiting-retry") return false;
     const room = this.rooms.get(roomId);
     if (!room) {
-      this.flows.delete(roomId);
+      this.removeFlow(roomId);
       return false;
     }
     const failed = [...flow.tasks.values()].filter(
@@ -2345,7 +2415,10 @@ export class ConductorOrchestrator {
       delete t.failureMessage;
       delete t.finishedAt;
       t.retries = 0;
+      delete t.lastRetryAt;
     }
+    flow.retryWindow = [];
+    this.clearFlowRetryTimers(flow);
     flow.phase = "working";
     this.emitFlow?.(roomId);
     const failedIds = failed.map((t) => t.id);

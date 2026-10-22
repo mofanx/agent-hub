@@ -1,0 +1,12 @@
+{
+  "generated": "2026-10-20",
+  "scope": "perf fixes regression baseline",
+  "metrics": {
+    "rangeReadChars": 5240,
+    "rangeReadCharsBudget": 32768,
+    "roomEventsSince40of50": 10,
+    "replayDedupBoardSize": 3,
+    "suiteTests": 445,
+    "notes": "readTextFileRange 区间读有界；room_events since 增量；eventSeq 水位回放幂等；阈值用于后续回归对比"
+  }
+}

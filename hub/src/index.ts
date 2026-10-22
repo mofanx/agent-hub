@@ -751,6 +751,27 @@ const decisionCenter = new DecisionCenter({
 });
 /** permission.respond 显式指定的授权粒度（once/task/always），decision.resolve 时消费 */
 const pendingDecisionScope = new Map<string, DecisionScope>();
+/** 超时兜底：agent 断连/不回包致 decision.resolve 永不触发时，条目不再无限驻留（到期删除并记录） */
+const PENDING_DECISION_SCOPE_TTL_MS = 30_000;
+const pendingDecisionScopeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function trackPendingDecisionScope(requestId: string, scope: DecisionScope): void {
+  pendingDecisionScope.set(requestId, scope);
+  clearTimeout(pendingDecisionScopeTimers.get(requestId));
+  const t = setTimeout(() => {
+    pendingDecisionScope.delete(requestId);
+    pendingDecisionScopeTimers.delete(requestId);
+    logWarn("decision", `pending decision scope expired after ${PENDING_DECISION_SCOPE_TTL_MS}ms: ${requestId}`);
+  }, PENDING_DECISION_SCOPE_TTL_MS);
+  t.unref();
+  pendingDecisionScopeTimers.set(requestId, t);
+}
+
+function clearPendingDecisionScope(requestId: string): void {
+  clearTimeout(pendingDecisionScopeTimers.get(requestId));
+  pendingDecisionScopeTimers.delete(requestId);
+  pendingDecisionScope.delete(requestId);
+}
 
 // nano 相关性过滤：默认开启（HUB_RELEVANCE_FILTER=0/false/off 关闭），房间级 relevanceFilter 可覆盖；
 // 规则判定不确定时若配置 HUB_FILTER_MODEL 走轻量模型档，未配置则放行
@@ -1247,7 +1268,7 @@ function onAgentEvent(event: HubEvent): void {
       action?: string;
     };
     const requestedScope = pendingDecisionScope.get(p.requestId);
-    pendingDecisionScope.delete(p.requestId);
+    clearPendingDecisionScope(p.requestId);
     const tracked = decisionCenter.getByRequest(p.requestId);
     const option = tracked?.meta.options.find((o) => o.id === p.optionId);
     let scope: DecisionScope | undefined;
@@ -2774,13 +2795,13 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const optionId = String(req.params?.optionId ?? "");
       const rawScope = String(req.params?.scope ?? "").toLowerCase();
       if (rawScope === "once" || rawScope === "task" || rawScope === "always") {
-        pendingDecisionScope.set(requestId, rawScope);
+        trackPendingDecisionScope(requestId, rawScope);
       }
       const ok = [...agents.values()].some((a) =>
         a.respondPermission(requestId, optionId),
       );
       if (!ok) {
-        pendingDecisionScope.delete(requestId);
+        clearPendingDecisionScope(requestId);
         throw new Error("unknown, expired, or invalid option for permission request");
       }
       return { responded: true };
@@ -3261,7 +3282,13 @@ startPerfMonitor(() => ({
   maxBuffered: Math.max(0, ...[...clients].map((w) => w.bufferedAmount)),
 }));
 
-const wss = new WebSocketServer({ port: PORT, host: "0.0.0.0" });
+const wss = new WebSocketServer({
+  port: PORT,
+  host: "0.0.0.0",
+  // permessage-deflate：process 卡/历史回包/合帧批量消息体量不小，低配链路收益直接；
+  // 1KB 阈值以下不压（小消息压缩反而费 CPU 且可能变大），两端 ws/OkHttp 均标准支持
+  perMessageDeflate: { threshold: 1024 },
+});
 /** 经 gateway 中继的客户端连接（via=gateway）：connectInfo 不下发明文凭据 */
 const relayedClients = new Set<WebSocket>();
 type LiveSocket = WebSocket & { isAlive?: boolean };
