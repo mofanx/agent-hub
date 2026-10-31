@@ -35,7 +35,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { stringsFor, toolStatusLabel, planEntryLabel, type Strings } from "../hub/strings";
+import { stringsFor, toolStatusLabel, planEntryLabel, flowMessageHint, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, DecisionMeta, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
@@ -180,9 +180,9 @@ export function ChatScreen() {
   const S = stringsFor(store.lang);
   const [input, setInput] = useState("");
   const [cmdOpen, setCmdOpen] = useState(false);
-  const [showThought, setShowThought] = useState<Record<number, boolean>>({});
-  const toggleThought = useCallback((i: number) => {
-    setShowThought((p) => ({ ...p, [i]: !p[i] }));
+  const [showThought, setShowThought] = useState<Record<string, boolean>>({});
+  const toggleThought = useCallback((k: string) => {
+    setShowThought((p) => ({ ...p, [k]: !p[k] }));
   }, []);
   const handleImageClick = useCallback((src: string, name?: string) => {
     setLightbox({ src, name });
@@ -1008,7 +1008,7 @@ export function ChatScreen() {
                       : "tail";
                 const dateSep = !prev || !sameDay;
                 return (
-                  <Fragment key={i}>
+                  <Fragment key={itemKey(item, i)}>
                     {dateSep && (
                       <div className="date-sep">
                         <span>{dateLabel(S, item.at)}</span>
@@ -1016,12 +1016,12 @@ export function ChatScreen() {
                     )}
                   <ChatMessage
                     item={item}
-                    index={i}
+                    index={itemKey(item, i)}
                     showAuthor={isRoom}
                     fullWidth={isHostAuthor(item.author)}
                     grouped={grouped}
                     turnPos={turnPos}
-                    expanded={showThought[i] ?? false}
+                    expanded={showThought[itemKey(item, i)] ?? false}
                     isQuoted={isQuoted}
                     onToggleThought={toggleThought}
                     highlight={inChatSearchQuery}
@@ -1047,6 +1047,17 @@ export function ChatScreen() {
           </div>
 
           <div className="compose-wrap">
+            {(() => {
+              const hint =
+                store.currentRoom && !replyHelp && store.flow
+                  ? flowMessageHint(
+                      store.flow.phase,
+                      store.flow.mode || store.currentRoom.subMode || store.currentRoom.mode,
+                      S,
+                    )
+                  : null;
+              return hint ? <div className="compose-flow-hint">{hint}</div> : null;
+            })()}
             {pendingUserHelps.map((t) => (
               <div key={t.id} className="help-banner">
                 <LifeBuoy size={13} />
@@ -1615,14 +1626,14 @@ const ChatMessage = memo(function ChatMessage({
   onFilePillClick,
 }: {
   item: ChatItem;
-  index: number;
+  index: string;
   showAuthor: boolean;
   fullWidth?: boolean;
   grouped?: boolean;
   turnPos?: "head" | "mid" | "tail" | "solo";
   expanded: boolean;
   isQuoted: boolean;
-  onToggleThought: (i: number) => void;
+  onToggleThought: (k: string) => void;
   highlight?: string;
   isCurrentMatch?: boolean;
   onImageClick?: (src: string, name?: string) => void;
@@ -1922,6 +1933,15 @@ const ChatMessage = memo(function ChatMessage({
       return null;
   }
 });
+
+/** 消息列表稳定 key：flow/process 用业务 id（合成项升级落库后 key 不变），其次 historyId（库行唯一）、自增 id，均缺时退 index */
+const itemKey = (it: ChatItem, i: number): string => {
+  const rec = it as { kind?: string; flowId?: string; processId?: string; historyId?: number; id?: number };
+  if (rec.kind === "flow" && rec.flowId) return `flow:${rec.flowId}`;
+  if (rec.kind === "process" && rec.processId) return `process:${rec.processId}`;
+  if (rec.historyId != null) return `h${rec.historyId}`;
+  return rec.id ? `k${rec.id}` : `x${i}`;
+};
 
 /** 过程步文本截断上限（与 hub buildProcessMeta 的 120 对齐），超长留 title 悬浮全文 */
 const PROC_STEP_TEXT_MAX = 120;
@@ -2371,6 +2391,7 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
 
 /** 编排卡/面板共用的视图形状：FlowInfo（实时）与 FlowCardSnapshot（房史）都可赋入 */
 type FlowView = {
+  flowId?: string;
   phase: string;
   goal?: string;
   mode?: string;
@@ -2563,7 +2584,7 @@ function FlowCardBody({ flow, showRetry }: { flow: FlowView; showRetry: boolean 
       )}
       <div className="flow-tasks">
         {tasks.map((t) => (
-          <FlowTaskItem key={t.id} task={t} showRetry={showRetry} />
+          <FlowTaskItem key={`${flow.flowId ?? ""}:${t.id}`} task={t} showRetry={showRetry} flowId={flow.flowId ?? ""} />
         ))}
       </div>
       {flow.supplements && flow.supplements.length > 0 && (
@@ -3245,7 +3266,7 @@ function renderMarkdown(text: string, S: Strings): string {
   }
 }
 
-function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean }) {
+function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: boolean; flowId: string }) {
   const [expanded, setExpanded] = useState(false);
   const store = useHubStore();
   const S = stringsFor(store.lang);
@@ -3259,15 +3280,6 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     ) : (
       <Circle size={11} />
     );
-  const hasDetail =
-    task.status === "done" ||
-    task.output ||
-    task.failureMessage ||
-    task.dependsOn.length > 0 ||
-    task.retries ||
-    task.waitingQuestion ||
-    (task.verifications?.length ?? 0) > 0 ||
-    (task.backendRuns?.length ?? 0) > 0;
   const verdicts = (task.verifications ?? []).map((v) => v.verdict.trim().toLowerCase());
   const derivedStatus =
     verdicts.length === 0 ? "unverified" : verdicts.some((v) => v !== "pass") ? "member_nonpass" : "member_pass";
@@ -3336,31 +3348,61 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     } catch { /* ignore */ }
   };
   const showRetryBtn = showRetry && task.status === "failed";
-  // 过程钻取：running 读内存缓冲（session.process），完成态按 [dispatchedAt, finishedAt] 窗口读会话历史
-  const [procOpen, setProcOpen] = useState(false);
+  // 过程并入详情：批次键 flowId+taskId+sessionId+dispatchedAt 隔离缓存与开关状态；
+  // running 展开直看内存缓冲，完成态按 [dispatchedAt, finishedAt] 窗口读会话历史
+  const batchKey = `${flowId}:${task.id}:${task.sessionId}:${task.dispatchedAt ?? 0}`;
   const [procLoading, setProcLoading] = useState(false);
   const [procItems, setProcItems] = useState<ChatItem[] | null>(null);
-  const toggleProcess = async () => {
-    const next = !procOpen;
-    setProcOpen(next);
-    if (!next || procItems !== null || procLoading) return;
-    setProcLoading(true);
-    setProcItems(
-      await store.fetchProcessItems(task.sessionId, {
+  const [procOpen, setProcOpen] = useState<boolean | null>(null);
+  const fetchProcessItems = store.fetchProcessItems;
+  const procVisible =
+    expanded && task.status !== "pending" && (procOpen ?? task.status === "running");
+  const procIdentity = `${flowId}:${task.id}:${task.sessionId}:${task.dispatchedAt ?? 0}:${task.status}:${task.finishedAt ?? 0}`;
+  const prevBatch = useRef(batchKey);
+  const prevProcIdentity = useRef(procIdentity);
+  useEffect(() => {
+    if (prevBatch.current === batchKey) return;
+    prevBatch.current = batchKey;
+    setProcOpen(null);
+    setProcItems(null);
+    setProcLoading(false);
+  }, [batchKey]);
+  useEffect(() => {
+    if (!procVisible) return;
+    let alive = true;
+    let inFlight = false;
+    if (prevProcIdentity.current !== procIdentity) {
+      prevProcIdentity.current = procIdentity;
+      setProcItems(null);
+    }
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      setProcLoading(true);
+      const items = await fetchProcessItems(task.sessionId, {
         running: task.status === "running",
         from: task.dispatchedAt,
         to: task.finishedAt,
-      }),
-    );
-    setProcLoading(false);
-  };
+      });
+      inFlight = false;
+      if (!alive) return;
+      if (items !== null) setProcItems(items);
+      setProcLoading(false);
+    };
+    void load();
+    const timer = task.status === "running" ? setInterval(() => void load(), 2000) : undefined;
+    return () => {
+      alive = false;
+      if (timer !== undefined) clearInterval(timer);
+    };
+  }, [procVisible, procIdentity, fetchProcessItems, task.sessionId, task.status, task.dispatchedAt, task.finishedAt]);
   const procScrollRef = useRef<HTMLDivElement | null>(null);
   // 「已在底部才跟随」：记录视口是否贴底（24px 阈值），running 轮询新条目仅贴底时才滚；
   // 首滚等双帧 reflow 后瞬时定位
   const procAtBottom = useRef(true);
   const procScrolledOnce = useRef(false);
   useEffect(() => {
-    if (!procOpen) {
+    if (!procVisible) {
       procScrolledOnce.current = false;
       procAtBottom.current = true;
       return;
@@ -3375,24 +3417,25 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
     };
     if (first) requestAnimationFrame(() => requestAnimationFrame(doScroll));
     else doScroll();
-  }, [procOpen, procItems]);
-  // running 任务：展开期间 2s 轮询内存缓冲，收起/收尾/卸载即停
-  useEffect(() => {
-    if (!procOpen || task.status !== "running") return;
-    const timer = setInterval(() => {
-      void store
-        .fetchProcessItems(task.sessionId, { running: true, from: task.dispatchedAt })
-        .then((r) => {
-          if (r !== null) setProcItems(r);
-        });
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [procOpen, task.status, task.sessionId, task.dispatchedAt, store]);
+  }, [procVisible, procItems]);
   return (
     <div className={`flow-task flow-task-${task.status}`}>
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
       <div className="flow-task-body">
-        <div className="flow-task-line" onClick={() => hasDetail && setExpanded(!expanded)} style={hasDetail ? { cursor: "pointer" } : undefined}>
+        <div
+          className="flow-task-line"
+          role="button"
+          tabIndex={0}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setExpanded((v) => !v);
+            }
+          }}
+          style={{ cursor: "pointer" }}
+        >
           <span className="flow-task-name">@{task.name}</span>
           <span className="flow-task-desc" title={task.task}>{task.task}</span>
           {task.retries && task.retries > 0 && (
@@ -3406,13 +3449,14 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
               🆘 {task.waitingFor === "user" ? S.helpBadgeUser : S.helpBadgeMember.replace("%s", task.waitingFor)}
             </span>
           )}
-          {hasDetail && (
-            <span className="flow-task-expand">{expanded ? "▾" : "▸"}</span>
-          )}
+          <span className="flow-task-expand">{expanded ? "▾" : "▸"}</span>
         </div>
-        {expanded && hasDetail && (
+        {expanded && (
           <div className="flow-task-detail">
             <div className="flow-task-full">{task.task}</div>
+            {task.failureMessage && (
+              <div className="flow-task-error">{task.failureMessage}</div>
+            )}
             {task.status === "done" && (
               <>
                 <div className="flow-task-meta">{S.verificationStatusLabel}{verificationText}</div>
@@ -3537,40 +3581,47 @@ function FlowTaskItem({ task, showRetry }: { task: FlowTask; showRetry: boolean 
                 )}
               </div>
             )}
-            {task.failureMessage && (
-              <div className="flow-task-error">{task.failureMessage}</div>
+            {task.status === "pending" && task.dependsOn.length === 0 && (
+              <div className="flow-task-meta">{S.taskWaitingDispatch}</div>
+            )}
+            {task.status !== "pending" && (
+              <div className="flow-task-process">
+                <button
+                  type="button"
+                  className="flow-task-meta flow-task-proc-toggle"
+                  aria-expanded={procVisible}
+                  onClick={() => setProcOpen(!procVisible)}
+                >
+                  {procVisible ? "▾" : "▸"} {S.viewProcess}
+                  {task.status === "running" && (
+                    <span className="process-running">{S.processRunning}</span>
+                  )}
+                </button>
+                {procVisible &&
+                  (procLoading && procItems === null ? (
+                    <div className="process-step-line">{S.processLoading}</div>
+                  ) : procItems === null ? (
+                    <div className="process-step-line process-error">{S.processUnavailable}</div>
+                  ) : procItems.length === 0 ? (
+                    <div className="process-step-line">
+                      {task.status === "running" ? S.processRunning : S.processEmpty}
+                    </div>
+                  ) : (
+                    <div
+                      ref={procScrollRef}
+                      className="proc-scroll"
+                      onScroll={(e) => {
+                        const el = e.currentTarget;
+                        procAtBottom.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+                      }}
+                    >
+                      <ProcessSteps items={procItems} />
+                    </div>
+                  ))}
+              </div>
             )}
           </div>
         )}
-        {task.status !== "pending" && (
-          <button className="flow-task-proc-toggle" onClick={toggleProcess}>
-            {procOpen ? "▾" : "▸"} {S.viewProcess}
-            {task.status === "running" && (
-              <span className="process-running">{S.processRunning}</span>
-            )}
-          </button>
-        )}
-        {procOpen &&
-          (procLoading ? (
-            <div className="process-step-line">{S.processLoading}</div>
-          ) : procItems === null ? (
-            <div className="process-step-line process-error">{S.processUnavailable}</div>
-          ) : procItems.length === 0 ? (
-            <div className="process-step-line">
-              {task.status === "running" ? S.processRunning : S.processUnavailable}
-            </div>
-          ) : (
-            <div
-              ref={procScrollRef}
-              className="proc-scroll"
-              onScroll={(e) => {
-                const el = e.currentTarget;
-                procAtBottom.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
-              }}
-            >
-              <ProcessSteps items={procItems} />
-            </div>
-          ))}
         {showRetryBtn && (
           <button className="flow-task-retry-btn" onClick={handleRetry}>
             <RotateCcw size={11} /> {S.retryAction}

@@ -140,6 +140,9 @@ interface Strings {
     val processLoading: String
     val processEmpty: String
     val viewProcess: String
+    val waitingDispatch: String
+    val sendAsSupplement: String
+    val flowStartsNewHint: String
     val dispatchCollapsedFmt: String
     val finalSummary: String
     val summaryCompleted: String
@@ -741,6 +744,9 @@ object ZhStrings : Strings {
     override val processLoading = "加载过程…"
     override val processEmpty = "暂无过程记录"
     override val viewProcess = "查看过程"
+    override val waitingDispatch = "等待派发"
+    override val sendAsSupplement = "普通新消息将补充到当前流程"
+    override val flowStartsNewHint = "此阶段普通新消息会结束当前流程并开启新一轮"
     override val dispatchCollapsedFmt = "已派发 %d 个子任务"
     override val finalSummary = "最终总结"
     override val summaryCompleted = "%d/%d 任务已完成"
@@ -1350,6 +1356,9 @@ object EnStrings : Strings {
     override val processLoading = "Loading process…"
     override val processEmpty = "No process items"
     override val viewProcess = "View process"
+    override val waitingDispatch = "Waiting for dispatch"
+    override val sendAsSupplement = "New messages add context to the current flow"
+    override val flowStartsNewHint = "At this stage, a new message ends the current flow and starts a new one"
     override val dispatchCollapsedFmt = "Dispatched %d subtasks"
     override val finalSummary = "Final summary"
     override val summaryCompleted = "%d/%d tasks completed"
@@ -1849,6 +1858,18 @@ private val PLAN_STATUS_RE = Regex("^\\[(pending|in_progress|completed|failed|ca
 
 fun planEntryLabel(S: Strings, entry: String): String =
     PLAN_STATUS_RE.replace(entry) { "[${toolStatusLabel(S, it.groupValues[1])}] " }
+
+fun flowMessageHint(phase: String, mode: String, S: Strings): String? {
+    if (phase == "awaiting-retry") return S.flowStartsNewHint
+    if ((mode == "parallel" || mode == "debate") && phase == "summarizing") return S.flowStartsNewHint
+    val phases = when (mode) {
+        "conductor" -> listOf("planning", "awaiting-input", "working", "reviewing", "summarizing")
+        "pipeline" -> listOf("working", "summarizing")
+        "parallel", "debate" -> listOf("working")
+        else -> emptyList()
+    }
+    return if (phase in phases) S.sendAsSupplement else null
+}
 
 fun missionEventLabel(S: Strings, kind: String): String = when (kind) {
     "lifecycle" -> S.missionEventLifecycle

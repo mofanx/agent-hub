@@ -125,6 +125,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -1005,6 +1006,21 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         S.queueClearHint,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            // 活跃编排中输入语义提示：普通消息补充进当前 flow，或在特定阶段结束并开新一轮；
+            // 有显式求助答复目标时不展示（消息已定向）
+            vm.flow?.takeIf { vm.currentRoom != null && vm.helpReplyTo == null }?.let { flow ->
+                val mode = flow.mode.ifEmpty {
+                    vm.currentRoom?.subMode?.takeIf(String::isNotEmpty) ?: vm.currentRoom?.mode.orEmpty()
+                }
+                flowMessageHint(flow.phase, mode, S)?.let { hint ->
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                     )
                 }
             }
@@ -2051,21 +2067,22 @@ private fun ProcessStepRow(item: ChatItem) {
 }
 
 @Composable
-private fun TaskProcessSection(roomId: String, task: FlowTask, vm: ChatViewModel) {
+private fun TaskProcessSection(roomId: String, flowId: String, task: FlowTask, vm: ChatViewModel) {
     val S = LocalStrings.current
-    val key = "task:$roomId:${task.id}"
+    // 缓存键含 flowId+dispatchedAt：同房间多 flow 复用 taskId、重试新批次时隔离不串数据
+    val key = "task:$roomId:$flowId:${task.id}:${task.dispatchedAt}"
     val items = vm.processItems[key]
     val unavailable = vm.processUnavailable[key] == true
     val failed = vm.processErrors[key]
-    LaunchedEffect(task.sessionId, task.status) {
+    LaunchedEffect(key, task.sessionId, task.status, task.finishedAt) {
         if (task.status == "running") {
             while (true) {
-                vm.loadTaskProcess(roomId, task)
+                vm.loadTaskProcess(roomId, task, flowId)
                 delay(2000)
                 if (vm.processUnavailable[key] == true) break
             }
         } else {
-            vm.loadTaskProcess(roomId, task)
+            vm.loadTaskProcess(roomId, task, flowId)
         }
     }
     val procScroll = rememberScrollState()
@@ -2942,8 +2959,11 @@ private fun FlowCardBlock(
                         }
                 }
                 Spacer(Modifier.height(6.dp))
+                val flowKey = flow.flowId.ifEmpty { item.flowId.ifEmpty { "__live" } }
                 flow.tasks.forEach { task ->
-                    FlowTaskRow(task, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
+                    key(flowKey, task.id) {
+                        FlowTaskRow(task, flowKey, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
+                    }
                 }
                 if (flow.supplements.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
@@ -2992,9 +3012,11 @@ private fun FlowCardBlock(
 }
 
 @Composable
-private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, roomId: String, onRetry: () -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    var processExpanded by remember { mutableStateOf(false) }
+private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: ChatViewModel, roomId: String, onRetry: () -> Unit) {
+    var expanded by remember(task.id) { mutableStateOf(false) }
+    /** null=自动（running 展开详情即看过程，其余默认收起）；显式切换后跟随用户选择 */
+    var processOpen by remember(task.id, task.dispatchedAt) { mutableStateOf<Boolean?>(null) }
+    val procVisible = processOpen ?: (task.status == "running")
     val icon = when (task.status) {
         "done" -> "✓"
         "running" -> "▶"
@@ -3011,14 +3033,11 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val S = LocalStrings.current
-    val hasDetail = task.status == "done" || task.output != null || task.failureMessage != null ||
-        task.dependsOn.isNotEmpty() || task.retries > 0 || task.waitingFor != null ||
-        task.verifications.isNotEmpty() || task.backendRuns.isNotEmpty()
     val showRetryBtn = showRetry && task.status == "failed"
     Column(Modifier.padding(vertical = 1.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = if (hasDetail) Modifier.clickable { expanded = !expanded } else Modifier,
+            modifier = Modifier.clickable { expanded = !expanded },
         ) {
             Text(icon, color = iconColor, modifier = Modifier.width(20.dp))
             Text("@${task.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
@@ -3040,9 +3059,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                 }
                 Spacer(Modifier.width(4.dp))
             }
-            if (hasDetail) {
-                Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-            }
+            Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
         }
         task.waitingFor?.let { target ->
             Row(
@@ -3068,29 +3085,39 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                 }
             }
         }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .padding(start = 20.dp)
-                .clickable { processExpanded = !processExpanded },
-        ) {
-            Text(
-                if (processExpanded) "▾" else "▸",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            Spacer(Modifier.width(4.dp))
-            Text(
-                S.viewProcess,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
+        // pending 无过程可看：不渲染入口（与 desktop 行为对齐）
+        if (task.status != "pending") {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .padding(start = 20.dp)
+                    .clickable {
+                        expanded = true
+                        processOpen = true
+                    },
+            ) {
+                Text(
+                    "▸",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    S.viewProcess,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
-        if (processExpanded) {
-            TaskProcessSection(roomId, task, vm)
-        }
-        if (expanded && hasDetail) {
+        if (expanded) {
             Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+                // 分区按状态：failed 失败原因优先
+                if (task.status == "failed") {
+                    task.failureMessage?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.height(2.dp))
+                    }
+                }
                 Text(
                     task.task,
                     style = MaterialTheme.typography.bodySmall,
@@ -3100,6 +3127,24 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                         .heightIn(max = 240.dp)
                         .verticalScroll(rememberScrollState()),
                 )
+                if (task.status == "pending") {
+                    if (task.dependsOn.isNotEmpty()) {
+                        Text("${S.dependsOnLabel}${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Text(S.waitingDispatch, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                task.output?.takeIf { it.isNotBlank() }?.let {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
                 if (task.status == "done") {
                     val statusText = when (task.verificationStatus) {
                         "member_pass" -> S.verificationStatusMemberPass
@@ -3157,7 +3202,7 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                         )
                     }
                 }
-                if (task.dependsOn.isNotEmpty()) {
+                if (task.dependsOn.isNotEmpty() && task.status != "pending") {
                     Text("${S.dependsOnLabel}${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 task.verifications.forEachIndexed { _, v ->
@@ -3339,20 +3384,21 @@ private fun FlowTaskRow(task: FlowTask, showRetry: Boolean, vm: ChatViewModel, r
                         }
                     }
                 }
-                task.output?.takeIf { it.isNotBlank() }?.let {
+                // 过程区块：详情内二级区块（running 展开详情自动可见，其余默认收起）；
+                // pending 无过程可看，不渲染入口（与 desktop 行为对齐）
+                if (task.status != "pending") {
                     Spacer(Modifier.height(2.dp))
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState()),
-                    )
-                }
-                task.failureMessage?.let {
-                    Spacer(Modifier.height(2.dp))
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { processOpen = !procVisible },
+                    ) {
+                        Text(if (procVisible) "▾" else "▸", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(4.dp))
+                        Text(S.viewProcess, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                    if (procVisible) {
+                        TaskProcessSection(roomId, flowId, task, vm)
+                    }
                 }
             }
         }

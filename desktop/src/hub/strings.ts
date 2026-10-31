@@ -57,6 +57,8 @@ export interface Strings {
   processRunning: string;
   processLoading: string;
   processUnavailable: string;
+  processEmpty: string;
+  taskWaitingDispatch: string;
   /** 派发卡：已派发 %s 个子任务 */
   dispatchCardFmt: string;
   viewProcess: string;
@@ -106,6 +108,8 @@ export interface Strings {
   clarificationReply: string;
   clarificationReplying: string;
   clarificationSupplementHint: string;
+  composeSupplementHint: string;
+  flowStartsNewHint: string;
   deliverableEvidence: string;
   evidenceSummaryLabel: string;
   evidenceCommandLabel: string;
@@ -709,6 +713,8 @@ const zh: Strings = {
   processRunning: "进行中…",
   processLoading: "加载过程…",
   processUnavailable: "过程不可用（会话已失效或 Hub 不支持）",
+  processEmpty: "暂无过程记录",
+  taskWaitingDispatch: "等待派发",
   dispatchCardFmt: "已派发 %s 个子任务",
   viewProcess: "查看过程",
   toolStatusPending: "排队中",
@@ -757,6 +763,8 @@ const zh: Strings = {
   clarificationReply: "答复",
   clarificationReplying: "答复指挥家的确认问题",
   clarificationSupplementHint: "直接发送并入补充",
+  composeSupplementHint: "普通新消息将补充到当前流程",
+  flowStartsNewHint: "此阶段普通新消息会结束当前流程并开启新一轮",
   deliverableEvidence: "交付证据",
   evidenceSummaryLabel: "结论：",
   evidenceCommandLabel: "命令：",
@@ -1360,6 +1368,8 @@ const en: Strings = {
   processRunning: "Running…",
   processLoading: "Loading process…",
   processUnavailable: "Process unavailable (session gone or unsupported)",
+  processEmpty: "No process records yet",
+  taskWaitingDispatch: "Waiting for dispatch",
   dispatchCardFmt: "Dispatched %s subtasks",
   viewProcess: "View process",
   toolStatusPending: "Pending",
@@ -1408,6 +1418,8 @@ const en: Strings = {
   clarificationReply: "Answer",
   clarificationReplying: "Answering the conductor's questions",
   clarificationSupplementHint: "Send normally to add as a supplement",
+  composeSupplementHint: "New messages add context to the current flow",
+  flowStartsNewHint: "At this stage, a new message ends the current flow and starts a new one",
   deliverableEvidence: "Delivery evidence",
   evidenceSummaryLabel: "Summary: ",
   evidenceCommandLabel: "Command: ",
@@ -2028,4 +2040,18 @@ const PLAN_STATUS_RE = /^\[(pending|in_progress|completed|failed|cancelled)\]\s*
 
 export function planEntryLabel(S: Strings, entry: string): string {
   return entry.replace(PLAN_STATUS_RE, (_m, s: string) => `[${toolStatusLabel(S, s)}] `);
+}
+
+export function flowMessageHint(phase: string, mode: string, S: Strings): string | null {
+  if (phase === "awaiting-retry") return S.flowStartsNewHint;
+  if ((mode === "parallel" || mode === "debate") && phase === "summarizing") return S.flowStartsNewHint;
+  const phases =
+    mode === "conductor"
+      ? ["planning", "awaiting-input", "working", "reviewing", "summarizing"]
+      : mode === "pipeline"
+        ? ["working", "summarizing"]
+        : mode === "parallel" || mode === "debate"
+          ? ["working"]
+          : [];
+  return phases.includes(phase) ? S.composeSupplementHint : null;
 }

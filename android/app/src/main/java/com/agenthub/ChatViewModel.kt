@@ -20,6 +20,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.State
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -226,6 +227,7 @@ sealed class ChatItem {
         val cardType: String = "",
         val dispatchCount: Int = 0,
         val dispatchTasks: List<DispatchTask> = emptyList(),
+        val flowId: String = "",
         override val author: String,
         override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
@@ -3565,6 +3567,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
             } ?: emptyList(),
             dispatchCount = data["count"]?.jsonPrimitive?.intOrNull ?: 0,
+            flowId = data["flowId"]?.jsonPrimitive?.contentOrNull ?: "",
             author = author,
             at = at,
         )
@@ -3694,12 +3697,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // 过程卡/任务钻取的懒加载缓存：key 为 processId、"card:<itemId>" 或 "task:<roomId>:<taskId>"
+    // 过程卡/任务钻取的懒加载缓存：key 为 processId、"card:<itemId>" 或
+    // "task:<roomId>:<flowId>:<taskId>:<dispatchedAt>"（执行批次隔离，防跨 flow/重试串数据）
     val processItems = mutableStateMapOf<String, List<ChatItem>>()
     val processLoading = mutableStateMapOf<String, Boolean>()
     // 致命失败（会话不存在等）：停止重试并提示不可用；瞬时失败存 processErrors，不阻塞重试
     val processUnavailable = mutableStateMapOf<String, Boolean>()
     val processErrors = mutableStateMapOf<String, String>()
+    /** 同 key 请求的代数：过期响应不得覆盖新结果 */
+    private val processFetchSeq = mutableMapOf<String, Long>()
+    private val processFetchFingerprints = mutableMapOf<String, String>()
+    private val processFetchJobs = mutableMapOf<String, Job>()
 
     fun processKey(item: ChatItem.Process): String =
         item.processId.ifEmpty { "card:${item.id}" }
@@ -3727,36 +3735,55 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun loadTaskProcess(roomId: String, task: FlowTask) {
-        val key = "task:$roomId:${task.id}"
+    fun loadTaskProcess(roomId: String, task: FlowTask, flowId: String = "") {
+        val key = "task:$roomId:$flowId:${task.id}:${task.dispatchedAt}"
         if (task.sessionId.isEmpty()) {
             processUnavailable[key] = true
             return
         }
-        if (processLoading[key] == true) return
+        val fingerprint = "${task.status}:${task.finishedAt}"
+        if (processLoading[key] == true && processFetchFingerprints[key] == fingerprint) return
+        val seq = (processFetchSeq[key] ?: 0) + 1
+        processFetchSeq[key] = seq
+        val identityChanged = processFetchFingerprints[key] != fingerprint
+        processFetchFingerprints[key] = fingerprint
+        if (identityChanged) processItems.remove(key)
+        processFetchJobs[key]?.cancel()
         processLoading[key] = true
         processUnavailable.remove(key)
         processErrors.remove(key)
-        viewModelScope.launch {
+        processFetchJobs[key] = viewModelScope.launch {
             try {
-                processItems[key] = if (task.status == "pending") {
+                val items = if (task.status == "pending") {
                     emptyList()
                 } else if (task.status == "running") {
-                    fetchProcessItems(task.sessionId, 0L, 0L, running = true)
+                    fetchProcessItems(task.sessionId, task.dispatchedAt, 0L, running = true)
+                } else if (task.dispatchedAt > 0L && task.finishedAt >= task.dispatchedAt) {
+                    fetchProcessItems(task.sessionId, task.dispatchedAt, task.finishedAt, running = false)
                 } else {
-                    // 已完成任务：优先用房内过程卡的精确回合窗口，找不到则退化为该成员最近过程
-                    val card = chatItems.filterIsInstance<ChatItem.Process>()
-                        .lastOrNull { it.taskId == task.id && it.sessionId == task.sessionId }
-                    if (card != null) {
-                        fetchProcessItems(card.sessionId, card.turnStartAt, card.turnEndAt, running = false)
+                    val card = if (flowId.isNotEmpty()) {
+                        chatItems.filterIsInstance<ChatItem.Process>().lastOrNull {
+                            it.flowId == flowId && it.taskId == task.id &&
+                                it.sessionId == task.sessionId &&
+                                it.turnStartAt > 0L && it.turnEndAt >= it.turnStartAt &&
+                                (task.dispatchedAt <= 0L || it.turnStartAt >= task.dispatchedAt) &&
+                                (task.finishedAt <= 0L || it.turnEndAt <= task.finishedAt)
+                        }
+                    } else null
+                    if (card == null) {
+                        if (processFetchSeq[key] == seq) processUnavailable[key] = true
+                        emptyList()
                     } else {
-                        fetchProcessItems(task.sessionId, task.dispatchedAt, task.finishedAt, running = false)
+                        fetchProcessItems(card.sessionId, card.turnStartAt, card.turnEndAt, running = false)
                     }
                 }
+                if (processFetchSeq[key] == seq) processItems[key] = items
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                processErrors[key] = e.message ?: "error"
+                if (processFetchSeq[key] == seq) processErrors[key] = e.message ?: "error"
             } finally {
-                processLoading.remove(key)
+                if (processFetchSeq[key] == seq) processLoading.remove(key)
             }
         }
     }
@@ -3773,6 +3800,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (startAt > 0) put("after", JsonPrimitive(startAt - 1))
                     put("limit", JsonPrimitive(500))
                 })
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 hub.call("session.history", buildJsonObject {
                     put("sessionId", sessionId)
@@ -3793,7 +3822,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         return out
             .filter { it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan }
-            .filter { running || it.at <= 0L || (it.at >= startAt - 2000 && (endAt <= 0L || it.at <= endAt + 2000)) }
+            .filter {
+                if (it.at <= 0L) return@filter true
+                if (startAt > 0L && it.at < startAt) return@filter false
+                if (!running && endAt > 0L && it.at > endAt) return@filter false
+                true
+            }
             .sortedBy { it.at }
     }
 
