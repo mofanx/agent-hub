@@ -192,10 +192,31 @@ export function startAgent(options: {
     },
   });
 
+  // 控制通道心跳：Cloudflare ~100s 空闲超时掐断 remote，25s ping 保活；
+  // isAlive 死连接检测：上轮 pong 未回（TCP 半开/僵尸连接）→ terminate 走进程级重连，
+  // 比等内核 tcp_retries2 (~15-30min) 恢复快；readyState 先判 OPEN——非 OPEN 态 ping 会同步 throw
+  const HEARTBEAT_MS = 25_000;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let remoteAlive = false;
+
   remote.on('open', () => {
     console.log(`[agent] connected to gateway as ${hubId}`);
     // 协议握手：server 要求 control 首帧为 hello，否则按旧版拒绝
     remote?.send(envelope({ type: 'hello', proto: PROTO_V }));
+    remoteAlive = true;
+    heartbeat = setInterval(() => {
+      if (!remoteAlive) {
+        console.warn('[agent] heartbeat pong timeout, terminating');
+        remote?.terminate();
+        return;
+      }
+      remoteAlive = false;
+      if (remote?.readyState === WebSocket.OPEN) remote.ping();
+    }, HEARTBEAT_MS);
+  });
+
+  remote.on('pong', () => {
+    remoteAlive = true;
   });
 
   remote.on('message', (data) => {
@@ -249,6 +270,10 @@ export function startAgent(options: {
 
   remote.on('close', (code) => {
     console.log(`[agent] gateway disconnected (code ${code})`);
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
     for (const conn of localConns.values()) conn.close();
     localConns.clear();
     pending.clear();
