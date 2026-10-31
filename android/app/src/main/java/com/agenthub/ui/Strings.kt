@@ -591,6 +591,17 @@ interface Strings {
     val missionDelivered: String
     val missionRecordedOnly: String
     val missionEventsDetail: String
+    val missionOwnerLabel: String
+    val backToMission: String
+    val missionNavUnavailable: String
+    val missionNavMissingFlow: String
+    val missionNavNoFlow: String
+    val missionSnapshotTag: String
+    val missionShowAll: String
+    val missionLocate: String
+    val missionExecSummary: String
+    val missionNavRetry: String
+    val missionRoomPending: String
     val missionEventLifecycle: String
     val missionEventFlow: String
     val missionEventOutput: String
@@ -1203,6 +1214,17 @@ object ZhStrings : Strings {
     override val missionDelivered = "已投递"
     override val missionRecordedOnly = "仅记录"
     override val missionEventsDetail = "技术详情"
+    override val missionOwnerLabel = "所属工单"
+    override val backToMission = "返回工单"
+    override val missionNavUnavailable = "工单所属房间不可用"
+    override val missionNavMissingFlow = "找不到该次执行的过程卡（批次可能已变化）"
+    override val missionNavNoFlow = "此执行没有任务编排卡，可查看关联时间段消息"
+    override val missionSnapshotTag = "导航快照"
+    override val missionShowAll = "显示全部工单"
+    override val missionLocate = "定位"
+    override val missionExecSummary = "执行摘要"
+    override val missionNavRetry = "重试定位"
+    override val missionRoomPending = "本房间待审批"
     override val missionEventLifecycle = "生命周期"
     override val missionEventFlow = "编排"
     override val missionEventOutput = "输出"
@@ -1815,6 +1837,17 @@ object EnStrings : Strings {
     override val missionDelivered = "Delivered"
     override val missionRecordedOnly = "Recorded only"
     override val missionEventsDetail = "Technical details"
+    override val missionOwnerLabel = "Mission"
+    override val backToMission = "Back to mission"
+    override val missionNavUnavailable = "The mission's room is unavailable"
+    override val missionNavMissingFlow = "Can't find this run's flow card (the batch may have changed)"
+    override val missionNavNoFlow = "This run has no orchestration card; see messages around that time"
+    override val missionSnapshotTag = "Navigation snapshot"
+    override val missionShowAll = "Show all missions"
+    override val missionLocate = "Locate"
+    override val missionExecSummary = "Execution summary"
+    override val missionNavRetry = "Retry locate"
+    override val missionRoomPending = "Pending approvals in this room"
     override val missionEventLifecycle = "Lifecycle"
     override val missionEventFlow = "Flow"
     override val missionEventOutput = "Output"

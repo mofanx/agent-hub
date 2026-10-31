@@ -30,8 +30,8 @@ function extractDecls(sourceFile: string, names: string[]): string {
 }
 
 const screenSnippet =
-  extractDecls(path.join(DESKTOP_SRC, "screens/ChatScreen.tsx"), ["itemKey", "FlowCardBody", "FlowTaskItem"]) +
-  "\nmodule.exports = { itemKey, FlowCardBody, FlowTaskItem };\n";
+  extractDecls(path.join(DESKTOP_SRC, "screens/ChatScreen.tsx"), ["itemKey", "FlowCardBody", "FlowTaskItem", "FlowCard", "FLOW_PHASE_LABEL_KEYS"]) +
+  "\nmodule.exports = { itemKey, FlowCardBody, FlowTaskItem, FlowCard, FLOW_PHASE_LABEL_KEYS };\n";
 const screenJs = ts.transpileModule(screenSnippet, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, jsxFactory: "h" },
 }).outputText;
@@ -56,7 +56,14 @@ function makeRuntime() {
     if (autoResolve) resolve([{ kind: "thought", marker: opts.running ? "partial" : "final" }]);
     return p;
   };
-  const storeBox = { current: { lang: "en", client: null, currentRoom: null, fetchProcessItems, chatItems: [] as unknown[] } };
+  const storeBox = {
+    current: {
+      lang: "en", client: null, currentRoom: null as any, fetchProcessItems,
+      chatItems: [] as unknown[], missions: [] as unknown[], missionExecutionTarget: null as any,
+      flow: { flowId: "f1" } as any,
+      openMission: () => {}, openMissionExecution: () => {}, loadHistory: () => {},
+    },
+  };
 
   const hooks: any[] = [];
   let idx = 0;
@@ -92,10 +99,14 @@ function makeRuntime() {
       if (!(i in hooks) || !depsEqual(hooks[i].deps, deps)) hooks[i] = { kind: "cb", fn, deps };
       return hooks[i].fn;
     },
-    useHubStore: () => storeBox.current,
+    useHubStore: Object.assign(() => storeBox.current, { getState: () => storeBox.current }),
     stringsFor: () => new Proxy({}, { get: (_t, k) => `S.${String(k)}` }),
     ProcessSteps: (p: any) => h("div", { className: "proc-steps-stub" }, p.items.map((it: any) => it.marker ?? it.kind).join(",")),
     Check: () => null, Loader2: () => null, X: () => null, Circle: () => null,
+    ChevronRight: () => null, ChevronDown: () => null, RotateCcw: () => null,
+    formatClock: () => "", formatElapsed: () => "",
+    localStorage: { getItem: () => null, setItem: () => {} },
+    confirm: () => true,
     setInterval: (cb: () => void, ms: number) => { const id = nextTimer++; timers.set(id, { cb, ms, acc: 0, cleared: false }); return id; },
     clearInterval: (id: number) => { const t = timers.get(id); if (t) t.cleared = true; },
     requestAnimationFrame: (cb: () => void) => { cb(); return 0; },
@@ -471,4 +482,123 @@ test("flowMessageHint truth table(zh/en)", () => {
   assert.equal(en.composeSupplementHint, "New messages add context to the current flow");
   assert.equal(zh.flowStartsNewHint, "此阶段普通新消息会结束当前流程并开启新一轮");
   assert.equal(en.flowStartsNewHint, "At this stage, a new message ends the current flow and starts a new one");
+});
+
+const navTarget = (over: Record<string, unknown> = {}) => ({
+  missionId: "ms1", roomId: "r1", flowId: "f1", taskId: "t1", dispatchedAt: 100, nonce: 7, ...over,
+});
+const navRoom = { roomId: "r1", mode: "parallel", members: [["s1", "w"]], name: "room" };
+
+test("导航 target 命中任务:自动展开详情并打开同过程", async () => {
+  const { rt, mod } = fresh();
+  const store = (rt as any).exposed.useHubStore();
+  store.currentRoom = navRoom;
+  store.missionExecutionTarget = navTarget();
+  mount(rt, mod, { ...baseTask, status: "done", finishedAt: 200 });
+  await settle(rt);
+  assert.ok(findByClass(rt.tree, "flow-task-detail"), "任务应自动展开详情");
+  assert.equal(rt.fetchCalls.length, 1);
+  assert.equal(rt.fetchCalls[0]!.running, false);
+  assert.equal(rt.fetchCalls[0]!.from, 100);
+  assert.equal(rt.fetchCalls[0]!.to, 200);
+});
+
+test("导航 target 批次不符:dispatchedAt 不同不展开不取过程", async () => {
+  const { rt, mod } = fresh();
+  const store = (rt as any).exposed.useHubStore();
+  store.currentRoom = navRoom;
+  store.missionExecutionTarget = navTarget({ dispatchedAt: 50 });
+  mount(rt, mod, { ...baseTask, status: "done", finishedAt: 200, dispatchedAt: 100 });
+  await settle(rt);
+  assert.equal(findByClass(rt.tree, "flow-task-detail"), null);
+  assert.equal(rt.fetchCalls.length, 0);
+});
+
+test("导航展开仅当 nonce 变化触发:同 nonce 重渲染不覆盖用户收起", async () => {
+  const { rt, mod } = fresh();
+  const store = (rt as any).exposed.useHubStore();
+  store.currentRoom = navRoom;
+  store.missionExecutionTarget = navTarget();
+  mount(rt, mod, { ...baseTask, status: "done", finishedAt: 200 });
+  await settle(rt);
+  assert.ok(findByClass(rt.tree, "flow-task-detail"));
+  clickTaskLine(rt);
+  assert.equal(findByClass(rt.tree, "flow-task-detail"), null, "用户已收起");
+  rt.flush();
+  assert.equal(findByClass(rt.tree, "flow-task-detail"), null, "同 nonce 不重新展开");
+  store.missionExecutionTarget = navTarget({ nonce: 8 });
+  rt.flush();
+  assert.ok(findByClass(rt.tree, "flow-task-detail"), "新 nonce 再次展开");
+});
+
+test("FlowCard:done+failureMessage 危险样式且收起可见;nonce 只强制展开一次", async () => {
+  const { rt, mod } = fresh();
+  const store = (rt as any).exposed.useHubStore();
+  store.currentRoom = navRoom;
+  store.missionExecutionTarget = null;
+  store.flow = { flowId: "f2" };
+  const item = {
+    kind: "flow",
+    flowId: "f1",
+    author: "",
+    snapshot: {
+      flowId: "f1", phase: "done", mode: "parallel", missionId: "ms1",
+      failureMessage: "MOCK_SUMMARY_TIMEOUT", startedAt: 1, finishedAt: 2,
+      progress: { done: 2, running: 0, pending: 0, failed: 0, total: 2 },
+      tasks: [{ ...baseTask, status: "done", finishedAt: 2 }],
+    },
+  };
+  rt.mount(mod.FlowCard, { item, currentMatchClass: "" });
+  const card = findByClass(rt.tree, "flow-card");
+  assert.ok(card.props.className.includes("flow-card-failed"), "failureMessage 应转危险分组");
+  assert.ok(allText(rt.tree).includes("MOCK_SUMMARY_TIMEOUT"), "收起态应显示失败原因");
+  assert.equal(findByClass(rt.tree, "flow-task-line"), null, "终态默认收起");
+  store.missionExecutionTarget = navTarget({ taskId: undefined, dispatchedAt: undefined, nonce: 9 });
+  rt.flush();
+  assert.ok(findByClass(rt.tree, "flow-task-line"), "nonce 命中强制展开一次");
+  findByClass(rt.tree, "flow-card-head").props.onClick();
+  rt.flush();
+  assert.equal(findByClass(rt.tree, "flow-task-line"), null, "用户收起");
+  rt.flush();
+  assert.equal(findByClass(rt.tree, "flow-task-line"), null, "同 nonce 不重展开");
+  store.missionExecutionTarget = navTarget({ taskId: undefined, dispatchedAt: undefined, nonce: 10 });
+  rt.flush();
+  assert.ok(findByClass(rt.tree, "flow-task-line"), "新 nonce 可再展开");
+});
+
+
+test("过程守卫:无 dispatch 任务不请求,旧 running 快照遇新 flow 不请求", async () => {
+  const { rt, mod } = fresh();
+  const store = (rt as any).exposed.useHubStore();
+  mount(rt, mod, { ...baseTask, status: "done", finishedAt: 200, dispatchedAt: 0 });
+  await settle(rt);
+  assert.equal(rt.fetchCalls.length, 0, "无 dispatchedAt 不发无界请求");
+  clickTaskLine(rt);
+  clickProcToggle(rt);
+  await settle(rt);
+  assert.equal(rt.fetchCalls.length, 0, "手动展开过程也不发请求");
+  assert.ok(allText(rt.tree).includes("S.processUnavailable"), "明确不可用");
+
+  const rt2 = makeRuntime();
+  const sandbox2: Record<string, unknown> = { module: { exports: {} }, exports: {}, ...rt2.exposed };
+  vm.createContext(sandbox2);
+  vm.runInContext(screenJs, sandbox2);
+  const mod2 = (sandbox2.module as any).exports;
+  const store2 = (rt2 as any).exposed.useHubStore();
+  store2.flow = { flowId: "f-other" };
+  rt2.mount(mod2.FlowTaskItem, { task: { ...baseTask, status: "running" }, showRetry: false, flowId: "f1" });
+  clickTaskLine(rt2);
+  await settle(rt2);
+  assert.equal(rt2.fetchCalls.length, 0, "非 live flow 的 running 快照不借新回合过程");
+});
+
+test("导航 target 无 dispatch:展开详情但不自动取过程", async () => {
+  const { rt, mod } = fresh();
+  const store = (rt as any).exposed.useHubStore();
+  store.currentRoom = navRoom;
+  store.missionExecutionTarget = navTarget({ dispatchedAt: undefined });
+  mount(rt, mod, { ...baseTask, status: "done", finishedAt: 200 });
+  await settle(rt);
+  assert.ok(findByClass(rt.tree, "flow-task-detail"), "详情展开");
+  assert.equal(rt.fetchCalls.length, 0, "缺 dispatch 不自动取过程");
 });

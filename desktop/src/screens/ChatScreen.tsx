@@ -794,14 +794,59 @@ export function ChatScreen() {
   const scrollToFlowCard = (): boolean => {
     const root = messagesRef.current;
     if (!root) return false;
-    const els = root.querySelectorAll<HTMLElement>(".flow-card[data-flow-id]");
-    const el = els[els.length - 1];
+    const els = Array.from(root.querySelectorAll<HTMLElement>(".flow-card[data-flow-id]"));
+    const want = store.flow?.flowId;
+    const el = els.find((e) => e.dataset.flowId === want) ?? (want ? undefined : els[els.length - 1]);
     if (!el) return false;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("flow-card-flash");
     setTimeout(() => el.classList.remove("flow-card-flash"), 1600);
     return true;
   };
+
+  const navTarget = store.missionExecutionTarget;
+  const [navTick, setNavTick] = useState(0);
+  const navFlowItem = navTarget?.flowId
+    ? (store.chatItems.find(
+        (it): it is Extract<ChatItem, { kind: "flow" }> =>
+          it.kind === "flow" && it.flowId === navTarget.flowId,
+      ) ?? null)
+    : null;
+  const hasExactFlow = !!navFlowItem;
+  const navMission = navTarget ? store.missions.find((m) => m.id === navTarget.missionId) : undefined;
+  const navSnapRaw = (navMission?.flow ?? null) as (Record<string, unknown> & { flowId?: string; missionId?: string }) | null;
+  const navSnapOk =
+    navTarget?.flowId != null && navSnapRaw != null &&
+    navSnapRaw.flowId === navTarget.flowId &&
+    (!navSnapRaw.missionId || navSnapRaw.missionId === navTarget.missionId);
+  const navFlowView = navFlowItem
+    ? store.flow && (store.flow.flowId ?? "__live") === navFlowItem.flowId
+      ? store.flow
+      : navFlowItem.snapshot
+    : navSnapOk ? (navSnapRaw as FlowView) : null;
+  const navTaskFound = !!navTarget?.taskId && !!navFlowView?.tasks?.some(
+    (t) => t.id === navTarget.taskId && (navTarget.dispatchedAt == null || t.dispatchedAt === navTarget.dispatchedAt),
+  );
+  useEffect(() => {
+    if (!navTarget?.flowId || navTarget.roomId !== store.currentRoom?.roomId) return;
+    if (!hasExactFlow) return;
+    if (navTarget.taskId && navTaskFound) return;
+    const root = messagesRef.current;
+    const el = root
+      ? Array.from(root.querySelectorAll<HTMLElement>(".flow-card[data-flow-id]"))
+          .find((e) => e.dataset.flowId === navTarget.flowId)
+      : undefined;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("flow-card-flash");
+    setTimeout(() => el.classList.remove("flow-card-flash"), 1600);
+  }, [navTarget?.nonce, hasExactFlow, navTick, store.currentRoom?.roomId]);
+  const navSnapshot: Extract<ChatItem, { kind: "flow" }> | null =
+    navSnapOk
+      ? { kind: "flow", flowId: navSnapRaw!.flowId!, snapshot: navSnapRaw as never, author: "" } as Extract<ChatItem, { kind: "flow" }>
+      : null;
+  const ownerMissionId = store.flow?.missionId
+    ?? store.missions.find((m) => m.flowId && m.flowId === store.flow?.flowId && m.roomId === store.currentRoom?.roomId)?.id;
 
   const openContextPanel = () => {
     if (isContextPanel) {
@@ -967,9 +1012,48 @@ export function ChatScreen() {
       {isRoom && store.flow && store.flow.phase !== "done" && store.flow.phase !== "cancelled" && (
         <FlowStrip flow={store.flow} onLocate={scrollToFlowCard} />
       )}
+      {isRoom && ownerMissionId && (
+        <div className="mission-owner-bar">
+          <span className="mission-owner-label">{S.missionOwnerLabel}</span>
+          <button className="mission-owner-btn" onClick={() => store.openMission(ownerMissionId)}>
+            {S.backToMission}
+          </button>
+        </div>
+      )}
+
 
           <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
             <div className="chat-column">
+              {isRoom && navTarget && navTarget.roomId === store.currentRoom?.roomId && (
+                navTarget.flowId == null ? (
+                  <div className="mission-nav-hint">{S.missionNavNoFlow}</div>
+                ) : !hasExactFlow ? (
+                  navSnapshot ? (
+                    <div className="mission-nav-snapshot">
+                      <div className="mission-nav-tag">{S.missionSnapshotTag}</div>
+                      <FlowCard item={navSnapshot} currentMatchClass="" />
+                      {navTarget.taskId != null && !navTaskFound && (
+                        <div className="mission-nav-hint mission-nav-missing">{S.missionNavMissingFlow}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="mission-nav-hint mission-nav-missing">
+                      {S.missionNavMissingFlow}
+                      <button
+                        className="mission-nav-retry"
+                        onClick={() => {
+                          void store.retryMissionLocation();
+                          setNavTick((n) => n + 1);
+                        }}
+                      >
+                        {S.missionNavRetry}
+                      </button>
+                    </div>
+                  )
+                ) : navTarget.taskId && !navTaskFound ? (
+                  <div className="mission-nav-hint mission-nav-missing">{S.missionNavMissingFlow}</div>
+                ) : null
+              )}
               {store.historyLoading && (
                 <div className="history-loading">{S.loadMoreHistory}</div>
               )}
@@ -2392,6 +2476,8 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
 /** 编排卡/面板共用的视图形状：FlowInfo（实时）与 FlowCardSnapshot（房史）都可赋入 */
 type FlowView = {
   flowId?: string;
+  missionId?: string;
+  failureMessage?: string;
   phase: string;
   goal?: string;
   mode?: string;
@@ -2622,6 +2708,11 @@ function FlowCard({
     return v === null ? null : v === "1";
   });
   const collapsed = choice ?? terminal;
+  const navT = store.missionExecutionTarget;
+  const navHit = navT != null && navT.flowId === item.flowId && navT.roomId === store.currentRoom?.roomId;
+  useEffect(() => {
+    if (navHit) setChoice(false);
+  }, [navHit ? navT?.nonce : 0]);
   const toggle = () => {
     const next = !collapsed;
     setChoice(next);
@@ -2646,8 +2737,9 @@ function FlowCard({
   const endAt = flow.finishedAt ?? (terminal ? undefined : Date.now());
   const elapsed = startedAt && endAt && endAt > startedAt ? formatElapsed(startedAt, endAt, S) : "";
   const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const flowFailed = terminal && !!flow.failureMessage;
   const phaseGroup = terminal
-    ? phase === "done" && progress.failed === 0
+    ? phase === "done" && progress.failed === 0 && !flowFailed
       ? "done"
       : "failed"
     : phase === "awaiting-retry"
@@ -2709,7 +2801,20 @@ function FlowCard({
               {startedAt ? formatClock(startedAt) : ""}
               {elapsed ? ` · ${elapsed}` : ""}
             </span>
+            {flow.missionId && (
+              <button
+                className="flow-mission-btn"
+                title={S.backToMission}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  store.openMission(flow.missionId!);
+                }}
+              >
+                {S.backToMission}
+              </button>
+            )}
           </div>
+          {flowFailed && <div className="flow-card-failure">{flow.failureMessage}</div>}
           <div className="flow-card-bar">
             <i style={{ width: `${pct}%` }} />
           </div>
@@ -3355,11 +3460,35 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
   const [procItems, setProcItems] = useState<ChatItem[] | null>(null);
   const [procOpen, setProcOpen] = useState<boolean | null>(null);
   const fetchProcessItems = store.fetchProcessItems;
-  const procVisible =
-    expanded && task.status !== "pending" && (procOpen ?? task.status === "running");
+  const isLiveFlow = !!store.flow?.flowId && store.flow.flowId === flowId;
+  const procEligible =
+    task.status === "running"
+      ? isLiveFlow && (task.dispatchedAt ?? 0) > 0
+      : task.status !== "pending" &&
+        (task.dispatchedAt ?? 0) > 0 &&
+        (task.finishedAt ?? 0) >= (task.dispatchedAt ?? 0);
+  const procOpenResolved = procOpen ?? task.status === "running";
+  const procVisible = expanded && procEligible && procOpenResolved;
   const procIdentity = `${flowId}:${task.id}:${task.sessionId}:${task.dispatchedAt ?? 0}:${task.status}:${task.finishedAt ?? 0}`;
   const prevBatch = useRef(batchKey);
   const prevProcIdentity = useRef(procIdentity);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const navT = store.missionExecutionTarget;
+  const navTaskHit =
+    navT != null &&
+    navT.roomId === store.currentRoom?.roomId &&
+    navT.flowId === flowId &&
+    navT.taskId === task.id &&
+    (navT.dispatchedAt == null || navT.dispatchedAt === task.dispatchedAt);
+  const navNonce = navTaskHit ? navT!.nonce : 0;
+  useEffect(() => {
+    if (!navNonce) return;
+    setExpanded(true);
+    if (task.status !== "pending") setProcOpen(navT!.dispatchedAt != null);
+    requestAnimationFrame(() =>
+      rootRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }),
+    );
+  }, [navNonce]);
   useEffect(() => {
     if (prevBatch.current === batchKey) return;
     prevBatch.current = batchKey;
@@ -3419,7 +3548,12 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
     else doScroll();
   }, [procVisible, procItems]);
   return (
-    <div className={`flow-task flow-task-${task.status}`}>
+    <div
+      ref={rootRef}
+      className={`flow-task flow-task-${task.status}`}
+      data-task-id={task.id}
+      data-dispatched-at={task.dispatchedAt ?? 0}
+    >
       <span className={`flow-task-status flow-status-${task.status}`}>{statusIcon}</span>
       <div className="flow-task-body">
         <div
@@ -3589,16 +3723,18 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
                 <button
                   type="button"
                   className="flow-task-meta flow-task-proc-toggle"
-                  aria-expanded={procVisible}
-                  onClick={() => setProcOpen(!procVisible)}
+                  aria-expanded={procOpenResolved}
+                  onClick={() => setProcOpen(!procOpenResolved)}
                 >
-                  {procVisible ? "▾" : "▸"} {S.viewProcess}
+                  {procOpenResolved ? "▾" : "▸"} {S.viewProcess}
                   {task.status === "running" && (
                     <span className="process-running">{S.processRunning}</span>
                   )}
                 </button>
-                {procVisible &&
-                  (procLoading && procItems === null ? (
+                {procOpenResolved &&
+                  (!procEligible ? (
+                    <div className="flow-task-proc-note">{S.processUnavailable}</div>
+                  ) : procLoading && procItems === null ? (
                     <div className="process-step-line">{S.processLoading}</div>
                   ) : procItems === null ? (
                     <div className="process-step-line process-error">{S.processUnavailable}</div>

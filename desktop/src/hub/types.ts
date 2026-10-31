@@ -190,6 +190,8 @@ export interface ArtifactInfo {
 
 export interface FlowInfo {
   roomId: string;
+  missionId?: string;
+  failureMessage?: string;
   /** 编排实例 id（Hub 生成，跨重启稳定）；旧 Hub 快照可能缺失 */
   flowId?: string;
   phase: string;
@@ -211,6 +213,8 @@ export interface FlowInfo {
 /** 房史 kind:"flow" 条目内嵌的卡片快照（Hub toCardSnapshot 白名单截断版） */
 export interface FlowCardSnapshot {
   flowId: string;
+  missionId?: string;
+  failureMessage?: string;
   phase: string;
   goal?: string;
   mode?: string;
@@ -551,6 +555,21 @@ export interface MissionEvent {
   at: number;
   kind: string;
   text: string;
+  flowId?: string;
+  taskId?: string;
+  sessionId?: string;
+  dispatchedAt?: number;
+  phase?: string;
+}
+
+export interface MissionExecutionTarget {
+  missionId: string;
+  roomId: string;
+  flowId?: string;
+  taskId?: string;
+  dispatchedAt?: number;
+  anchorAt?: number;
+  nonce: number;
 }
 
 export interface MissionCriterionReview {

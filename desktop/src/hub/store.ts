@@ -20,6 +20,7 @@ import type {
   ModelBackend,
   BackendQuota,
   MissionInfo,
+  MissionExecutionTarget,
   MissionCreateInput,
   MissionStatus,
   MissionCriterionReview,
@@ -134,6 +135,8 @@ interface State {
   missionChecked: boolean;
   missionLoading: boolean;
   missionError: string | null;
+  missionFocusId: string | null;
+  missionExecutionTarget: MissionExecutionTarget | null;
   pendingDecisions: DecisionInfo[];
   decisionLoading: boolean;
 }
@@ -200,7 +203,11 @@ interface Actions {
   ): Promise<void>;
 
   openChat(session: SessionInfo, anchorAt?: number): void;
-  openRoom(room: RoomInfo, anchorAt?: number): Promise<void>;
+  openRoom(room: RoomInfo, anchorAt?: number, options?: { readOnly?: boolean; missionTarget?: MissionExecutionTarget }): Promise<void>;
+  openMission(id: string): void;
+  openMissionClear(): void;
+  retryMissionLocation(): Promise<void>;
+  openMissionExecution(id: string, context?: { flowId?: string; taskId?: string; dispatchedAt?: number; at?: number }): Promise<void>;
   clearJumpToAt(): void;
   resumeSession(session: SessionInfo, autoOpen?: boolean): Promise<void>;
   resumeOne(session: SessionInfo): Promise<SessionInfo | null>;
@@ -342,6 +349,7 @@ interface Actions {
 
 let artifactRefreshGeneration = 0;
 let missionListSeq = 0;
+let roomOpenSeq = 0;
 let decisionListSeq = 0;
 let missionRev = 0;
 let decisionRev = 0;
@@ -1340,6 +1348,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
               at: typeof ev.at === "number" ? ev.at : 0,
               kind: String(ev.kind ?? ""),
               text: String(ev.text ?? ""),
+              ...(typeof ev.flowId === "string" ? { flowId: ev.flowId } : {}),
+              ...(typeof ev.taskId === "string" ? { taskId: ev.taskId } : {}),
+              ...(typeof ev.sessionId === "string" ? { sessionId: ev.sessionId } : {}),
+              ...(typeof ev.dispatchedAt === "number" ? { dispatchedAt: ev.dispatchedAt } : {}),
+              ...(typeof ev.phase === "string" ? { phase: ev.phase } : {}),
             };
           })
         : [],
@@ -1546,6 +1559,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     missionChecked: false,
     missionLoading: false,
     missionError: null,
+    missionFocusId: null,
+    missionExecutionTarget: null,
     pendingDecisions: [],
     decisionLoading: false,
 
@@ -1704,11 +1719,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
     disconnect: () => {
       missionListSeq++;
       decisionListSeq++;
+      roomOpenSeq++;
       flowCache.clear();
       panelsCache.clear();
       get().client?.disconnect();
       set({
         client: null,
+        missionFocusId: null,
+        missionExecutionTarget: null,
         sessions: [],
         rooms: [],
         roles: [],
@@ -1988,6 +2006,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     openChat: (session: SessionInfo, anchorAt?: number) => {
+      roomOpenSeq++;
+      set({ missionExecutionTarget: null });
       saveCurrentHistoryCache();
       saveCurrentScopeCounts();
       const cached = getHistoryCache("session", session.sessionId);
@@ -2015,16 +2035,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if ((session.backendType ?? session.agent) === "devin") void get().refreshBackendQuota();
     },
 
-    openRoom: async (room: RoomInfo, anchorAt?: number) => {
-      await get().refreshAll();
-      const latestRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? room;
-      const toResume = latestRoom.members
-        .map(([sid]) => get().sessions.find((s) => s.sessionId === sid && s.offline))
-        .filter((s): s is SessionInfo => s != null);
-      for (const s of toResume) {
-        try { await get().resumeOne(s); } catch {}
+    openRoom: async (room: RoomInfo, anchorAt?: number, options?: { readOnly?: boolean; missionTarget?: MissionExecutionTarget }) => {
+      const seq = ++roomOpenSeq;
+      const client = get().client;
+      if (!options?.readOnly) set({ missionExecutionTarget: null });
+      const stale = () => seq !== roomOpenSeq || get().client !== client;
+      try {
+        await get().refreshAll();
+      } catch (e) {
+        if (!stale()) set({ connectError: String(e) });
+        return;
       }
-      if (toResume.length > 0) await get().refreshAll();
+      if (stale()) return;
+      const latestRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? room;
+      if (!options?.readOnly) {
+        const toResume = latestRoom.members
+          .map(([sid]) => get().sessions.find((s) => s.sessionId === sid && s.offline))
+          .filter((s): s is SessionInfo => s != null);
+        for (const s of toResume) {
+          try { await get().resumeOne(s); } catch {}
+        }
+        if (toResume.length > 0) {
+          try { await get().refreshAll(); } catch (e) {
+            if (!stale()) set({ connectError: String(e) });
+            return;
+          }
+        }
+      }
+      if (stale()) return;
       const updatedRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? latestRoom;
 
       saveCurrentHistoryCache();
@@ -2054,6 +2092,66 @@ export const useHubStore = create<State & Actions>((set, get) => {
       void get().refreshMemberStatus();
       if (updatedRoom.activeSpeaker) void get().refreshSessionUsage(updatedRoom.activeSpeaker);
       void get().refreshRoomMemberModels();
+      if (!stale() && options?.missionTarget && options.missionTarget.roomId === updatedRoom.roomId) {
+        set({ missionExecutionTarget: options.missionTarget });
+      }
+    },
+
+    openMission: (id: string) => {
+      roomOpenSeq++;
+      set({ missionExecutionTarget: null });
+      if (!get().missions.some((m) => m.id === id)) {
+        set({ connectError: stringsFor(get().lang).missionNavUnavailable });
+        return;
+      }
+      set({ missionFocusId: id, searchQuery: "", screen: "sessions" });
+    },
+
+    openMissionClear: () => {
+      set({ missionFocusId: null });
+    },
+
+    openMissionExecution: async (id: string, context?: { flowId?: string; taskId?: string; dispatchedAt?: number; at?: number }) => {
+      const S = stringsFor(get().lang);
+      const m = get().missions.find((x) => x.id === id);
+      const room = m ? get().rooms.find((r) => r.roomId === m.roomId) : undefined;
+      if (!m || !room) {
+        set({ connectError: S.missionNavUnavailable });
+        return;
+      }
+      const flowId = context?.flowId ?? m.flowId ?? undefined;
+      const oldFlow = context?.flowId != null && context.flowId !== m.flowId;
+      const anchor = oldFlow
+        ? context?.at
+        : (typeof (m.flow as Record<string, unknown> | null)?.startedAt === "number"
+            ? (m.flow as Record<string, unknown>).startedAt as number
+            : m.startedAt ?? context?.at);
+      await get().openRoom(room, anchor ?? undefined, {
+        readOnly: true,
+        missionTarget: {
+          missionId: id,
+          roomId: m.roomId,
+          ...(flowId ? { flowId } : {}),
+          ...(context?.taskId ? { taskId: context.taskId } : {}),
+          ...(context?.dispatchedAt != null ? { dispatchedAt: context.dispatchedAt } : {}),
+          ...(anchor != null ? { anchorAt: anchor } : {}),
+          nonce: Date.now() + Math.random(),
+        },
+      });
+    },
+
+    retryMissionLocation: async () => {
+      const t = get().missionExecutionTarget;
+      if (!t) return;
+      const room = get().rooms.find((r) => r.roomId === t.roomId);
+      if (!room) {
+        set({ connectError: stringsFor(get().lang).missionNavUnavailable });
+        return;
+      }
+      await get().openRoom(room, t.anchorAt, {
+        readOnly: true,
+        missionTarget: { ...t, nonce: Date.now() + Math.random() },
+      });
     },
 
     clearJumpToAt: () => {

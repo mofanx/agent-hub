@@ -255,7 +255,17 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
     for (const f of FILTERS) c[f.key] = missions.filter(f.match).length;
     return c;
   }, [missions]);
-  const filtered = useMemo(() => missions.filter(FILTERS.find((f) => f.key === filter)!.match), [missions, filter]);
+  const focusId = store.missionFocusId;
+  const filtered = useMemo(
+    () => (focusId != null ? missions.filter((m) => m.id === focusId) : missions.filter(FILTERS.find((f) => f.key === filter)!.match)),
+    [missions, filter, focusId],
+  );
+  React.useEffect(() => {
+    if (!focusId) return;
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-mission-id="${CSS.escape(focusId)}"]`)?.scrollIntoView({ block: "nearest" });
+    });
+  }, [focusId, missions]);
 
   if (!store.missionSupported) return <DecisionSection />;
   const lines = (v: string) => v.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -292,7 +302,12 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
     <section className="mission-panel">
       <div className="home-section-title">
         <Target size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-        {S.missionSection} ({missions.length})
+        {S.missionSection} ({filtered.length})
+        {focusId != null && (
+          <button className="secondary" style={{ marginLeft: 8 }} onClick={() => store.openMissionClear()}>
+            {S.missionShowAll}
+          </button>
+        )}
         <button className="secondary" style={{ marginLeft: 8 }} onClick={() => setShowForm(!showForm)}>
           {S.missionNew}
         </button>
@@ -359,7 +374,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
             const rm = rooms.find((r) => r.roomId === m.roomId);
             const canAccept = m.status === "awaiting-acceptance" && allPassed(m);
             return (
-              <div key={m.id} className="home-recent-item mission-item">
+              <div key={m.id} className="home-recent-item mission-item" data-mission-id={m.id}>
                 <div className="nav-text" style={{ flex: 1 }}>
                   <span className="nav-title">
                     <span className={`mission-status mission-status-${m.status}`}>
@@ -384,13 +399,36 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                   )}
                   {m.status === "awaiting-acceptance" && <span className="nav-sub mission-hint">{S.missionAwaitingHint}</span>}
                   {m.error && <span className="nav-sub mission-error">{m.error}</span>}
+                  <MissionExecSummary mission={m} S={S} />
                   <MissionEvidence mission={m} />
                   {m.events.length > 0 && (
                     <details className="nav-sub">
                       <summary>{S.missionEventsDetail} ({m.events.length})</summary>
-                      {m.events.map((e) => (
-                        <div key={e.id}>
-                          [{missionEventKindLabel(S, e.kind)}] {e.text}
+                      {m.events.slice().sort((a, b) => b.at - a.at).map((e) => (
+                        <div key={e.id} className="mission-event-row">
+                          <span className="mission-event-time">{formatMissionTime(e.at)}</span>
+                          <span className="mission-event-text">
+                            [{missionEventKindLabel(S, e.kind)}] {e.text}
+                            {(e.sessionId || e.taskId || e.phase) && (
+                              <span className="mission-event-meta">
+                                {" · "}{[e.sessionId, e.taskId, e.phase ? missionPhaseLabel(S, e.phase) : undefined].filter(Boolean).join(" · ")}
+                              </span>
+                            )}
+                          </span>
+                          {e.flowId != null && (
+                            <button
+                              className="mission-locate-btn"
+                              title={S.missionLocate}
+                              onClick={() => void store.openMissionExecution(m.id, {
+                                ...(e.flowId ? { flowId: e.flowId } : {}),
+                                ...(e.taskId ? { taskId: e.taskId } : {}),
+                                ...(e.dispatchedAt != null ? { dispatchedAt: e.dispatchedAt } : {}),
+                                at: e.at,
+                              })}
+                            >
+                              {S.missionLocate}
+                            </button>
+                          )}
                         </div>
                       ))}
                     </details>
@@ -502,7 +540,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                   <button className="secondary" disabled={busy} onClick={() => void run(() => store.retryMission(m.id))}>{S.missionRetry}</button>
                 )}
                 {rm && (
-                  <button className="icon-btn" title={S.missionViewRoom} onClick={() => void store.openRoom(rm)}>
+                  <button className="icon-btn" title={S.missionViewRoom} onClick={() => void store.openMissionExecution(m.id)}>
                     <ExternalLink size={14} />
                   </button>
                 )}
@@ -514,4 +552,80 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
     </section>
     </>
   );
+}
+
+
+function MissionExecSummary({ mission: m, S }: { mission: MissionInfo; S: Strings }) {
+  const store = useHubStore();
+  const flow = m.flow as Record<string, unknown> | null;
+  const lastAt = m.events.reduce((acc, e) => Math.max(acc, e.at), 0) || m.updatedAt;
+  const roomDecisions = store.pendingDecisions.filter((d) => d.roomId === m.roomId).length;
+  const roomPending = roomDecisions > 0 ? ` · ${S.missionRoomPending}: ${roomDecisions}` : "";
+  if (!flow || typeof flow.phase !== "string") {
+    return (
+      <div className="mission-exec">
+        <span className="nav-sub">
+          {S.missionExecSummary} · {formatMissionTime(lastAt)}{roomPending}
+        </span>
+      </div>
+    );
+  }
+  const progress = (flow.progress ?? {}) as Record<string, unknown>;
+  const tasks = Array.isArray(flow.tasks) ? (flow.tasks as Record<string, unknown>[]) : [];
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  return (
+    <div className="mission-exec">
+      <span className="nav-sub">
+        {S.missionExecSummary}: {missionPhaseLabel(S, String(flow.phase))}
+        {" · "}{num(progress.done)}/{num(progress.total)}
+        {" · "}{formatMissionTime(lastAt)}{roomPending}
+      </span>
+      {typeof flow.failureMessage === "string" && flow.failureMessage && (
+        <span className="nav-sub mission-error">{flow.failureMessage}</span>
+      )}
+      {tasks.map((t) => {
+        const tid = String(t.id ?? "");
+        const tstatus = String(t.status ?? "pending");
+        const icon = tstatus === "done" ? "✓" : tstatus === "running" ? "▶" : tstatus === "failed" ? "✗" : "○";
+        return (
+          <div key={tid} className="mission-task-row">
+            <span className={`nav-sub mission-task-${tstatus}`}>
+              {icon} @{String(t.name ?? t.sessionId ?? "")} {String(t.task ?? "")}
+              {typeof t.failureMessage === "string" && t.failureMessage ? ` · ${t.failureMessage}` : ""}
+              {typeof t.waitingQuestion === "string" && t.waitingQuestion ? ` · ${t.waitingQuestion}` : ""}
+            </span>
+            <button
+              className="mission-locate-btn"
+              title={S.missionLocate}
+              onClick={() => void store.openMissionExecution(m.id, {
+                ...(typeof flow.flowId === "string" ? { flowId: flow.flowId } : {}),
+                taskId: tid,
+                ...(typeof t.dispatchedAt === "number" ? { dispatchedAt: t.dispatchedAt } : {}),
+              })}
+            >
+              {S.missionLocate}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function missionPhaseLabel(S: Strings, phase: string): string {
+  switch (phase) {
+    case "planning": return S.phasePlanning;
+    case "awaiting-input": return S.flowAwaitingInput;
+    case "working": return S.phaseWorking;
+    case "reviewing": return S.phaseReviewing;
+    case "summarizing": return S.phaseSummarizing;
+    case "awaiting-retry": return S.phaseAwaitingRetry;
+    case "done": return S.phaseDone;
+    case "cancelled": return S.phaseCancelled;
+    default: return phase;
+  }
+}
+
+function formatMissionTime(at: number): string {
+  return at > 0 ? new Date(at).toLocaleString() : "";
 }

@@ -13,7 +13,27 @@ export type MissionStatus =
   | "stopped"
   | "failed";
 
-export type MissionEvent = { id: string; at: number; kind: string; text: string };
+export type MissionEvent = {
+  id: string;
+  at: number;
+  kind: string;
+  text: string;
+  flowId?: string;
+  taskId?: string;
+  sessionId?: string;
+  dispatchedAt?: number;
+  phase?: string;
+};
+
+export type MissionTurnContext = {
+  missionId: string;
+  roomId: string;
+  sessionId: string;
+  flowId?: string;
+  taskId?: string;
+  dispatchedAt?: number;
+  phase?: string;
+};
 
 export type MissionCriterionReview = {
   index: number;
@@ -191,7 +211,12 @@ function validateRecord(raw: unknown): MissionRecord {
     const ev = e as Record<string, unknown>;
     if (typeof ev !== "object" || ev === null || typeof ev.id !== "string" || typeof ev.at !== "number")
       throw new Error("mission record: bad event entry");
-    return { id: ev.id, at: ev.at, kind: String(ev.kind ?? ""), text: String(ev.text ?? "") };
+    const rec: MissionEvent = { id: ev.id, at: ev.at, kind: String(ev.kind ?? ""), text: String(ev.text ?? "") };
+    for (const k of ["flowId", "taskId", "sessionId", "phase"] as const) {
+      if (typeof ev[k] === "string") rec[k] = ev[k] as string;
+    }
+    if (typeof ev.dispatchedAt === "number") rec.dispatchedAt = ev.dispatchedAt;
+    return rec;
   });
   const num = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
@@ -345,8 +370,18 @@ export class MissionManager {
     this.deps.store.setMeta(META_KEY, JSON.stringify([...this.missions.values()]));
   }
 
-  private log(m: MissionRecord, kind: string, text: string): void {
-    m.events.push({ id: `e${randomUUID().slice(0, 8)}`, at: Date.now(), kind, text });
+  private log(m: MissionRecord, kind: string, text: string, context?: MissionTurnContext): void {
+    m.events.push({
+      id: `e${randomUUID().slice(0, 8)}`,
+      at: Date.now(),
+      kind,
+      text,
+      ...(context?.flowId ? { flowId: context.flowId } : {}),
+      ...(context?.taskId ? { taskId: context.taskId } : {}),
+      ...(context?.sessionId ? { sessionId: context.sessionId } : {}),
+      ...(context?.dispatchedAt !== undefined ? { dispatchedAt: context.dispatchedAt } : {}),
+      ...(context?.phase ? { phase: context.phase } : {}),
+    });
     if (m.events.length > MISSION_EVENT_LIMIT) {
       m.events.splice(0, m.events.length - MISSION_EVENT_LIMIT);
     }
@@ -519,21 +554,11 @@ export class MissionManager {
       if (other.id !== m.id && other.roomId === m.roomId && OCCUPYING.has(other.status))
         throw new Error(`room already occupied by mission ${other.id}`);
     }
-    // 归属预检：仅明确归属他人的活跃 flow 显式拒绝（与 runMissionTask 的 occupied 语义一致），
-    // 不交给 handle 吸收/取消；无标记（兼容旧 flow）或本 mission 的 flow 走吸收路径，
-    // 吸收场景成员在跑旧流程属正常，不应用 member busy 阻断
     const preFlow = this.deps.getFlow(m.roomId);
-    const flowOwner =
-      typeof preFlow?.missionId === "string" && preFlow.missionId !== "" && String(preFlow.phase ?? "") !== "done"
-        ? preFlow.missionId
-        : undefined;
     const roomActive = this.deps.hasActiveFlow(m.roomId);
-    if (roomActive && flowOwner !== undefined && flowOwner !== m.id)
-      throw new Error(`room already occupied by an active flow of mission ${flowOwner}`);
-    if (!roomActive) {
-      for (const mem of room.members) {
-        if (this.deps.isBusy(mem.sessionId)) throw new Error(`member busy: ${mem.name}`);
-      }
+    if (roomActive) throw new Error(`room ${m.roomId} already has an active flow`);
+    for (const mem of room.members) {
+      if (this.deps.isBusy(mem.sessionId)) throw new Error(`member busy: ${mem.name}`);
     }
     m.baselineFlowId = typeof preFlow?.flowId === "string" ? preFlow.flowId : undefined;
     m.status = "running";
@@ -675,7 +700,8 @@ export class MissionManager {
       flow.waitingFor === "user" ||
       tasks.some((t) => t.waitingFor === "user");
     if (phase === "done") {
-      const anyFailed = tasks.some((t) => t.status === "failed");
+      const flowFailure = typeof flow.failureMessage === "string" && flow.failureMessage ? flow.failureMessage : undefined;
+      const anyFailed = tasks.some((t) => t.status === "failed") || flowFailure !== undefined;
       m.output = summarizeFlow(flow);
       this.transition(
         m,
@@ -683,7 +709,10 @@ export class MissionManager {
         "flow",
         anyFailed ? "flow done with failed tasks" : "flow done",
       );
-      if (anyFailed) m.error = "flow finished with failed tasks";
+      if (anyFailed) {
+        const taskFailure = tasks.find((t) => t.status === "failed" && typeof t.failureMessage === "string");
+        m.error = flowFailure ?? (taskFailure?.failureMessage as string | undefined) ?? "flow finished with failed tasks";
+      }
     } else if (phase === "cancelled") {
       this.transition(m, "stopped", "flow", "flow cancelled");
     } else if (waitingUser) {
@@ -862,10 +891,72 @@ export class MissionManager {
     this.commit(m);
   }
 
-  onTurnError(sessionId: string, roomId: string | undefined, message: string): void {
+  captureTurnContext(sessionId: string, roomId: string | undefined): MissionTurnContext | undefined {
+    const m = roomId ? this.activeFor(roomId) : this.findPending(sessionId);
+    if (!m || !this.ownsTurn(m, sessionId)) return undefined;
+    const flow = (m.flow ?? this.deps.getFlow(m.roomId)) as Record<string, unknown> | undefined;
+    const tasks = Array.isArray(flow?.tasks) ? (flow!.tasks as Record<string, unknown>[]) : [];
+    const running = tasks.find((t) => t.sessionId === sessionId && t.status === "running");
+    return {
+      missionId: m.id,
+      roomId: m.roomId,
+      sessionId,
+      ...(typeof flow?.flowId === "string" && flow.flowId ? { flowId: flow.flowId } : {}),
+      ...(typeof flow?.phase === "string" && flow.phase ? { phase: flow.phase } : {}),
+      ...(running
+        ? {
+            taskId: String(running.id ?? ""),
+            ...(typeof running.dispatchedAt === "number" ? { dispatchedAt: running.dispatchedAt } : {}),
+          }
+        : {}),
+    };
+  }
+
+  private writebackContextError(sessionId: string, message: string, context?: MissionTurnContext): void {
+    if (!context) return;
+    const m = this.missions.get(context.missionId);
+    if (!m || m.roomId !== context.roomId || context.sessionId !== sessionId) return;
+    if (m.flowId && context.flowId && m.flowId !== context.flowId) return;
+    this.log(m, "error", `turn error on ${sessionId}: ${message.slice(0, 300)}`, context);
+    if (!m.error || m.error === "flow finished with failed tasks") {
+      m.error = message.slice(0, 1000);
+    }
+    this.commit(m);
+  }
+
+  onTurnError(sessionId: string, roomId: string | undefined, message: string, context?: MissionTurnContext): void {
+    if (context !== undefined) {
+      const target = this.contextTarget(sessionId, context);
+      if (!target) return;
+      if (this.activeFor(target.roomId) === target && this.ownsTurn(target, sessionId)) {
+        this.applyTurnError(target, sessionId, message, context);
+      } else {
+        this.writebackContextError(sessionId, message, context);
+      }
+      return;
+    }
     const m = roomId ? this.activeFor(roomId) : this.findPending(sessionId);
     if (!m) return;
     if (!this.ownsTurn(m, sessionId)) return;
+    this.applyTurnError(m, sessionId, message, undefined);
+  }
+
+  private contextTarget(sessionId: string, context: MissionTurnContext): MissionRecord | undefined {
+    const m = this.missions.get(context.missionId);
+    if (!m || m.roomId !== context.roomId || context.sessionId !== sessionId) return undefined;
+    if (m.flowId && context.flowId && m.flowId !== context.flowId) return undefined;
+    if (context.taskId !== undefined) {
+      const tasks = Array.isArray(m.flow?.tasks)
+        ? (m.flow!.tasks as Record<string, unknown>[])
+        : (Array.isArray(this.deps.getFlow(m.roomId)?.tasks) ? (this.deps.getFlow(m.roomId)!.tasks as Record<string, unknown>[]) : []);
+      const cur = tasks.find((t) => String(t.id ?? "") === context.taskId && t.sessionId === sessionId);
+      if (!cur) return undefined;
+      if (context.dispatchedAt !== undefined && cur.dispatchedAt !== context.dispatchedAt) return undefined;
+    }
+    return m;
+  }
+
+  private applyTurnError(m: MissionRecord, sessionId: string, message: string, context: MissionTurnContext | undefined): void {
     m.pending = m.pending.filter((s) => s !== sessionId);
     if (!m.turnErrors.some((t) => t.sid === sessionId)) {
       m.turnErrors.push({ sid: sessionId, message });
@@ -880,13 +971,13 @@ export class MissionManager {
         m.flowId = flowId;
         this.log(m, "flow", `bound flow ${flowId}`);
       }
-      this.log(m, "error", `turn error on ${sessionId}: ${message.slice(0, 300)}`);
+      this.log(m, "error", `turn error on ${sessionId}: ${message.slice(0, 300)}`, context?.missionId === m.id ? context : undefined);
       this.commit(m);
       return;
     }
     this.rescanBusy(m);
     if (m.pending.length === 0) this.finishNoFlow(m);
-    else this.log(m, "error", `turn error on ${sessionId}: ${message.slice(0, 300)}`);
+    else this.log(m, "error", `turn error on ${sessionId}: ${message.slice(0, 300)}`, context?.missionId === m.id ? context : undefined);
     this.commit(m);
   }
 

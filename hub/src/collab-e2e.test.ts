@@ -2436,8 +2436,10 @@ describe("collab-e2e", () => {
       undefined,
       "回合早于派发窗口则不误关联",
     );
+    const t2 = h.flow()!.tasks.find((t) => t.id === "t2")!;
+    assert.ok(t2.dispatchedAt && t2.dispatchedAt > 0, "t2 派发时记录 dispatchedAt");
     assert.equal(
-      h.manager.taskIdForTurn("s3", h.room.roomId, turnStart, turnEnd),
+      h.manager.taskIdForTurn("s3", h.room.roomId, t2.dispatchedAt!, t2.dispatchedAt! + 1),
       "t2",
       "t2 派发后 tester 回合关联 t2",
     );

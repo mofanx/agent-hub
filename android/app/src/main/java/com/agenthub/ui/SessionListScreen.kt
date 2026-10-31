@@ -524,6 +524,11 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     Modifier.weight(1f).padding(horizontal = 12.dp),
                     contentPadding = PaddingValues(bottom = 88.dp),
                 ) {
+                    if (selectedTab == 1 && vm.missionFocusId != null && !inBatchMode && vm.missionSupported) {
+                        item(key = "mission-focus") {
+                            MissionSection(vm, S, onCreateRoom = { showCreateRoom = true })
+                        }
+                    }
                 if (inBatchMode && vm.currentProfile == null) {
                     item {
                         Card(
@@ -727,7 +732,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     }
                 }
                 if (selectedTab == 1 || inBatchMode) {
-                    if (!inBatchMode && vm.missionSupported) {
+                    if (!inBatchMode && vm.missionSupported && vm.missionFocusId == null) {
                         item {
                             MissionSection(vm, S, onCreateRoom = { showCreateRoom = true })
                         }

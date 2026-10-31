@@ -116,6 +116,8 @@ export function toCardSnapshot(
     phase,
     goal: String(flow.goal ?? "").slice(0, GENERIC_MAX),
     mode,
+    ...(clip(flow.missionId, 64) ? { missionId: clip(flow.missionId, 64) } : {}),
+    ...(clip(flow.failureMessage) ? { failureMessage: clip(flow.failureMessage) } : {}),
     startedAt: Number(flow.startedAt ?? 0),
     ...(clip(flow.waitingFor, 32) ? { waitingFor: clip(flow.waitingFor, 32) } : {}),
     ...(typeof flow.rounds === "number" ? { rounds: flow.rounds } : {}),

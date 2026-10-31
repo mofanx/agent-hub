@@ -24,6 +24,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
@@ -467,6 +469,34 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             flashFlowId = null
         }
     }
+    val navTarget = vm.missionExecutionTarget
+    val navCardItem = navTarget?.flowId?.let { fid ->
+        messages.firstOrNull { (it as? ChatListItem.FlowCard)?.item?.flowId == fid } as? ChatListItem.FlowCard
+    }
+    val hasExactFlow = navCardItem != null
+    val navMissionForView = navTarget?.let { t -> vm.missions.firstOrNull { it.id == t.missionId } }
+    val navSnapView = navMissionForView?.flow?.let { vm.parseMissionFlow(it, navMissionForView.roomId) }
+        ?.takeIf { it.flowId == navTarget?.flowId && (it.missionId == null || it.missionId == navTarget.missionId) }
+    val navFlowView = when {
+        navTarget?.flowId == null -> null
+        vm.flow?.flowId == navTarget.flowId -> vm.flow
+        else -> navCardItem?.item?.snapshot ?: navSnapView
+    }
+    val navTaskFound = navTarget?.taskId != null && navFlowView?.tasks?.any {
+        it.id == navTarget.taskId && (navTarget.dispatchedAt == null || it.dispatchedAt == navTarget.dispatchedAt)
+    } == true
+    val navOffset = if (navTarget != null && navTarget.roomId == vm.currentRoom?.roomId) 1 else 0
+    LaunchedEffect(navTarget?.nonce, hasExactFlow, navTaskFound) {
+        val t = navTarget ?: return@LaunchedEffect
+        if (t.roomId != vm.currentRoom?.roomId || !hasExactFlow) return@LaunchedEffect
+        val idx = messages.indexOfFirst {
+            (it as? ChatListItem.FlowCard)?.item?.flowId == t.flowId
+        }
+        if (idx >= 0) {
+            listState.scrollToItem(idx + navOffset)
+            flashFlowId = t.flowId
+        }
+    }
 
     BackHandler(enabled = !editingRoom) {
         if (vm.multiSelectMode) vm.exitMultiSelect()
@@ -740,6 +770,21 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         "artifact" -> ArtifactPanel(vm.currentArtifacts, vm)
                         "event" -> EventPanel(vm.currentEvents, vm)
                     }
+                    if (isRoom) {
+                        val ownerId = vm.flow?.missionId
+                            ?: vm.missions.firstOrNull { it.flowId != null && it.flowId == vm.flow?.flowId }?.id
+                        if (ownerId != null) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(S.missionOwnerLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                TextButton(onClick = { vm.openMission(ownerId) }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                                    Text(S.backToMission, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
@@ -754,6 +799,63 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             listBounds = Rect(0f, top, 0f, top + coordinates.size.height)
                         },
                 ) {
+                    if (isRoom && navTarget != null && navTarget.roomId == vm.currentRoom?.roomId) {
+                        item(key = "mission-nav") {
+                            when {
+                                navTarget.flowId == null -> Text(
+                                    S.missionNavNoFlow,
+                                    Modifier.padding(vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                !hasExactFlow -> {
+                                    if (navSnapView != null) {
+                                        Column(Modifier.padding(vertical = 2.dp)) {
+                                            Text(S.missionSnapshotTag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            FlowCardBlock(ChatItem.Flow(id = -1L, flowId = navSnapView.flowId, snapshot = navSnapView), vm)
+                                            if (navTarget.taskId != null && !navTaskFound) {
+                                                Text(
+                                                    S.missionNavMissingFlow,
+                                                    Modifier.padding(vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                S.missionNavMissingFlow,
+                                                Modifier.weight(1f).padding(vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                            TextButton(onClick = { vm.retryMissionLocation() }) {
+                                                Text(S.missionNavRetry, style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+                                    }
+                                }
+                                navTarget.taskId != null && !navTaskFound -> Text(
+                                    S.missionNavMissingFlow,
+                                    Modifier.padding(vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                                else -> {}
+                            }
+                            vm.missionNavMessage?.let { code ->
+                                if (code == "unavailable") {
+                                    Text(
+                                        S.missionNavUnavailable,
+                                        Modifier.padding(vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                            }
+                        }
+                    }
                     itemsIndexed(
                         messages,
                         key = { _, item -> item.id },
@@ -2723,6 +2825,9 @@ private fun FlowCardBlock(
     val terminal = flow.phase == "done" || flow.phase == "cancelled"
     // 折叠默认：进行中展开、终态折叠；用户手动选择后按 flowId 记忆（-1 未选/0 展开/1 折叠）
     var collapsedChoice by rememberSaveable(item.flowId) { mutableStateOf(-1) }
+    val navT = vm.missionExecutionTarget
+    val navHit = ChatViewModel.missionFlowNavMatch(navT, vm.currentRoom?.roomId, flow.flowId.ifEmpty { item.flowId })
+    LaunchedEffect(if (navHit) navT?.nonce else 0L) { if (navHit) collapsedChoice = 0 }
     val collapsed = if (collapsedChoice >= 0) collapsedChoice == 1 else terminal
     // 进行中卡片每秒刷新耗时
     var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -2745,14 +2850,15 @@ private fun FlowCardBlock(
         "cancelled" -> S.phaseCancelled
         else -> ""
     }
+    val flowFailed = !flow.failureMessage.isNullOrBlank()
     val phaseTagColor = when (flow.phase) {
-        "done" -> MaterialTheme.colorScheme.primaryContainer
+        "done" -> if (flowFailed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer
         "cancelled" -> MaterialTheme.colorScheme.errorContainer
         "awaiting-retry" -> MaterialTheme.colorScheme.tertiaryContainer
         else -> MaterialTheme.colorScheme.surface
     }
     val phaseTagTextColor = when (flow.phase) {
-        "done" -> MaterialTheme.colorScheme.onPrimaryContainer
+        "done" -> if (flowFailed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
         "cancelled" -> MaterialTheme.colorScheme.onErrorContainer
         "awaiting-retry" -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -2856,6 +2962,18 @@ private fun FlowCardBlock(
                             softWrap = false,
                         )
                     }
+                }
+            }
+            flow.failureMessage?.takeIf { it.isNotBlank() }?.let { fm ->
+                if (terminal) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        fm,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
             if (collapsed) {
@@ -2981,6 +3099,15 @@ private fun FlowCardBlock(
                         )
                     }
                 }
+                if (flow.missionId != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(
+                            onClick = { vm.openMission(flow.missionId!!) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) { Text(S.backToMission, style = MaterialTheme.typography.labelSmall) }
+                    }
+                }
                 if (canCancel || showRetry) {
                     Spacer(Modifier.height(6.dp))
                     Row(
@@ -3016,6 +3143,18 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
     var expanded by remember(task.id) { mutableStateOf(false) }
     /** null=自动（running 展开详情即看过程，其余默认收起）；显式切换后跟随用户选择 */
     var processOpen by remember(task.id, task.dispatchedAt) { mutableStateOf<Boolean?>(null) }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val navT = vm.missionExecutionTarget
+    val navHit = ChatViewModel.missionTaskNavMatch(navT, vm.currentRoom?.roomId, flowId, task)
+    LaunchedEffect(if (navHit) navT?.nonce else 0L) {
+        if (navHit) {
+            expanded = true
+            processOpen = navT?.dispatchedAt != null
+            withFrameNanos { }
+            withFrameNanos { }
+            bringIntoViewRequester.bringIntoView()
+        }
+    }
     val procVisible = processOpen ?: (task.status == "running")
     val icon = when (task.status) {
         "done" -> "✓"
@@ -3034,7 +3173,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
     val context = LocalContext.current
     val S = LocalStrings.current
     val showRetryBtn = showRetry && task.status == "failed"
-    Column(Modifier.padding(vertical = 1.dp)) {
+    Column(Modifier.padding(vertical = 1.dp).bringIntoViewRequester(bringIntoViewRequester)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.clickable { expanded = !expanded },

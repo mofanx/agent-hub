@@ -1324,8 +1324,9 @@ function onAgentEvent(event: HubEvent): void {
     if (sessionId) {
       flushTurnProcess(sessionId, "failed");
       const errorRoomId = roomModeManager.roomIdForTurn(sessionId);
+      const turnContext = missionManager.captureTurnContext(sessionId, errorRoomId);
       interruptTurnDrafts(sessionId);
-      const message = String(event.params.message ?? "");
+      const message = String(event.params.message ?? "").trim() || "turn error";
       const author = displayNameFor(sessionId);
       store.append("session", sessionId, {
         at: Date.now(),
@@ -1341,8 +1342,8 @@ function onAgentEvent(event: HubEvent): void {
           text: message,
         });
       }
-      roomModeManager.onPromptError(sessionId);
-      missionManager.onTurnError(sessionId, errorRoomId, message);
+      roomModeManager.onPromptError(sessionId, message);
+      missionManager.onTurnError(sessionId, errorRoomId, message, turnContext);
       persistState();
     }
   } else if (event.method === "room.notice") {

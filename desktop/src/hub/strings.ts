@@ -549,6 +549,17 @@ export interface Strings {
   devinQuotaLabel: string;
   quotaResetFmt: string;
   missionSection: string;
+  missionOwnerLabel: string;
+  backToMission: string;
+  missionNavUnavailable: string;
+  missionNavMissingFlow: string;
+  missionNavNoFlow: string;
+  missionNavRetry: string;
+  missionSnapshotTag: string;
+  missionShowAll: string;
+  missionLocate: string;
+  missionExecSummary: string;
+  missionRoomPending: string;
   missionRoom: string;
   missionOwner: string;
   missionOwnerAuto: string;
@@ -1204,6 +1215,17 @@ const zh: Strings = {
   devinQuotaLabel: "Devin 用量",
   quotaResetFmt: "重置 %s",
   missionSection: "目标工作单",
+  missionOwnerLabel: "所属工单",
+  backToMission: "返回工单",
+  missionNavUnavailable: "工单所属房间不可用",
+  missionNavMissingFlow: "找不到该次执行的过程卡（批次可能已变化）",
+  missionNavNoFlow: "此执行没有任务编排卡，可查看关联时间段消息",
+  missionNavRetry: "重试定位",
+  missionSnapshotTag: "导航快照",
+  missionShowAll: "显示全部工单",
+  missionLocate: "定位",
+  missionExecSummary: "执行摘要",
+  missionRoomPending: "本房间待审批",
   missionRoom: "房间",
   missionOwner: "负责人",
   missionOwnerAuto: "默认（指挥家/首成员）",
@@ -1859,6 +1881,17 @@ const en: Strings = {
   devinQuotaLabel: "Devin usage",
   quotaResetFmt: "Resets %s",
   missionSection: "Task missions",
+  missionOwnerLabel: "Mission",
+  backToMission: "Back to mission",
+  missionNavUnavailable: "The mission's room is unavailable",
+  missionNavMissingFlow: "Can't find this run's flow card (the batch may have changed)",
+  missionNavNoFlow: "This run has no orchestration card; see messages around that time",
+  missionNavRetry: "Retry locate",
+  missionSnapshotTag: "Navigation snapshot",
+  missionShowAll: "Show all missions",
+  missionLocate: "Locate",
+  missionExecSummary: "Execution summary",
+  missionRoomPending: "Pending approvals in this room",
   missionRoom: "Room",
   missionOwner: "Owner",
   missionOwnerAuto: "Default (conductor/first member)",

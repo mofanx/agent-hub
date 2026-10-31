@@ -373,6 +373,11 @@ data class MissionEvent(
     val at: Long,
     val kind: String,
     val text: String,
+    val flowId: String? = null,
+    val taskId: String? = null,
+    val sessionId: String? = null,
+    val dispatchedAt: Long? = null,
+    val phase: String? = null,
 )
 
 data class MissionReview(
@@ -557,6 +562,8 @@ data class FlowInfo(
     val supplements: List<String> = emptyList(),
     val clarificationId: String? = null,
     val clarificationQuestions: List<String> = emptyList(),
+    val missionId: String? = null,
+    val failureMessage: String? = null,
 )
 
 
@@ -791,6 +798,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var appForeground = true
         const val LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]"
 
+        fun missionTaskNavMatch(
+            target: MissionExecutionTarget?,
+            currentRoomId: String?,
+            flowId: String,
+            task: FlowTask,
+        ): Boolean {
+            val t = target ?: return false
+            if (t.roomId != currentRoomId) return false
+            if (t.flowId == null || t.flowId != flowId) return false
+            if (t.taskId == null || t.taskId != task.id) return false
+            return t.dispatchedAt == null || t.dispatchedAt == task.dispatchedAt
+        }
+
+        fun missionFlowNavMatch(target: MissionExecutionTarget?, currentRoomId: String?, flowId: String): Boolean {
+            val t = target ?: return false
+            return t.roomId == currentRoomId && t.flowId != null && t.flowId == flowId
+        }
     }
 
     var screen by mutableStateOf(Screen.Sessions)
@@ -1775,6 +1799,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         missionChecked = false
         missionLoading = false
         missionError = null
+        missionFocusId = null
+        missionExecutionTarget = null
+        missionNavMessage = null
+        roomOpenSeq++
         missionConnectionGeneration++
         missionListSeq++
         decisionListSeq++
@@ -2317,6 +2345,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     (ev["at"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 0,
                     (ev["kind"] as? JsonPrimitive)?.contentOrNull ?: "",
                     (ev["text"] as? JsonPrimitive)?.contentOrNull ?: "",
+                    flowId = (ev["flowId"] as? JsonPrimitive)?.contentOrNull,
+                    taskId = (ev["taskId"] as? JsonPrimitive)?.contentOrNull,
+                    sessionId = (ev["sessionId"] as? JsonPrimitive)?.contentOrNull,
+                    dispatchedAt = (ev["dispatchedAt"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull(),
+                    phase = (ev["phase"] as? JsonPrimitive)?.contentOrNull,
                 )
             } ?: emptyList(),
             reviews = (o["reviews"] as? JsonArray)?.mapNotNull {
@@ -2873,6 +2906,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openChat(session: SessionInfo, anchorAt: Long? = null) {
+        roomOpenSeq++
+        missionExecutionTarget = null
         if (session.offline) {
             resumeSession(session, autoOpen = true)
             return
@@ -2910,19 +2945,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         refreshSessionUsage(session.sessionId)
     }
 
-    fun openRoom(room: RoomInfo, anchorAt: Long? = null) {
+    fun openRoom(room: RoomInfo, anchorAt: Long? = null, readOnly: Boolean = false, onOpened: (() -> Unit)? = null) {
+        val seq = ++roomOpenSeq
+        if (!readOnly) missionExecutionTarget = null
         viewModelScope.launch {
             connectError = null
             try {
                 syncRefreshAll()
+                if (seq != roomOpenSeq) return@launch
                 val latestRoom = rooms.find { it.roomId == room.roomId } ?: room
-                val toResume = latestRoom.members.mapNotNull { (sid, _) ->
-                    sessions.find { it.sessionId == sid && it.offline }
+                if (!readOnly) {
+                    val toResume = latestRoom.members.mapNotNull { (sid, _) ->
+                        sessions.find { it.sessionId == sid && it.offline }
+                    }
+                    for (s in toResume) {
+                        if (seq != roomOpenSeq) return@launch
+                        resumeOne(s)
+                    }
+                    if (seq != roomOpenSeq) return@launch
+                    syncRefreshAll()
                 }
-                for (s in toResume) {
-                    resumeOne(s)
-                }
-                syncRefreshAll()
+                if (seq != roomOpenSeq) return@launch
                 val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
                 val isSameRoom = currentRoom?.roomId == updatedRoom.roomId
                 saveCurrentScope()
@@ -2957,6 +3000,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 refreshCurrentModel()
                 refreshMemberStatus()
                 updatedRoom.activeSpeaker?.let { refreshSessionUsage(it) }
+                if (seq == roomOpenSeq) onOpened?.invoke()
             } catch (e: Exception) {
                 connectError = e.message
             }
@@ -3210,6 +3254,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             clarificationId = obj["clarificationId"]?.jsonPrimitive?.contentOrNull,
             clarificationQuestions = obj["clarificationQuestions"]?.jsonArray
                 ?.map { it.jsonPrimitive.content } ?: emptyList(),
+            missionId = obj["missionId"]?.jsonPrimitive?.contentOrNull,
+            failureMessage = obj["failureMessage"]?.jsonPrimitive?.contentOrNull,
         )
     }
 
@@ -3314,6 +3360,64 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             artifactRefs = obj["artifactRefs"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
         )
     }
+
+    fun openMission(id: String) {
+        roomOpenSeq++
+        missionExecutionTarget = null
+        if (!missions.any { it.id == id }) {
+            missionNavMessage = "unavailable"
+            return
+        }
+        missionNavMessage = null
+        missionFocusId = id
+        searchQuery = ""
+        listTab.value = 1
+        screen = Screen.Sessions
+    }
+
+    fun openMissionExecution(missionId: String, event: MissionEvent? = null, task: FlowTask? = null) {
+        val m = missions.find { it.id == missionId } ?: return run { missionNavMessage = "unavailable" }
+        val room = rooms.find { it.roomId == m.roomId } ?: return run { missionNavMessage = "unavailable" }
+        val flowId = event?.flowId ?: m.flowId
+        val taskId = event?.taskId ?: task?.id
+        val dispatchedAt = event?.dispatchedAt ?: task?.dispatchedAt?.takeIf { it > 0 }
+        val anchor = if (event != null && event.flowId != null && event.flowId != m.flowId) event.at
+            else (m.flow?.get("startedAt")?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: m.startedAt ?: event?.at)
+        val nonce = System.nanoTime()
+        missionNavMessage = null
+        openRoom(room, anchor, readOnly = true) {
+            missionExecutionTarget = MissionExecutionTarget(
+                missionId = missionId,
+                roomId = m.roomId,
+                flowId = flowId,
+                taskId = taskId,
+                dispatchedAt = dispatchedAt,
+                anchorAt = anchor,
+                nonce = nonce,
+            )
+        }
+    }
+
+    fun retryMissionLocation() {
+        val t = missionExecutionTarget ?: return
+        val room = rooms.find { it.roomId == t.roomId } ?: return run { missionNavMessage = "unavailable" }
+        val nonce = System.nanoTime()
+        openRoom(room, t.anchorAt, readOnly = true) {
+            missionExecutionTarget = t.copy(nonce = nonce)
+        }
+    }
+
+    fun parseMissionFlow(obj: JsonObject, roomIdFallback: String = ""): FlowInfo? = parseFlow(obj, roomIdFallback)
+
+    data class MissionExecutionTarget(
+        val missionId: String,
+        val roomId: String,
+        val flowId: String? = null,
+        val taskId: String? = null,
+        val dispatchedAt: Long? = null,
+        val anchorAt: Long? = null,
+        val nonce: Long = 0,
+    )
 
     private suspend fun resumeOne(session: SessionInfo): SessionInfo? {
         val result = hub.call("session.resume", buildJsonObject {
@@ -3604,6 +3708,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null) {
+        val scopeAtStart = scopeKey()
+        val seqAtStart = roomOpenSeq
+        val genAtStart = missionConnectionGeneration
         viewModelScope.launch {
             try {
                 val params = buildJsonObject {
@@ -3611,6 +3718,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (anchorAt != null) put("anchorAt", anchorAt)
                 }
                 val result = hub.call(method, params)
+                if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
                 historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
                 val items = mutableListOf<ChatItem>()
@@ -3655,6 +3763,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val oldestAt = oldest.at
         if (oldestAt == 0L) return
         historyLoading = true
+        val scopeAtStart = scopeKey()
+        val seqAtStart = roomOpenSeq
+        val genAtStart = missionConnectionGeneration
         viewModelScope.launch {
             try {
                 val (method, idKey, id) = when {
@@ -3668,6 +3779,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("beforeId", JsonPrimitive(-oldest.id))
                     put("limit", 50)
                 })
+                if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
                 historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
                 val items = mutableListOf<ChatItem>()
@@ -3692,7 +3804,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 scopeKey()?.let { key -> chatCache[key] = chatItems.toList() }
             } catch (_: Exception) {
             } finally {
-                historyLoading = false
+                if (scopeKey() == scopeAtStart && roomOpenSeq == seqAtStart && missionConnectionGeneration == genAtStart) {
+                    historyLoading = false
+                }
             }
         }
     }
@@ -3757,7 +3871,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val items = if (task.status == "pending") {
                     emptyList()
                 } else if (task.status == "running") {
-                    fetchProcessItems(task.sessionId, task.dispatchedAt, 0L, running = true)
+                    if (flow?.flowId == flowId && task.dispatchedAt > 0L) {
+                        fetchProcessItems(task.sessionId, task.dispatchedAt, 0L, running = true)
+                    } else {
+                        if (processFetchSeq[key] == seq) processUnavailable[key] = true
+                        emptyList()
+                    }
                 } else if (task.dispatchedAt > 0L && task.finishedAt >= task.dispatchedAt) {
                     fetchProcessItems(task.sessionId, task.dispatchedAt, task.finishedAt, running = false)
                 } else {
@@ -3878,6 +3997,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val searchResults = mutableStateListOf<SearchHit>()
     var selectedSearchGroup by mutableStateOf<SearchGroup?>(null)
     var searchQuery by mutableStateOf("")
+    var missionFocusId by mutableStateOf<String?>(null)
+    var missionExecutionTarget by mutableStateOf<MissionExecutionTarget?>(null)
+    var missionNavMessage by mutableStateOf<String?>(null)
+    private var roomOpenSeq = 0
     var inChatSearchQuery by mutableStateOf("")
     var jumpToHistoryId by mutableStateOf<Long?>(null)
     var chatSearchMatchIndex by mutableIntStateOf(-1)
@@ -4095,6 +4218,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         jumpToHistoryId = null
         chatSearchMatchIndex = -1
         chatSearchMatchCount = 0
+        roomOpenSeq++
+        missionExecutionTarget = null
         refreshAll()
         screen = Screen.Sessions
     }

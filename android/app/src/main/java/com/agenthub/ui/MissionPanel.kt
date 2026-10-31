@@ -3,6 +3,7 @@ package com.agenthub.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,12 +23,15 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import java.text.DateFormat
+import java.util.Date
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -248,7 +252,8 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
 
     val lines = { v: String -> v.split("\n").map { it.trim() }.filter { it.isNotEmpty() } }
     val missions = vm.missions.sortedByDescending { it.updatedAt }
-    val filtered = missions.filter { filterMatch(it, filter) }
+    val focusId = vm.missionFocusId
+    val filtered = if (focusId != null) missions.filter { it.id == focusId } else missions.filter { filterMatch(it, filter) }
 
     Card(
         Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -256,8 +261,16 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
     ) {
         Column(Modifier.padding(12.dp)) {
             DecisionBlock(vm, S)
+            vm.missionNavMessage?.let { code ->
+                if (code == "unavailable") {
+                    Text(S.missionNavUnavailable, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${S.missionSection} (${missions.size})", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                Text("${S.missionSection} (${filtered.size})", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                if (focusId != null) {
+                    TextButton(onClick = { vm.missionFocusId = null }) { Text(S.missionShowAll) }
+                }
                 TextButton(onClick = { showForm = !showForm }) { Text(S.missionNew) }
             }
             Row(Modifier.horizontalScroll(rememberScrollState())) {
@@ -375,6 +388,73 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             Text(S.missionAwaitingHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
                         }
                         m.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                        val roomDecisions = vm.pendingDecisions.count { it.roomId == m.roomId }
+                        if (roomDecisions > 0) {
+                            Text(
+                                "${S.missionRoomPending}: $roomDecisions",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                            )
+                        }
+                        val execFlow = m.flow?.let { vm.parseMissionFlow(it, m.roomId) }
+                        if (execFlow == null && m.events.isNotEmpty()) {
+                            Text(
+                                "${S.missionExecSummary} · ${formatMissionTime(m.events.maxOf { it.at })}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (execFlow != null) {
+                            val ph = when (execFlow.phase) {
+                                "planning" -> S.phasePlanning
+                                "awaiting-input" -> S.flowAwaitingInput
+                                "working" -> S.phaseWorking
+                                "reviewing" -> S.phaseReviewing
+                                "summarizing" -> S.phaseSummarizing
+                                "awaiting-retry" -> S.phaseAwaitingRetry
+                                "done" -> S.phaseDone
+                                "cancelled" -> S.phaseCancelled
+                                else -> execFlow.phase
+                            }
+                            val lastAt = m.events.maxOfOrNull { it.at } ?: m.updatedAt
+                            Text(
+                                "${S.missionExecSummary}: $ph · ${S.flowProgressFmt.format(execFlow.progress.done, execFlow.progress.total, execFlow.progress.running, execFlow.progress.pending)}" +
+                                    " · ${formatMissionTime(lastAt)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            execFlow.failureMessage?.takeIf { it.isNotBlank() }?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
+                            execFlow.tasks.forEach { t ->
+                                var taskOpen by remember(t.id + t.dispatchedAt.toString()) { mutableStateOf(false) }
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        val tIcon = when (t.status) { "done" -> "✓"; "running" -> "▶"; "failed" -> "✗"; else -> "○" }
+                                        Text(
+                                            "$tIcon ${missionTaskStatusStr(S, t.status)} @${t.name} ${t.task}",
+                                            Modifier.weight(1f).clickable { taskOpen = !taskOpen },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (t.status == "failed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = if (taskOpen) Int.MAX_VALUE else 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        TextButton(
+                                            onClick = { vm.openMissionExecution(m.id, task = t) },
+                                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                                        ) { Text(S.missionLocate, style = MaterialTheme.typography.labelSmall) }
+                                    }
+                                    if (taskOpen) {
+                                        t.failureMessage?.let {
+                                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                        }
+                                        t.waitingQuestion?.let {
+                                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         MissionEvidence(m, S)
                         if (m.events.isNotEmpty()) {
                             var showEvents by remember { mutableStateOf(false) }
@@ -385,8 +465,23 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                                 color = MaterialTheme.colorScheme.primary,
                             )
                             if (showEvents) {
-                                m.events.forEach { e ->
-                                    Text("[${missionEventLabel(S, e.kind)}] ${e.text}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                m.events.sortedByDescending { it.at }.forEach { e ->
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "${formatMissionTime(e.at)} [${missionEventLabel(S, e.kind)}] ${e.text}" +
+                                                (listOfNotNull(e.sessionId, e.taskId, e.phase?.let { missionPhaseStr(S, it) })
+                                                    .takeIf { it.isNotEmpty() }?.joinToString(" · ", prefix = " · ") ?: ""),
+                                            Modifier.weight(1f),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        if (e.flowId != null) {
+                                            TextButton(
+                                                onClick = { vm.openMissionExecution(m.id, event = e) },
+                                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                                            ) { Text(S.missionLocate, style = MaterialTheme.typography.labelSmall) }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -448,7 +543,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             }
                             TextButton(onClick = { schedId = m; schedAuto = false }) { Text(S.missionSchedule) }
                             if (rm != null) {
-                                TextButton(onClick = { vm.openRoom(rm) }) { Text(S.missionViewRoom) }
+                                TextButton(onClick = { vm.openMissionExecution(m.id) }) { Text(S.missionViewRoom) }
                             }
                         }
                         if (suppId == m.id) {
@@ -530,4 +625,30 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
             dismissButton = { TextButton(onClick = { schedAutoConfirm = false }) { Text(S.cancel) } },
         )
     }
+}
+
+
+private fun formatMissionTime(at: Long): String =
+    if (at <= 0) "" else DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(at))
+
+
+private fun missionPhaseStr(S: Strings, phase: String): String = when (phase) {
+    "planning" -> S.phasePlanning
+    "awaiting-input" -> S.flowAwaitingInput
+    "working" -> S.phaseWorking
+    "reviewing" -> S.phaseReviewing
+    "summarizing" -> S.phaseSummarizing
+    "awaiting-retry" -> S.phaseAwaitingRetry
+    "done" -> S.phaseDone
+    "cancelled" -> S.phaseCancelled
+    else -> phase
+}
+
+
+private fun missionTaskStatusStr(S: Strings, status: String): String = when (status) {
+    "done" -> S.phaseDone
+    "running" -> S.phaseWorking
+    "failed" -> S.missionStatusFailed
+    "pending" -> S.toolStatusPending
+    else -> status
 }

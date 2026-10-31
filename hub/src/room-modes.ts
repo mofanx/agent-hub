@@ -171,6 +171,7 @@ type ParallelFlow = {
   extras?: string[] | undefined;
   /** 创建本 flow 的 mission id（无则非 mission 派发） */
   missionId?: string | undefined;
+  failureMessage?: string | undefined;
 };
 
 type PipelineFlow = {
@@ -192,6 +193,7 @@ type PipelineFlow = {
   extras?: string[] | undefined;
   /** 创建本 flow 的 mission id（无则非 mission 派发） */
   missionId?: string | undefined;
+  failureMessage?: string | undefined;
 };
 
 type DebateOutput = {
@@ -224,6 +226,7 @@ type DebateFlow = {
   extras?: string[] | undefined;
   /** 创建本 flow 的 mission id（无则非 mission 派发） */
   missionId?: string | undefined;
+  failureMessage?: string | undefined;
 };
 
 /** 活跃流程中的显式取消指令（除此之外的新消息视为补充/答复） */
@@ -564,6 +567,7 @@ export class RoomModeManager {
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
+      ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
     };
   }
 
@@ -604,6 +608,7 @@ export class RoomModeManager {
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
+      ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
     };
   }
 
@@ -668,6 +673,7 @@ export class RoomModeManager {
       tasks,
       ...(flow.extras?.length ? { supplements: flow.extras } : {}),
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
+      ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
     };
   }
 
@@ -883,14 +889,17 @@ export class RoomModeManager {
 
     // 活跃流程中的新消息默认视为补充/答复，不再取消编排；显式取消词或 /stop 除外
     if (this.hasActiveFlow(room.roomId)) {
-      // 归属预检：mission 派发遇明确归属他人的活跃 flow → 显式失败；
-      // 既不 absorb 吞掉契约，也不走 cancelActive 误杀他人流程（无标记 flow 兼容吸收）。
+      // 归属预检：mission 派发遇任何非本 mission 的活跃 flow（含无标记）→ 显式失败；
+      // 既不 absorb 吞掉契约，也不走 cancelActive 误杀他人流程。
       // mission 契约文本不识别取消词——否则「取消某功能」类 goal 会误杀在跑的 flow
       const mid = options?.missionId;
       if (mid) {
         const owner = this.foreignFlowOwner(room.roomId, mid);
         if (owner !== undefined) {
           throw new Error(`room ${room.roomId} occupied by an active flow of mission ${owner}`);
+        }
+        if (this.getFlow(room.roomId)?.missionId !== mid) {
+          throw new Error(`room ${room.roomId} occupied by an active flow not owned by mission ${mid}`);
         }
       }
       if (!mid && CANCEL_TEXT.test(text.trim()) && !helpAnswerIntent(text, options?.params)) {
@@ -1111,7 +1120,8 @@ export class RoomModeManager {
   }
 
   /** prompt 异常/取消时的回调 */
-  onPromptError(sessionId: string): boolean {
+  onPromptError(sessionId: string, message?: string): boolean {
+    message = message?.trim() || "turn error";
     this.turnGuards.delete(sessionId);
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
@@ -1133,7 +1143,7 @@ export class RoomModeManager {
       return true;
     }
 
-    const conductorRoom = this.conductor.onPromptError(sessionId);
+    const conductorRoom = this.conductor.onPromptError(sessionId, message);
     if (conductorRoom) {
       if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
       this.emitFlowUpdate(conductorRoom);
@@ -1144,6 +1154,7 @@ export class RoomModeManager {
       if (!flow.done && flow.pending.has(sessionId)) {
         flow.pending.delete(sessionId);
         (flow.failed ??= new Set()).add(sessionId);
+        flow.failureMessage ??= message;
         this.notice({
           roomId,
           message: `@${this.nameFor(roomId, sessionId)} 并行回答中断`,
@@ -1158,6 +1169,7 @@ export class RoomModeManager {
       if (!flow.done && flow.order[flow.stage] === sessionId) {
         flow.done = true;
         flow.failed = true;
+        flow.failureMessage ??= message;
         this.clearSubMode(roomId);
         this.notice({ roomId, message: `流水线第 ${flow.stage + 1} 阶段中断` });
         this.emitFlowUpdate(roomId);
@@ -1168,6 +1180,7 @@ export class RoomModeManager {
     for (const [roomId, flow] of this.parallelFlows) {
       if (flow.summarizing && flow.summarizer === sessionId) {
         flow.done = true;
+        flow.failureMessage ??= message ?? "并行汇总中断";
         if (!flow.results.has(sessionId)) (flow.failed ??= new Set()).add(sessionId);
         delete flow.summarizing;
         this.clearSubMode(roomId);
@@ -1181,6 +1194,7 @@ export class RoomModeManager {
       if (!flow.done && (flow.sides.includes(sessionId) || flow.judge === sessionId)) {
         flow.done = true;
         flow.failed = true;
+        flow.failureMessage ??= message;
         delete flow.summarizing;
         this.clearSubMode(roomId);
         this.notice({ roomId, message: "辩论流程中断" });
@@ -1620,6 +1634,7 @@ export class RoomModeManager {
       const f = this.parallelFlows.get(room.roomId);
       if (f === flow && f.summarizing) {
         f.done = true;
+        f.failureMessage ??= err instanceof Error && err.message ? err.message : "并行汇总中断";
         if (!f.results.has(flow.summarizer!)) (f.failed ??= new Set()).add(flow.summarizer!);
         delete f.summarizing;
         this.emitFlowUpdate(room.roomId);

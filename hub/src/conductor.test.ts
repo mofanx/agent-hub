@@ -1063,7 +1063,7 @@ describe("conductor", () => {
     );
 
     await orchestrator.start(qRoom, "任务");
-    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"任务一"},{"id":"t2","to":"worker2","task":"任务二"},{"id":"t3","to":"worker3","task":"任务三"}]}\n```';
+    const plan = '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"任务一"},{"id":"t2","to":"worker2","task":"任务二","dependsOn":["t1"]},{"id":"t3","to":"worker3","task":"任务三"}]}\n```';
     await orchestrator.onPromptDone("conductor", plan);
     for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 

@@ -256,7 +256,7 @@ describe("mission", () => {
     h.busy.clear();
     h.state.activeFlow = true;
     h.state.flow = flowView("fx", "working", [], "ms_other");
-    await assert.rejects(() => h.manager.start(m1.id), /occupied/);
+    await assert.rejects(() => h.manager.start(m1.id), /active flow/);
     h.state.activeFlow = false;
     h.state.flow = undefined;
     // 另一 mission 占用房间
@@ -673,7 +673,7 @@ describe("mission", () => {
     h.state.activeFlow = true;
     h.state.flow = flowView("fx", "working", [{ id: "t1", status: "running" }], "ms_other");
     const m = makeMission(h);
-    await assert.rejects(() => h.manager.start(m.id), /occupied/);
+    await assert.rejects(() => h.manager.start(m.id), /active flow/);
     assert.equal(h.manager.get(m.id)!.status, "draft", "拒绝后保持 draft，交还用户决策");
     assert.equal(h.dispatched.length, 0, "不得派发不得吸收进他人 flow");
     assert.deepEqual(h.cancelActived, [], "不得 cancelActive 他人 flow");
@@ -703,13 +703,20 @@ describe("mission", () => {
     assert.equal(r2.supplements[1]!.delivered, true, "本 mission flow 正常吸收");
     assert.match(h2.supplementLog.at(-1) ?? "", /补充：加日志/);
 
-    // dispatch：无标记/在途（无 flow 视图）的活跃编排不阻断 start（由 handle 吸收路径接管）
     const h3 = makeHarness();
     h3.state.activeFlow = true;
     h3.state.flow = flowView("fx", "working", []);
     const m3 = makeMission(h3);
-    await h3.manager.start(m3.id);
-    assert.equal(h3.dispatched.length, 1, "无标记 flow 不阻断派发");
+    await assert.rejects(() => h3.manager.start(m3.id), /active flow/);
+    assert.equal(h3.manager.get(m3.id)!.status, "draft");
+    assert.equal(h3.dispatched.length, 0);
+    assert.deepEqual(h3.cancelActived, []);
+    const h4 = makeHarness();
+    h4.state.activeFlow = true;
+    h4.state.flow = undefined;
+    const m4 = makeMission(h4);
+    await assert.rejects(() => h4.manager.start(m4.id), /active flow/);
+    assert.equal(h4.manager.get(m4.id)!.status, "draft");
   });
 
   it("reconcile：无 flowId 的 mission 仅按 missionId 归属恢复", async () => {

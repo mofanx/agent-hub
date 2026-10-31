@@ -2644,3 +2644,66 @@ div.turn-tail {
 .compose-flow-hint { font-size: 0.75rem; opacity: 0.7; padding: 2px 2px 0; }
 /* 嵌套滚动消除：外层已滚动时内层不再限高自滚，否则内层 320px>外层 288px 底部被裁呈空白 */
 .proc-scroll .process-steps { max-height: none; overflow-y: visible; }
+
+.mission-owner-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.mission-owner-btn,
+.mission-nav-retry,
+.mission-locate-btn,
+.flow-mission-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.mission-nav-hint {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.mission-nav-missing {
+  color: var(--danger);
+}
+.mission-nav-snapshot {
+  margin: 4px 12px;
+  opacity: 0.92;
+}
+.mission-nav-tag {
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.flow-card-failure {
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.mission-event-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mission-event-time {
+  color: var(--muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.mission-event-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.mission-event-meta { color: var(--muted); }
+.mission-task-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mission-task-row .nav-sub { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.mission-task-failed { color: var(--danger); }

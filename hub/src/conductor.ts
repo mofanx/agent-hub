@@ -211,6 +211,7 @@ type Flow = {
   planFormatRetries: number;
   /** 进入 done 终态的时刻；话题归档窗口（startedAt, finishedAt] 上界 */
   finishedAt?: number;
+  failureMessage?: string;
 };
 
 export type ConductorNotice = {
@@ -996,6 +997,7 @@ export class ConductorOrchestrator {
       phase: flow.phase,
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
       ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
+      ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
@@ -1121,7 +1123,7 @@ export class ConductorOrchestrator {
   }
 
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */
-  onPromptError(sessionId: string): string | undefined {
+  onPromptError(sessionId: string, message?: string): string | undefined {
     this.pendingToolCalls.delete(sessionId);
     for (const [roomId, flow] of [...this.flows]) {
       const room = this.rooms.get(roomId);
@@ -1131,8 +1133,13 @@ export class ConductorOrchestrator {
       }
       if (flow.phase === "done") continue;
       if (sessionId === room.conductorId) {
-        this.removeFlow(roomId);
+        for (const t of flow.retryTimers ?? []) clearTimeout(t);
+        flow.retryTimers?.clear();
         this.planningInFlight.delete(roomId);
+        flow.phase = "done";
+        flow.finishedAt = Date.now();
+        flow.failureMessage = message ?? "指挥家执行中断";
+        this.emitFlow?.(roomId);
         this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
         return roomId;
       }
@@ -2452,6 +2459,7 @@ export class ConductorOrchestrator {
       rounds: flow.rounds,
       maxRounds: flow.maxRounds,
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
+      ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
       ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
       tasks: [...flow.tasks.values()].map((t) => ({
         id: t.id,
@@ -2574,6 +2582,9 @@ export class ConductorOrchestrator {
           : {}),
         ...(typeof f.finishedAt === "number" && f.finishedAt > 0
           ? { finishedAt: f.finishedAt }
+          : {}),
+        ...(typeof f.failureMessage === "string" && f.failureMessage
+          ? { failureMessage: f.failureMessage }
           : {}),
         planFormatRetries:
           f.planFormatRetries === 0 || f.planFormatRetries === 1
