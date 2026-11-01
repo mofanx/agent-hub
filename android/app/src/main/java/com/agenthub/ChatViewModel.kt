@@ -860,6 +860,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var decisionEventRev = 0
     val pendingDecisions = mutableStateListOf<PendingDecision>()
     var decisionLoading by mutableStateOf(false)
+    var missionFocusId by mutableStateOf<String?>(null)
+    var missionExecutionTarget by mutableStateOf<MissionExecutionTarget?>(null)
+    var missionNavMessage by mutableStateOf<String?>(null)
+    private var roomOpenSeq = 0
     var scheduleReturnScreen by mutableStateOf(Screen.Sessions)
     var currentSession by mutableStateOf<SessionInfo?>(null)
     var currentRoom by mutableStateOf<RoomInfo?>(null)
@@ -3997,10 +4001,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val searchResults = mutableStateListOf<SearchHit>()
     var selectedSearchGroup by mutableStateOf<SearchGroup?>(null)
     var searchQuery by mutableStateOf("")
-    var missionFocusId by mutableStateOf<String?>(null)
-    var missionExecutionTarget by mutableStateOf<MissionExecutionTarget?>(null)
-    var missionNavMessage by mutableStateOf<String?>(null)
-    private var roomOpenSeq = 0
     var inChatSearchQuery by mutableStateOf("")
     var jumpToHistoryId by mutableStateOf<Long?>(null)
     var chatSearchMatchIndex by mutableIntStateOf(-1)

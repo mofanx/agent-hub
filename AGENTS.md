@@ -99,6 +99,22 @@ cd android
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## 发版流程（版本提升/推送前必须完成）
+
+`adb install` 返回 Success 只代表安装成功，不代表应用可用。**版本号提升与 tag/push 之前必须实测 App 能正常启动**，避免把"构建通过但打开即崩"的版本推给用户。
+
+```bash
+# 安装后启动验证：进程存活且无 FATAL
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell monkey -p com.agenthub -c android.intent.category.LAUNCHER 1
+sleep 4
+adb shell pidof com.agenthub          # 应输出 PID
+adb logcat -d | grep -i FATAL          # 应无输出
+```
+
+- Kotlin 成员属性/`by mutableStateOf` 委托按声明顺序初始化：`init {}` 块（如自动连接）若在构造期触达在其后声明的属性，会因委托字段未初始化而 NPE——崩溃只在真机启动时暴露，编译和单测都测不出来。
+- 历史教训：0.14.0 曾因 `missionFocusId` 等属性声明在 `init{}` 之后、被 `connect()→disconnect()` 提前访问导致启动即崩；修复方式是把声明上移到 `init` 块之前。
+
 ## 本地 Agent 启动问题排查
 
 - Windows 下 `npx`/`npm` 等入口是 `.cmd` 脚本，Hub 使用 `cross-spawn` 自动解析 `PATHEXT` 和 `.cmd` 后缀。
