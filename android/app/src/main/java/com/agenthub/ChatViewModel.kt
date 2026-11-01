@@ -3640,7 +3640,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var i = chatItems.size
         while (i > 0) {
             val it = chatItems[i - 1]
-            val inFlight = it.id > 0 &&
+            val inFlight = it.id > 0 && it.at <= 0L &&
                 (it is ChatItem.Assistant || it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan)
             if (it.at > at || inFlight) i-- else break
         }

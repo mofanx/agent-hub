@@ -1021,7 +1021,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           let insertAt = items.length;
           for (let i = items.length - 1; i >= 0; i--) {
             const t = items[i]!;
-            const inFlight = t.historyId == null &&
+            const inFlight = t.historyId == null && (t.at == null || t.at <= 0) &&
               (t.kind === "assistant" || t.kind === "thought" || t.kind === "tool" || t.kind === "plan");
             if ((t.at ?? Infinity) > at || inFlight) insertAt = i; else break;
           }
