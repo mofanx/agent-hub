@@ -3224,8 +3224,8 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                 }
             }
         }
-        // pending 无过程可看：不渲染入口（与 desktop 行为对齐）
-        if (task.status != "pending") {
+        // pending 无过程可看、展开后详情内已有过程开关：折叠态才渲染快捷入口
+        if (!expanded && task.status != "pending") {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
