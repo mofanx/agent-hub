@@ -3693,13 +3693,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 is ChatItem.System ->
                     hist.none { it is ChatItem.System && sameWindow(it, t) && it.text == t.text }
                 is ChatItem.Assistant ->
-                    hist.none { it is ChatItem.Assistant && sameWindow(it, t) && sameAuthor(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
+                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && (it.text == t.text || (sameWindow(it, t) && (it.text.startsWith(t.text) || t.text.startsWith(it.text)))) }
                 is ChatItem.Thought ->
-                    hist.none { it is ChatItem.Thought && sameWindow(it, t) && sameAuthor(it, t) && it.text.startsWith(t.text) }
+                    hist.none { it is ChatItem.Thought && sameAuthor(it, t) && (it.text == t.text || (sameWindow(it, t) && it.text.startsWith(t.text))) }
                 is ChatItem.Tool ->
-                    hist.none { it is ChatItem.Tool && sameWindow(it, t) && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId }
+                    hist.none { it is ChatItem.Tool && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId }
                 is ChatItem.Plan ->
-                    hist.none { it is ChatItem.Plan && sameWindow(it, t) && sameAuthor(it, t) && it.entries == t.entries }
+                    hist.none { it is ChatItem.Plan && sameAuthor(it, t) && it.entries == t.entries }
                 is ChatItem.Error ->
                     hist.none { it is ChatItem.Error && sameWindow(it, t) && sameAuthor(it, t) && it.text == t.text }
                 is ChatItem.Process ->

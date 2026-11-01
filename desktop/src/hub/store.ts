@@ -608,26 +608,27 @@ export const useHubStore = create<State & Actions>((set, get) => {
       case "system":
         return near.some((h) => h.kind === "system" && h.text === it.text);
       case "assistant":
-        return near.some(
+        return hist.some(
           (h) =>
             h.kind === "assistant" &&
             sameAuthor(h, it) &&
-            (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
+            (h.text === it.text ||
+              (near.includes(h) && (h.text.startsWith(it.text) || it.text.startsWith(h.text)))),
         );
       case "thought":
-        return near.some(
+        return hist.some(
           (h) =>
             h.kind === "thought" &&
             sameAuthor(h, it) &&
-            (h.text === it.text || h.text.startsWith(it.text)),
+            (h.text === it.text || (near.includes(h) && h.text.startsWith(it.text))),
         );
       case "tool":
-        return near.some(
+        return hist.some(
           (h) =>
             h.kind === "tool" && !!it.toolCallId && h.toolCallId === it.toolCallId,
         );
       case "plan":
-        return near.some(
+        return hist.some(
           (h) =>
             h.kind === "plan" &&
             sameAuthor(h, it) &&
