@@ -55,7 +55,7 @@ import { RelevanceFilter } from "./filter.js";
 import { presenceEvents, type PresenceStatus } from "./presence.js";
 import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
 import { MissionManager } from "./mission.js";
-import { missionTemplateFrom, runMissionTask } from "./mission-schedule.js";
+import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook } from "./mission-schedule.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -728,7 +728,16 @@ const missionManager = new MissionManager({
   cancel: (sessionId) => agentOps.cancel(sessionId),
   retryFailedTasks: (roomId, taskIds) => roomModeManager.retryFailedTasks(roomId, taskIds),
   supplementActive: (room, text, missionId) => roomModeManager.supplementActive(room, text, missionId),
-  broadcast: (method, params) => broadcast({ method, params } as HubEvent),
+  broadcast: (method, params) => {
+    broadcast({ method, params } as HubEvent);
+    // mission 进入终态 → "task.done" 事件唤醒（roomId 取自 mission 快照）
+    if (method === "mission.update") {
+      const m = (params as { mission?: { roomId?: string; status?: string } }).mission;
+      if (m?.roomId && (m.status === "accepted" || m.status === "stopped" || m.status === "failed")) {
+        fireEventTasks(m.roomId, "task.done");
+      }
+    }
+  },
 });
 missionManager.beginRestore();
 
@@ -744,6 +753,9 @@ const baseFlowCardSync = makeFlowCardSync({
 roomModeManager.onFlowCard = (roomId, flow) => {
   baseFlowCardSync(roomId, flow);
   missionManager.syncFlow(roomId, flow);
+  // flow waitingFor 转移（求助/澄清/交还）→ 唤醒订阅了该事件的任务
+  const waiting = (flow as Record<string, unknown> | null | undefined)?.waitingFor;
+  if (typeof waiting === "string" && waiting) fireEventTasks(roomId, "flow.waitingFor");
 };
 
 // 决策卡中心：permission/elicitation 统一为 kind:"decision" 房史条目 + 原位更新广播 + 审计
@@ -889,6 +901,29 @@ const scheduler = new Scheduler(
   },
 );
 scheduler.start();
+
+/** Loop 事件唤醒：房内事件命中任务 eventTrigger 白名单 → 去抖/上限后复用触发管线。
+ * 仅显式配置 eventTrigger 的任务参与匹配，普通对话不会触发任何任务。 */
+const eventWakeBook = new EventWakeBook();
+/** 自激抑制：事件唤醒后的一段时间内，同一任务不再被任何事件触发——
+ *  否则任务自身派发产生的 prompt.done/task.done/decision/flow.waitingFor
+ *  会把自己再次唤醒，在上限内永续自激。窗口内对同一任务的合法唤醒漏一次，
+ *  属保守取舍（去抖+小时上限仍兜底）；超长 flow 的自激残留由小时上限收敛。 */
+const WAKE_SELF_SUPPRESS_MS = 10 * 60_000;
+const wakeSelfSuppress = new Map<string, number>();
+function fireEventTasks(roomId: string | undefined, event: string): void {
+  if (!roomId) return;
+  const now = Date.now();
+  for (const task of scheduler.list()) {
+    const et = task.eventTrigger;
+    if (!et || !task.enabled || task.targetType !== "room" || task.targetId !== roomId) continue;
+    if (!et.events.includes(event)) continue;
+    if (now < (wakeSelfSuppress.get(task.id) ?? 0)) continue;
+    if (!eventWakeBook.admit(task.id, et.debounceMs ?? 30_000, et.maxPerHour ?? 6)) continue;
+    wakeSelfSuppress.set(task.id, now + WAKE_SELF_SUPPRESS_MS);
+    scheduler.fireEvent(task).catch((e) => logError("event wake task", e));
+  }
+}
 
 function ownerOf(sessionId: string): AcpAgent {
   const connectionId = owners.get(sessionId);
@@ -1287,6 +1322,7 @@ function onAgentEvent(event: HubEvent): void {
       requestedBy: displayNameFor(sessionId),
       ...(missionId ? { missionId } : {}),
     });
+    fireEventTasks(roomId, "decision");
     return;
   }
   if (event.method === "decision.resolve") {
@@ -1344,6 +1380,7 @@ function onAgentEvent(event: HubEvent): void {
       .onPromptDone(sessionId!, internalOutput)
       .then(() => {
         missionManager.onTurnDone(sessionId!, turnRoomId, internalOutput);
+        fireEventTasks(turnRoomId, "prompt.done");
         persistState();
       })
       .catch((err) => {
@@ -1944,6 +1981,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       roomModeManager.onRoomRemoved(roomId);
       store.deleteHistory("room", roomId);
       store.deleteRoomEvents(roomId);
+      store.deleteMemory(roomId);
       persistState();
       return { deleted: true };
     }
@@ -1960,6 +1998,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         roomModeManager.onRoomRemoved(roomId);
         store.deleteHistory("room", roomId);
         store.deleteRoomEvents(roomId);
+        store.deleteMemory(roomId);
       }
       persistState();
       return { deleted: true, count: uniqueIds.length };
@@ -3237,9 +3276,11 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         throw new Error("missionAutoStart requires missionId");
       }
       if (!message) throw new Error("message required");
+      const eventTrigger = parseEventTrigger(req.params?.eventTrigger, targetType);
       const task = scheduler.create({
         name, targetType, targetId, targetName, message, schedule, enabled,
         ...(missionTemplate ? { missionTemplate, missionAutoStart } : {}),
+        ...(eventTrigger ? { eventTrigger } : {}),
       });
       return { task };
     }
@@ -3272,6 +3313,13 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       if (typeof req.params?.enabled === "boolean") patch.enabled = req.params.enabled;
       if (req.params?.missionAutoStart !== undefined)
         patch.missionAutoStart = req.params.missionAutoStart === true;
+      if (req.params?.eventTrigger !== undefined) {
+        // null 表示清除唤醒配置；对象按白名单校验（targetType 可能随本 patch 变更）
+        patch.eventTrigger =
+          req.params.eventTrigger === null
+            ? undefined
+            : parseEventTrigger(req.params.eventTrigger, patch.targetType ?? existing.targetType);
+      }
       const task = scheduler.update(id, patch);
       if (!task) throw new Error(`unknown task: ${id}`);
       return { task };
@@ -3279,6 +3327,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     case "task.delete": {
       const id = String(req.params?.id ?? "");
       if (!scheduler.delete(id)) throw new Error(`unknown task: ${id}`);
+      eventWakeBook.drop(id);
+      wakeSelfSuppress.delete(id);
       return { deleted: true };
     }
     case "task.toggle": {

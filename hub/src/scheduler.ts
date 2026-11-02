@@ -8,7 +8,8 @@ export type SimpleSchedule = {
   // daily: 每天固定时间 "HH:MM"
   // interval: 每隔 N 分钟
   // once: 一次性，指定 timestamp
-  kind: "daily" | "interval" | "once";
+  // event: 不走时间表，仅由 eventTrigger 事件唤醒（nextRunAt 恒 null）
+  kind: "daily" | "interval" | "once" | "event";
   time?: string; // "HH:MM" for daily
   intervalMinutes?: number; // for interval
   at?: number; // timestamp for once
@@ -20,6 +21,24 @@ export type CronSchedule = {
 };
 
 export type Schedule = SimpleSchedule | CronSchedule;
+
+/** 事件唤醒白名单：仅房作用域、仅以下事件可触发任务 */
+export const EVENT_WAKE_KINDS = [
+  "prompt.done",
+  "flow.waitingFor",
+  "decision",
+  "task.done",
+] as const;
+
+export type EventWakeKind = (typeof EVENT_WAKE_KINDS)[number];
+
+export type EventTrigger = {
+  events: string[];
+  /** 同任务去抖窗口（默认 30s） */
+  debounceMs?: number | undefined;
+  /** 每房每小时触发上限（默认 6） */
+  maxPerHour?: number | undefined;
+};
 
 export type MissionTemplate = {
   sourceMissionId: string;
@@ -46,6 +65,8 @@ export type ScheduledTask = {
   createdAt: number;
   missionTemplate?: MissionTemplate | undefined;
   missionAutoStart?: boolean | undefined;
+  /** 事件唤醒配置：存在则房内指定事件可触发本任务（与时间表可并存） */
+  eventTrigger?: EventTrigger | undefined;
 };
 
 export type TaskLog = {
@@ -130,6 +151,9 @@ function simpleNextRun(schedule: SimpleSchedule, from: Date, lastRunAt: number |
   if (schedule.kind === "once") {
     return schedule.at ?? null;
   }
+  if (schedule.kind === "event") {
+    return null;
+  }
   if (schedule.kind === "interval") {
     const mins = schedule.intervalMinutes ?? 0;
     if (mins <= 0) return null;
@@ -176,6 +200,7 @@ export function parseSchedule(raw: unknown): Schedule {
         throw new Error("schedule once requires a future at timestamp");
       return { mode: "simple", kind: "once", at: s.at };
     }
+    if (s.kind === "event") return { mode: "simple", kind: "event" };
     throw new Error(`unknown schedule kind: ${String(s.kind)}`);
   }
   if (s.mode === "cron") {
@@ -253,6 +278,32 @@ export class Scheduler {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /** 事件唤醒手动触发：复用同一触发管线与执行日志；不推进时间表游标（lastRunAt/nextRunAt 不变） */
+  async fireEvent(task: ScheduledTask): Promise<void> {
+    const now = Date.now();
+    let success = true;
+    let error: string | null = null;
+    try {
+      await this.trigger(task);
+    } catch (err) {
+      success = false;
+      error = err instanceof Error ? err.message : String(err);
+    }
+    this.addLog({
+      id: randomUUID(),
+      taskId: task.id,
+      taskName: task.name,
+      targetType: task.targetType,
+      targetId: task.targetId,
+      targetName: task.targetName,
+      message: task.message,
+      at: now,
+      success,
+      error,
+    });
+    if (error !== null) throw new Error(error);
   }
 
   private async tick(): Promise<void> {
