@@ -92,7 +92,15 @@ class MainActivity : ComponentActivity() {
             return
         }
         val data = intent.data ?: return
-        if (data.scheme == "agenthub") vm.importConnectUri(data.toString())
+        if (data.scheme == "agenthub") {
+            // ntfy Click 深链：agenthub://attention?roomId=… → 走待办定位；connect 链接照旧导入
+            if (data.host == "attention") {
+                val rid = data.getQueryParameter("roomId")
+                vm.openAttentionTarget(if (rid.isNullOrEmpty()) emptyMap() else mapOf("navRoomId" to rid))
+            } else {
+                vm.importConnectUri(data.toString())
+            }
+        }
     }
 
     override fun onResume() {

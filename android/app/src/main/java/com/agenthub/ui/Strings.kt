@@ -151,6 +151,9 @@ interface Strings {
     val hubLocalOnlyHint: String
     val memorySection: String
     val eventWakeTag: String
+    val ntfySection: String
+    val ntfySubscribeHint: String
+    val ntfyOpenApp: String
     val deliveryLabels: Map<String, String>
     val deliveryAttachmentFmt: String
     val flowStartsNewHint: String
@@ -793,6 +796,9 @@ object ZhStrings : Strings {
     override val hubLocalOnlyHint = "Hub 仅监听本机回环（dev-token），远程接入需在 Hub 设置正式 token"
     override val memorySection = "记忆"
     override val eventWakeTag = "事件唤醒"
+    override val ntfySection = "离线推送（ntfy）"
+    override val ntfySubscribeHint = "在 ntfy app 订阅该 topic，离线时即可收到待办与任务完成提醒，点通知直接定位"
+    override val ntfyOpenApp = "打开订阅页"
     override val deliveryAttachmentFmt = "\n附件：%s\n%s"
     override val deliveryLabels = mapOf(
         "title" to "发送记录", "pending" to "待发送", "deferred" to "等待恢复并校准上下文",
@@ -1456,6 +1462,9 @@ object EnStrings : Strings {
     override val hubLocalOnlyHint = "Hub only listens on loopback (dev-token) — set a real token on the Hub for remote access"
     override val memorySection = "Memory"
     override val eventWakeTag = "Event wake"
+    override val ntfySection = "Offline push (ntfy)"
+    override val ntfySubscribeHint = "Subscribe to this topic in the ntfy app to get attention/done alerts while offline — tap to jump straight in"
+    override val ntfyOpenApp = "Open subscribe page"
     override val deliveryAttachmentFmt = "\nAttachment: %s\n%s"
     override val deliveryLabels = mapOf(
         "title" to "Delivery records", "pending" to "Pending", "deferred" to "Waiting for recovery and context validation",

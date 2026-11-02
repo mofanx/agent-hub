@@ -880,6 +880,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var agentStatus by mutableStateOf("offline")
     /** hub.connectInfo.localOnly：dev-token 回环运行的 hub 仅本机可连，提示用户换正式 token */
     var hubLocalOnly by mutableStateOf(false)
+    /** ntfy 离线推送：hub agent.info 下发的 topic/url；未配置时回退 agenthub-<hubId> 约定名展示 */
+    var ntfyTopic by mutableStateOf<String?>(null)
+    var ntfyUrl by mutableStateOf("https://ntfy.sh")
     var currentProfile by mutableStateOf<ConnProfile?>(null)
 
     val sessions = mutableStateListOf<SessionInfo>()
@@ -2145,6 +2148,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val info = hub.call("agent.info")
             if (!valid()) return@coroutineScope false
             onInfo(info)
+            val ntfy = info["ntfy"] as? JsonObject
+            ntfyTopic = ntfy?.get("topic")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: info["hubId"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { "agenthub-$it" }
+            ntfyUrl = ntfy?.get("url")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: "https://ntfy.sh"
             val agents = info["agents"] as? JsonArray ?: JsonArray(emptyList())
             hubAgentTypes.clear()
             agents.forEach { hubAgentTypes.add(it.jsonPrimitive.content) }

@@ -19,6 +19,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.compose.material.icons.filled.Add
@@ -131,6 +134,50 @@ fun SettingsScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
                             ) { Text(label) }
                         }
+                    }
+                }
+            }
+            // ntfy 离线推送订阅指引：显示 hub 下发的 topic（未配置回退 agenthub-<hubId>），可复制+跳 ntfy
+            val ntfyTopic = vm.ntfyTopic
+            if (ntfyTopic != null) {
+                val context = LocalContext.current
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                Card(
+                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    ),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(S.ntfySection, style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                ntfyTopic,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = {
+                                clipboard.setPrimaryClip(ClipData.newPlainText("ntfy topic", ntfyTopic))
+                                Toast.makeText(context, S.copiedToast, Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = S.actionCopy, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        Text(
+                            S.ntfySubscribeHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse("${vm.ntfyUrl}/$ntfyTopic"))
+                                )
+                            }
+                        }) { Text(S.ntfyOpenApp) }
                     }
                 }
             }
