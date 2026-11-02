@@ -13,6 +13,7 @@ import {
 } from "./prompts.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
+import { clientMessageFlowState } from "./client-messages.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
@@ -240,7 +241,7 @@ const HELP_ANSWER_PREFIX = /^(?:(?:答|answer|reply)\s*[:：]\s*|\/reply\s+)/i;
  * 新客户端用 params.replyTo / params.answer / params.intent 标记；
  * 旧客户端用「答：」「answer:」「/reply 」前缀。其余消息一律视为补充信息。
  */
-function helpAnswerIntent(
+export function helpAnswerIntent(
   text: string,
   params?: Record<string, unknown>,
 ): { text: string; helpId?: string } | undefined {
@@ -522,8 +523,14 @@ export class RoomModeManager {
 
   getFlow(roomId: string): Record<string, unknown> | undefined {
     const conductorFlow = this.conductor.getFlow(roomId);
-    if (conductorFlow && conductorFlow.phase !== "done") return conductorFlow;
-    return this.parallelFlowView(roomId) ?? this.pipelineFlowView(roomId) ?? this.debateFlowView(roomId) ?? conductorFlow;
+    if (conductorFlow && conductorFlow.phase !== "done") return { ...conductorFlow, mode: "conductor" };
+    const parallel = this.parallelFlowView(roomId);
+    if (parallel) return { ...parallel, mode: "parallel" };
+    const pipeline = this.pipelineFlowView(roomId);
+    if (pipeline) return { ...pipeline, mode: "pipeline" };
+    const debate = this.debateFlowView(roomId);
+    if (debate) return { ...debate, mode: "debate" };
+    return conductorFlow ? { ...conductorFlow, mode: "conductor" } : undefined;
   }
 
   observeToolUpdate(sessionId: string, update: unknown): void {
@@ -929,7 +936,33 @@ export class RoomModeManager {
         (Array.isArray(options?.params?.targets) &&
           (options.params.targets as unknown[]).length > 0);
       if (!explicit) {
+        const expects = options?.params;
+        const expectsFlow = expects?.expectedFlowId !== undefined ? expects.expectedFlowId : undefined;
+        const expectsMission = expects?.expectedMissionId !== undefined ? expects.expectedMissionId : undefined;
+        const expectsState = expects?.expectedFlowState;
+        const expectsMode = expects?.expectedRoomMode;
+        const guarded = expectsFlow !== undefined || expectsMission !== undefined || expectsState !== undefined || expectsMode !== undefined;
+        const preFlow = guarded ? this.getFlow(room.roomId) : undefined;
+        const preFlowId = (preFlow?.flowId as string | undefined) ?? null;
+        const preMissionId = (preFlow?.missionId as string | undefined) ?? null;
+        const preActive = preFlow !== undefined ? true : this.hasActiveFlow(room.roomId);
+        const preState = clientMessageFlowState(preFlow, this.subModeFor(room.roomId)?.mode);
+        const preMode = room.mode;
         const relevant = await this.relevanceFilter(room, text, options?.note);
+        if (guarded) {
+          const curFlow = this.getFlow(room.roomId);
+          const curFlowId = (curFlow?.flowId as string | undefined) ?? null;
+          const curMissionId = (curFlow?.missionId as string | undefined) ?? null;
+          const curActive = curFlow !== undefined || this.hasActiveFlow(room.roomId);
+          if (
+            (expectsFlow !== undefined && (curFlowId !== preFlowId || curActive !== preActive)) ||
+            (expectsMission !== undefined && curMissionId !== preMissionId) ||
+            (expectsState !== undefined && clientMessageFlowState(curFlow, this.subModeFor(room.roomId)?.mode) !== preState) ||
+            (expectsMode !== undefined && room.mode !== preMode)
+          ) {
+            throw new Error("client_message_context_changed");
+          }
+        }
         if (!relevant) {
           this.rooms.addEvent(room.roomId, {
             author: "hub",
@@ -1093,6 +1126,7 @@ export class RoomModeManager {
     this.pipelineFlows.delete(roomId);
     this.debateFlows.delete(roomId);
     this.conductor.dropRoom(roomId);
+    this.broadcast("room.flowUpdate", { roomId, flow: null });
   }
 
   /**
@@ -1215,10 +1249,15 @@ export class RoomModeManager {
     return false;
   }
 
+  /** 自动决策回合：主持人的模式选择思考属内部编排，其过程卡不应落房史（assistant 草稿已被 isHiddenTurn 抑制） */
+  isDecidingTurn(sessionId: string, roomId: string): boolean {
+    const sub = this.roomSubMode.get(roomId);
+    return sub?.mode === "deciding" && sub.activeSpeaker === sessionId;
+  }
+
   /** 用于 onTurnEnd：某 session 的输出是否需要写入房间历史 */
   isHiddenTurn(sessionId: string, roomId: string): boolean {
-    const sub = this.roomSubMode.get(roomId);
-    if (sub?.mode === "deciding" && sub.activeSpeaker === sessionId) return true;
+    if (this.isDecidingTurn(sessionId, roomId)) return true;
     const flow = this.conductor.getFlowForSession(sessionId);
     if (flow && flow.roomId === roomId) {
       if (flow.role === "worker") return true;

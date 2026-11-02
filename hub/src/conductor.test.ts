@@ -871,8 +871,6 @@ describe("conductor", () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 
     const w1Output = '```json\n{"text":"前端改好了","artifacts":[{"type":"file","path":"/a.ts","summary":"改"}]}\n```';
-    await orchestrator.onPromptDone("worker1", w1Output);
-
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1));
       const flow = orchestrator.getFlow(qRoom.roomId);
@@ -1009,6 +1007,12 @@ describe("conductor", () => {
       notices.some((m) => m.includes("重试") && m.includes("新消息继续")),
       "should notify retry option",
     );
+    const beforeLateResult = workerPrompts.length;
+    assert.equal(await orchestrator.onPromptDone("worker1", w1Output), qRoom.roomId);
+    assert.equal((orchestrator.getFlow(qRoom.roomId)!.tasks as { id: string; status: string }[]).find((t) => t.id === "t1")?.status, "done");
+    assert.equal(orchestrator.getFlow(qRoom.roomId)!.phase, "awaiting-retry");
+    assert.equal(workerPrompts.length, beforeLateResult);
+    assert.equal(conductorPrompts.length, 1);
 
     failWorker2 = false;
     const retried = orchestrator.retryFailedTasks(qRoom.roomId);
@@ -1026,6 +1030,82 @@ describe("conductor", () => {
       workerPrompts.some((p) => p.sessionId === "worker2" && p.content.includes("改后端")),
       "worker2 should receive retry prompt",
     );
+  });
+
+  async function pausedPeers(helpBeforePause: boolean) {
+    const rooms = new RoomManager();
+    const r = rooms.create("paused-peers", [
+      { sessionId: "conductor", name: "leader" }, { sessionId: "worker1", name: "a" },
+      { sessionId: "worker2", name: "b" }, { sessionId: "worker3", name: "helper" },
+    ], "conductor", { conductorId: "conductor" });
+    const prompts: { sessionId: string; content: string }[] = [];
+    let fail = true, first = true;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const orch = new ConductorOrchestrator({
+      prompt: async (sessionId, content) => {
+        prompts.push({ sessionId, content: String(content) });
+        if (sessionId === "worker2" && fail) {
+          if (first) { first = false; await gate; }
+          throw new Error("worker2 unavailable");
+        }
+      }, isBusy: () => false,
+    }, rooms, () => {}, undefined, 0);
+    await orch.start(r, "paused peers");
+    await orch.onPromptDone("conductor", '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"front"},{"id":"t2","to":"worker2","task":"back"}]}\n```');
+    const help = '```json\n{"help":{"to":"worker3","question":"Which contract?"}}\n```';
+    if (helpBeforePause) {
+      await orch.onPromptDone("worker1", help);
+      assert.equal(prompts.filter((p) => p.sessionId === "worker3").length, 1);
+    }
+    release();
+    for (let i = 0; i < 200 && !orch.hasAwaitingRetry(r.roomId); i++) await new Promise((resolve) => setTimeout(resolve, 1));
+    assert.ok(orch.hasAwaitingRetry(r.roomId));
+    return { orch, r, prompts, help, resume: () => {
+      fail = false;
+      assert.ok(orch.retryFailedTasks(r.roomId));
+    } };
+  }
+
+  it("等待重试时仍接收同批求助，但手动恢复前不转派成员", async () => {
+    const { orch, r, prompts, help, resume } = await pausedPeers(false);
+    const before = prompts.length;
+    assert.equal(await orch.onPromptDone("worker1", help), r.roomId);
+    const task = (orch.getFlow(r.roomId)!.tasks as { id: string; waitingHelpId?: string }[]).find((t) => t.id === "t1")!;
+    assert.ok(task.waitingHelpId);
+    assert.equal(orch.getFlow(r.roomId)!.phase, "awaiting-retry");
+    assert.equal(prompts.length, before);
+    resume();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker3").length, 1);
+  });
+
+  it("等待重试时收录已派发 helper 的答案，恢复后只唤醒原任务一次", async () => {
+    const { orch, r, prompts, resume } = await pausedPeers(true);
+    const before = prompts.length;
+    assert.equal(await orch.onPromptDone("worker3", "Use v2"), r.roomId);
+    assert.equal(orch.getFlow(r.roomId)!.phase, "awaiting-retry");
+    assert.equal(prompts.length, before);
+    resume();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker1").length, 2);
+    assert.ok(prompts.some((p) => p.sessionId === "worker1" && p.content.includes("Use v2")));
+    orch.resumeFlows();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker1").length, 2);
+  });
+
+  it("等待重试时收录同批 worker 中断但不自动重新派发", async () => {
+    const { orch, r, prompts, resume } = await pausedPeers(false);
+    const before = prompts.length;
+    assert.equal(orch.onPromptError("worker1", "interrupted"), r.roomId);
+    const tasks = () => orch.getFlow(r.roomId)!.tasks as { id: string; status: string }[];
+    assert.equal(tasks().find((t) => t.id === "t1")?.status, "pending");
+    assert.equal(orch.getFlow(r.roomId)!.phase, "awaiting-retry");
+    assert.equal(prompts.length, before);
+    resume();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(prompts.filter((p) => p.sessionId === "worker1").length, 2);
   });
 
   it("awaiting-retry 时指定 task ID 只重试指定任务", async () => {

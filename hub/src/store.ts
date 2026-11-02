@@ -35,6 +35,7 @@ export type HistoryEntry = {
   kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow" | "decision";
   author: string;
   text: string;
+  clientMessageId?: string;
 };
 
 /**
@@ -53,7 +54,7 @@ export function lostReplyAction(
   return undefined;
 }
 
-type HistoryItem = HistoryEntry & { id: number; at: number };
+type HistoryItem = HistoryEntry & { id: number; at: number; draft?: number };
 
 export type Role = {
   id: string;
@@ -242,6 +243,11 @@ export class Store {
         at INTEGER NOT NULL,
         snapshot TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS client_msgs (
+        key TEXT PRIMARY KEY,
+        result TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
     `);
     this.migrateSchema();
     this.seedRoles();
@@ -294,6 +300,7 @@ export class Store {
       { table: "roles", column: "persona", def: "TEXT NOT NULL DEFAULT ''" },
       { table: "roles", column: "builtin", def: "INTEGER NOT NULL DEFAULT 0" },
       { table: "history", column: "draft", def: "INTEGER NOT NULL DEFAULT 0" },
+      { table: "history", column: "client_message_id", def: "TEXT" },
     ];
     for (const { table, column, def } of columns) {
       try {
@@ -684,7 +691,7 @@ export class Store {
   read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryItem[] {
     const rows = this.db
       .prepare(
-        `SELECT id, at, kind, author, text FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
          WHERE scope = ? AND scope_id = ?
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
@@ -700,14 +707,14 @@ export class Store {
   ): HistoryItem[] {
     const before = this.db
       .prepare(
-        `SELECT id, at, kind, author, text FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
          WHERE scope = ? AND scope_id = ? AND at <= ?
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
       .all(scope, id, at, limit) as HistoryItem[];
     const after = this.db
       .prepare(
-        `SELECT id, at, kind, author, text FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
          WHERE scope = ? AND scope_id = ? AND at >= ?
          ORDER BY at ASC, id ASC LIMIT ?`,
       )
@@ -735,7 +742,7 @@ export class Store {
   ): HistoryItem[] {
     const rows = this.db
       .prepare(
-        `SELECT id, at, kind, author, text FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
          WHERE scope = ? AND scope_id = ? AND (at < ? OR (at = ? AND id < ?))
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
@@ -751,11 +758,172 @@ export class Store {
   ): HistoryItem[] {
     return this.db
       .prepare(
-        `SELECT id, at, kind, author, text FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
          WHERE scope = ? AND scope_id = ? AND at >= ?
          ORDER BY at ASC, id ASC LIMIT ?`,
       )
       .all(scope, id, at, limit) as HistoryItem[];
+  }
+
+  /**
+   * 游标式增量读：返回 id > afterId 的条目。
+   * truncated=true 表示游标行已被清理/不存在（超出保留范围），调用方应回退全量重载。
+   */
+  readAfterId(
+    scope: "session" | "room",
+    id: string,
+    afterId: number,
+    limit = 200,
+  ): { entries: HistoryItem[]; truncated: boolean } {
+    const exists = this.db
+      .prepare(
+        "SELECT 1 FROM history WHERE scope = ? AND scope_id = ? AND id = ? LIMIT 1",
+      )
+      .get(scope, id, afterId);
+    if (afterId !== 0 && !exists) return { entries: [], truncated: true };
+    const entries = this.db
+      .prepare(
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+         WHERE scope = ? AND scope_id = ? AND id > ?
+         ORDER BY id ASC LIMIT ?`,
+      )
+      .all(scope, id, afterId, limit) as HistoryItem[];
+    return { entries, truncated: false };
+  }
+
+  clientMsgReceipt(key: string):
+    | { state: "dispatching" | "accepted" | "uncertain"; fingerprint?: string; historyId?: number; result?: unknown; legacy?: boolean }
+    | undefined {
+    const row = this.db
+      .prepare("SELECT result FROM client_msgs WHERE key = ?")
+      .get(key) as { result: string } | undefined;
+    if (!row) return undefined;
+    try {
+      const v = JSON.parse(row.result) as Record<string, unknown>;
+      if (v && typeof v === "object" && v.v === 1 && typeof v.fingerprint === "string") {
+        return {
+          state: v.state as "dispatching" | "accepted" | "uncertain",
+          fingerprint: v.fingerprint as string,
+          ...(typeof v.historyId === "number" ? { historyId: v.historyId } : {}),
+          ...(v.result !== undefined ? { result: v.result } : {}),
+        };
+      }
+      return { state: "accepted", result: v, legacy: true };
+    } catch {
+      return undefined;
+    }
+  }
+
+  clientMsgBegin(
+    key: string,
+    fingerprint: string,
+    scope: "room" | "session",
+    scopeId: string,
+    entry: HistoryEntry,
+  ):
+    | { created: boolean; state: "dispatching"; historyId: number }
+    | { created: boolean; state: "accepted" | "uncertain"; historyId?: number; result?: unknown; legacy?: boolean } {
+    return this.db.transaction(() => {
+      const existing = this.clientMsgReceipt(key);
+      if (existing) {
+        if (existing.legacy) return { created: false, state: "accepted" as const, result: existing.result, legacy: true };
+        if (existing.fingerprint !== fingerprint) throw new Error("client_message_conflict");
+        if (existing.state === "accepted") {
+          return {
+            created: false,
+            state: "accepted" as const,
+            ...(existing.historyId !== undefined ? { historyId: existing.historyId } : {}),
+            ...(existing.result !== undefined ? { result: existing.result } : {}),
+          };
+        }
+        return { created: false, state: existing.state, ...(existing.historyId !== undefined ? { historyId: existing.historyId } : {}) };
+      }
+      this.db
+        .prepare("DELETE FROM client_msgs WHERE at < ?")
+        .run(Date.now() - 48 * 3600_000);
+      const count = (this.db.prepare("SELECT COUNT(*) AS c FROM client_msgs").get() as { c: number }).c;
+      if (count >= 10000) throw new Error("client_message_capacity");
+      const r = this.db
+        .prepare(
+          "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(scope, scopeId, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null);
+      const historyId = Number(r.lastInsertRowid);
+      if (!(historyId > 0)) throw new Error("client_message_history");
+      const receipt = {
+        v: 1, fingerprint, historyId, state: "dispatching",
+      };
+      this.db
+        .prepare("INSERT INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
+        .run(key, JSON.stringify(receipt), Date.now());
+      return { created: true, state: "dispatching" as const, historyId };
+    })() as
+      | { created: boolean; state: "dispatching"; historyId: number }
+      | { created: boolean; state: "accepted" | "uncertain"; historyId?: number; result?: unknown; legacy?: boolean };
+  }
+
+  clientMsgFinish(key: string, state: "accepted" | "uncertain", result?: unknown): void {
+    this.db.transaction(() => {
+      const cur = this.clientMsgReceipt(key);
+      if (!cur || cur.legacy) return;
+      const receipt = {
+        v: 1,
+        fingerprint: cur.fingerprint,
+        historyId: cur.historyId,
+        state,
+        ...(state === "accepted" && result !== undefined ? { result } : {}),
+      };
+      this.db
+        .prepare("UPDATE client_msgs SET result = ? WHERE key = ?")
+        .run(JSON.stringify(receipt), key);
+    })();
+  }
+
+  readEntries(scope: "room" | "session", scopeId: string, ids: number[]): HistoryItem[] {
+    if (!ids.length) return [];
+    const marks = ids.map(() => "?").join(",");
+    return this.db.prepare(
+      `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+       WHERE scope = ? AND scope_id = ? AND id IN (${marks}) ORDER BY id ASC`,
+    ).all(scope, scopeId, ...ids) as HistoryItem[];
+  }
+
+  readRoomCards(roomId: string, ids: number[]): HistoryItem[] {
+    if (!ids.length) return [];
+    const marks = ids.map(() => "?").join(",");
+    return this.db
+      .prepare(
+        `SELECT id, at, kind, author, text, draft FROM history
+         WHERE scope = 'room' AND scope_id = ? AND draft = 0
+           AND kind IN ('flow', 'decision') AND id IN (${marks})
+         ORDER BY id ASC`,
+      )
+      .all(roomId, ...ids) as HistoryItem[];
+  }
+
+  /** 客户端消息幂等记录：重复提交返回缓存的原结果 */
+  clientMsgGet(key: string): unknown | undefined {
+    const row = this.db
+      .prepare("SELECT result FROM client_msgs WHERE key = ?")
+      .get(key) as { result: string } | undefined;
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.result) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  clientMsgSet(key: string, result: unknown, cap = 5000): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
+      .run(key, JSON.stringify(result), Date.now());
+    this.db
+      .prepare(
+        `DELETE FROM client_msgs WHERE key NOT IN (
+           SELECT key FROM client_msgs ORDER BY at DESC, rowid DESC LIMIT ?)`,
+      )
+      .run(cap);
   }
 
   /** 最后一条已提交（非草稿）用户条目 id；不存在返回 0。turn 游标校验用 */

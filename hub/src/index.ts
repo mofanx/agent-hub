@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import qrcode from "qrcode-terminal";
 import { Readable, Writable } from "node:stream";
@@ -15,7 +16,7 @@ import {
   type HubEvent,
 } from "./agent.js";
 import { RoomManager, dedupeName, remapRoomModeConfig, normalizePersonaValue, parseAliasesParam, parseMemberRolesParam, serializePersonaCard, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
-import { RoomModeManager } from "./room-modes.js";
+import { helpAnswerIntent, RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
@@ -48,6 +49,7 @@ import {
 import { Scheduler, parseSchedule, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 import { OperationLedger, dedupInflight } from "./op-ledger.js";
+import { runClientMessage, clientMessageStatus, clientMessageFlowState } from "./client-messages.js";
 import { DecisionCenter, sweepPendingDecisions, inferOptionScope, isRejectOption, type DecisionScope, type DecisionRequestParams } from "./decision.js";
 import { RelevanceFilter } from "./filter.js";
 import { presenceEvents, type PresenceStatus } from "./presence.js";
@@ -58,6 +60,13 @@ import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayIn
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
 const TOKEN = process.env.HUB_TOKEN ?? "dev-token";
+if (!TOKEN.trim() || TOKEN !== TOKEN.trim() || /^(?:CHANGE_ME(?:_|$)|replace[-_ ]me(?:_|$))/i.test(TOKEN)) {
+  throw new Error("Set HUB_TOKEN to a non-placeholder secret before starting the Hub");
+}
+const LOCAL_ONLY = TOKEN === "dev-token";
+if (LOCAL_ONLY && (process.env.NODE_ENV === "production" || process.env.HUB_TUNNEL === "1")) {
+  throw new Error("Set a private HUB_TOKEN for production or tunnel access");
+}
 const WORKER_PATH = "/worker";
 
 function setSessionModel(
@@ -84,7 +93,7 @@ async function syncSessionConfigPrefs(agent: AcpAgent, sessionId: string, backen
 }
 
 if (TOKEN === "dev-token") {
-  logWarn("config", "using default token, set HUB_TOKEN in production");
+  logWarn("config", "development token: loopback only; set a private HUB_TOKEN for remote access");
 }
 
 const clients = new Set<WebSocket>();
@@ -96,6 +105,11 @@ const localStarts = new Map<string, Promise<void>>();
 const sessionResumes = new Map<string, Promise<unknown>>();
 const localAgentErrors = new Map<string, string>();
 const store = new Store();
+let hubId = store.getMeta("hubIdentity");
+if (!hubId) {
+  hubId = randomBytes(16).toString("hex");
+  store.setMeta("hubIdentity", hubId);
+}
 const modelManager = new ModelManager();
 
 
@@ -978,6 +992,19 @@ function dropTurnDraft(sessionId: string): void {
 }
 const turnProcess = new TurnProcessRecorder();
 const opLedger = new OperationLedger();
+const stableFingerprint = (v: unknown): string => {
+  const norm = (x: unknown): unknown =>
+    Array.isArray(x)
+      ? x.map(norm)
+      : x && typeof x === "object"
+        ? Object.fromEntries(
+            Object.keys(x as Record<string, unknown>)
+              .sort()
+              .map((k) => [k, norm((x as Record<string, unknown>)[k])]),
+          )
+        : x;
+  return createHash("sha256").update(JSON.stringify(norm(v))).digest("hex");
+};
 /** 每会话当前 turn 起始时刻（首个 turn 事件记录，turn 结束清除），operation ledger 的 opId 限定符 */
 const turnStarts = new Map<string, number>();
 const markTurnStart = (sessionId: string): void => {
@@ -997,6 +1024,8 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
     });
   }
   if (!roomId) return;
+  // 自动决策回合的过程卡与 assistant 草稿同等隐藏：host 内部模式思考落房史即成孤儿卡
+  if (roomModeManager.isDecidingTurn(sessionId, roomId)) return;
   // 房间历史只写一条聚合过程卡（不逐条散装），meta 供客户端钻取/展开
   const turnStartAt = buf[0]!.at;
   const turnEndAt = buf[buf.length - 1]!.at;
@@ -1619,6 +1648,9 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       return {
         agents: Object.keys(AGENT_DEFS),
         sessions: listAllSessions(),
+        deliveryProtocol: 1,
+        maxReplayAgeMs: 24 * 3600_000,
+        hubId,
       };
     case "session.list":
       return { sessions: listAllSessions() };
@@ -2014,7 +2046,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     case "hub.connectInfo": {
       // 连接信息下发：仅认证连接可达此分支；relayed（via=gateway）客户端
       // 不回传 HUB_TOKEN 与 LAN 明文卡，只保留 gateway 卡
-      return buildConnectInfo({ port: PORT, token: TOKEN, relayed });
+      return buildConnectInfo({ port: PORT, token: TOKEN, relayed, localOnly: LOCAL_ONLY });
     }
     case "hub.gatewayAnnounce": {
       // gateway agent 上报公网接入点；仅认证 WS 可达（/worker 通道走独立处理器）
@@ -2061,7 +2093,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       // 远程后端接入命令：LAN 直连 + gateway 通道（若已上报）
       const gw = getGatewayInfo();
       const join = {
-        lan: lanIps().map((ip) =>
+        lan: (LOCAL_ONLY ? ["127.0.0.1"] : lanIps()).map((ip) =>
           workerJoinCommand({ url: `ws://${ip}:${PORT}${WORKER_PATH}`, connToken: token }),
         ),
         gateway: gw
@@ -2123,7 +2155,23 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     }
     case "session.history": {
       const sessionId = String(req.params?.sessionId ?? "");
+      const entryIds = req.params?.entryIds;
+      if (entryIds !== undefined) {
+        if (!Array.isArray(entryIds) || entryIds.length > 200 ||
+            entryIds.some((id) => typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) {
+          throw new Error("invalid_history_ids");
+        }
+        return { entries: store.readEntries("session", sessionId, [...new Set(entryIds)]), hasMore: false };
+      }
       const limit = Number(req.params?.limit ?? 200);
+      const afterId = req.params?.afterId;
+      const afterIdNum =
+        typeof afterId === "number" && Number.isFinite(afterId) ? afterId : undefined;
+      if (afterIdNum !== undefined) {
+        const inc = store.readAfterId("session", sessionId, afterIdNum, limit);
+        // 满页=可能还有后续增量，客户端应以最后一条 id 继续翻页
+        return { entries: inc.entries, hasMore: inc.entries.length === limit, truncated: inc.truncated };
+      }
       const anchorAt = req.params?.anchorAt;
       const beforeAt = req.params?.before;
       const afterAt = req.params?.after;
@@ -2149,7 +2197,22 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     }
     case "room.history": {
       const roomId = String(req.params?.roomId ?? "");
+      const entryIds = req.params?.entryIds;
+      if (entryIds !== undefined) {
+        if (!Array.isArray(entryIds) || entryIds.length > 200 ||
+            entryIds.some((id) => typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) {
+          throw new Error("invalid_history_ids");
+        }
+        return { entries: store.readEntries("room", roomId, [...new Set(entryIds)]), hasMore: false };
+      }
       const limit = Number(req.params?.limit ?? 200);
+      const afterId = req.params?.afterId;
+      const afterIdNum =
+        typeof afterId === "number" && Number.isFinite(afterId) ? afterId : undefined;
+      if (afterIdNum !== undefined) {
+        const inc = store.readAfterId("room", roomId, afterIdNum, limit);
+        return { entries: inc.entries, hasMore: inc.entries.length === limit, truncated: inc.truncated };
+      }
       const anchorAt = req.params?.anchorAt;
       const beforeAt = req.params?.before;
       const afterAt = req.params?.after;
@@ -2274,7 +2337,56 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
-      return { flow: roomModeManager.getFlow(roomId) };
+      return { flow: roomModeManager.getFlow(roomId) ?? null };
+    }
+    case "client.message.status": {
+      const method = String(req.params?.method ?? "");
+      if (method !== "room.message" && method !== "prompt.send") {
+        throw new Error("method must be room.message or prompt.send");
+      }
+      const scopeId = String(
+        (method === "room.message" ? req.params?.roomId : req.params?.sessionId) ?? "",
+      );
+      if (!scopeId) throw new Error("scope id required");
+      const cmId = req.params?.clientMessageId;
+      if (typeof cmId !== "string" || !cmId || cmId.length > 200) {
+        throw new Error("clientMessageId must be a non-empty string, max 200");
+      }
+      return clientMessageStatus(store, `${method}:${scopeId}:${cmId}`);
+    }
+    case "room.sync": {
+      // 增量恢复校准快照：卡原位更新 id 不变，只给全量快照不给增量
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const sub = roomModeManager.subModeFor(roomId);
+      const rawIds = req.params?.knownCardIds;
+      const knownCardIds = rawIds === undefined
+        ? undefined
+        : Array.isArray(rawIds)
+          ? rawIds
+          : null;
+      if (knownCardIds === null) throw new Error("knownCardIds must be an array");
+      if (knownCardIds !== undefined && knownCardIds.length > 200) {
+        throw new Error("knownCardIds must be positive integers, max 200");
+      }
+      const dedup = knownCardIds === undefined
+        ? undefined
+        : [...new Set(
+            knownCardIds.map((v) => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null)),
+          )];
+      if (dedup && dedup.some((v) => v === null)) {
+        throw new Error("knownCardIds must be positive integers, max 200");
+      }
+      const ids = (dedup ?? []) as number[];
+      return {
+        mode: room.mode,
+        flow: roomModeManager.getFlow(roomId) ?? null,
+        blackboard: rooms.getBlackboard(roomId),
+        subMode: sub?.mode ?? null,
+        activeSpeaker: sub?.activeSpeaker ?? null,
+        ...(knownCardIds !== undefined ? { cards: store.readRoomCards(roomId, ids) } : {}),
+      };
     }
     case "room.flow.cancel": {
       const roomId = String(req.params?.roomId ?? "");
@@ -2694,48 +2806,147 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         .map((b) => (b.type === "text" ? String(b.text ?? "") : "[图片]"))
         .join("") || "（图片）";
 
+      const clientMsgId = String(req.params?.clientMessageId ?? "");
+      if (clientMsgId.length > 200) throw new Error("client_message_invalid");
       const slash = parseSlash(text);
       if (slash && HUB_SLASH_COMMANDS.has(slash.command)) {
+        if (clientMsgId) throw new Error("client_message_control");
         return handleRoomSlash(room, slash, text, quote);
       }
 
       const roomNote = roomLostReplyNote(roomId);
 
-      store.append("room", roomId, {
-        at: Date.now(),
-        kind: "user",
-        author: "我",
-        text: quote
-          ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
-          : historyText,
-      });
-      // 重试指令拦截：awaiting-retry 的 flow 优先处理，不进入 cancelActive
+      // 幂等重放白名单：仅普通派发记账；重试指令为控制面旁路，不进入幂等重放域
       const retryMatch = parseRetryCommand(historyText);
-      if (retryMatch && roomModeManager.hasAwaitingRetry(roomId)) {
-        const retried = roomModeManager.retryFailedTasks(roomId, retryMatch.taskIds);
-        if (retried) {
-          persistState();
-          return { sent: [], skipped: [] };
-        }
+      const isRetryCmd = !!retryMatch && roomModeManager.hasAwaitingRetry(roomId);
+      const isCancelWord = /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i.test(historyText.trim());
+      const isHelpAnswer = !!helpAnswerIntent(historyText, req.params as Record<string, unknown>);
+      if (clientMsgId && (retryMatch || (isCancelWord && !isHelpAnswer))) {
+        throw new Error("client_message_control");
       }
-      const result = await roomModeManager.handle(room, historyText, {
-        note: roomNote,
-        quote,
-        content,
-        params: req.params as Record<string, unknown>,
-        sessionNote: (sid) => sessionLostReplyNote(sid),
-      });
-      persistState();
-      if (result.skipped.length > 0) {
-        broadcast({
-          method: "prompt.error",
-          params: {
-            sessionId: result.skipped[0] ?? "",
-            message: `跳过忙碌会话: ${result.skipped.join(", ")}`,
-          },
+
+      const dispatch = async () => {
+        store.append("room", roomId, {
+          at: Date.now(),
+          kind: "user",
+          author: "我",
+          text: quote
+            ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
+            : historyText,
         });
+        if (isRetryCmd) {
+          const retried = roomModeManager.retryFailedTasks(roomId, retryMatch!.taskIds);
+          if (retried) {
+            persistState();
+            return { sent: [], skipped: [] };
+          }
+        }
+        const result = await roomModeManager.handle(room, historyText, {
+          note: roomNote,
+          quote,
+          content,
+          params: req.params as Record<string, unknown>,
+          sessionNote: (sid) => sessionLostReplyNote(sid),
+        });
+        persistState();
+        if (result.skipped.length > 0) {
+          broadcast({
+            method: "prompt.error",
+            params: {
+              sessionId: result.skipped[0] ?? "",
+              message: `跳过忙碌会话: ${result.skipped.join(", ")}`,
+            },
+          });
+        }
+        return result;
+      };
+      if (!clientMsgId || isRetryCmd) return dispatch();
+
+      const expectedFlowId = req.params?.expectedFlowId;
+      const expectedMissionId = req.params?.expectedMissionId;
+      const expectedFlowState = req.params?.expectedFlowState;
+      const expectedRoomMode = req.params?.expectedRoomMode;
+      const expectedReplyTo = req.params?.replyTo;
+      if (
+        (expectedFlowId !== undefined && expectedFlowId !== null && typeof expectedFlowId !== "string") ||
+        (expectedMissionId !== undefined && expectedMissionId !== null && typeof expectedMissionId !== "string") ||
+        (expectedFlowState !== undefined && (typeof expectedFlowState !== "string" ||
+          !["none", "active", "terminal", "restart", "deciding"].includes(expectedFlowState))) ||
+        (expectedRoomMode !== undefined && typeof expectedRoomMode !== "string") ||
+        (expectedReplyTo !== undefined && expectedReplyTo !== null && typeof expectedReplyTo !== "string")
+      ) {
+        throw new Error("client_message_context_changed");
       }
-      return result;
+      const fingerprint = stableFingerprint({ ...(req.params as Record<string, unknown>), clientMessageId: undefined });
+      return runClientMessage(
+        store,
+        {
+          key: `room.message:${roomId}:${clientMsgId}`,
+          fingerprint,
+          scope: "room",
+          scopeId: roomId,
+          entry: {
+            clientMessageId: clientMsgId,
+            at: Date.now(),
+            kind: "user",
+            author: "我",
+            text: quote
+              ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
+              : historyText,
+          },
+          validateNew: () => {
+            const answer = helpAnswerIntent(historyText, req.params as Record<string, unknown>);
+            if (answer && !answer.helpId) throw new Error("client_message_context_changed");
+            if (expectedFlowId === undefined && expectedMissionId === undefined &&
+                expectedFlowState === undefined && expectedRoomMode === undefined && !expectedReplyTo) return;
+            const flow = roomModeManager.getFlow(roomId);
+            if (typeof expectedReplyTo === "string" &&
+                (!flow || flow.phase === "done" || flow.phase === "cancelled" ||
+                  (flow.clarificationId !== expectedReplyTo &&
+                    !(Array.isArray(flow.tasks) && flow.tasks.some((task) =>
+                      task?.waitingFor === "user" && task.waitingHelpId === expectedReplyTo))))) {
+              throw new Error("client_message_context_changed");
+            }
+            if ((expectedFlowState !== undefined &&
+                clientMessageFlowState(flow, roomModeManager.subModeFor(roomId)?.mode) !== expectedFlowState) ||
+                (expectedRoomMode !== undefined && room.mode !== expectedRoomMode)) {
+              throw new Error("client_message_context_changed");
+            }
+            if (expectedFlowId !== undefined) {
+              const actualFlowId = (flow?.flowId as string | undefined) ?? null;
+              if (actualFlowId !== expectedFlowId) {
+                throw new Error("client_message_context_changed");
+              }
+            }
+            if (expectedMissionId !== undefined) {
+              const actualMissionId = (flow?.missionId as string | undefined) ?? null;
+              if (actualMissionId !== expectedMissionId) {
+                throw new Error("client_message_context_changed");
+              }
+            }
+          },
+        },
+        async () => {
+          const result = await roomModeManager.handle(room, historyText, {
+            note: roomNote,
+            quote,
+            content,
+            params: req.params as Record<string, unknown>,
+            sessionNote: (sid) => sessionLostReplyNote(sid),
+          });
+          persistState();
+          if (result.skipped.length > 0) {
+            broadcast({
+              method: "prompt.error",
+              params: {
+                sessionId: result.skipped[0] ?? "",
+                message: `跳过忙碌会话: ${result.skipped.join(", ")}`,
+              },
+            });
+          }
+          return result as unknown as Record<string, unknown>;
+        },
+      );
     }
     case "prompt.send": {
       const sessionId = String(req.params?.sessionId ?? "");
@@ -2753,8 +2964,11 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         .filter((b) => b.type === "text")
         .map((b) => String(b.text ?? ""))
         .join("");
+      const clientMsgId = String(req.params?.clientMessageId ?? "");
+      if (clientMsgId.length > 200) throw new Error("client_message_invalid");
       const slash = parseSlash(slashText);
       if (slash && HUB_SLASH_COMMANDS.has(slash.command)) {
+        if (clientMsgId) throw new Error("client_message_control");
         return handleSessionSlash(sessionId, slash);
       }
       const historyText = promptContent
@@ -2763,24 +2977,47 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
 
       const note = sessionLostReplyNote(sessionId);
 
-      store.append("session", sessionId, {
-        at: Date.now(),
-        kind: "user",
-        author: "我",
-        text: historyText,
-      });
-
-      if (note) {
-        const first = promptContent[0];
-        if (first?.type === "text") {
-          (first as Record<string, unknown>).text = `${note}\n\n${String(first.text ?? "")}`;
-        } else {
-          promptContent.unshift({ type: "text", text: note });
-        }
+      const promptIsCancel = /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i.test(historyText.trim());
+      const promptIsHelp = !!helpAnswerIntent(historyText, req.params as Record<string, unknown>);
+      if (clientMsgId && promptIsCancel && !promptIsHelp) {
+        throw new Error("client_message_control");
       }
 
-      await agentOps.prompt(sessionId, promptContent);
-      return { accepted: true };
+      const dispatchBody = async () => {
+        if (note) {
+          const first = promptContent[0];
+          if (first?.type === "text") {
+            (first as Record<string, unknown>).text = `${note}\n\n${String(first.text ?? "")}`;
+          } else {
+            promptContent.unshift({ type: "text", text: note });
+          }
+        }
+        await agentOps.prompt(sessionId, promptContent);
+        return { accepted: true };
+      };
+
+      if (!clientMsgId) {
+        store.append("session", sessionId, {
+          at: Date.now(),
+          kind: "user",
+          author: "我",
+          text: historyText,
+        });
+        return dispatchBody();
+      }
+
+      const fingerprint = stableFingerprint({ ...(req.params as Record<string, unknown>), clientMessageId: undefined });
+      return runClientMessage(
+        store,
+        {
+          key: `prompt.send:${sessionId}:${clientMsgId}`,
+          fingerprint,
+          scope: "session",
+          scopeId: sessionId,
+          entry: { at: Date.now(), kind: "user", author: "我", text: historyText, clientMessageId: clientMsgId },
+        },
+        dispatchBody,
+      );
     }
     case "session.cancel": {
       const sid = String(req.params?.sessionId ?? "");
@@ -3283,13 +3520,36 @@ startPerfMonitor(() => ({
   maxBuffered: Math.max(0, ...[...clients].map((w) => w.bufferedAmount)),
 }));
 
+// 健康探针：/healthz 进程存活（恒 200）；/readyz 链路可用（无 agent 在线 → 503）。
+// 供 Uptime Kuma/systemd 探测，WS 握手路径不受影响
+const healthServer = createServer((req, res) => {
+  const route = (req.url ?? "").split("?")[0];
+  if (req.method === "GET" && (route === "/healthz" || route === "/readyz")) {
+    const onlineAgents = [...agents.values()].filter((agent) => agent.isReady).length;
+    const ready = onlineAgents > 0;
+    res.setHeader("Content-Type", "application/json");
+    res.statusCode = route === "/readyz" && !ready ? 503 : 200;
+    res.end(
+      JSON.stringify({
+        status: route === "/readyz" && !ready ? "not_ready" : "ok",
+        agents: onlineAgents,
+        clients: clients.size,
+        uptimeSec: Math.round(process.uptime()),
+      }),
+    );
+    return;
+  }
+  res.statusCode = 404;
+  res.end("Not found");
+});
+
 const wss = new WebSocketServer({
-  port: PORT,
-  host: "0.0.0.0",
+  server: healthServer,
   // permessage-deflate：process 卡/历史回包/合帧批量消息体量不小，低配链路收益直接；
   // 1KB 阈值以下不压（小消息压缩反而费 CPU 且可能变大），两端 ws/OkHttp 均标准支持
   perMessageDeflate: { threshold: 1024 },
 });
+healthServer.listen(PORT, LOCAL_ONLY ? "127.0.0.1" : "0.0.0.0");
 /** 经 gateway 中继的客户端连接（via=gateway）：connectInfo 不下发明文凭据 */
 const relayedClients = new Set<WebSocket>();
 type LiveSocket = WebSocket & { isAlive?: boolean };
@@ -3357,7 +3617,7 @@ wss.on("connection", (ws, req) => {
 });
 
 wss.on("listening", () => {
-  const addrs = lanIps();
+  const addrs = LOCAL_ONLY ? ["127.0.0.1"] : lanIps();
   console.log(`[hub] ws listening on port ${PORT}`);
   console.log(`[hub] agent types: ${Object.keys(AGENT_DEFS).join(", ")}`);
   console.log(`[hub] data dir: ${store.dir}`);
@@ -3365,7 +3625,7 @@ wss.on("listening", () => {
     `[hub] restored: ${sessionMetas.size} sessions, ${rooms.list().length} rooms`,
   );
   for (const addr of addrs) {
-    console.log(`[hub] phone connect: ws://${addr}:${PORT}/?token=${TOKEN}`);
+    console.log(`[hub] ${LOCAL_ONLY ? "local" : "phone"} connect: ws://${addr}:${PORT}/?token=${TOKEN}`);
     console.log(`[hub] worker connect: ws://${addr}:${PORT}${WORKER_PATH}?token=<CONNECTION_TOKEN>`);
   }
   // --qr 或 HUB_QR=1：终端打印 LAN 接入二维码 + 统一 URI

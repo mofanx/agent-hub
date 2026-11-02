@@ -11,6 +11,16 @@ import {
   workerJoinCommand,
 } from "./connect.js";
 
+test("开发连接信息只公布实际可用的回环地址，转发连接仍隐藏凭据", () => {
+  const local = buildConnectInfo({ port: 8787, token: "dev-token", relayed: false, localOnly: true });
+  assert.deepEqual(local.lanIps, ["127.0.0.1"]);
+  const urls = (local.uris as { lan: string[] }).lan;
+  assert.equal(new URLSearchParams(urls[0]!.split("?")[1]).get("u"), "ws://127.0.0.1:8787");
+  const relayed = buildConnectInfo({ port: 8787, token: "private-token", relayed: true, localOnly: true });
+  assert.deepEqual(relayed.lanIps, []);
+  assert.equal(relayed.token, "");
+});
+
 test("buildConnectUri: 参数 encodeURIComponent，可被 URLSearchParams 还原", () => {
   const uri = buildConnectUri({
     url: "wss://gw.example.com/hub/abc-123_?x=1",

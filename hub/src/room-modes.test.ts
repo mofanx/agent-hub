@@ -5,6 +5,7 @@ import { createPromptDoneParams, promptDoneInternalOutput } from "./agent.js";
 import { resolveMemberByString } from "./conductor.js";
 import { RoomManager } from "./room.js";
 import type { Room } from "./room.js";
+import { clientMessageFlowState } from "./client-messages.js";
 
 const room: Room = {
   roomId: "r1",
@@ -22,6 +23,24 @@ function complete(sessionId: string, output: string): string {
 }
 
 describe("room-modes", () => {
+  it("移除房间广播空 flow，撤回其他客户端的待办而不再次派发", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create("team", room.members, "parallel");
+    let sends = 0;
+    const agent: AgentOps = { prompt: async () => { sends++; }, isBusy: () => false, cancel: async () => {} };
+    const events: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(agent, rooms, (method, params) => events.push({ method, params }));
+    await manager.handle(r, "review", {});
+    assert.ok(manager.getFlow(r.roomId));
+    const before = sends;
+    rooms.delete(r.roomId);
+    manager.onRoomRemoved(r.roomId);
+    const last = events.filter((event) => event.method === "room.flowUpdate").at(-1);
+    assert.deepEqual(last?.params, { roomId: r.roomId, flow: null });
+    assert.equal(manager.getFlow(r.roomId), undefined);
+    assert.equal(sends, before);
+  });
+
   it("parseTaskCommand 解析单任务", () => {
     const tasks = parseTaskCommand("/task @coder 实现排序");
     assert.equal(tasks?.length, 1);
@@ -785,5 +804,73 @@ describe("openTopics 编排注入与归档", () => {
       rooms.getBlackboard(room.roomId).find((e) => e.id === t.id)!.status,
       "resolved",
     );
+  });
+
+  it("预条件消息在 relevanceFilter 挂起期间遇新 flow → context_changed 不派发", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "coder" }], { mode: "auto" } as never);
+    room.mode = "mention";
+    const dispatched: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid) => { dispatched.push(String(sid)); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    let release: (v: boolean) => void = () => {};
+    const gate = new Promise<boolean>((r) => { release = r; });
+    manager.setRelevanceFilter(() => gate);
+    const params = { expectedFlowId: null };
+    const p = manager.handle(room, "旧意图", { params } as never);
+    await new Promise((r) => setImmediate(r));
+    const origGetFlow = manager.getFlow.bind(manager);
+    manager.getFlow = () => ({ flowId: "f2", missionId: null });
+    const origActive = manager.hasActiveFlow.bind(manager);
+    manager.hasActiveFlow = () => true;
+    release(true);
+    await assert.rejects(p, /client_message_context_changed/);
+    manager.getFlow = origGetFlow;
+    manager.hasActiveFlow = origActive;
+    assert.equal(dispatched.length, 0, "旧意图不得派发");
+  });
+
+  it("预条件消息在 relevanceFilter 期间变更无 flow 的房间模式也拒绝派发", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "coder" }], "mention");
+    let dispatched = 0;
+    const manager = new RoomModeManager(
+      { prompt: async () => { dispatched++; }, isBusy: () => false, cancel: async () => {} },
+      rooms, () => {},
+    );
+    let release!: (value: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    manager.setRelevanceFilter(() => { entered(); return gate; });
+    const sending = manager.handle(room, "old intent", {
+      params: { expectedFlowId: null, expectedFlowState: "none", expectedRoomMode: "mention" },
+    });
+    await started;
+    room.mode = "conductor";
+    release(true);
+    await assert.rejects(sending, /client_message_context_changed/);
+    assert.equal(dispatched, 0);
+  });
+
+  it("预条件分类读取真实 parallel 汇总快照的执行模式", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("parallel", [{ sessionId: "a", name: "worker" }, { sessionId: "b", name: "summary" }], "parallel");
+    const manager = new RoomModeManager(
+      { prompt: async () => {}, isBusy: () => false, cancel: async () => {} }, rooms, () => {},
+    );
+    await manager.handle(room, "goal", { params: { targets: ["a"], summarizer: "b" } });
+    assert.equal(manager.getFlow(room.roomId)?.mode, "parallel");
+    assert.equal(clientMessageFlowState(manager.getFlow(room.roomId)), "active");
+    await manager.onPromptDone("a", "result");
+    const snapshot = manager.getFlow(room.roomId);
+    assert.equal(snapshot?.phase, "summarizing");
+    assert.equal(snapshot?.mode, "parallel");
+    assert.equal(clientMessageFlowState(snapshot), "restart");
+    await manager.cancelActive(room.roomId, "test cleanup");
   });
 });

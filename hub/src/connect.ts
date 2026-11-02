@@ -66,9 +66,10 @@ export function buildConnectInfo(opts: {
   port: number;
   token: string;
   relayed: boolean;
+  localOnly?: boolean;
 }): Record<string, unknown> {
   const gateway = getGatewayInfo();
-  const ips = opts.relayed ? [] : lanIps();
+  const ips = opts.relayed ? [] : opts.localOnly ? ["127.0.0.1"] : lanIps();
   return {
     lanIps: ips,
     port: opts.port,

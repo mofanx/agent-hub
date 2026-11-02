@@ -1085,15 +1085,15 @@ export class ConductorOrchestrator {
     this.pendingToolCalls.delete(sessionId);
     for (const [roomId, flow] of this.flows) {
       const room = this.rooms.get(roomId);
-      if (!room || flow.phase !== "working") continue;
-      // 该会话正被求助方等待回复：按无响应收敛，唤醒原任务
+      if (!room || (flow.phase !== "working" && flow.phase !== "awaiting-retry")) continue;
+      // 该会话正被求助方等待回复：按无响应收敛；working 立即唤醒，awaiting-retry 收录待恢复
       const pendingReply = [...flow.help.values()].find(
         (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
       );
       if (pendingReply) {
         pendingReply.status = "answered";
         pendingReply.answer = "（对方已停止/中断，未能提供回复）";
-        this.repromptAsker(flow, room, pendingReply);
+        if (flow.phase === "working") this.repromptAsker(flow, room, pendingReply);
         this.emitFlow?.(roomId);
         return roomId;
       }
@@ -1113,10 +1113,13 @@ export class ConductorOrchestrator {
         roomId,
         message: `@${name} 的子任务已中断并标记失败（发送"重试"重新派发，或发送新消息继续）`,
       });
-      // 走一遍调度收敛依赖传播与阶段判定（全部终态时会自动进入汇总/awaiting-retry）
-      void this.scheduleTasks(flow, room).catch((e) =>
-        logError("conductor schedule after cancel", e),
-      );
+      // 走一遍调度收敛依赖传播与阶段判定（全部终态时会自动进入汇总/awaiting-retry）；
+      // awaiting-retry 下只收录终态，不触发调度
+      if (flow.phase === "working") {
+        void this.scheduleTasks(flow, room).catch((e) =>
+          logError("conductor schedule after cancel", e),
+        );
+      }
       return roomId;
     }
     return undefined;
@@ -1143,15 +1146,17 @@ export class ConductorOrchestrator {
         this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
         return roomId;
       }
-      if (flow.phase === "working") {
-        // 求助对象出错/中断：视为无响应，继续唤醒原任务
+      if (flow.phase === "working" || flow.phase === "awaiting-retry") {
+        const working = flow.phase === "working";
+        // 求助对象出错/中断：视为无响应；working 时立即唤醒，awaiting-retry 收录待恢复
         const pendingReply = [...flow.help.values()].find(
           (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
         );
         if (pendingReply) {
           pendingReply.status = "answered";
           pendingReply.answer = "（对方出错或中断，未能提供回复）";
-          this.repromptAsker(flow, room, pendingReply);
+          if (working) this.repromptAsker(flow, room, pendingReply);
+          else this.emitFlow?.(roomId);
           return roomId;
         }
         const running = [...flow.tasks.values()].find(
@@ -1167,9 +1172,13 @@ export class ConductorOrchestrator {
               this.rooms.displayNameForId(room.roomId, sessionId)
             } 子任务中断（剩 ${pendingCount} 项待派发）`,
           });
-          void this.scheduleTasks(flow, room).catch((err) => {
-            logError("conductor schedule after error", err);
-          });
+          if (working) {
+            void this.scheduleTasks(flow, room).catch((err) => {
+              logError("conductor schedule after error", err);
+            });
+          } else {
+            this.emitFlow?.(roomId);
+          }
           return roomId;
         }
       }
@@ -1409,6 +1418,50 @@ export class ConductorOrchestrator {
           return flow.roomId;
         }
       }
+      if (flow.phase === "awaiting-retry") {
+        // 交还用户期间同批回传只收录不派发：不重开 working 轮、不改相位（waitingFor=user 保持）
+        const reply = [...flow.help.values()].find(
+          (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
+        );
+        if (reply) {
+          reply.status = "answered";
+          reply.answer = output;
+          this.emitFlow?.(flow.roomId);
+          return flow.roomId;
+        }
+        const running = [...flow.tasks.values()].find(
+          (t) => t.sessionId === sessionId && t.status === "running",
+        );
+        if (running) {
+          const name = this.rooms.displayNameForId(room.roomId, sessionId);
+          // 求助同样收录挂起（dispatched=false），恢复时由 scheduleTasks 统一送出
+          const helpReq = extractHelpRequest(output);
+          if (helpReq && this.handleHelpRequest(flow, room, running, helpReq, output)) {
+            return flow.roomId;
+          }
+          const result = extractTaskResult(output);
+          flow.results.set(running.id, result);
+          this.recordVerifications(flow, room, sessionId, running, result.verifications ?? []);
+          for (const a of result.artifacts) {
+            this.commitArtifact(flow.roomId, a, sessionId, running.id);
+          }
+          running.status = "done";
+          running.finishedAt = Date.now();
+          this.notice({
+            roomId: flow.roomId,
+            message: `@${name} 已完成子任务 ${running.id}（已收录，恢复后统一调度）`,
+          });
+          this.emitFlow?.(flow.roomId);
+          return flow.roomId;
+        }
+        // 迟到重复回传（任务已终态/指挥家迟回）：参与者输出视为已消费，不重复收录
+        if (
+          sessionId === room.conductorId ||
+          [...flow.tasks.values()].some((t) => t.sessionId === sessionId)
+        ) {
+          return flow.roomId;
+        }
+      }
     }
     return undefined;
   }
@@ -1573,8 +1626,10 @@ export class ConductorOrchestrator {
     return true;
   }
 
-  /** 把可派发的成员求助送出去；目标忙碌或有自己在跑的任务时留待下次调度 */
+  /** 把可派发的成员求助送出去；目标忙碌或有自己在跑的任务时留待下次调度。
+   * 相位门控：awaiting-retry 期间只收录不派发，恢复后由 scheduleTasks 统一送出 */
   private dispatchPendingHelp(flow: Flow, room: Room): void {
+    if (flow.phase !== "working") return;
     for (const e of flow.help.values()) {
       if (e.status !== "pending" || e.dispatched) continue;
       const task = flow.tasks.get(e.taskId);
@@ -1911,6 +1966,12 @@ export class ConductorOrchestrator {
     // 先把可派发的求助送出去（目标空闲且无自己在跑的任务）
     this.dispatchPendingHelp(flow, room);
     this.ensureHelpDispatch(flow, room);
+    // awaiting-retry 期间收录的已答求助：恢复调度时统一唤醒原任务
+    if (flow.phase === "working") {
+      for (const e of flow.help.values()) {
+        if (e.status === "answered") this.repromptAsker(flow, room, e);
+      }
+    }
 
     // 成员会话已删除的任务直接标记失败，避免无限重试
     if (this.agent.has) {
