@@ -647,6 +647,7 @@ internal class DeliveryRecovery(
                     val revision = state.revision
                     val response = rpc(if (protocol == 1) "room.sync" else "room.flow", buildJsonObject {
                         put("roomId", id)
+                        put("ifcAuthorized", true)
                         if (protocol == 1) put("knownCardIds", JsonArray(chunk.map { JsonPrimitive(it) }))
                     })
                     checkCurrent()

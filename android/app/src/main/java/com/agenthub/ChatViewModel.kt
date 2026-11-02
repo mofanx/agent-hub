@@ -364,6 +364,7 @@ data class RoomInfo(
     val debateSides: Pair<String, String>? = null,
     val debateJudge: String? = null,
     val debateRounds: Int? = null,
+    val sensitivity: String = "shared",
 )
 
 data class FlowArtifact(
@@ -922,7 +923,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadRoomMemory(roomId: String) {
         viewModelScope.launch {
             try {
-                val result = hub.call("room.memory", buildJsonObject { put("roomId", roomId) })
+                val result = hub.call("room.memory", buildJsonObject { put("roomId", roomId); put("ifcAuthorized", true) })
                 val list = result["memories"]?.jsonArray ?: return@launch
                 roomMemories.clear()
                 for (m in list) {
@@ -945,6 +946,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 hub.call("room.memory.delete", buildJsonObject {
                     put("roomId", roomId)
                     put("id", id)
+                    put("ifcAuthorized", true)
                 })
                 roomMemories.removeAll { it.id == id }
             } catch (_: Exception) { }
@@ -2077,6 +2079,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** IFC：门控错误（private 读/未授权写）映射为用户可读"待批准"提示 */
+    private fun ifcHint(msg: String): String =
+        if (msg.contains("is private") || msg.contains("ifcAuthorized"))
+            "${stringsFor(lang).ifcPendingApproval}: $msg" else msg
+
     internal fun attentionCurrent(target: AttentionTarget) =
         target.extras["navOrigin"] == deliveryOrigin && target.extras["navHubId"] == deliveryHubId
 
@@ -2104,6 +2111,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         pendingAttention = null
         attentionNavError = null
         attentionRequestId = null
+        // 处理后本地销记：导航成功即从徽标移除该待办（仍真实待办的会在下次 reconcile 补回）
+        val navKeys = listOf("navRoomId", "navFlowId", "navTaskId", "navHelpId", "navDecisionId", "navRequestId", "navBatchKey")
+        attentionItems.removeAll { t -> navKeys.all { k -> (target[k] ?: "") == (t.extras[k] ?: "") } }
         val roomId = target["navRoomId"]
         val anchor = target["navAt"]?.toLongOrNull()?.takeIf { it > 0 }
         val request = target["navRequestId"]
@@ -3248,6 +3258,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             debateSides = debateSides,
             debateJudge = o["debateJudge"]?.jsonPrimitive?.content,
             debateRounds = o["debateRounds"]?.jsonPrimitive?.intOrNull,
+            sensitivity = o["sensitivity"]?.jsonPrimitive?.contentOrNull ?: "shared",
         )
     }
 
@@ -3412,7 +3423,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun refreshArtifacts(roomId: String) {
         val generation = ++artifactRefreshGeneration
         try {
-            val result = hub.call("room.artifacts", buildJsonObject { put("roomId", roomId) })
+            val result = hub.call("room.artifacts", buildJsonObject {
+                put("roomId", roomId)
+                // IFC：用户驱动的房内容拉取带授权标记——private 房不被门控拒绝
+                put("ifcAuthorized", true)
+            })
             val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
             val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
             if (generation != artifactRefreshGeneration) return
@@ -3594,7 +3609,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val tail = base.filter { old -> incoming.none {
             sameHistoryItem(old, it) || (old is ChatItem.Permission && it is ChatItem.Decision && old.requestId == it.requestId)
         } }
-        val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { if (it.at <= 0) Long.MAX_VALUE else it.at }
+        // 过程卡 at<=0 时用 turnEndAt/turnStartAt 归位——否则晚到的执行过程排尾部而非汇总前
+        val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { item ->
+            val at = if (item is ChatItem.Process && item.at <= 0)
+                item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
+            else item.at
+            if (at <= 0) Long.MAX_VALUE else at
+        }
         updateScopeItems(key, combined)
         deliveryRecords.filter {
             it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == key
@@ -4355,6 +4376,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val params = buildJsonObject {
                     put(idKey, id)
                     put("anchorAt", anchorAt)
+                    put("ifcAuthorized", true)
                 }
                 val result = hub.call(method, params)
                 if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
@@ -6443,7 +6465,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             validate = ::validateDelivery,
             onRecord = ::recordDelivery,
             onChange = ::updateDeliveryRecords,
-            onError = { deliveryError = it },
+            onError = { deliveryError = ifcHint(it.orEmpty()) },
         )
         updateDeliveryRecords(delivery.records)
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {

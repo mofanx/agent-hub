@@ -489,7 +489,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val isRoom = vm.currentRoom != null
     val flowAbsorbing = isRoom &&
         vm.flow?.phase in setOf("planning", "awaiting-input", "working", "reviewing", "summarizing")
-    val title = vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat
+    val title = (if (vm.currentRoom?.sensitivity == "private") "🔒 " else "") +
+        (vm.currentRoom?.name ?: vm.currentSession?.name ?: S.chat)
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { vm.addAttachment(it) }
     }
@@ -2159,10 +2160,11 @@ private fun ProcessCardBlock(
                         )
                     } else {
                         item.dispatchTasks.forEach { t ->
+                            // 空白折叠+非空守卫：task 描述含换行/多空行时按单行渲染，防"有的任务撑出超大空白"
                             val label = listOfNotNull(
-                                t.id,
-                                t.to?.let { "@$it" },
-                                t.task,
+                                t.id?.takeIf { it.isNotBlank() },
+                                t.to?.takeIf { it.isNotBlank() }?.let { "@$it" },
+                                t.task?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() },
                             ).joinToString("  ")
                             if (label.isNotBlank()) {
                                 HighlightText(
@@ -4801,7 +4803,8 @@ private fun CapsuleWithBadge(label: String, badgeCount: Int, expanded: Boolean, 
 private fun BlackboardPanel(vm: ChatViewModel) {
     val S = LocalStrings.current
     val entries = vm.blackboard
-    if (entries.isEmpty()) return
+    // 黑板条目或记忆条目任一非空即渲染——记忆区不绑死在黑板渲染条件上
+    if (entries.isEmpty() && vm.roomMemories.isEmpty()) return
     var collapsed by remember { mutableStateOf(false) }
     var detailEntry by remember { mutableStateOf<BlackboardEntry?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
@@ -4849,6 +4852,13 @@ private fun BlackboardPanel(vm: ChatViewModel) {
             val topicEntries = entries.filter { it.type == "topic" }
                 .sortedBy { it.status == "resolved" }
             if (!collapsed) {
+                // 内容区限高滚动：黑板+记忆+话题条目多时底部不外溢（与既有 heightIn+verticalScroll 模式一致）
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
                 Spacer(Modifier.height(4.dp))
                 // 蒸馏记忆条目：room.memory RPC 拉取，可查看与删除
                 if (vm.roomMemories.isNotEmpty()) {
@@ -4936,6 +4946,7 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
+                }
                 }
             }
         }

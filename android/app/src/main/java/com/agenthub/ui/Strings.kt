@@ -145,6 +145,8 @@ interface Strings {
     val attentionNeeded: String
     val attentionLabels: Map<String, String>
     val attentionCountFmt: String
+    val sensitivityPrivate: String
+    val ifcPendingApproval: String
     val serviceActivityFmt: String
     val connReconnecting: String
     val outboxPendingFmt: String
@@ -782,6 +784,8 @@ object ZhStrings : Strings {
     override val sendAsSupplement = "普通新消息将补充到当前流程"
     override val attentionNeeded = "有待你处理的事项"
     override val attentionCountFmt = "%d 项待你处理"
+    override val sensitivityPrivate = "🔒 私密"
+    override val ifcPendingApproval = "待批准"
     override val serviceActivityFmt = "进行中 %d 个流程 · 待处理 %d 项"
     override val attentionLabels = mapOf(
         "app" to "Agent Hub", "flow" to "任务求助或澄清", "decision" to "审批或信息请求",
@@ -1448,6 +1452,8 @@ object EnStrings : Strings {
     override val sendAsSupplement = "New messages add context to the current flow"
     override val attentionNeeded = "Needs your attention"
     override val attentionCountFmt = "%d need your attention"
+    override val sensitivityPrivate = "🔒 Private"
+    override val ifcPendingApproval = "Pending approval"
     override val serviceActivityFmt = "%d active flows · %d need attention"
     override val attentionLabels = mapOf(
         "app" to "Agent Hub", "flow" to "Task help or clarification", "decision" to "Approval or information request",
