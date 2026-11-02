@@ -2757,3 +2757,54 @@ div.turn-tail {
   border: 1px solid rgba(245, 158, 11, 0.3);
   border-radius: 8px;
 }
+
+.board-memory {
+  margin-top: 12px;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  padding-top: 8px;
+}
+
+.board-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.board-memory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 0;
+  line-height: 1.4;
+}
+
+.board-memory-kind {
+  color: var(--accent, #7c8cf8);
+  flex-shrink: 0;
+}
+
+.board-memory-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.board-memory-del {
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+.board-memory-del:hover {
+  opacity: 1;
+  color: var(--danger, #ef4444);
+}
+
+.event-badge {
+  font-size: 11px;
+  color: var(--accent, #7c8cf8);
+  border: 1px solid var(--accent, #7c8cf8);
+  border-radius: 8px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}

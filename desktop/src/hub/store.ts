@@ -840,6 +840,45 @@ export const useHubStore = create<State & Actions>((set, get) => {
     }
   };
 
+  /** scope 订阅快照应用：与 room.sync 同一形状（flow/blackboard/subMode/activeSpeaker 原位覆盖） */
+  const applySyncSnapshot = (roomId: string, snap: Record<string, unknown>) => {
+    const flow = (snap.flow ?? null) as FlowInfo | null;
+    flowCache.set(roomId, flow);
+    const subMode = typeof snap.subMode === "string" ? snap.subMode : null;
+    const activeSpeaker = typeof snap.activeSpeaker === "string" ? snap.activeSpeaker : null;
+    set({
+      flow,
+      blackboard: (snap.blackboard ?? null) as BlackboardInfo[] | null,
+      ...(get().currentRoom?.roomId === roomId
+        ? { currentRoom: { ...get().currentRoom!, subMode, activeSpeaker } }
+        : {}),
+      rooms: get().rooms.map((r) =>
+        r.roomId === roomId ? { ...r, subMode, activeSpeaker } : r,
+      ),
+    });
+  };
+
+  /** scope 订阅：detail=当前房/会话全量（房附快照防漏），global=仅白名单低频事件。
+   *  旧 hub 无 client.subscribe 时静默降级全量推送（向后兼容） */
+  const subscribeScope = (
+    tier: "detail" | "global",
+    opts: { roomId?: string; sessionId?: string } = {},
+  ) => {
+    const client = get().client;
+    if (!client?.isConnected) return;
+    void client
+      .call("client.subscribe", { tier, ...opts })
+      .then((r) => {
+        const snap = (r as Record<string, unknown>).snapshot as
+          | Record<string, unknown>
+          | undefined;
+        if (snap && opts.roomId && get().currentRoom?.roomId === opts.roomId) {
+          applySyncSnapshot(opts.roomId, snap);
+        }
+      })
+      .catch(() => {});
+  };
+
   const mergeHistoryItems = (a: ChatItem[], b: ChatItem[]): ChatItem[] => {
     const byId = new Map<number, ChatItem>();
     const live = new Map<string, ChatItem>();
@@ -2544,6 +2583,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const seq = roomOpenSeq;
         const room = get().currentRoom;
         const session = get().currentSession;
+        subscribeScope(
+          "detail",
+          room ? { roomId: room.roomId } : session ? { sessionId: session.sessionId } : {},
+        );
         try {
           if (room) {
             const latest = rooms.find((r) => r.roomId === room.roomId);
@@ -2831,6 +2874,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historyLoading: false,
         historySearchContext: anchorAt != null,
       });
+      subscribeScope("detail", { sessionId: session.sessionId });
       get().loadHistory("session.history", "sessionId", session.sessionId, anchorAt);
       get().refreshArtifacts({ sessionId: session.sessionId });
       void get().refreshMemberStatus();
@@ -2891,6 +2935,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt);
       get().syncBusyIdsFromList(get().sessions);
       get().refreshFlow(updatedRoom.roomId);
+      subscribeScope("detail", { roomId: updatedRoom.roomId });
       get().refreshArtifacts({ roomId: updatedRoom.roomId });
       void get().refreshMemberStatus();
       if (updatedRoom.activeSpeaker) void get().refreshSessionUsage(updatedRoom.activeSpeaker);
@@ -3556,6 +3601,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         historySearchContext: false,
         screen: "sessions",
       });
+      subscribeScope("global");
       get().refreshAll();
     },
 

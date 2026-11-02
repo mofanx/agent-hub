@@ -70,6 +70,14 @@ export function ScheduleScreen() {
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                 <CalendarClock size={16} />
                 <strong style={{ flex: 1 }}>{task.name}</strong>
+                {task.eventTrigger && (
+                  <span
+                    className="event-badge"
+                    title={task.eventTrigger.events.join(", ")}
+                  >
+                    ⚡ {task.eventTrigger.events.join("/")} {S.taskEventWake}
+                  </span>
+                )}
                 <span
                   style={{
                     fontSize: 12,

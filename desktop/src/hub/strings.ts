@@ -373,6 +373,9 @@ export interface Strings {
   connectInfoError: string;
   lanLocalOnly: string;
   lanLoopbackHint: string;
+  memoriesTitle: string;
+  memoryDeleteTitle: string;
+  taskEventWake: string;
   lastSeenFmt: string;
   typeLabel: string;
   localStartLabel: string;
@@ -1073,6 +1076,9 @@ const zh: Strings = {
   connectInfoError: "获取连接信息失败",
   lanLocalOnly: "仅本机可见",
   lanLoopbackHint: "Hub 使用 dev-token，仅监听回环——手机/局域网设备无法直连。请为 Hub 设置正式 HUB_TOKEN 后重启。",
+  memoriesTitle: "长期记忆（蒸馏）",
+  memoryDeleteTitle: "删除此条记忆",
+  taskEventWake: "事件唤醒",
   lastSeenFmt: "最近在线 %s",
   typeLabel: "类型",
   localStartLabel: "本地启动",
@@ -1773,6 +1779,9 @@ const en: Strings = {
   connectInfoError: "Failed to load connection info",
   lanLocalOnly: "Visible on this device only",
   lanLoopbackHint: "Hub runs on dev-token and listens on loopback only — phones/LAN devices cannot connect. Set a real HUB_TOKEN and restart.",
+  memoriesTitle: "Long-term memory (distilled)",
+  memoryDeleteTitle: "Delete this memory",
+  taskEventWake: "event wake",
   lastSeenFmt: "Last seen %s",
   typeLabel: "Type",
   localStartLabel: "Local launch",

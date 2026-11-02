@@ -2450,7 +2450,35 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
   const [detail, setDetail] = useState<BlackboardInfo | null>(null);
   const [copied, setCopied] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
-  if (!blackboard || blackboard.length === 0) {
+  const [memories, setMemories] = useState<
+    { id: number; kind: string; text: string; source: string; at: number }[]
+  >([]);
+  useEffect(() => {
+    if (!roomId) return;
+    let dead = false;
+    void store.client
+      ?.call("room.memory", { roomId })
+      .then((r) => {
+        if (!dead) {
+          setMemories(
+            ((r as Record<string, unknown>).memories as never[] | undefined) ?? [],
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, store.client]);
+  const onDeleteMemory = (id: number) => {
+    if (!roomId) return;
+    void store.client
+      ?.call("room.memory.delete", { roomId, id })
+      .then(() => setMemories((m) => m.filter((x) => x.id !== id)))
+      .catch(() => {});
+  };
+  if ((!blackboard || blackboard.length === 0) && memories.length === 0) {
     return <div className="context-empty">{S.noBoardEntries}</div>;
   }
   const onClear = async () => {
@@ -2464,10 +2492,11 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
     await store.removeBlackboard(roomId, detail.id);
     setDetail(null);
   };
-  const topics = blackboard.filter((e) => (e.type ?? "note") === "topic");
+  const board = blackboard ?? [];
+  const topics = board.filter((e) => (e.type ?? "note") === "topic");
   const openTopics = topics.filter((e) => (e.status ?? "open") === "open");
   const resolvedTopics = topics.filter((e) => e.status === "resolved");
-  const notes = blackboard.filter((e) => (e.type ?? "note") === "note");
+  const notes = board.filter((e) => (e.type ?? "note") === "note");
   const onResolve = (e: BlackboardInfo, ev: React.MouseEvent) => {
     ev.stopPropagation();
     if (!roomId) return;
@@ -2522,6 +2551,25 @@ function BlackboardPanel({ blackboard }: { blackboard: BlackboardInfo[] | null }
             <div className="blackboard-text">{e.text}</div>
           </div>
         ))}
+
+      {memories.length > 0 && (
+        <div className="board-memory">
+          <div className="board-section-title">{S.memoriesTitle}</div>
+          {memories.map((m) => (
+            <div key={m.id} className="board-memory-item">
+              <span className="board-memory-kind">[{m.kind}]</span>
+              <span className="board-memory-text">{m.text}</span>
+              <button
+                className="icon-btn board-memory-del"
+                title={S.memoryDeleteTitle}
+                onClick={() => onDeleteMemory(m.id)}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {detail && (
         <div className="dialog-backdrop" onClick={() => setDetail(null)}>

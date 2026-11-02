@@ -518,6 +518,8 @@ export type ScheduledTask = {
     maxAutoRetries: number;
   };
   missionAutoStart?: boolean;
+  /** 事件唤醒配置：存在则房内指定事件可触发本任务（kind=event 时必有） */
+  eventTrigger?: { events: string[]; debounceMs?: number; maxPerHour?: number };
 };
 
 export type TaskLog = {
