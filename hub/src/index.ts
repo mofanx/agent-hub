@@ -57,6 +57,7 @@ import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } fr
 import { MissionManager } from "./mission.js";
 import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook } from "./mission-schedule.js";
 import { shouldDeliver, type ClientSub } from "./subscribe.js";
+import { NtfyPusher, ntfyConfigFromEnv, type NtfyKind } from "./ntfy.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -736,6 +737,7 @@ const missionManager = new MissionManager({
       const m = (params as { mission?: { roomId?: string; status?: string } }).mission;
       if (m?.roomId && (m.status === "accepted" || m.status === "stopped" || m.status === "failed")) {
         fireEventTasks(m.roomId, "task.done");
+        if (m.status === "accepted") notifyOffline(m.roomId, "task.done");
       }
     }
   },
@@ -756,7 +758,10 @@ roomModeManager.onFlowCard = (roomId, flow) => {
   missionManager.syncFlow(roomId, flow);
   // flow waitingFor 转移（求助/澄清/交还）→ 唤醒订阅了该事件的任务
   const waiting = (flow as Record<string, unknown> | null | undefined)?.waitingFor;
-  if (typeof waiting === "string" && waiting) fireEventTasks(roomId, "flow.waitingFor");
+  if (typeof waiting === "string" && waiting) {
+    fireEventTasks(roomId, "flow.waitingFor");
+    notifyOffline(roomId, "attention");
+  }
 };
 
 // 决策卡中心：permission/elicitation 统一为 kind:"decision" 房史条目 + 原位更新广播 + 审计
@@ -912,6 +917,18 @@ const eventWakeBook = new EventWakeBook();
  *  属保守取舍（去抖+小时上限仍兜底）；超长 flow 的自激残留由小时上限收敛。 */
 const WAKE_SELF_SUPPRESS_MS = 10 * 60_000;
 const wakeSelfSuppress = new Map<string, number>();
+
+/** ntfy 触达兜底：仅客户端全部离线时推（有客户端时走 WS 已可达）。
+ *  正文只含房名+事件类型；NTFY_TOPIC 未配置时恒不推。 */
+const ntfyPusher = new NtfyPusher(ntfyConfigFromEnv());
+function notifyOffline(roomId: string | undefined, kind: NtfyKind): void {
+  if (!roomId) return;
+  const room = rooms.get(roomId);
+  void ntfyPusher
+    .notifyIfOffline(roomId, room?.name ?? roomId, kind, clients.size)
+    .catch((e) => logError(`ntfy ${kind}`, e));
+}
+
 function fireEventTasks(roomId: string | undefined, event: string): void {
   if (!roomId) return;
   const now = Date.now();
@@ -1324,6 +1341,7 @@ function onAgentEvent(event: HubEvent): void {
       ...(missionId ? { missionId } : {}),
     });
     fireEventTasks(roomId, "decision");
+    notifyOffline(roomId, "attention");
     return;
   }
   if (event.method === "decision.resolve") {
