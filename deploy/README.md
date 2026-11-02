@@ -9,6 +9,32 @@ Hub 是纯 WebSocket 服务（无 TLS），远程接入的本质都是「给 878
 | **Tailscale** | PC/客户端装 Tailscale | 零暴露、端到端加密 | 客户端需装 Tailscale |
 | **hub-gateway 中继网关** | VPS、域名 | 外部用户零安装、hubId 管理 | 需部署 Gateway + Agent |
 
+## 升级注意（Breaking Change）
+
+本轮起 token 语义收紧，旧部署升级后请先核对以下三点：
+
+**1. `dev-token` 强制回环（LOCAL_ONLY）**
+
+`HUB_TOKEN` 缺省或等于 `dev-token` 时，Hub 现在**只绑定 `127.0.0.1`**，连接信息不再公布局域网地址；且 `NODE_ENV=production` 或 `HUB_TUNNEL=1` 时直接拒绝启动。
+
+- **受影响用户**：此前用默认 `dev-token` + 局域网 IP 直连（如手机连 `ws://192.168.x.x:8787`）——升级后 LAN 连接会失败。
+- **迁移方式**：生成正式 token 并在 Hub 侧与所有客户端同步更新：
+  ```bash
+  openssl rand -hex 24          # 生成正式 token
+  export HUB_TOKEN=<上面结果>   # 或写入 ecosystem.config.cjs / systemd unit
+  ```
+  Hub 检测到非 dev-token 后自动恢复 `0.0.0.0` 绑定与 LAN 连接信息；客户端把旧连接档案的 Token 字段改填新值即可。
+
+**2. 占位 token 启动拦截**
+
+`HUB_TOKEN` 为空、含首尾空白、或以 `CHANGE_ME`/`replace me` 开头的值，Hub 启动即抛错；Gateway 的 `GATEWAY_TOKEN`/`ADMIN_TOKEN` 同样拒绝空值与 `CHANGE_ME*`/`replace me`/`dev-token` 占位串。
+
+- **systemd 排查**：`deploy/agent-hub.service` 新增 `ExecStartPre` 占位检查——若 `systemctl start agent-hub` 立即失败，跑 `journalctl -u agent-hub -e`，看到 `HUB_TOKEN placeholder` 即说明 unit 里的 `HUB_TOKEN` 没改成真实随机串；Gateway 侧 `hub-gateway.service` 同理看 `GATEWAY_TOKEN`/`ADMIN_TOKEN`。
+
+**3. 健康探针语义**
+
+Hub 与 Gateway 均提供 `/healthz`（进程存活，恒 200）与 `/readyz`（链路可用，无 agent/hub 接入时 503）。systemd 模板用 `/healthz` 做启动自检；**不要把 `/readyz` 当存活性检查**——无后端接入时它预期返回 503，会导致 systemd/监控误报。
+
 ## 方式一：cloudflared 快速隧道
 
 ```bash

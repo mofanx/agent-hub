@@ -1,0 +1,28 @@
+# VPS 上的 Agent Hub Gateway 常驻服务
+# 用法：构建 dist 后替换 User/WorkingDirectory/Token 放到 /etc/systemd/system/
+#   cd deploy/gateway && npm ci && npx tsc
+#   sudo cp hub-gateway.service /etc/systemd/system/ && sudo systemctl enable --now hub-gateway
+[Unit]
+Description=Agent Hub Gateway (public relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/agent-hub/deploy/gateway
+Environment=GATEWAY_HOST=127.0.0.1
+Environment=GATEWAY_PORT=8788
+# 公网部署务必改成强随机串：openssl rand -hex 24
+Environment=GATEWAY_TOKEN=CHANGE_ME_TO_A_LONG_RANDOM_STRING
+Environment=ADMIN_TOKEN=CHANGE_ME_TO_ANOTHER_LONG_RANDOM_STRING
+Environment=MAX_CLIENTS=5
+ExecStartPre=/bin/sh -c 'case "$${GATEWAY_TOKEN}" in CHANGE_ME*|"") echo "GATEWAY_TOKEN placeholder; set a real token" >&2; exit 1;; esac; case "$${ADMIN_TOKEN}" in CHANGE_ME*|"") echo "ADMIN_TOKEN placeholder; set a real token" >&2; exit 1;; esac'
+ExecStart=/usr/bin/node dist/cli.js server
+Restart=always
+RestartSec=3
+# 启动即探测进程级存活；链路可用性（/readyz）交给外部监控（如 Uptime Kuma）
+ExecStartPost=/bin/sh -c 'sleep 2; curl -fsS http://127.0.0.1:8788/healthz >/dev/null'
+
+[Install]
+WantedBy=multi-user.target

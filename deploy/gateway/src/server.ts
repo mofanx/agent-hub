@@ -38,6 +38,10 @@ export function startServer(options: {
   maxClientsPerHub: number;
 }) {
   const { port, host, gatewayToken, adminToken, maxClientsPerHub } = options;
+  if ([gatewayToken, adminToken].some((token) => !token.trim() || token !== token.trim() ||
+      /^(?:CHANGE_ME(?:_|$)|replace[-_ ]me(?:_|$)|dev-token$)/i.test(token))) {
+    throw new Error("Set non-placeholder GATEWAY_TOKEN and ADMIN_TOKEN before starting the Gateway");
+  }
   const hubs = new Map<string, HubState>();
   const limits = new Map<string, RateLimit>();
 
@@ -45,6 +49,28 @@ export function startServer(options: {
     const parsed = parse(req.url || '/', true);
     const parts = (parsed.pathname || '').split('/').filter(Boolean);
     const token = getBearer(req.headers.authorization);
+
+    // 健康探针：/healthz 进程存活（恒 200）；/readyz 链路可用（无 hub 后端接入 → 503）
+    if (parts[0] === 'healthz' || parts[0] === 'readyz') {
+      const hubList = Array.from(hubs.entries()).map(([id, s]) => ({
+        hubId: id,
+        agentConnected: s.agent.readyState === WebSocket.OPEN && s.hello,
+        clients: s.clients.size,
+        workers: s.workers.size,
+      }));
+      const connected = hubList.filter((h) => h.agentConnected).length;
+      const ready = connected > 0;
+      res.setHeader('Content-Type', 'application/json');
+      res.statusCode = parts[0] === 'readyz' && !ready ? 503 : 200;
+      res.end(
+        JSON.stringify({
+          status: parts[0] === 'readyz' && !ready ? 'not_ready' : 'ok',
+          hubs: { registered: hubList.length, connected },
+          uptimeSec: Math.round(process.uptime()),
+        }),
+      );
+      return;
+    }
 
     if (parts[0] === 'admin' && parts[1] === 'hubs') {
       if (!token || token !== adminToken) {

@@ -1,0 +1,35 @@
+# Agent Hub Gateway（公网中继层）compose 示例
+#
+# 拓扑说明（重要）：
+#   - 本 compose 只容器化 gateway 中继层。Hub（hub/src）和本机 agent 不应容器化——
+#     hub 需要访问宿主机工作目录、启动本地 agent 子进程、读用户凭据/配置文件，
+#     容器隔离会切断这些依赖；gateway 无状态、只转发帧，天然适合容器化。
+#   - 典型部署：VPS 上跑本 compose（gateway:8788）→ 家中/办公机跑 hub
+#     （systemd: agent-hub.service）→ hub 侧 `hub-gateway up` 建立反向控制通道。
+#   - 公网 TLS 建议由 Caddy/nginx 反代本服务的 8788（参考 deploy/Caddyfile、
+#     deploy/nginx-site.conf），或直接用 cloudflared 隧道替代本 compose。
+#
+# 用法：
+#   1) cp .env.example .env  # 或直接编辑下方 environment
+#   2) docker compose up -d --build
+#   3) 健康检查：curl -fsS http://127.0.0.1:8788/healthz（存活）/ /readyz（有 hub 接入）
+services:
+  gateway:
+    build: .
+    container_name: agent-hub-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8788"
+    environment:
+      GATEWAY_HOST: 0.0.0.0          # 容器内必须绑 0.0.0.0 才能被宿主机端口映射访问
+      GATEWAY_PORT: 8788
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?GATEWAY_TOKEN is required}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN is required}
+      MAX_CLIENTS: ${MAX_CLIENTS:-5}
+    healthcheck:
+      # 容器内无 curl，wget 是 alpine busybox 自带；/readyz 在首个 hub 接入前会报 not_ready
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8788/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

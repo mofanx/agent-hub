@@ -11,9 +11,13 @@ WorkingDirectory=/home/YOUR_USER/.openclaw/workspace-devin/agent-hub/hub
 Environment=HUB_PORT=8787
 # 公网部署务必改成强随机串：openssl rand -hex 24
 Environment=HUB_TOKEN=CHANGE_ME_TO_A_LONG_RANDOM_STRING
+ExecStartPre=/bin/sh -c 'case "$${HUB_TOKEN}" in CHANGE_ME*|""|dev-token) echo "HUB_TOKEN placeholder; set a real token" >&2; exit 1;; esac'
 ExecStart=/usr/bin/npx tsx src/index.ts
 Restart=always
 RestartSec=3
+# 启动即探测进程级存活（/healthz 恒 200）；/readyz 需有 agent 在线才 200，
+# 链路可用性监控建议交给外部探针（如 Uptime Kuma），勿用 readyz 做 ExecStartPost
+ExecStartPost=/bin/sh -c 'sleep 3; curl -fsS http://127.0.0.1:8787/healthz >/dev/null'
 
 [Install]
 WantedBy=multi-user.target
