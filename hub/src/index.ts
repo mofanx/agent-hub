@@ -56,6 +56,7 @@ import { presenceEvents, type PresenceStatus } from "./presence.js";
 import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
 import { MissionManager } from "./mission.js";
 import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook } from "./mission-schedule.js";
+import { shouldDeliver, type ClientSub } from "./subscribe.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -1511,10 +1512,14 @@ function warnBufferThrottled(ws: WebSocket, detail: string): void {
   );
 }
 
+/** 订阅分层：client.subscribe 声明 tier；未声明按 detail 全量（兼容旧客户端） */
+const clientSubs = new Map<WebSocket, ClientSub>();
+
 function broadcast(event: HubEvent): void {
   const data = JSON.stringify(event);
   for (const ws of clients) {
     if (ws.readyState !== ws.OPEN) continue;
+    if (!shouldDeliver(clientSubs.get(ws), event)) continue;
     // 硬上限：积压 4 倍于软上限说明对端实质卡死（可丢事件也已无意义），
     // 直接 terminate 回收内存——否则非可丢事件仍会无限排队
     if (ws.bufferedAmount > WS_BUFFER_LIMIT * 4) {
@@ -3647,6 +3652,7 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     clients.delete(ws);
     relayedClients.delete(ws);
+    clientSubs.delete(ws);
   });
   ws.on("message", async (raw) => {
     let req2: RequestMessage;
@@ -3657,6 +3663,37 @@ wss.on("connection", (ws, req) => {
       return;
     }
     try {
+      // 订阅分层声明：global=低频状态白名单 / detail=全量；
+      // 切 detail 且带 roomId 时回包内嵌 room.sync 快照，防订阅窗口漏事件
+      if (req2.method === "client.subscribe") {
+        const tier = req2.params?.tier === "global" ? "global" : "detail";
+        const roomId =
+          typeof req2.params?.roomId === "string" && req2.params.roomId
+            ? req2.params.roomId
+            : undefined;
+        const sessionId =
+          typeof req2.params?.sessionId === "string" && req2.params.sessionId
+            ? req2.params.sessionId
+            : undefined;
+        clientSubs.set(ws, { tier, roomId, sessionId });
+        let snapshot: Record<string, unknown> | undefined;
+        if (tier === "detail" && roomId) {
+          const room = rooms.get(roomId);
+          if (!room) throw new Error(`unknown room: ${roomId}`);
+          const sub = roomModeManager.subModeFor(roomId);
+          snapshot = {
+            flow: roomModeManager.getFlow(roomId),
+            blackboard: rooms.getBlackboard(roomId),
+            subMode: sub?.mode ?? null,
+            activeSpeaker: sub?.activeSpeaker ?? null,
+          };
+        }
+        send(ws, {
+          id: req2.id,
+          result: { subscribed: true, tier, ...(snapshot ? { snapshot } : {}) },
+        });
+        return;
+      }
       const result = await handleRequest(req2, relayedClients.has(ws));
       send(ws, { id: req2.id, result });
     } catch (err) {
