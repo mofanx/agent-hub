@@ -120,7 +120,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val warning = vm.backgroundConnectionWarning()
-    Column(Modifier.fillMaxSize()) {
+    // 根级统一消费状态栏 inset：待办/发送记录/警告条不再侵入系统时间区，
+    // 且与内部 TopAppBar 不再叠加出双间距（TopAppBar 的 windowInsets 置 0）
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
         val S = stringsFor(vm.lang)
         val attentionCount = vm.attentionItems.count { vm.attentionCurrent(it) }
         if (attentionCount > 0) {
@@ -137,7 +139,7 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         }
         if (warning != null) {
             Surface(
-                modifier = Modifier.fillMaxWidth().statusBarsPadding(),
+                modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.errorContainer,
             ) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -632,6 +632,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         topBar = {
             if (vm.multiSelectMode) {
                 TopAppBar(
+                    windowInsets = WindowInsets(0),
                     title = { Text(S.selectedCount.format(vm.selectedMessageIds.size)) },
                     navigationIcon = {
                         IconButton(onClick = { vm.exitMultiSelect() }) {
@@ -649,6 +650,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 )
             } else {
             TopAppBar(
+                windowInsets = WindowInsets(0),
                 title = {
                     if (isRoom) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
