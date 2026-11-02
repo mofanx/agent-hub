@@ -2,9 +2,12 @@
  *  不值得直接计数跳过——不烧主模型。规则随 eventTrigger.filter 配置，
  *  默认放行兼容现有行为；auto 路由可复用 wakeGateAllows 同一判定接口。 */
 
-/** 白名单谓词：fields 为"点路径 → 期望值"的 AND 匹配，全部命中才放行 */
+/** 白名单谓词：fields 为"点路径 → 期望值"的 AND 匹配，全部命中才放行；
+ *  contains 为关键词白名单（OR），事件上下文 text 命中任一子串才放行——
+ *  用于 room.message 类文本事件的报障识别（silent-repro）。 */
 export type WakeFilter = {
   fields?: Record<string, string> | undefined;
+  contains?: string[] | undefined;
 };
 
 /** 事件上下文：kind + 调用方随事件附带的负载字段（waitingFor/status/scope…） */
@@ -19,12 +22,19 @@ function getPath(obj: Record<string, unknown>, path: string): unknown {
   return cur;
 }
 
-/** 判定：无 filter/无 fields 恒放行；fields 内全部键值相等（转字符串比较）才放行 */
+/** 判定：无 filter/无谓词恒放行；fields 内全部键值相等（转字符串比较）且
+ *  contains（如配置）至少一个关键词出现在 ctx.text 中才放行 */
 export function wakeGateAllows(filter: WakeFilter | undefined, ctx: WakeCtx): boolean {
   const fields = filter?.fields;
-  if (!fields || Object.keys(fields).length === 0) return true;
-  for (const [k, want] of Object.entries(fields)) {
-    if (String(getPath(ctx, k) ?? "") !== want) return false;
+  if (fields) {
+    for (const [k, want] of Object.entries(fields)) {
+      if (String(getPath(ctx, k) ?? "") !== want) return false;
+    }
+  }
+  const contains = filter?.contains;
+  if (contains && contains.length > 0) {
+    const text = String(ctx.text ?? "").toLowerCase();
+    if (!contains.some((kw) => text.includes(kw.toLowerCase()))) return false;
   }
   return true;
 }
@@ -49,14 +59,24 @@ export function parseWakeFilter(raw: unknown): WakeFilter | undefined {
   if (typeof raw !== "object" || Array.isArray(raw))
     throw new Error("eventTrigger.filter must be an object");
   const fields = (raw as Record<string, unknown>).fields;
-  if (fields === undefined) return {};
-  if (typeof fields !== "object" || fields === null || Array.isArray(fields))
-    throw new Error("eventTrigger.filter.fields must be an object");
-  for (const [k, v] of Object.entries(fields)) {
-    if (!k) throw new Error("eventTrigger.filter.fields key required");
-    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean")
-      throw new Error(`eventTrigger.filter.fields.${k} must be string/number/boolean`);
-    (fields as Record<string, unknown>)[k] = String(v);
+  if (fields !== undefined) {
+    if (typeof fields !== "object" || fields === null || Array.isArray(fields))
+      throw new Error("eventTrigger.filter.fields must be an object");
+    for (const [k, v] of Object.entries(fields)) {
+      if (!k) throw new Error("eventTrigger.filter.fields key required");
+      if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean")
+        throw new Error(`eventTrigger.filter.fields.${k} must be string/number/boolean`);
+      (fields as Record<string, unknown>)[k] = String(v);
+    }
   }
-  return { fields: fields as Record<string, string> };
+  const contains = (raw as Record<string, unknown>).contains;
+  if (contains !== undefined) {
+    if (!Array.isArray(contains) || contains.length === 0 ||
+        contains.some((x) => typeof x !== "string" || !x.trim()))
+      throw new Error("eventTrigger.filter.contains must be non-empty string array");
+  }
+  const out: WakeFilter = {};
+  if (fields !== undefined) out.fields = fields as Record<string, string>;
+  if (contains !== undefined) out.contains = (contains as string[]).map((x) => x.trim());
+  return out;
 }

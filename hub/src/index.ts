@@ -55,7 +55,7 @@ import { RelevanceFilter } from "./filter.js";
 import { presenceEvents, type PresenceStatus } from "./presence.js";
 import { makeFlowCardSync, sweepOrphanFlowCards as sweepOrphanFlowCardsImpl } from "./flow-card.js";
 import { MissionManager } from "./mission.js";
-import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook } from "./mission-schedule.js";
+import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook, SilentReproBook, buildSilentReproPrompt } from "./mission-schedule.js";
 import { shouldDeliver, type ClientSub } from "./subscribe.js";
 import { NtfyPusher, ntfyConfigFromEnv, type NtfyKind } from "./ntfy.js";
 import { wakeGateAllows, WakeGateStats } from "./wake-gate.js";
@@ -941,6 +941,8 @@ function notifyOffline(roomId: string | undefined, kind: NtfyKind): void {
 
 /** 廉价决策层拦截计数（观测：被谓词省掉的唤醒次数，auto 路由复用同一 wakeGateAllows） */
 const wakeGateStats = new WakeGateStats();
+/** 静默复现每房轮次账本（默认 24h 内 2 轮），防同房多 silent 任务叠加打扰 */
+const silentReproBook = new SilentReproBook();
 function fireEventTasks(
   roomId: string | undefined,
   event: string,
@@ -959,8 +961,13 @@ function fireEventTasks(
     }
     if (now < (wakeSelfSuppress.get(task.id) ?? 0)) continue;
     if (!eventWakeBook.admit(task.id, et.debounceMs ?? 30_000, et.maxPerHour ?? 6)) continue;
+    // silent-repro 额外受每房 24h 轮次上限约束（不打扰策略的一部分）
+    if (et.silentRepro && !silentReproBook.admit(roomId)) continue;
     wakeSelfSuppress.set(task.id, now + WAKE_SELF_SUPPRESS_MS);
-    scheduler.fireEvent(task).catch((e) => logError("event wake task", e));
+    const promise = et.silentRepro
+      ? scheduler.fireEvent(task, buildSilentReproPrompt(task.message, String(ctx.text ?? "")))
+      : scheduler.fireEvent(task);
+    promise.catch((e) => logError("event wake task", e));
   }
 }
 
@@ -2977,6 +2984,11 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
             ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
             : historyText,
         });
+        // silent-repro 等文本监听任务的唤醒源：仅真实用户消息到达这里，
+        // 任务产出不经此路径，room.message 事件天然不会自激；
+        // 已 @ 成员的消息走正常派发，不再触发静默复现（防同一份报障双重执行）
+        const mentionedMember = rooms.route(roomId, historyText).mentioned.length > 0;
+        if (!mentionedMember) fireEventTasks(roomId, "room.message", { text: historyText });
         if (isRetryCmd) {
           const retried = roomModeManager.retryFailedTasks(roomId, retryMatch!.taskIds);
           if (retried) {

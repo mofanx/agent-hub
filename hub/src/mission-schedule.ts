@@ -8,19 +8,35 @@ import {
 } from "./scheduler.js";
 import { parseWakeFilter } from "./wake-gate.js";
 
-/** task.create 入参校验：eventTrigger 仅房作用域、事件名白名单、数值字段合法 */
+/** 静默复现默认报障关键词（wake-gate contains OR 匹配，大小写不敏感） */
+export const SILENT_REPRO_KEYWORDS = [
+  "bug", "报错", "崩溃", "异常", "错误", "error", "crash", "修复",
+];
+/** 静默复现默认节奏：60s 去抖、每任务每小时最多 2 次、每房每天最多 2 轮 */
+export const SILENT_REPRO_DEFAULTS = {
+  debounceMs: 60_000,
+  maxPerHour: 2,
+  roomMaxPerDay: 2,
+} as const;
+
+/** task.create 入参校验：eventTrigger 仅房作用域、事件名白名单、数值字段合法。
+ *  silentRepro:true 为预设——自动订阅 room.message 并按报障关键词默认过滤，
+ *  默认不启用，仅显式 task.create 携带该标记才激活。 */
 export function parseEventTrigger(raw: unknown, targetType: string): EventTrigger | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (targetType !== "room") throw new Error("eventTrigger requires room target");
   if (typeof raw !== "object") throw new Error("eventTrigger must be an object");
   const t = raw as Record<string, unknown>;
+  const silentRepro = t.silentRepro === true;
   const events = Array.isArray(t.events) ? t.events.map((x) => String(x)) : [];
+  if (silentRepro && !events.includes("room.message")) events.push("room.message");
   if (!events.length) throw new Error("eventTrigger.events required");
   for (const e of events) {
     if (!(EVENT_WAKE_KINDS as readonly string[]).includes(e))
       throw new Error(`unknown wake event: ${e}`);
   }
   const out: EventTrigger = { events: [...new Set(events)] };
+  if (silentRepro) out.silentRepro = true;
   if (t.debounceMs !== undefined) {
     const d = Number(t.debounceMs);
     if (!Number.isFinite(d) || d < 0) throw new Error("eventTrigger.debounceMs invalid");
@@ -33,7 +49,45 @@ export function parseEventTrigger(raw: unknown, targetType: string): EventTrigge
   }
   const filter = parseWakeFilter(t.filter);
   if (filter !== undefined) out.filter = filter;
+  if (out.silentRepro) {
+    if (out.debounceMs === undefined) out.debounceMs = SILENT_REPRO_DEFAULTS.debounceMs;
+    if (out.maxPerHour === undefined) out.maxPerHour = SILENT_REPRO_DEFAULTS.maxPerHour;
+    if (!out.filter?.contains?.length) {
+      out.filter = { ...(out.filter ?? {}), contains: [...SILENT_REPRO_KEYWORDS] };
+    }
+  }
   return out;
+}
+
+/** 静默复现每房轮次账本：滑动 24h 窗口内每房最多 roomMaxPerDay 轮——
+ *  与 EventWakeBook（每任务去抖/小时上限）互补，防同房多 silent 任务叠加打扰。 */
+export class SilentReproBook {
+  private rounds = new Map<string, { dayStart: number; count: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  admit(roomId: string, maxPerDay = SILENT_REPRO_DEFAULTS.roomMaxPerDay): boolean {
+    const n = this.now();
+    let st = this.rounds.get(roomId);
+    if (!st || n - st.dayStart >= 86_400_000) {
+      st = { dayStart: n, count: 0 };
+      this.rounds.set(roomId, st);
+    }
+    if (st.count >= maxPerDay) return false;
+    st.count += 1;
+    return true;
+  }
+
+  drop(roomId: string): void {
+    this.rounds.delete(roomId);
+  }
+}
+
+/** 静默复现 worker prompt：复现→定位→修复建议/补丁，限本房范围（IFC 作用域），
+ *  结果写黑板收尾（attention 聚合），不主动打扰用户。 */
+export function buildSilentReproPrompt(instruction: string, report: string): string {
+  const clipped = report.slice(0, 500);
+  return `${instruction}\n\n[静默复现任务] 用户报障：「${clipped}」\n要求：1) 静默复现该问题；2) 定位根因；3) 给出修复建议或补丁。仅限本房范围内的信息（IFC 作用域），不要跨房拉取数据；结果写入黑板并等待用户确认，不要主动打扰用户。`;
 }
 
 /**

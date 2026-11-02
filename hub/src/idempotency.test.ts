@@ -140,6 +140,8 @@ function compileIndexCase(body: string, sandbox: Record<string, unknown>): Index
   const box: Record<string, unknown> = { module: { exports: null }, console, Date, Promise, Error, String, Array, Number, Object, JSON, Set, Map, RegExp, clientMessageFlowState,
     // IFC 门控桩：测试 store 恒 shared 直通，保持原语义
     ifcCheckRoomRead: () => {},
+    // 事件唤醒桩：沙箱内无调度器，room.message 唤醒直接空转
+    fireEventTasks: () => {},
     ...sandbox };
   vm.runInNewContext(fn, box, { timeout: 5000 });
   const fn2 = (box.module as { exports: (req: { params: Record<string, unknown> }) => Promise<unknown> }).exports;
@@ -519,7 +521,10 @@ test("index prompt.send/room.message 提取：同 key 改 payload 冲突/控制�
       retryFailedTasks: () => false,
       handle: async () => { roomCalls.push(1); return { sent: ["s1"], skipped: [] }; },
     },
-    rooms: { get: () => ({ roomId: "r1" }) },
+    rooms: {
+      get: () => ({ roomId: "r1" }),
+      route: (_id: string, _text: string) => ({ targets: [], mentioned: [] }),
+    },
     persistState() {}, broadcast() {},
     parseRetryCommand: (txt: string) => (/^(?:retry|重试)(?:\s|$)/i.test(txt) ? { taskIds: [] } : null),
     helpAnswerIntent,
@@ -592,7 +597,7 @@ function guardedRoom(t: { after: (fn: () => void) => void }) {
     roomLostReplyNote: () => null, persistState() {}, broadcast() {},
     parseRetryCommand: () => null, helpAnswerIntent,
     CANCEL_TEXT: /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i,
-    rooms: { get: () => state.room },
+    rooms: { get: () => state.room, route: () => ({ targets: [], mentioned: [] }) },
     roomModeManager: {
       getFlow: () => state.flow ?? undefined,
       subModeFor: () => state.subMode ? { mode: state.subMode } : undefined,

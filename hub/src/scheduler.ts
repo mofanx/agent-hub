@@ -28,6 +28,9 @@ export const EVENT_WAKE_KINDS = [
   "flow.waitingFor",
   "decision",
   "task.done",
+  // 用户房消息事件——silent-repro 等文本监听任务使用；仅房内用户消息产生，
+  // 任务自身产出（assistant/定时任务条目）不会回灌，天然防自激。
+  "room.message",
 ] as const;
 
 export type EventWakeKind = (typeof EVENT_WAKE_KINDS)[number];
@@ -38,8 +41,12 @@ export type EventTrigger = {
   debounceMs?: number | undefined;
   /** 每房每小时触发上限（默认 6） */
   maxPerHour?: number | undefined;
-  /** 廉价决策层谓词：fields 键值 AND 匹配事件上下文，不匹配直接跳过不计费 */
-  filter?: { fields?: Record<string, string> | undefined } | undefined;
+  /** 廉价决策层谓词：fields 键值 AND 匹配事件上下文；contains 关键词 OR 匹配
+   *  事件文本，不匹配直接跳过不计费 */
+  filter?: { fields?: Record<string, string> | undefined; contains?: string[] | undefined } | undefined;
+  /** 静默复现修复：显式开启后按报障关键词监听 room.message，后台复现+试修，
+   *  结果走黑板/attention 聚合，不主动打扰用户；受每房轮次上限约束 */
+  silentRepro?: boolean | undefined;
 };
 
 export type MissionTemplate = {
@@ -282,13 +289,16 @@ export class Scheduler {
     }
   }
 
-  /** 事件唤醒手动触发：复用同一触发管线与执行日志；不推进时间表游标（lastRunAt/nextRunAt 不变） */
-  async fireEvent(task: ScheduledTask): Promise<void> {
+  /** 事件唤醒手动触发：复用同一触发管线与执行日志；不推进时间表游标（lastRunAt/nextRunAt 不变）。
+   *  messageOverride 供 silent-repro 等场景用包装后的 prompt 替换原始任务文案（日志仍记原文）。 */
+  async fireEvent(task: ScheduledTask, messageOverride?: string): Promise<void> {
     const now = Date.now();
     let success = true;
     let error: string | null = null;
     try {
-      await this.trigger(task);
+      await this.trigger(
+        messageOverride === undefined ? task : { ...task, message: messageOverride },
+      );
     } catch (err) {
       success = false;
       error = err instanceof Error ? err.message : String(err);
