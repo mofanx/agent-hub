@@ -38,9 +38,10 @@ import type {
   SkillInfo,
   SlashCommand,
   TaskLog,
+  OutboxSummary,
 } from "./types";
 import { KNOWN_AGENT_TYPES } from "./types";
-import { HubClient } from "./client";
+import { HubClient, HubRpcError } from "./client";
 import {
   loadConfig,
   saveConfig,
@@ -74,6 +75,17 @@ interface State {
   sendKey: "enter" | "ctrl-enter";
   connecting: boolean;
   connectError: string | null;
+  /** 链路断开/重连中（显式 disconnect 与 close 事件置位，onOpen 复位） */
+  linkDown: boolean;
+  deliveryReady: boolean;
+  deliveryProtocol: number;
+  deliveryHubId: string | null;
+  deliveryOrigin: string | null;
+  deliveryMaxAge?: number;
+  outboxError: "corrupt" | "storage" | "full" | "attachments" | "unsupported" | "unavailable" | null;
+  /** 未送达外发计数（pending/sending/uncertain） */
+  outboxPending: number;
+  outboxEntries: OutboxSummary[];
   agentStatus: string;
   sessions: SessionInfo[];
   rooms: RoomInfo[];
@@ -162,6 +174,8 @@ interface Actions {
   closeDrawer(): void;
   switchProfile(p: ConnProfile): void;
   refreshAll(): Promise<void>;
+  /** 断线重连增量恢复：room.sync 快照校准 + afterId 增量历史（truncated/异常回退全量） */
+  reconnectRecovery(): Promise<void>;
   refreshBusy(): void;
 
   createSession(
@@ -223,14 +237,17 @@ interface Actions {
   cloneRoom(room: RoomInfo, newName: string): Promise<RoomInfo | null>;
   newChat(): void;
 
-  sendPrompt(text: string, qOverride?: [string, string] | null, attsOverride?: Attachment[] | null): void;
-  sendRoomMessage(text: string, opts?: { replyTo?: string; quote?: [string, string] | null; atts?: Attachment[] | null }): void;
+  sendPrompt(text: string, qOverride?: [string, string] | null, attsOverride?: Attachment[] | null): boolean;
+  sendRoomMessage(text: string, opts?: { replyTo?: string; quote?: [string, string] | null; atts?: Attachment[] | null }): boolean;
+  sendLiveControl(scopeKey: string, params: Record<string, unknown>, userItem: Extract<ChatItem, { kind: "user" }>): boolean;
   /** 生成中的 follow-up 队列：发送排入队尾，回合空闲后按序冲刷 */
   followUps: { key: string; text: string; at: number; replyTo?: string; quote?: [string, string]; atts?: Attachment[] }[];
   queueFollowUp(text: string, replyTo?: string): void;
   removeFollowUp(index: number): void;
   /** 当前 scope 空闲时冲刷一条队首消息；返回是否冲刷了 */
   flushFollowUp(): void;
+  checkOutgoing(clientMessageId: string): void;
+  dismissOutgoing(clientMessageId: string, includeParked?: boolean): void;
   /** member.status 种子：进房/进会话时拉一次全量，后续靠事件增量 */
   refreshMemberStatus(): Promise<void>;
   stopCurrent(): void;
@@ -350,17 +367,38 @@ interface Actions {
 let artifactRefreshGeneration = 0;
 let missionListSeq = 0;
 let roomOpenSeq = 0;
+let connectionEpoch = 0;
+const scopeWatermarks = new Map<string, number>();
+const scopeDrafts = new Map<string, Map<number, number>>();
+const scopeRevisions = new Map<string, number>();
+const advanceWatermark = (scope: string, id: string, histId: number) => {
+  const k = `${scope}:${id}`;
+  if (histId > (scopeWatermarks.get(k) ?? 0)) scopeWatermarks.set(k, histId);
+};
 let decisionListSeq = 0;
 let missionRev = 0;
 let decisionRev = 0;
 let usageRefreshGeneration = 0;
 const flowCache = new Map<string, FlowInfo | null>();
+const clientMessageFlowState = (flow: FlowInfo | null | undefined, subMode?: string | null) => {
+  if (subMode === "deciding") return "deciding";
+  if (!flow) return "none";
+  if (flow.phase === "done" || flow.phase === "cancelled") return "terminal";
+  if (flow.phase === "awaiting-retry" ||
+      ((flow.mode === "parallel" || flow.mode === "debate") && flow.phase === "summarizing")) return "restart";
+  return "active";
+};
 /** 过程钻取区只保留的条目 kind（与 android fetchProcessItems 白名单一致） */
 const PROCESS_ITEM_KINDS = new Set(["thought", "tool", "plan"]);
 const panelsCache = new Map<
   string,
   { artifacts: ArtifactInfo[]; events: EventInfo[]; blackboard: BlackboardInfo[] }
 >();
+
+export const isLiveRoomControl = (text: string, replyTo?: string): boolean =>
+  /^(?:重试|retry)(?:\s+.+)?$/i.test(text.trim()) ||
+  (!replyTo && (/^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i.test(text.trim()) ||
+    /^(?:(?:答|answer|reply)\s*[:：]|\/reply\s+)/i.test(text.trim())));
 
 const defaultConfig: AppConfig = {
   profiles: [],
@@ -412,6 +450,7 @@ const attachTextLike = (mime: string) =>
   mime.endsWith("+json") || mime.endsWith("+xml");
 
 export const useHubStore = create<State & Actions>((set, get) => {
+  let deliveryProfile: { address: string; token: string } | null = null;
   const ensurePermission = async () => {
     try {
       const granted = await isNotificationPermissionGranted();
@@ -464,8 +503,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const attachments = ((o as Record<string, unknown>).attachments as unknown[] | undefined)
       ?.map((it) => parseAttachment(it as Record<string, unknown>));
     switch (kind) {
-      case "user":
-        return { kind: "user", at, historyId, text, author, attachments };
+      case "user": {
+        const clientMessageId = typeof o.clientMessageId === "string" ? o.clientMessageId : undefined;
+        const queued = clientMessageId ? outbox.find((i) => i.clientMessageId === clientMessageId) : undefined;
+        return { kind: "user", at, historyId, text, author, attachments, clientMessageId, sendStatus: queued?.status };
+      }
       case "assistant":
         return { kind: "assistant", at, historyId, id: 0, text, author, usage: usage ? parseTokenUsage(usage) : undefined };
       case "system":
@@ -566,6 +608,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   const liveKeyOf = (it: ChatItem): string => {
+    if (it.kind === "user" && it.clientMessageId) return `user:${it.clientMessageId}`;
     switch (it.kind) {
       case "tool":
         return `tool|${it.toolCallId}`;
@@ -602,25 +645,31 @@ export const useHubStore = create<State & Actions>((set, get) => {
     );
     switch (it.kind) {
       case "user":
+        if (it.clientMessageId && it.deliveryTracked !== false) {
+          return hist.some((h) => h.kind === "user" && h.clientMessageId === it.clientMessageId);
+        }
         return near.some(
           (h) => h.kind === "user" && (h.text === it.text || h.text.endsWith(it.text)),
         );
       case "system":
         return near.some((h) => h.kind === "system" && h.text === it.text);
       case "assistant":
+        // 指纹级匹配不限 300s 窗口但带时间门控：同作者 + live 不晚于持久化 +
+        // 全文相等或互为前缀（含持久化截断为前缀）
         return hist.some(
           (h) =>
             h.kind === "assistant" &&
             sameAuthor(h, it) &&
-            (h.text === it.text ||
-              (near.includes(h) && (h.text.startsWith(it.text) || it.text.startsWith(h.text)))),
+            (h.at == null || it.at == null || it.at <= h.at) &&
+            (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
         );
       case "thought":
         return hist.some(
           (h) =>
             h.kind === "thought" &&
             sameAuthor(h, it) &&
-            (h.text === it.text || (near.includes(h) && h.text.startsWith(it.text))),
+            (h.at == null || it.at == null || it.at <= h.at) &&
+            (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
         );
       case "tool":
         return hist.some(
@@ -637,14 +686,157 @@ export const useHubStore = create<State & Actions>((set, get) => {
       case "error":
         return near.some((h) => h.kind === "error" && h.text === it.text);
       case "process":
-        // 仅非空 processId 配对；空 id 的历史卡不吞 live 卡
-        return near.some(
+        // 指纹 id 匹配不限窗口；空 id 的历史卡不吞 live 卡
+        return hist.some(
           (h) => h.kind === "process" && !!it.processId && h.processId === it.processId,
         );
       case "flow":
-        return near.some((h) => h.kind === "flow" && h.flowId === it.flowId);
+        return hist.some((h) => h.kind === "flow" && h.flowId === it.flowId);
       default:
         return false;
+    }
+  };
+
+  /** 断线增量补齐：afterId 游标翻页拉取期间缺失条目；
+   * 实时事件先行到达的条目经 mergeHistoryItems 指纹去重自然合并；
+   * truncated（游标行被清理）或任何异常回退全量 loadHistory */
+  const incrementalCatchUp = async (
+    scope: "room" | "session",
+    idKey: "roomId" | "sessionId",
+    id: string,
+    client: HubClient,
+    seq: number,
+  ): Promise<void> => {
+    const epoch = connectionEpoch;
+    const stale = () => seq !== roomOpenSeq || get().client !== client || epoch !== connectionEpoch || !client.isConnected;
+    const method = scope === "room" ? "room.history" : "session.history";
+    const maxHistId = scopeWatermarks.get(`${scope}:${id}`) ?? 0;
+    const cardIds: number[] = [];
+    if (maxHistId <= 0) {
+      const res = await client.call(method, { [idKey]: id }, 30000);
+      if (stale()) throw new Error("recovery_stale");
+      const rows = historyRows(res);
+      applyHistoryRows(scope, id, rows);
+      rememberHistoryRows(scope, id, rows, true);
+      await refreshKnownHistory(scope, id, client, stale, { cardIds: cardIdsOf(rows) });
+      return;
+    }
+    let afterId = maxHistId;
+    for (;;) {
+      const rev = scopeRevisions.get(`${scope}:${id}`) ?? 0;
+      const res = await client.call(method, { [idKey]: id, afterId, limit: 500 }, 30000);
+      if (stale()) throw new Error("recovery_stale");
+      if (res.truncated === true) {
+        const before = new Set(scopeItems(scope, id));
+        const fullRows: Record<string, unknown>[] = [];
+        let cursor = 0;
+        for (;;) {
+          const full = await client.call(method, { [idKey]: id, afterId: cursor, limit: 500 }, 30000);
+          if (stale()) throw new Error("recovery_stale");
+          if (full.truncated === true) throw new Error("history_sync_truncated");
+          const batch = historyRows(full);
+          const lastId = batch.reduce((m, row) => typeof row.id === "number" ? Math.max(m, row.id) : m, cursor);
+          fullRows.push(...batch);
+          if (full.hasMore !== true) break;
+          if (lastId <= cursor) throw new Error("history_cursor_stalled");
+          cursor = lastId;
+        }
+        const live = scopeItems(scope, id).filter((it) => !before.has(it));
+        applyHistoryRows(scope, id, fullRows, { existing: live, liveFirst: true });
+        scopeWatermarks.set(`${scope}:${id}`, 0);
+        rememberHistoryRows(scope, id, fullRows, true);
+        cardIds.push(...cardIdsOf(fullRows));
+        break;
+      }
+      const rows = historyRows(res);
+      const rawLastId = rows.reduce((m, row) => typeof row.id === "number" ? Math.max(m, row.id) : m, afterId);
+      cardIds.push(...cardIdsOf(rows));
+      applyHistoryRows(scope, id, rows, { cardsCurrent: rev === (scopeRevisions.get(`${scope}:${id}`) ?? 0) });
+      rememberHistoryRows(scope, id, rows, true);
+      if (res.hasMore !== true) break;
+      if (rawLastId <= afterId) throw new Error("history_cursor_stalled");
+      afterId = rawLastId;
+    }
+    await refreshKnownHistory(scope, id, client, stale, { cardIds });
+  };
+
+  const historyRows = (res: Record<string, unknown>): Record<string, unknown>[] => {
+    if (!Array.isArray(res.entries)) throw new Error("history_sync_invalid");
+    return res.entries as Record<string, unknown>[];
+  };
+
+  const scopeItems = (scope: "room" | "session", id: string): ChatItem[] =>
+    scopeKeyNow() === `${scope}:${id}` ? get().chatItems : getHistoryCache(scope, id) ?? [];
+
+  const cardIdsOf = (rows: Record<string, unknown>[]) => rows
+    .filter((row) => row.kind === "flow" || row.kind === "decision")
+    .map((row) => row.id).filter((n): n is number => typeof n === "number" && n > 0);
+
+  const applyHistoryRows = (
+    scope: "room" | "session", id: string, rows: Record<string, unknown>[],
+    options: { cardsCurrent?: boolean; cache?: boolean; existing?: ChatItem[]; liveFirst?: boolean } = {},
+  ) => {
+    const items = rows.map(entryToChatItem).filter((it): it is ChatItem => it !== null)
+      .filter((it) => options.cardsCurrent !== false || (it.kind !== "flow" && it.kind !== "decision"));
+    const cids = new Set(items.map((i) => (i.kind === "user" ? i.clientMessageId : undefined)).filter(Boolean));
+    const restoredBubbles = outbox
+      .filter((i) => i.scopeKey === `${scope}:${id}` && i.origin === get().deliveryOrigin && i.hubId === get().deliveryHubId && i.bubble && !cids.has(i.bubble.clientMessageId))
+      .map((i) => ({ ...i.bubble!, sendStatus: i.status === "sent" ? "sent" : i.status, ...(i.attachmentNames?.length ? { attachmentNames: i.attachmentNames } : {}) }) as ChatItem);
+    const existing = options.existing ?? scopeItems(scope, id);
+    const fresh = [...items, ...restoredBubbles];
+    const merged = options.liveFirst ? mergeHistoryItems(existing, fresh) : mergeHistoryItems(fresh, existing);
+    if (options.cache !== false) setHistoryCache(scope, id, merged);
+    if (scopeKeyNow() === `${scope}:${id}`) set({ chatItems: merged });
+    return merged;
+  };
+
+  const rememberHistoryRows = (scope: "room" | "session", id: string, rows: Record<string, unknown>[], advance: boolean) => {
+    const key = `${scope}:${id}`;
+    const drafts = scopeDrafts.get(key) ?? new Map<number, number>();
+    for (const row of rows) {
+      if (typeof row.id !== "number" || !Number.isSafeInteger(row.id) || row.id <= 0) continue;
+      if (advance) advanceWatermark(scope, id, row.id);
+      if (row.draft === 1 && typeof row.at === "number") drafts.set(row.id, row.at);
+      else if (row.draft === 0) drafts.delete(row.id);
+    }
+    if (drafts.size) scopeDrafts.set(key, drafts);
+    else scopeDrafts.delete(key);
+  };
+
+  const refreshKnownHistory = async (
+    scope: "room" | "session", id: string, client: HubClient, stale: () => boolean,
+    options: { cache?: boolean; cardIds?: number[] } = {},
+  ) => {
+    const key = `${scope}:${id}`;
+    const visibleIds = new Set(scopeItems(scope, id).map((it) => it.historyId));
+    for (const historyId of [...(scopeDrafts.get(key)?.keys() ?? [])]) {
+      if (!visibleIds.has(historyId)) { scopeDrafts.get(key)?.delete(historyId); continue; }
+      const res = await client.call(`${scope}.history`, { [`${scope}Id`]: id, entryIds: [historyId] }, 30000);
+      if (stale()) throw new Error("recovery_stale");
+      const row = historyRows(res).find((r) => r.id === historyId);
+      if (!row) throw new Error("history_draft_unavailable");
+      applyHistoryRows(scope, id, [row], { cache: options.cache });
+      rememberHistoryRows(scope, id, [row], false);
+    }
+    if (scope !== "room" || get().deliveryProtocol !== 1) return;
+    const ids = [...new Set([
+      ...scopeItems(scope, id).filter((it) => it.kind === "flow" || it.kind === "decision")
+        .map((it) => it.historyId).filter((n): n is number => typeof n === "number" && n > 0),
+      ...(options.cardIds ?? []),
+    ])];
+    for (let offset = 0; offset < ids.length; offset += 200) {
+      let applied = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const rev = scopeRevisions.get(key) ?? 0;
+        const res = await client.call("room.sync", { roomId: id, knownCardIds: ids.slice(offset, offset + 200) }, 30000);
+        if (stale()) throw new Error("recovery_stale");
+        if (!Array.isArray(res.cards)) throw new Error("history_cards_unavailable");
+        if (rev !== (scopeRevisions.get(key) ?? 0)) continue;
+        applyHistoryRows(scope, id, res.cards as Record<string, unknown>[], { cache: options.cache });
+        applied = true;
+        break;
+      }
+      if (!applied) throw new Error("recovery_snapshot_stale");
     }
   };
 
@@ -666,6 +858,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const hist = [...byId.values()];
     const result = [...hist];
     for (const it of live.values()) {
+      if (it.kind === "user" && it.clientMessageId &&
+          hist.some((h) => h.kind === "user" && h.clientMessageId === it.clientMessageId)) continue;
       if (!isCoveredByHistory(it, hist)) result.push(it);
     }
     result.sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity));
@@ -1216,10 +1410,470 @@ export const useHubStore = create<State & Actions>((set, get) => {
     next[i] = m;
     return next;
   };
-  const getOrCall = async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+  /** 发送可靠性：有界 Outbox（与 android OutboxStatus 语义对齐）
+   * pending=待发送(未连上) sending=在途 sent=已接收 uncertain=结果待确认(可能已达) failed=失败/过期 */
+  type OutboxItem = {
+    clientMessageId: string;
+    method: "room.message" | "prompt.send";
+    scopeKey: string;
+    params: Record<string, unknown>;
+    status: "pending" | "sending" | "sent" | "uncertain" | "failed" | "dismissed";
+    queuedAt: number;
+    flowId?: string;
+    missionId?: string;
+    attempted?: boolean;
+    origin: string | null;
+    hubId: string | null;
+    flowPhase: string | null;
+    deferred: boolean;
+    error?: string;
+    sendError?: "context" | "expired";
+    replayable: boolean;
+    bubble?: Extract<ChatItem, { kind: "user" }>;
+    attachmentNames?: string[];
+    profileLabel?: string;
+    scopeLabel?: string;
+  };
+  const OUTBOX_MAX = 50;
+  const outbox: OutboxItem[] = [];
+  const OUTBOX_STORAGE_KEY = "agent-hub.outbox.v1";
+  let outboxCorrupt = false;
+  const serializeOutbox = () => ({
+    version: 1,
+    entries: outbox.map((i) => ({
+      clientMessageId: i.clientMessageId, method: i.method, scopeKey: i.scopeKey,
+      params: i.replayable ? i.params : {
+          ...(i.method === "room.message" ? { roomId: i.params.roomId } : { sessionId: i.params.sessionId }),
+          clientMessageId: i.clientMessageId,
+          ...(i.params.expectedFlowId !== undefined ? { expectedFlowId: i.params.expectedFlowId } : {}),
+          ...(i.params.expectedMissionId !== undefined ? { expectedMissionId: i.params.expectedMissionId } : {}),
+          ...(i.params.intent !== undefined ? { intent: i.params.intent } : {}),
+          ...(i.params.replyTo !== undefined ? { replyTo: i.params.replyTo } : {}),
+        },
+      status: i.status, queuedAt: i.queuedAt, flowId: i.flowId, missionId: i.missionId,
+      origin: i.origin, hubId: i.hubId, flowPhase: i.flowPhase, deferred: i.deferred,
+      replayable: i.replayable,
+      attempted: i.replayable ? i.attempted === true : true,
+      bubble: i.bubble
+        ? { ...i.bubble, attachments: undefined, quoteText: i.bubble.quoteText?.slice(0, 300) }
+        : undefined,
+      attachmentNames: i.attachmentNames,
+      sendError: i.sendError,
+      profileLabel: i.profileLabel,
+      scopeLabel: i.scopeLabel,
+    })),
+  });
+  let outboxReadBroken = false;
+  const saveOutbox = (): boolean => {
+    if (outboxCorrupt || outboxReadBroken) { set({ outboxError: outboxCorrupt ? "corrupt" : "storage" }); return false; }
+    try {
+      localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(serializeOutbox()));
+      if (get().outboxError === "storage") set({ outboxError: null });
+      return true;
+    } catch {
+      set({ outboxError: "storage" });
+      return false;
+    }
+  };
+  const restoreOutbox = (): { entries: OutboxItem[]; corrupt: boolean } => {
+    let raw: string | null = null;
+    try { raw = localStorage.getItem(OUTBOX_STORAGE_KEY); } catch { outboxReadBroken = true; return { entries: [], corrupt: false }; }
+    if (!raw) return { entries: [], corrupt: false };
+    try {
+      const parsed = JSON.parse(raw) as { version?: number; entries?: unknown[] };
+      if (parsed.version !== 1 || !Array.isArray(parsed.entries) || parsed.entries.length > 50) {
+        return { entries: [], corrupt: true };
+      }
+      const entries: OutboxItem[] = [];
+      const seenCids = new Set<string>();
+      const scopeCount = new Map<string, number>();
+      let textBytes = 0;
+      let allBytes = 0;
+      for (const e of parsed.entries) {
+        const it = e as Record<string, unknown>;
+        const cid = it.clientMessageId;
+        const bub = it.bubble as Record<string, unknown> | undefined;
+        const prm = it.params as Record<string, unknown> | undefined;
+        const scopeId = it.method === "room.message" ? prm?.roomId : prm?.sessionId;
+        const expectedScope = it.method === "room.message"
+          ? `room:${String((prm ?? {}).roomId ?? "")}`
+          : `session:${String((prm ?? {}).sessionId ?? "")}`;
+        const valid =
+          typeof cid === "string" && cid.length > 0 && cid.length <= 200 && !seenCids.has(cid) &&
+          (it.method === "room.message" || it.method === "prompt.send") &&
+          typeof it.scopeKey === "string" && it.scopeKey === expectedScope &&
+          typeof scopeId === "string" && scopeId.length > 0 &&
+          prm !== undefined && typeof prm === "object" && !Array.isArray(prm) &&
+          prm.clientMessageId === cid &&
+          typeof it.queuedAt === "number" && Number.isFinite(it.queuedAt) && it.queuedAt > 0 &&
+          typeof it.replayable === "boolean" && typeof it.attempted === "boolean" &&
+          (it.profileLabel === undefined || typeof it.profileLabel === "string") &&
+          (it.scopeLabel === undefined || typeof it.scopeLabel === "string") &&
+          (it.status === "pending" || it.status === "sending" || it.status === "uncertain" || it.status === "failed") &&
+          typeof it.origin === "string" && /^[a-f0-9]{64}$/.test(it.origin) &&
+          (it.hubId === null || (typeof it.hubId === "string" && it.hubId.length > 0)) &&
+          bub !== undefined && bub.kind === "user" && bub.clientMessageId === cid &&
+          typeof bub.text === "string" && typeof bub.author === "string";
+        if (!valid) return { entries: [], corrupt: true };
+        const bytes = new TextEncoder().encode(JSON.stringify(prm)).byteLength;
+        allBytes += bytes;
+        if (it.replayable === true) {
+          const blocks = Array.isArray(prm!.content) ? (prm!.content as Record<string, unknown>[]) : [];
+          textBytes += bytes;
+          if (!blocks.length || !blocks.every((b) => b && b.type === "text" && typeof b.text === "string") || bytes > 256 * 1024) {
+            return { entries: [], corrupt: true };
+          }
+        }
+        if (textBytes > 1024 * 1024 || allBytes > 64 * 1024 * 1024 ||
+            (it.attachmentNames !== undefined && (!Array.isArray(it.attachmentNames) ||
+              !it.attachmentNames.every((name) => typeof name === "string")))) return { entries: [], corrupt: true };
+        seenCids.add(cid as string);
+        const sk = `${String(it.origin)}:${String(it.hubId)}:${String(it.scopeKey)}`;
+        scopeCount.set(sk, (scopeCount.get(sk) ?? 0) + 1);
+        if (scopeCount.get(sk)! > 30) return { entries: [], corrupt: true };
+        entries.push({
+          clientMessageId: cid as string, method: it.method as OutboxItem["method"],
+          scopeKey: it.scopeKey as string, params: (it.params ?? {}) as Record<string, unknown>,
+          status: (!it.replayable || it.status === "sending" ? "uncertain" : it.status) as OutboxItem["status"],
+          queuedAt: it.queuedAt as number,
+          flowId: it.flowId as string | undefined, missionId: it.missionId as string | undefined,
+          origin: (it.origin ?? null) as string | null, hubId: (it.hubId ?? null) as string | null,
+          flowPhase: (it.flowPhase ?? null) as string | null, deferred: true,
+          replayable: it.replayable === true,
+          attempted: it.replayable === true ? it.attempted === true : true,
+          bubble: it.bubble as OutboxItem["bubble"],
+          attachmentNames: Array.isArray(it.attachmentNames) ? (it.attachmentNames as string[]) : undefined,
+          profileLabel: typeof it.profileLabel === "string" ? it.profileLabel : "",
+          scopeLabel: typeof it.scopeLabel === "string" ? it.scopeLabel : "",
+          sendError: it.sendError === "context" || it.sendError === "expired" ? it.sendError : undefined,
+        });
+      }
+      return { entries, corrupt: false };
+    } catch {
+      return { entries: [], corrupt: true };
+    }
+  };
+  const restored = restoreOutbox();
+  outboxCorrupt = restored.corrupt;
+  for (const e of restored.entries) outbox.push(e);
+  const newClientMessageId = () => crypto.randomUUID();
+
+  /** 标记 user 气泡的发送状态（按 clientMessageId 定位最近一条） */
+  const markUserSendStatus = (cmId: string, status: NonNullable<OutboxItem["status"]>, historyId?: number, sendError?: "context" | "expired") => {
+    const update = (items: ChatItem[]) => items.map((it) =>
+      it.kind === "user" && it.clientMessageId === cmId
+        ? { ...it, sendStatus: status, ...(historyId ? { historyId } : {}),
+            ...(status === "failed" && sendError ? { sendError } : {}) } : it);
+    const historyCache = Object.fromEntries(Object.entries(get().historyCache).map(([key, items]) => [key, update(items)]));
+    const record = outbox.find((i) => i.clientMessageId === cmId);
+    if (record?.bubble) record.bubble = update([record.bubble])[0] as Extract<ChatItem, { kind: "user" }>;
+    set({ chatItems: update(get().chatItems), historyCache });
+  };
+
+  const syncOutboxPending = () => {
+    const origin = get().deliveryOrigin;
+    const hubId = get().deliveryHubId;
+    const summaries: OutboxSummary[] = outbox.map((i) => ({
+      clientMessageId: i.clientMessageId,
+      scopeKey: i.scopeKey,
+      profileLabel: i.profileLabel ?? "",
+      scopeLabel: i.scopeLabel ?? "",
+      text: String(i.bubble?.text ?? (i.params.text ?? "")),
+      queuedAt: i.queuedAt,
+      status: i.status as OutboxSummary["status"],
+      current: i.origin === origin && i.hubId === hubId,
+      attachmentNames: i.attachmentNames ?? [],
+    }));
+    set({
+      outboxPending: outbox.filter((i) => i.origin === origin &&
+        i.hubId === hubId && i.status !== "sent" && i.status !== "failed").length,
+      outboxEntries: summaries,
+    });
+  };
+
+  type SendOutcome = "accepted" | "blocked";
+  const scopeWorkers = new Map<string, Promise<void>>();
+  const scopeWakes = new Set<string>();
+  const drainScope = (scopeKey: string) => {
+    if (!get().deliveryReady || !get().client?.isConnected) return Promise.resolve();
+    const client = get().client!;
+    const epoch = connectionEpoch;
+    const origin = get().deliveryOrigin;
+    const hubId = get().deliveryHubId;
+    const workerKey = JSON.stringify([origin, hubId, scopeKey]);
+    const existing = scopeWorkers.get(workerKey);
+    if (existing) { scopeWakes.add(workerKey); return existing; }
+    const next = Promise.resolve().then(async () => {
+      for (;;) {
+        if (outboxCorrupt) break;
+        if (get().client !== client || connectionEpoch !== epoch || !get().deliveryReady) break;
+        const item = outbox.find((i) => i.scopeKey === scopeKey && i.origin === origin && i.hubId === hubId);
+        if (!item) break;
+        if (item.status === "failed" || item.status === "sending") break;
+        const outcome = await sendOutboxOrdered(item, client, epoch);
+        if (outcome === "blocked") break;
+      }
+    });
+    const tracked = next.finally(() => {
+      if (scopeWorkers.get(workerKey) === tracked) scopeWorkers.delete(workerKey);
+      if (scopeWakes.delete(workerKey) && get().deliveryOrigin === origin && get().deliveryHubId === hubId) {
+        void drainScope(scopeKey).catch(() => {});
+      }
+    });
+    scopeWorkers.set(workerKey, tracked);
+    return tracked;
+  };
+  const parkOutbox = () => {
+    for (const i of outbox) {
+      if (i.origin !== get().deliveryOrigin || i.hubId !== get().deliveryHubId) continue;
+      if (i.status === "sending") { i.status = "uncertain"; markUserSendStatus(i.clientMessageId, "uncertain"); }
+      if (i.status === "pending") i.deferred = true;
+    }
+    const items = [...get().chatItems];
+    let touched = false;
+    for (let k = 0; k < items.length; k++) {
+      const it = items[k];
+      if (it.kind === "user" && it.deliveryTracked === false && it.sendStatus === "sending") {
+        items[k] = { ...it, sendStatus: "uncertain" };
+        touched = true;
+      }
+    }
+    if (touched) set({ chatItems: items });
+    saveOutbox();
+    syncOutboxPending();
+  };
+
+  const sendOutboxOrdered = async (item: OutboxItem, client = get().client, epoch = connectionEpoch): Promise<SendOutcome> => {
+    const stale = () => !client?.isConnected || get().client !== client || epoch !== connectionEpoch ||
+      !outbox.includes(item) ||
+      item.origin !== get().deliveryOrigin || item.hubId !== get().deliveryHubId || !get().deliveryReady;
+    if (stale() || !client) return "blocked";
+    const finish = (result: Record<string, unknown>): SendOutcome => {
+      item.status = "sent";
+      const hid = typeof result.historyId === "number" ? result.historyId : undefined;
+      markUserSendStatus(item.clientMessageId, "sent", hid);
+      const index = outbox.indexOf(item);
+      if (index >= 0) outbox.splice(index, 1);
+      saveOutbox();
+      syncOutboxPending();
+      return "accepted";
+    };
+    if (item.attempted && item.status !== "sent") {
+      if (get().deliveryProtocol !== 1) return "blocked";
+      try {
+        const st = await client.call("client.message.status", {
+          method: item.method,
+          ...(item.method === "room.message" ? { roomId: item.scopeKey.slice(5) } : { sessionId: item.scopeKey.slice(8) }),
+          clientMessageId: item.clientMessageId,
+        }, 30000);
+        if (stale()) return "blocked";
+        if (st.deliveryStatus === "accepted") {
+          return finish(st);
+        }
+        item.status = "uncertain";
+        markUserSendStatus(item.clientMessageId, "uncertain");
+        saveOutbox();
+        syncOutboxPending();
+        return "blocked";
+      } catch (e) {
+        if (!stale()) {
+          item.status = "uncertain";
+          markUserSendStatus(item.clientMessageId, "uncertain");
+          saveOutbox();
+          syncOutboxPending();
+        }
+        return "blocked";
+      }
+    }
+    if (stale()) return "blocked";
+    const maxAge = Math.min(24 * 3600_000, (get().deliveryMaxAge ?? 24 * 3600_000));
+    const age = Date.now() - item.queuedAt;
+    if (age < 0 || age > maxAge) {
+      item.status = item.attempted ? "uncertain" : "failed";
+      item.error = "expired";
+      item.sendError = "expired";
+      markUserSendStatus(item.clientMessageId, item.status, undefined, "expired");
+      saveOutbox();
+      syncOutboxPending();
+      return "blocked";
+    }
+    try {
+      if (item.method === "room.message") {
+        const roomId = String(item.params.roomId);
+        if (typeof item.params.expectedFlowState !== "string" || typeof item.params.expectedRoomMode !== "string") {
+          item.status = "failed";
+          item.sendError = "context";
+          markUserSendStatus(item.clientMessageId, "failed", undefined, "context");
+          saveOutbox();
+          syncOutboxPending();
+          return "blocked";
+        }
+        const sync = await client.call(get().deliveryProtocol === 1 ? "room.sync" : "room.flow", { roomId }, 30000);
+        if (stale()) return "blocked";
+        if (item.deferred && typeof sync.mode !== "string") {
+          item.status = "failed";
+          markUserSendStatus(item.clientMessageId, "failed");
+          set({ outboxError: "unsupported" });
+          saveOutbox();
+          syncOutboxPending();
+          return "blocked";
+        }
+        const flow = (sync.flow ?? null) as FlowInfo | null;
+        const flowId = flow?.flowId ?? null;
+        const missionId = flow?.missionId ?? null;
+        const terminal = (phase: string | null) => phase === "done" || phase === "cancelled";
+        const replyTo = item.params.replyTo;
+        const replyValid = !replyTo || flow?.clarificationId === replyTo ||
+          flow?.tasks.some((t) => t.waitingFor === "user" && t.waitingHelpId === replyTo);
+        if (flowId !== (item.params.expectedFlowId ?? null) ||
+            missionId !== (item.params.expectedMissionId ?? null) ||
+            clientMessageFlowState(flow, typeof sync.subMode === "string" ? sync.subMode : null) !== item.params.expectedFlowState ||
+            (typeof sync.mode === "string" && sync.mode !== item.params.expectedRoomMode) ||
+            (terminal(flow?.phase ?? null) && !terminal(item.flowPhase)) ||
+            !replyValid || (item.deferred && (sync.subMode === "deciding" || flow?.phase === "awaiting-retry"))) {
+          item.status = "failed";
+          item.error = "context";
+          item.sendError = "context";
+          markUserSendStatus(item.clientMessageId, "failed", undefined, "context");
+          saveOutbox();
+          syncOutboxPending();
+          return "blocked";
+        }
+      } else {
+        const res = await client.call("session.list", {}, 30000);
+        if (stale()) return "blocked";
+        const sessions = (Array.isArray(res.sessions) ? res.sessions : []) as Record<string, unknown>[];
+        const session = sessions.find((s) => s.sessionId === item.params.sessionId);
+        if (!session || session.offline === true) {
+          item.status = "failed";
+          item.error = "context";
+          item.sendError = "context";
+          markUserSendStatus(item.clientMessageId, "failed", undefined, "context");
+          saveOutbox();
+          syncOutboxPending();
+          return "blocked";
+        }
+        if (session.busy === true) { item.deferred = true; return "blocked"; }
+      }
+    } catch {
+      return "blocked";
+    }
+    if (stale() || (item.deferred && get().deliveryProtocol !== 1)) return "blocked";
+    const prevAttempted = item.attempted;
+    const prevStatus = item.status;
+    item.status = "sending";
+    item.attempted = true;
+    markUserSendStatus(item.clientMessageId, "sending");
+    if (!saveOutbox()) {
+      item.attempted = prevAttempted;
+      item.status = prevStatus;
+      markUserSendStatus(item.clientMessageId, prevStatus);
+      syncOutboxPending();
+      return "blocked";
+    }
+    syncOutboxPending();
+    try {
+      const result = await client.call(item.method, item.params, 30000);
+      if (stale()) return "blocked";
+      if (result.deliveryStatus !== "accepted" && get().deliveryProtocol === 1) {
+        item.status = "uncertain";
+        markUserSendStatus(item.clientMessageId, "uncertain");
+        saveOutbox();
+        syncOutboxPending();
+        return "blocked";
+      }
+      return finish(result);
+    } catch (e) {
+      if (stale()) return "blocked";
+      const st = e instanceof HubRpcError ? "failed" : "uncertain";
+      item.status = st;
+      markUserSendStatus(item.clientMessageId, st);
+      saveOutbox();
+      syncOutboxPending();
+      return "blocked";
+    }
+  };
+
+  const replayOutbox = () => {
+    if (!get().deliveryReady) return;
+    const scopes = [...new Set(outbox.filter((i) => i.origin === get().deliveryOrigin &&
+      i.hubId === get().deliveryHubId).map((i) => i.scopeKey))];
+    for (const scopeKey of scopes) void drainScope(scopeKey).catch(() => {});
+    syncOutboxPending();
+  };
+
+  const enqueueOutbox = (
+    method: OutboxItem["method"],
+    scopeKey: string,
+    params: Record<string, unknown>,
+    ctx: { flowId?: string; missionId?: string; bubble: Extract<ChatItem, { kind: "user" }>; replayable: boolean },
+  ): string => {
+    const cmId = ctx.bubble.clientMessageId ?? newClientMessageId();
+    const connected = !!get().client?.isConnected && get().deliveryReady;
+    const replayable = ctx.replayable;
+    if (outboxCorrupt) { set({ outboxError: "corrupt" }); return ""; }
+    if (!get().deliveryOrigin) { set({ outboxError: "unavailable" }); return ""; }
+    if (!connected && (!replayable || get().deliveryProtocol !== 1)) {
+      set({ outboxError: !replayable ? "attachments" : "unsupported" });
+      return "";
+    }
+    const roomId = method === "room.message" ? String(params.roomId) : null;
+    const flow = roomId ? flowCache.get(roomId) ?? (get().currentRoom?.roomId === roomId ? get().flow : null) : null;
+    const room = roomId ? (get().currentRoom?.roomId === roomId ? get().currentRoom : get().rooms.find((r) => r.roomId === roomId)) : null;
+    if (roomId && !room) { set({ outboxError: "unavailable" }); return ""; }
+    const snapshot = JSON.parse(JSON.stringify({
+      ...params, clientMessageId: cmId,
+      ...(roomId ? {
+        expectedFlowId: ctx.flowId ?? flow?.flowId ?? null,
+        expectedMissionId: ctx.missionId ?? flow?.missionId ?? null,
+        expectedFlowState: clientMessageFlowState(flow, room?.subMode),
+        expectedRoomMode: room!.mode,
+      } : {}),
+    })) as Record<string, unknown>;
+    const size = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+    const storedBytes = outbox.reduce((total, entry) => total + (entry.replayable
+      ? new TextEncoder().encode(JSON.stringify(entry.params)).byteLength : 0), 0);
+    const memBytes = outbox.reduce((t, e) => t + new TextEncoder().encode(JSON.stringify(e.params)).byteLength, 0);
+    if (memBytes + size > 64 * 1024 * 1024) { set({ outboxError: "full" }); return ""; }
+    if (outbox.length >= OUTBOX_MAX ||
+        outbox.filter((i) => i.origin === get().deliveryOrigin && i.scopeKey === scopeKey).length >= 30 ||
+        (replayable && (size > 256 * 1024 || size + storedBytes > 1024 * 1024))) {
+      set({ outboxError: "full" });
+      return "";
+    }
+    const item: OutboxItem = {
+      clientMessageId: cmId, method, scopeKey, params: snapshot,
+      status: "pending", queuedAt: Date.now(),
+      flowId: ctx.flowId, missionId: ctx.missionId,
+      origin: get().deliveryOrigin, hubId: get().deliveryHubId,
+      flowPhase: flow?.phase ?? null,
+      deferred: !connected || outbox.some((i) => i.origin === get().deliveryOrigin && i.scopeKey === scopeKey),
+      replayable,
+      bubble: ctx.bubble,
+      attachmentNames: !replayable
+        ? (ctx.bubble.attachments ?? []).map((a) => a.name)
+        : undefined,
+      profileLabel: get().currentProfile?.name ?? "",
+      scopeLabel: scopeKey.startsWith("room:")
+        ? (get().currentRoom?.name ?? "")
+        : (get().currentSession?.name ?? ""),
+    };
+    outbox.push(item);
+    if (!saveOutbox()) {
+      outbox.splice(outbox.indexOf(item), 1);
+      syncOutboxPending();
+      return "";
+    }
+    syncOutboxPending();
+    if (get().deliveryReady && get().client?.isConnected) void drainScope(scopeKey).catch(() => {});
+    else markUserSendStatus(cmId, "pending");
+    return cmId;
+  };
+
+  const getOrCall = async <T>(method: string, params: Record<string, unknown> = {}, timeoutMs = 0): Promise<T> => {
     const client = get().client;
     if (!client || !client.isConnected) throw new Error("not connected");
-    const resp = await client.call(method, params);
+    const resp = await client.call(method, params, timeoutMs);
     return resp as T;
   };
 
@@ -1505,6 +2159,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
     sendKey: "enter",
     connecting: false,
     connectError: null,
+    linkDown: false,
+    deliveryReady: false,
+    deliveryProtocol: 0,
+    deliveryHubId: null,
+    deliveryOrigin: null,
+    outboxError: outboxCorrupt ? "corrupt" : outboxReadBroken ? "storage" : null,
+    outboxPending: 0,
+    outboxEntries: [],
     agentStatus: stringsFor("zh").notConnected,
     sessions: [],
     rooms: [],
@@ -1684,6 +2346,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     connect: (address: string, token: string, name?: string) => {
       get().disconnect();
+      deliveryProfile = { address, token };
       set({ connecting: true, connectError: null });
       const url = buildWsUrl(address, token);
 
@@ -1691,11 +2354,21 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ client });
 
       client.addEventListener("event", (obj) => {
-        if (get().client === client) handleEvent(obj);
+        if (get().client !== client) return;
+        const p = (obj.params ?? {}) as Record<string, unknown>;
+        const key = typeof p.roomId === "string" ? `room:${p.roomId}` :
+          p.scope === "room" && typeof p.id === "string" ? `room:${p.id}` : null;
+        if (key && ["room.flowUpdate", "room.modeSelected", "room.blackboardUpdate", "room.process", "decision.update"].includes(String(obj.method))) {
+          scopeRevisions.set(key, (scopeRevisions.get(key) ?? 0) + 1);
+        }
+        handleEvent(obj);
+        if (["prompt.done", "prompt.error", "session.cancelled"].includes(String(obj.method))) replayOutbox();
       });
       client.addEventListener("close", () => {
         if (get().client !== client) return;
-        set({ agentStatus: stringsFor(get().lang).agentDisconnected });
+        connectionEpoch++;
+        parkOutbox();
+        set({ agentStatus: stringsFor(get().lang).agentDisconnected, linkDown: true, deliveryReady: false });
         updateTray();
       });
       client.addEventListener("error", (msg) => {
@@ -1705,10 +2378,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
       client.connect(
         url,
-        () => {
+        async () => {
           if (get().client !== client) return;
-          set({ connecting: false, connectError: null, agentStatus: stringsFor(get().lang).connected });
+          const epoch = ++connectionEpoch;
+          set({ connecting: false, connectError: null, linkDown: false, deliveryReady: false, agentStatus: stringsFor(get().lang).connected });
           get().saveProfileAndConnect(address, token, name);
+          try {
+            await get().reconnectRecovery();
+          } catch {
+            if (get().client === client && epoch === connectionEpoch) {
+              set({ connectError: stringsFor(get().lang).recoveryFailed, deliveryReady: false });
+            }
+          }
         },
         (msg) => {
           if (get().client !== client) return;
@@ -1718,14 +2399,24 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     disconnect: () => {
+      connectionEpoch++;
+      scopeWatermarks.clear();
+      scopeDrafts.clear();
+      scopeRevisions.clear();
+      deliveryProfile = null;
       missionListSeq++;
       decisionListSeq++;
       roomOpenSeq++;
       flowCache.clear();
       panelsCache.clear();
+      parkOutbox();
       get().client?.disconnect();
       set({
         client: null,
+        deliveryReady: false,
+        deliveryProtocol: 0,
+        deliveryHubId: null,
+        deliveryOrigin: null,
         missionFocusId: null,
         missionExecutionTarget: null,
         sessions: [],
@@ -1752,6 +2443,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         jumpQuery: "",
         connecting: false,
         connectError: null,
+        linkDown: false,
+        outboxPending: 0,
         agentStatus: stringsFor(get().lang).notConnected,
         selectedIds: { sessions: [], rooms: [] },
         historyCache: {},
@@ -1793,12 +2486,120 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().connect(p.address, p.token, p.name);
     },
 
+    reconnectRecovery: async () => {
+      set({ deliveryReady: false, connectError: null });
+      const client = get().client;
+      if (!client || !client.isConnected) return;
+      const epoch = connectionEpoch;
+      const stale = () => get().client !== client || epoch !== connectionEpoch || !client.isConnected;
+      set({ deliveryReady: false });
+      const [info, sList, rList] = await Promise.all([
+        client.call("agent.info", {}, 30000),
+        client.call("session.list", {}, 30000),
+        client.call("room.list", {}, 30000),
+      ]);
+      if (stale()) throw new Error("recovery_stale");
+      if (!deliveryProfile) throw new Error("recovery_profile_missing");
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
+        JSON.stringify([deliveryProfile.address.trim(), deliveryProfile.token]),
+      ));
+      if (stale()) throw new Error("recovery_stale");
+      const origin = [...new Uint8Array(digest)].map((n) => n.toString(16).padStart(2, "0")).join("");
+      if (!Array.isArray(sList.sessions) || !Array.isArray(rList.rooms)) throw new Error("recovery_snapshot_invalid");
+      const sessions = (sList.sessions as Record<string, unknown>[]).map(parseSession);
+      const rooms = (rList.rooms as Record<string, unknown>[]).map(parseRoom);
+      const hubId = typeof info.hubId === "string" && info.hubId.length > 0 ? info.hubId : null;
+      const maxAge = typeof info.maxReplayAgeMs === "number" && Number.isFinite(info.maxReplayAgeMs) &&
+        info.maxReplayAgeMs > 0 ? info.maxReplayAgeMs : undefined;
+      if (get().deliveryHubId !== null && get().deliveryHubId !== hubId) {
+        scopeWatermarks.clear();
+        scopeDrafts.clear();
+        scopeRevisions.clear();
+        flowCache.clear();
+        panelsCache.clear();
+        roomOpenSeq++;
+        set({
+          currentRoom: null, currentSession: null, chatItems: [], flow: null,
+          historyCache: {}, historyCacheKeys: [], seenCache: {},
+          missionFocusId: null, missionExecutionTarget: null,
+          currentArtifacts: null, currentEvents: null, blackboard: null,
+          busyIds: [], memberStatus: {}, missions: [], pendingDecisions: [],
+          searchGroups: [], searchResults: [], jumpToAt: null, jumpQuery: "",
+          historySearchContext: false, screen: "sessions",
+        });
+      }
+      set({
+        sessions, rooms,
+        deliveryProtocol: info.deliveryProtocol === 1 && hubId !== null && maxAge !== undefined ? 1 : 0,
+        deliveryHubId: hubId,
+        deliveryMaxAge: maxAge,
+        deliveryOrigin: origin,
+      });
+      syncOutboxPending();
+      get().syncBusyIdsFromList(sessions);
+      await Promise.all([get().refreshMissions(), get().refreshDecisions()]);
+      if (stale()) throw new Error("recovery_stale");
+      if (get().missionError) throw new Error("recovery_snapshot_failed");
+      for (;;) {
+        const seq = roomOpenSeq;
+        const room = get().currentRoom;
+        const session = get().currentSession;
+        try {
+          if (room) {
+            const latest = rooms.find((r) => r.roomId === room.roomId);
+            if (!latest) throw new Error("recovery_scope_missing");
+            const rev = scopeRevisions.get(`room:${room.roomId}`) ?? 0;
+            const sync = await client.call(get().deliveryProtocol === 1 ? "room.sync" : "room.flow", { roomId: room.roomId }, 30000);
+            if (stale()) throw new Error("recovery_stale");
+            if (seq !== roomOpenSeq) continue;
+            if (rev === (scopeRevisions.get(`room:${room.roomId}`) ?? 0)) {
+              const flow = (sync.flow ?? null) as FlowInfo | null;
+              flowCache.set(room.roomId, flow);
+              set({
+                flow,
+                currentRoom: {
+                  ...latest,
+                  ...(get().deliveryProtocol === 1 ? {
+                    subMode: typeof sync.subMode === "string" ? sync.subMode : null,
+                    activeSpeaker: typeof sync.activeSpeaker === "string" ? sync.activeSpeaker : null,
+                  } : {}),
+                },
+                ...(Array.isArray(sync.blackboard) ? { blackboard: sync.blackboard as BlackboardInfo[] } : {}),
+              });
+            }
+            await incrementalCatchUp("room", "roomId", room.roomId, client, seq);
+          } else if (session) {
+            const latest = sessions.find((s) => s.sessionId === session.sessionId);
+            if (!latest) throw new Error("recovery_scope_missing");
+            set({ currentSession: latest });
+            await incrementalCatchUp("session", "sessionId", session.sessionId, client, seq);
+          }
+        } catch (error) {
+          if (!stale() && seq !== roomOpenSeq) continue;
+          throw error;
+        }
+        if (stale()) throw new Error("recovery_stale");
+        if (seq === roomOpenSeq) break;
+      }
+      set({ deliveryReady: true, connectError: null });
+      replayOutbox();
+      void get().refreshAll();
+    },
+
     refreshAll: async () => {
       const client = get().client;
       if (!client || !client.isConnected) return;
+      const epoch = connectionEpoch;
+      const stale = () => get().client !== client || epoch !== connectionEpoch || !client.isConnected;
+      const call = async (method: string, params: Record<string, unknown> = {}) => {
+        if (stale()) throw new Error("recovery_stale");
+        const result = await client.call(method, params, 30000);
+        if (stale()) throw new Error("recovery_stale");
+        return result;
+      };
 
       try {
-        const cList = (await client.call("connection.list")) as Record<string, unknown>;
+        const cList = await call("connection.list");
         const conns = ((cList.connections as unknown[] | undefined) ?? []).map((it) =>
           parseConnection(it as Record<string, unknown>),
         );
@@ -1806,7 +2607,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
 
       try {
-        const sList = (await client.call("session.list")) as Record<string, unknown>;
+        const sList = await call("session.list");
         const rawSessions = (sList.sessions as unknown[] | undefined) ?? [];
         collectSessionQuotas(rawSessions as Array<Record<string, unknown>>);
         const list = rawSessions.map((it) =>
@@ -1823,7 +2624,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
 
       try {
-        const rList = (await client.call("role.list")) as Record<string, unknown>;
+        const rList = await call("role.list");
         const list = ((rList.roles as unknown[] | undefined) ?? []).map((it) =>
           parseRole(it as Record<string, unknown>),
         );
@@ -1831,7 +2632,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
 
       try {
-        const info = (await client.call("agent.info")) as Record<string, unknown>;
+        const info = await call("agent.info");
         const reported = ((info.agents as unknown[] | undefined) ?? [])
           .map((a) => String(a))
           .filter(Boolean);
@@ -1841,7 +2642,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const conns = get().connections;
         const connId = conns.length ? conns[0].id : undefined;
-        const sList = (await client.call("skill.list", connId ? { connectionId: connId } : {})) as Record<string, unknown>;
+        const sList = await call("skill.list", connId ? { connectionId: connId } : {});
         const skills = ((sList.skills as unknown[] | undefined) ?? []).map((it) => {
           const s = it as Record<string, unknown>;
           return {
@@ -1855,7 +2656,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
 
       try {
-        const rmList = (await client.call("room.list")) as Record<string, unknown>;
+        const rmList = await call("room.list");
         const list = ((rmList.rooms as unknown[] | undefined) ?? []).map((it) =>
           parseRoom(it as Record<string, unknown>),
         );
@@ -1867,13 +2668,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch {}
 
       try {
-        const tList = (await client.call("task.list")) as Record<string, unknown>;
+        const tList = await call("task.list");
         const tasks = ((tList.tasks as unknown[] | undefined) ?? []) as ScheduledTask[];
         set({ scheduledTasks: tasks });
       } catch {}
 
+      if (stale()) return;
       await get().refreshMissions();
-      await get().refreshDecisions();
+      if (!stale()) await get().refreshDecisions();
     },
 
     refreshBusy: () => {
@@ -2374,6 +3176,42 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     followUps: [],
+    checkOutgoing: (cmId: string) => {
+      const item = outbox.find((i) => i.clientMessageId === cmId && i.origin === get().deliveryOrigin && i.hubId === get().deliveryHubId);
+      if (item) void drainScope(item.scopeKey).catch(() => {});
+    },
+
+    dismissOutgoing: (cmId: string, includeParked = false) => {
+      const idx = outbox.findIndex((i) => i.clientMessageId === cmId &&
+        (includeParked || (i.origin === get().deliveryOrigin && i.hubId === get().deliveryHubId)));
+      if (idx >= 0) {
+        const item = outbox[idx];
+        if (item.status === "sending") return;
+        outbox.splice(idx, 1);
+        if (!saveOutbox()) {
+          outbox.splice(idx, 0, item);
+          syncOutboxPending();
+          return;
+        }
+        markUserSendStatus(cmId, "dismissed");
+        syncOutboxPending();
+        if (item.origin === get().deliveryOrigin && item.hubId === get().deliveryHubId) {
+          void drainScope(item.scopeKey).catch(() => {});
+        }
+        return;
+      }
+      const items = [...get().chatItems];
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.kind === "user" && it.clientMessageId === cmId && it.deliveryTracked === false &&
+            (it.sendStatus === "failed" || it.sendStatus === "uncertain")) {
+          items[i] = { ...it, sendStatus: "dismissed" };
+          set({ chatItems: items });
+          return;
+        }
+      }
+    },
+
     queueFollowUp: (text: string, replyTo?: string) => {
       const key = get().currentRoom
         ? `room:${get().currentRoom!.roomId}`
@@ -2412,12 +3250,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const idx = get().followUps.findIndex((f) => f.key === key);
         if (idx < 0) return;
         const item = get().followUps[idx];
+        const ok = get().currentRoom
+          ? get().sendRoomMessage(item.text, { replyTo: item.replyTo, quote: item.quote ?? null, atts: item.atts ?? null })
+          : get().sendPrompt(item.text, item.quote ?? null, item.atts ?? null);
+        if (!ok) return;
         get().removeFollowUp(idx);
-        if (get().currentRoom) {
-          get().sendRoomMessage(item.text, { replyTo: item.replyTo, quote: item.quote ?? null, atts: item.atts ?? null });
-        } else {
-          get().sendPrompt(item.text, item.quote ?? null, item.atts ?? null);
-        }
       }
     },
 
@@ -2442,28 +3279,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } catch { /* member.status 可选能力，失败静默 */ }
     },
 
-    sendPrompt: (text: string, qOverride?: [string, string] | null, attsOverride?: Attachment[] | null) => {
+    sendPrompt: (text: string, qOverride?: [string, string] | null, attsOverride?: Attachment[] | null): boolean => {
       const session = get().currentSession;
-      if (!session) return;
-      if (get().handleSlashCommand(text)) return;
+      if (!session) return false;
+      if (text.startsWith("/") && !/^\/help(?:\s|$)/i.test(text) && !get().deliveryReady) {
+        set({ outboxError: "unsupported" });
+        return false;
+      }
+      if (get().handleSlashCommand(text)) return true;
       // undefined=用当前草稿，null=显式无（队列冲刷不得偷挂/清空草稿）
       const q = qOverride === undefined ? get().quote : (qOverride ?? undefined);
       const atts = attsOverride === undefined ? get().pendingAttachments : (attsOverride ?? []);
-      const now = Date.now();
-      const userItem: ChatItem = {
-        kind: "user",
-        at: now,
-        text,
-        author: "我",
-        attachments: atts.length ? atts : undefined,
-        quoteAuthor: q?.[0],
-        quoteText: q?.[1],
-      };
-      set({
-        chatItems: [...get().chatItems, userItem],
-        ...(qOverride === undefined ? { quote: null } : {}),
-        ...(attsOverride === undefined ? { pendingAttachments: [] } : {}),
-      });
       const content: Record<string, unknown>[] = [];
       if (text) content.push({ type: "text", text: q ? `${stringsFor(get().lang).quoteHeaderFmt.replace("%s", q[0]).replace("%s", q[1].slice(0, 300))}\n${text}` : text });
       for (const a of atts) {
@@ -2478,39 +3304,66 @@ export const useHubStore = create<State & Actions>((set, get) => {
           content.push({ type: "resource", resource: { mimeType: a.mimeType, uri: a.name, blob: a.base64 } });
         }
       }
-      if (!content.length) return;
-      set({ busyIds: [...get().busyIds, session.sessionId] });
-
-      getOrCall("prompt.send", { sessionId: session.sessionId, content }).catch((e) => {
-        set({
-          busyIds: get().busyIds.filter((id) => id !== session.sessionId),
-          chatItems: [...get().chatItems, { kind: "error", at: Date.now(), text: String(e), author: "" }],
-        });
+      if (!content.length) return false;
+      const hasAt = atts.length > 0;
+      const cmId = newClientMessageId();
+      const cm = enqueueOutbox("prompt.send", `session:${session.sessionId}`, { sessionId: session.sessionId, content }, {
+        replayable: !hasAt,
+        bubble: { kind: "user", at: Date.now(), text, author: "我", clientMessageId: cmId,
+          attachments: atts.length ? atts : undefined, quoteAuthor: q?.[0], quoteText: q?.[1],
+          sendStatus: "pending", deliveryTracked: true },
       });
-    },
-
-    sendRoomMessage: (text: string, opts?: { replyTo?: string; quote?: [string, string] | null; atts?: Attachment[] | null }) => {
-      const room = get().currentRoom;
-      if (!room) return;
-      if (get().handleSlashCommand(text)) return;
-      const q = opts === undefined || opts.quote === undefined ? get().quote : (opts.quote ?? undefined);
-      const atts = opts === undefined || opts.atts === undefined ? get().pendingAttachments : (opts.atts ?? []);
-      const now = Date.now();
+      if (!cm) return false;
+      set({ busyIds: [...get().busyIds, session.sessionId] });
       const userItem: ChatItem = {
-        kind: "user",
-        at: now,
-        text,
-        author: "我",
+        kind: "user", at: Date.now(), text, author: "我",
         attachments: atts.length ? atts : undefined,
-        quoteAuthor: q?.[0],
-        quoteText: q?.[1],
+        quoteAuthor: q?.[0], quoteText: q?.[1],
+        clientMessageId: cmId, sendStatus: "pending", deliveryTracked: true,
       };
       set({
         chatItems: [...get().chatItems, userItem],
-        ...(opts?.quote === undefined ? { quote: null } : {}),
-        ...(opts?.atts === undefined ? { pendingAttachments: [] } : {}),
+        ...(qOverride === undefined ? { quote: null } : {}),
+        ...(attsOverride === undefined ? { pendingAttachments: [] } : {}),
       });
+      return true;
+    },
 
+    sendLiveControl: (scopeKey: string, params: Record<string, unknown>, userItem: Extract<ChatItem, { kind: "user" }>): boolean => {
+      const client = get().client;
+      if (scopeKey !== `room:${get().currentRoom?.roomId}`) return false;
+      if (!client?.isConnected || !get().deliveryReady) {
+        set({ connectError: stringsFor(get().lang).offlineUnsupported });
+        return false;
+      }
+      const epoch = connectionEpoch;
+      const origin = get().deliveryOrigin;
+      const hubId = get().deliveryHubId;
+      const snapshot = JSON.parse(JSON.stringify(params)) as Record<string, unknown>;
+      const item: Extract<ChatItem, { kind: "user" }> = { ...userItem, sendStatus: "sending", deliveryTracked: false };
+      set({ chatItems: [...get().chatItems, item] });
+      client.call("room.message", snapshot, 30000)
+        .then(() => {
+          if (get().client !== client || connectionEpoch !== epoch || get().deliveryOrigin !== origin || get().deliveryHubId !== hubId) return;
+          markUserSendStatus(item.clientMessageId!, "sent");
+        })
+        .catch((e) => {
+          if (get().client !== client || connectionEpoch !== epoch || get().deliveryOrigin !== origin || get().deliveryHubId !== hubId) return;
+          markUserSendStatus(item.clientMessageId!, e instanceof HubRpcError ? "failed" : "uncertain");
+        });
+      return true;
+    },
+
+    sendRoomMessage: (text: string, opts?: { replyTo?: string; quote?: [string, string] | null; atts?: Attachment[] | null }): boolean => {
+      const room = get().currentRoom;
+      if (!room) return false;
+      if (text.startsWith("/") && !/^\/help(?:\s|$)/i.test(text) && !get().deliveryReady) {
+        set({ outboxError: "unsupported" });
+        return false;
+      }
+      if (get().handleSlashCommand(text)) return true;
+      const q = opts === undefined || opts.quote === undefined ? get().quote : (opts.quote ?? undefined);
+      const atts = opts === undefined || opts.atts === undefined ? get().pendingAttachments : (opts.atts ?? []);
       const content: Record<string, unknown>[] = [];
       if (text) content.push({ type: "text", text });
       for (const a of atts) {
@@ -2534,20 +3387,44 @@ export const useHubStore = create<State & Actions>((set, get) => {
         params.replyTo = opts.replyTo;
       }
 
-      getOrCall("room.message", params)
-        .then((result) => {
-          const sent = (result as Record<string, unknown>).sent as string[] | undefined;
-          if (sent) {
-            const busy = new Set(get().busyIds);
-            sent.forEach((id) => busy.add(id));
-            set({ busyIds: Array.from(busy) });
-          }
-        })
-        .catch((e) => {
-          set({
-            chatItems: [...get().chatItems, { kind: "error", at: Date.now(), text: String(e), author: "" }],
-          });
+      if (!content.length) return false;
+      const historyText = content.map((block) => block.type === "text" ? String(block.text ?? "") : "[图片]").join("");
+      if (!atts.length && isLiveRoomControl(historyText, opts?.replyTo)) {
+        const ok = get().sendLiveControl(`room:${room.roomId}`, params, {
+          kind: "user", at: Date.now(), text, author: "我",
+          attachments: atts.length ? atts : undefined,
+          quoteAuthor: q?.[0], quoteText: q?.[1],
+          clientMessageId: newClientMessageId(),
         });
+        if (!ok) return false;
+        set({
+          ...(opts?.quote === undefined ? { quote: null } : {}),
+          ...(opts?.atts === undefined ? { pendingAttachments: [] } : {}),
+        });
+        return true;
+      }
+      const hasAt = atts.length > 0;
+      const cmId = newClientMessageId();
+      const cm = enqueueOutbox("room.message", `room:${room.roomId}`, params, {
+        flowId: get().flow?.flowId,
+        replayable: !hasAt,
+        bubble: { kind: "user", at: Date.now(), text, author: "我", clientMessageId: cmId,
+          attachments: atts.length ? atts : undefined, quoteAuthor: q?.[0], quoteText: q?.[1],
+          sendStatus: "pending", deliveryTracked: true },
+      });
+      if (!cm) return false;
+      const userItem: ChatItem = {
+        kind: "user", at: Date.now(), text, author: "我",
+        attachments: atts.length ? atts : undefined,
+        quoteAuthor: q?.[0], quoteText: q?.[1],
+        clientMessageId: cmId, sendStatus: "pending", deliveryTracked: true,
+      };
+      set({
+        chatItems: [...get().chatItems, userItem],
+        ...(opts?.quote === undefined ? { quote: null } : {}),
+        ...(opts?.atts === undefined ? { pendingAttachments: [] } : {}),
+      });
+      return true;
     },
 
     stopCurrent: () => {
@@ -2845,18 +3722,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     loadHistory: async (method, idKey, id, anchorAt) => {
+      const client = get().client;
+      if (!client) return;
+      const epoch = connectionEpoch;
+      const seq = roomOpenSeq;
       try {
         const params: Record<string, unknown> = { [idKey]: id };
         if (anchorAt != null && Number.isFinite(anchorAt)) params.anchorAt = anchorAt;
-        const result = (await getOrCall(method, params)) as Record<string, unknown>;
-        const entries = (result.entries as unknown[] | undefined) ?? [];
-        const chat = entries
-          .map((it) => entryToChatItem(it as Record<string, unknown>))
-          .filter((it): it is ChatItem => it !== null);
+        const result = await client.call(method, params, 30000);
+        if (get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq) return;
+        const entries = historyRows(result);
         const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
-        const merged = mergeHistoryItems(chat, currentId === id ? get().chatItems : []);
+        const merged = applyHistoryRows(scope, id, entries, { cache: anchorAt == null });
         const maxLiveId = merged.reduce(
           (m, it) => ("id" in it && typeof it.id === "number" ? Math.max(m, it.id) : m),
           0,
@@ -2864,14 +3743,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (currentId === id) {
           set({
             chatItems: merged,
-            itemSeq: Math.max(chat.length, maxLiveId),
+            itemSeq: Math.max(get().itemSeq, merged.length, maxLiveId),
             historyHasMore: result.hasMore === true,
             historySearchContext: anchorAt != null,
           });
         }
-        if (anchorAt == null) {
-          setHistoryCache(scope, id, merged);
-        }
+        rememberHistoryRows(scope, id, entries, anchorAt == null);
+        await refreshKnownHistory(scope, id, client,
+          () => get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq,
+          { cache: anchorAt == null, cardIds: cardIdsOf(entries) });
         get().syncBusyIds().catch(() => {});
       } catch {}
     },
@@ -2913,30 +3793,38 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     loadMoreHistory: async (method, idKey, id) => {
       if (get().historyLoading || !get().historyHasMore) return;
+      const client = get().client;
+      if (!client?.isConnected) return;
+      const epoch = connectionEpoch;
+      const seq = roomOpenSeq;
+      const stale = () => get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq;
       const items = get().chatItems;
       const oldest = items.find((it) => it.historyId != null);
       if (oldest?.at == null) return;
       set({ historyLoading: true });
       try {
-        const result = (await getOrCall(method, { [idKey]: id, before: oldest.at, beforeId: oldest.historyId, limit: 50 })) as Record<string, unknown>;
-        const entries = (result.entries as unknown[] | undefined) ?? [];
+        const result = await client.call(method, { [idKey]: id, before: oldest.at, beforeId: oldest.historyId, limit: 50 }, 30000);
+        if (stale()) return;
+        const entries = historyRows(result);
         const more = entries
           .map((it) => entryToChatItem(it as Record<string, unknown>))
           .filter((it): it is ChatItem => it !== null);
         const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
-        const existingIds = new Set(items.map((it) => it.historyId).filter((x) => x != null));
+        const latest = get().chatItems;
+        const existingIds = new Set(latest.map((it) => it.historyId).filter((x) => x != null));
         const deduped = more.filter((it) => it.historyId == null || !existingIds.has(it.historyId));
-        const nextItems = [...deduped, ...items];
+        const nextItems = [...deduped, ...latest];
         if (currentId === id) {
           set({ chatItems: nextItems, historyHasMore: result.hasMore === true, historyLoading: false });
         }
         if (!get().historySearchContext) {
           setHistoryCache(scope, id, nextItems);
         }
+        rememberHistoryRows(scope, id, entries, false);
       } catch {
-        set({ historyLoading: false });
+        if (!stale()) set({ historyLoading: false });
       }
     },
 
@@ -2953,8 +3841,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
     syncBusyIds: async () => {
       const client = get().client;
       if (!client || !client.isConnected) return;
+      const epoch = connectionEpoch;
+      const seq = roomOpenSeq;
       try {
-        const result = (await client.call("session.list")) as Record<string, unknown>;
+        const result = await client.call("session.list", {}, 30000);
+        if (get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq) return;
         const list = ((result.sessions as unknown[] | undefined) ?? []).map((it) =>
           parseSession(it as Record<string, unknown>),
         );
@@ -3338,8 +4229,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ profiles, currentProfile: profile, drawerOpen: false });
       persist();
       saveLastProfile(address, token).catch(() => {});
-      set({ screen: "sessions" });
-      get().refreshAll().then(() => get().restoreCurrentScreen());
+      if (!get().currentRoom && !get().currentSession) set({ screen: "sessions" });
     },
 
     restoreCurrentScreen: async () => {

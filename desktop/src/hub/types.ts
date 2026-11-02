@@ -8,6 +8,18 @@ export type JsonValue =
 
 export type JsonObject = Record<string, JsonValue>;
 
+export interface OutboxSummary {
+  clientMessageId: string;
+  scopeKey: string;
+  profileLabel: string;
+  scopeLabel: string;
+  text: string;
+  queuedAt: number;
+  status: "pending" | "sending" | "uncertain" | "failed";
+  current: boolean;
+  attachmentNames: string[];
+}
+
 export interface ConnProfile {
   name: string;
   address: string;
@@ -374,7 +386,10 @@ export interface SessionConfigOption {
 }
 
 export type ChatItem =
-  | { kind: "user"; at?: number; historyId?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string }
+  | { kind: "user"; at?: number; historyId?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string; clientMessageId?: string; sendStatus?: "pending" | "sending" | "sent" | "uncertain" | "failed" | "dismissed";
+  deliveryTracked?: boolean;
+  attachmentNames?: string[];
+  sendError?: "context" | "expired" }
   | { kind: "system"; at?: number; historyId?: number; text: string; author: string }
   | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string; /** 流式进行中：渲染层用轻量纯文本，turn 结束后完整 markdown 重排 */ streaming?: boolean }
   | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string; streaming?: boolean }

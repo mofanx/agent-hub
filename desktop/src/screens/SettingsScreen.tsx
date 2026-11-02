@@ -6,6 +6,7 @@ import type { ConnectionInfo, RoleInfo } from "../hub/types";
 import QRCode from "qrcode";
 import { version } from "../../package.json";
 import { FormRow } from "../components/FormRow";
+import { OutboxPanel } from "../components/OutboxPanel";
 
 type Tab = "general" | "connections" | "roles";
 
@@ -52,6 +53,7 @@ function GeneralSettings() {
   const S = stringsFor(lang);
   return (
     <>
+      <OutboxPanel />
       <div className="card">
         <h3>{S.themeSection}</h3>
         <p className="card-desc">{S.themeDesc}</p>

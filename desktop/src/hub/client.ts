@@ -3,6 +3,15 @@ type OpenListener = () => void;
 type CloseListener = () => void;
 type ErrorListener = (msg: string) => void;
 
+export class HubRpcError extends Error {
+  readonly serverError: unknown;
+  constructor(serverError: unknown) {
+    super(String((serverError as { message?: string })?.message ?? serverError));
+    this.name = "HubRpcError";
+    this.serverError = serverError;
+  }
+}
+
 export interface HubClientOptions {
   heartbeatIntervalMs?: number;
   maxReconnectDelayMs?: number;
@@ -19,7 +28,11 @@ export class HubClient {
   private nextId = 1;
   private pending = new Map<
     number,
-    { resolve: (value: Record<string, unknown>) => void; reject: (reason: unknown) => void }
+    {
+      resolve: (value: Record<string, unknown>) => void;
+      reject: (reason: unknown) => void;
+      timer?: ReturnType<typeof setTimeout>;
+    }
   >();
 
   private eventListeners = new Set<EventListener>();
@@ -97,10 +110,11 @@ export class HubClient {
 
     const id = typeof obj.id === "number" ? obj.id : undefined;
     if (id !== undefined && this.pending.has(id)) {
-      const { resolve, reject } = this.pending.get(id)!;
+      const { resolve, reject, timer } = this.pending.get(id)!;
+      if (timer) clearTimeout(timer);
       this.pending.delete(id);
       if (obj.error !== undefined) {
-        reject(new Error(String(obj.error)));
+        reject(new HubRpcError(obj.error));
       } else {
         resolve(((obj.result ?? {}) as Record<string, unknown>) || {});
       }
@@ -151,7 +165,10 @@ export class HubClient {
   private _failPending(err: Error) {
     const copy = new Map(this.pending);
     this.pending.clear();
-    copy.forEach((d) => d.reject(err));
+    copy.forEach((d) => {
+      if (d.timer) clearTimeout(d.timer);
+      d.reject(err);
+    });
   }
 
   private _scheduleReconnect() {
@@ -196,7 +213,7 @@ export class HubClient {
     }
   }
 
-  call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  call(method: string, params: Record<string, unknown> = {}, timeoutMs = 0): Promise<Record<string, unknown>> {
     const ws = this.ws;
     if (!ws || !this.isConnected) {
       return Promise.reject(new Error("not connected"));
@@ -205,10 +222,17 @@ export class HubClient {
     const msg = { id, method, params };
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            this.pending.delete(id);
+            reject(new Error("rpc timeout"));
+          }, timeoutMs)
+        : undefined;
+      this.pending.set(id, { resolve, reject, timer });
       try {
         ws.send(JSON.stringify(msg));
       } catch (e) {
+          if (timer) clearTimeout(timer);
         this.pending.delete(id);
         reject(e);
       }

@@ -34,7 +34,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useHubStore } from "../hub/store";
+import { useHubStore, isLiveRoomControl } from "../hub/store";
+import { OutboxPanel } from "../components/OutboxPanel";
 import { stringsFor, toolStatusLabel, planEntryLabel, flowMessageHint, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, DecisionMeta, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
@@ -314,6 +315,38 @@ export function ChatScreen() {
     const el = document.querySelector(".chat-messages .message.current-match");
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [chatSearchMatchIndex, matchPositions, inChatSearchQuery]);
+
+  // 待你处理聚合：复用 decision.list（pendingDecisions）+ flow.waitingFor=user，不另造事实源
+  const attentionDecisions = store.pendingDecisions.filter((d) => d.status === "pending" &&
+    (store.currentRoom ? d.roomId === store.currentRoom.roomId :
+      !d.roomId && d.sessionId === store.currentSession?.sessionId));
+  const attentionTasks =
+    store.flow && store.flow.phase !== "done" && store.flow.phase !== "cancelled"
+      ? store.flow.tasks.filter((t) => t.waitingFor === "user")
+      : [];
+  const flowClarify = store.flow?.phase === "awaiting-input" && store.flow.clarificationId ? 1 : 0;
+  const flowRetry = !attentionTasks.length && store.flow?.phase === "awaiting-retry" ? 1 : 0;
+  const attentionCount = attentionDecisions.length + attentionTasks.length + flowClarify + flowRetry;
+  const [attentionHint, setAttentionHint] = useState(false);
+  useEffect(() => { setAttentionHint(false); }, [store.currentRoom?.roomId, store.currentSession?.sessionId, store.flow?.flowId, attentionCount, store.chatItems.length]);
+
+  const locateAttention = () => {
+    const container = messagesRef.current;
+    if (!container) return;
+    let el: HTMLElement | null = null;
+    if (attentionDecisions.length) {
+      const reqId = attentionDecisions[0]!.requestId;
+      el = Array.from(container.querySelectorAll<HTMLElement>("[data-decision-id]"))
+        .find((n) => n.getAttribute("data-decision-id") === reqId) ?? null;
+    }
+    if (!el && store.flow && (attentionTasks.length || flowClarify || flowRetry)) {
+      el = Array.from(container.querySelectorAll<HTMLElement>(".flow-card[data-flow-id]"))
+        .find((n) => n.getAttribute("data-flow-id") === store.flow!.flowId) ?? null;
+    }
+    if (!el) { setAttentionHint(true); return; }
+    setAttentionHint(false);
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   useEffect(() => {
     if (store.jumpToAt == null || store.chatItems.length === 0) return;
@@ -625,16 +658,18 @@ export function ChatScreen() {
     const text = input.trim();
     if (!text && !store.pendingAttachments.length) return;
     // 生成中（且无活跃编排可并入）→ 进 follow-up 队列，回合结束后按序发送
-    if (store.isGenerating() && !flowActive) {
+    if (store.deliveryReady && store.isGenerating() && !flowActive &&
+        !(isRoom && isLiveRoomControl(text, replyHelp?.helpId))) {
       store.queueFollowUp(text, replyHelp?.helpId);
       setReplyHelp(null);
       setInput("");
       return;
     }
     if (isRoom) {
-      store.sendRoomMessage(text, replyHelp ? { replyTo: replyHelp.helpId } : undefined);
+      const accepted = store.sendRoomMessage(text, replyHelp ? { replyTo: replyHelp.helpId } : undefined);
+      if (!accepted) return;
       setReplyHelp(null);
-    } else store.sendPrompt(text);
+    } else { const accepted = store.sendPrompt(text); if (!accepted) return; }
     setInput("");
   };
 
@@ -924,6 +959,14 @@ export function ChatScreen() {
                 {quotaSummary && <div className="chat-usage">{quotaSummary}</div>}
               </>
             )}
+            {attentionCount > 0 && (
+              <>
+              {attentionHint && <span className="send-status-hint">{S.attentionUnavailable}</span>}
+              <button className="attention-chip" onClick={locateAttention}>
+                {S.attentionEntryFmt.replace("%d", String(attentionCount))}
+              </button>
+              </>
+            )}
           </div>
         ) : (
           <div className="chat-search-bar">
@@ -1022,6 +1065,29 @@ export function ChatScreen() {
       )}
 
 
+          {(store.outboxError || store.linkDown || store.outboxPending > 0 || (store.client?.isConnected && !store.deliveryReady)) && (
+            <div className="conn-status">
+              {store.client?.isConnected && !store.deliveryReady
+                ? (store.connectError ? S.recoveryFailedRetry : S.recoveryInProgress)
+                : store.linkDown ? S.connReconnecting : ""}
+              {store.outboxError ? (
+                <span className="send-status-hint">{
+                  store.outboxError === "corrupt" ? S.outboxCorrupt :
+                  store.outboxError === "storage" ? S.outboxStorageFailed :
+                  store.outboxError === "full" ? S.outboxFull :
+                  store.outboxError === "attachments" ? S.attachmentOffline :
+                  store.outboxError === "unsupported" ? S.offlineUnsupported : S.outboxUnavailable
+                }</span>
+              ) : null}
+              {store.client?.isConnected && !store.deliveryReady && store.connectError ? (
+                <button className="link" onClick={() => { void store.reconnectRecovery().catch(() => useHubStore.setState({ connectError: S.recoveryFailed })); }}>{S.recoveryFailedRetry}</button>
+              ) : null}
+              {store.outboxPending > 0
+                ? `${store.linkDown ? " · " : ""}${S.outboxPendingFmt.replace("%d", String(store.outboxPending))}`
+                : ""}
+            </div>
+          )}
+          <OutboxPanel />
           <div ref={messagesRef} className="chat-messages" onScroll={onMessagesScroll}>
             <div className="chat-column">
               {isRoom && navTarget && navTarget.roomId === store.currentRoom?.roomId && (
@@ -1113,6 +1179,27 @@ export function ChatScreen() {
                     onImageClick={handleImageClick}
                     onFilePillClick={handleFilePillClick}
                   />
+                    {item.kind === "user" && item.sendStatus && (
+                      <div className={`send-status send-status-${item.sendStatus}`}>
+                        {item.sendStatus === "pending" && S.sendStatusPending}
+                        {item.sendStatus === "sending" && S.sendStatusSending}
+                        {item.sendStatus === "sent" && S.sendStatusSent}
+                        {item.sendStatus === "uncertain" && S.sendStatusUncertain}
+                        {item.sendStatus === "failed" && (item.sendError === "context" ? S.sendErrorContext : item.sendError === "expired" ? S.sendErrorExpired : S.sendStatusFailed)}
+                        {item.sendStatus === "dismissed" && S.sendStatusDismissed}
+                        {item.sendStatus === "uncertain" && <span className="send-status-hint">{item.attachmentNames?.length ? S.outboxAttachmentNamesFmt.replace("%s", item.attachmentNames.join(", ")) : (item.attachments?.length ? S.sendAttachmentUncertainHint : S.sendUncertainHint)}</span>}
+                        {(item.sendStatus === "pending" || item.sendStatus === "uncertain") && item.clientMessageId && item.deliveryTracked !== false && (
+                          <button className="link" onClick={() => store.checkOutgoing(item.clientMessageId!)}>{S.checkOutgoing}</button>
+                        )}
+                        {(item.sendStatus === "pending" || item.sendStatus === "failed" || item.sendStatus === "uncertain") && item.clientMessageId && (
+                          <button className="link" onClick={() => {
+                            if (item.sendStatus === "uncertain" && !window.confirm(S.dismissUncertainConfirm)) return;
+                            store.dismissOutgoing(item.clientMessageId!);
+                          }}>{S.dismissOutgoing}</button>
+                        )}
+                      </div>
+                    )}
+
                   </Fragment>
                 );
               })}
@@ -2530,7 +2617,7 @@ function DecisionCard({ meta }: { meta: DecisionMeta }) {
   const scopeLabel = (s: string) =>
     s === "task" ? S.scopeTask : s === "always" ? S.scopeAlways : S.scopeOnce;
   return (
-    <div className={`decision-card ${pending ? "" : "resolved"}`}>
+    <div className={`decision-card ${pending ? "" : "resolved"}`} data-decision-id={meta.requestId}>
       <div className="decision-head">
         <span className="decision-type">{meta.type === "permission" ? S.permissionRequest : S.elicitationRequestLabel}</span>
         <span className="decision-title">{meta.title}</span>

@@ -11,7 +11,40 @@ export interface Strings {
   newChatDoneFmt: string;
   unknownCommandHint: string;
   connectError: string;
+  sendStatusPending: string;
+  sendStatusSending: string;
+  sendStatusSent: string;
+  sendStatusUncertain: string;
+  sendStatusFailed: string;
+  sendStatusDismissed: string;
+  sendUncertainHint: string;
+  sendAttachmentUncertainHint: string;
+  dismissUncertainConfirm: string;
+  dismissOutgoing: string;
+  checkOutgoing: string;
+  recoveryInProgress: string;
+  recoveryFailedRetry: string;
+  attachmentOffline: string;
+  outboxFull: string;
+  offlineUnsupported: string;
+  outboxUnavailable: string;
+  outboxStorageFailed: string;
+  outboxCorrupt: string;
+  outboxAttachmentNamesFmt: string;
+  sendErrorContext: string;
+  sendErrorExpired: string;
+  outboxRecordsFmt: string;
+  outboxUnknownProfile: string;
+  outboxUnknownScope: string;
+  outboxOtherConnection: string;
+  outboxCopyFailed: string;
+  outboxRemoveConfirm: string;
+  attentionUnavailable: string;
   agentDisconnected: string;
+  connReconnecting: string;
+  recoveryFailed: string;
+  outboxPendingFmt: string;
+  attentionEntryFmt: string;
   notConnected: string;
   connected: string;
   trayShow: string;
@@ -679,7 +712,40 @@ const zh: Strings = {
   newChatDoneFmt: "已切换到新会话 %s，原会话已归档",
   unknownCommandHint: "未知指令，输入 /help 查看可用指令",
   connectError: "连接失败",
+  sendStatusPending: "待发送",
+  sendStatusSending: "发送中",
+  sendStatusSent: "Hub 已接收（不代表任务成功）",
+  sendStatusUncertain: "结果待确认",
+  sendStatusFailed: "发送失败",
+  sendStatusDismissed: "已移除送达记录",
+  sendUncertainHint: "结果未确认，请不要盲目重复发送",
+  sendAttachmentUncertainHint: "先核对送达；结果不明时不要重复发送附件",
+  dismissUncertainConfirm: "移除本机送达记录不会撤销可能已执行的任务，确定移除？",
+  dismissOutgoing: "移除",
+  checkOutgoing: "检查状态",
+  recoveryInProgress: "正在恢复连接状态…",
+  recoveryFailedRetry: "恢复失败，重试恢复",
+  attachmentOffline: "附件消息离线不可用，请连接后发送",
+  outboxFull: "待发送队列已满",
+  offlineUnsupported: "当前 Hub 不支持离线自动送达",
+  outboxUnavailable: "送达服务不可用",
+  outboxStorageFailed: "送达记录保存失败",
+  outboxCorrupt: "送达记录损坏，原记录已保留",
+  outboxAttachmentNamesFmt: "原附件：%s（仅核对送达，重启后需重新选择附件）",
+  sendErrorContext: "执行上下文已变化，请确认后作为新消息发送",
+  sendErrorExpired: "超出自动发送时限，请确认",
+  outboxRecordsFmt: "待发记录（%d）",
+  outboxUnknownProfile: "未知连接",
+  outboxUnknownScope: "未知范围",
+  outboxOtherConnection: "原连接记录，不会发送到当前 Hub",
+  outboxCopyFailed: "复制失败",
+  outboxRemoveConfirm: "本机移除不会撤销已执行的操作，确定移除？",
+  attentionUnavailable: "目标暂不可用",
   agentDisconnected: "连接已断开",
+  connReconnecting: "连接已断开，重连中",
+  recoveryFailed: "状态恢复未完成，消息暂不自动发送，请重新连接后确认",
+  outboxPendingFmt: "%d 条待发送",
+  attentionEntryFmt: "待你处理 %d",
   notConnected: "未连接",
   connected: "已连接",
   trayShow: "显示窗口",
@@ -1345,7 +1411,40 @@ const en: Strings = {
   newChatDoneFmt: "Switched to %s; the previous one was archived",
   unknownCommandHint: "Unknown command, type /help for available commands",
   connectError: "Connection failed",
+  sendStatusPending: "Pending",
+  sendStatusSending: "Sending",
+  sendStatusSent: "Received by Hub (not task success)",
+  sendStatusUncertain: "Unconfirmed",
+  sendStatusFailed: "Failed",
+  sendStatusDismissed: "Delivery record removed",
+  sendUncertainHint: "Delivery unconfirmed; do not resend blindly",
+  sendAttachmentUncertainHint: "Verify delivery first; do not resend attachments while the result is unknown",
+  dismissUncertainConfirm: "Removing the local delivery record will not cancel a possibly executed task. Continue?",
+  dismissOutgoing: "Dismiss",
+  checkOutgoing: "Check status",
+  recoveryInProgress: "Restoring connection state…",
+  recoveryFailedRetry: "Recovery failed, retry",
+  attachmentOffline: "Attachments cannot be sent offline; connect and retry",
+  outboxFull: "Outbox is full",
+  offlineUnsupported: "This Hub does not support offline auto-delivery",
+  outboxUnavailable: "Delivery unavailable",
+  outboxStorageFailed: "Failed to persist delivery record",
+  outboxCorrupt: "Delivery record corrupted; original record kept",
+  outboxAttachmentNamesFmt: "Attachments: %s (verify delivery only; re-select files after restart)",
+  sendErrorContext: "Context changed; please confirm and send as a new message",
+  sendErrorExpired: "Exceeded auto-send window; please confirm",
+  outboxRecordsFmt: "Outgoing records (%d)",
+  outboxUnknownProfile: "Unknown connection",
+  outboxUnknownScope: "Unknown scope",
+  outboxOtherConnection: "Records from another connection; will not send to this Hub",
+  outboxCopyFailed: "Copy failed",
+  outboxRemoveConfirm: "Removing locally will not undo actions already executed. Continue?",
+  attentionUnavailable: "Target currently unavailable",
   agentDisconnected: "Disconnected",
+  connReconnecting: "Disconnected, reconnecting",
+  recoveryFailed: "Recovery is incomplete. Automatic sending is paused; reconnect to confirm.",
+  outboxPendingFmt: "%d pending",
+  attentionEntryFmt: "%d need you",
   notConnected: "Not connected",
   trayShow: "Show window",
   trayHide: "Hide window",
