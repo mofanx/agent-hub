@@ -38,6 +38,8 @@ export type EventTrigger = {
   debounceMs?: number | undefined;
   /** 每房每小时触发上限（默认 6） */
   maxPerHour?: number | undefined;
+  /** 廉价决策层谓词：fields 键值 AND 匹配事件上下文，不匹配直接跳过不计费 */
+  filter?: { fields?: Record<string, string> | undefined } | undefined;
 };
 
 export type MissionTemplate = {

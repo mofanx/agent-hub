@@ -6,6 +6,7 @@ import {
   type MissionTemplate,
   type ScheduledTask,
 } from "./scheduler.js";
+import { parseWakeFilter } from "./wake-gate.js";
 
 /** task.create 入参校验：eventTrigger 仅房作用域、事件名白名单、数值字段合法 */
 export function parseEventTrigger(raw: unknown, targetType: string): EventTrigger | undefined {
@@ -30,6 +31,8 @@ export function parseEventTrigger(raw: unknown, targetType: string): EventTrigge
     if (!Number.isInteger(c) || c <= 0) throw new Error("eventTrigger.maxPerHour invalid");
     out.maxPerHour = c;
   }
+  const filter = parseWakeFilter(t.filter);
+  if (filter !== undefined) out.filter = filter;
   return out;
 }
 
