@@ -145,6 +145,7 @@ function QrImage({ text, size = 120 }: { text: string; size?: number }) {
 type ConnectInfo = {
   lanIps: string[];
   port: number;
+  localOnly?: boolean;
   gateway?: { publicUrl: string };
   uris: { lan: string[]; gateway?: string };
 };
@@ -192,6 +193,9 @@ function ShareConnectCard() {
       <h3>{S.shareConnectTitle}</h3>
       <div className="subtitle">{S.shareConnectHint}</div>
       {err && <div className="error">{err}</div>}
+      {info?.localOnly && (
+        <div className="connect-share-warning">{S.lanLoopbackHint}</div>
+      )}
       <div className="connect-share-grid">
         {lanUris.length === 0 ? (
           <div className="connect-share-card">

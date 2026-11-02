@@ -73,6 +73,7 @@ export function buildConnectInfo(opts: {
   return {
     lanIps: ips,
     port: opts.port,
+    localOnly: opts.localOnly === true,
     token: opts.relayed ? "" : opts.token,
     gateway,
     uris: {

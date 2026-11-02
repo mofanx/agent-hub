@@ -148,6 +148,7 @@ interface Strings {
     val serviceActivityFmt: String
     val connReconnecting: String
     val outboxPendingFmt: String
+    val hubLocalOnlyHint: String
     val deliveryLabels: Map<String, String>
     val deliveryAttachmentFmt: String
     val flowStartsNewHint: String
@@ -784,6 +785,7 @@ object ZhStrings : Strings {
     )
     override val connReconnecting = "重连中…"
     override val outboxPendingFmt = "%d 条待发送"
+    override val hubLocalOnlyHint = "Hub 仅监听本机回环（dev-token），远程接入需在 Hub 设置正式 token"
     override val deliveryAttachmentFmt = "\n附件：%s\n%s"
     override val deliveryLabels = mapOf(
         "title" to "发送记录", "pending" to "待发送", "deferred" to "等待恢复并校准上下文",
@@ -1441,6 +1443,7 @@ object EnStrings : Strings {
     )
     override val connReconnecting = "Reconnecting…"
     override val outboxPendingFmt = "%d pending"
+    override val hubLocalOnlyHint = "Hub only listens on loopback (dev-token) — set a real token on the Hub for remote access"
     override val deliveryAttachmentFmt = "\nAttachment: %s\n%s"
     override val deliveryLabels = mapOf(
         "title" to "Delivery records", "pending" to "Pending", "deferred" to "Waiting for recovery and context validation",

@@ -877,6 +877,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
     var agentStatus by mutableStateOf("offline")
+    /** hub.connectInfo.localOnly：dev-token 回环运行的 hub 仅本机可连，提示用户换正式 token */
+    var hubLocalOnly by mutableStateOf(false)
     var currentProfile by mutableStateOf<ConnProfile?>(null)
 
     val sessions = mutableStateListOf<SessionInfo>()
@@ -1807,6 +1809,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     saveProfile(address, token, publicToken, name)
                     startHubService()
                     agentStatus = "connected"
+                    viewModelScope.launch {
+                        hubLocalOnly = runCatching {
+                            hub.call("hub.connectInfo")["localOnly"]?.jsonPrimitive?.booleanOrNull == true
+                        }.getOrDefault(false)
+                    }
                     if (!openedOnce) screen = Screen.Sessions
                     openedOnce = true
                     startDeliveryRecovery(epoch, generation)
@@ -1980,6 +1987,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         connecting = false
         connectError = null
         agentStatus = "offline"
+        hubLocalOnly = false
         currentProfile = null
         missions.clear()
         missionSupported = false

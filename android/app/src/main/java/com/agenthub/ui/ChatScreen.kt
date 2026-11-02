@@ -1238,6 +1238,15 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     )
                 }
             }
+            // hub 回环提示：dev-token 运行的 hub 远程不可达，引导设正式 token
+            if (vm.hubLocalOnly) {
+                Text(
+                    S.hubLocalOnlyHint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                )
+            }
             // 连接状态/待发送提示：重连中与 outbox 积压可视化
             if (vm.agentStatus == "reconnecting") {
                 Text(
