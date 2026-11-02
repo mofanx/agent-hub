@@ -265,6 +265,8 @@ export interface RoomInfo {
   debateJudge?: string | null;
   /** 辩论：轮数 */
   debateRounds?: number | null;
+  /** IFC 敏感度标签：shared/private（默认 shared） */
+  sensitivity?: string;
 }
 
 export interface RoleInfo {

@@ -713,7 +713,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const maxHistId = scopeWatermarks.get(`${scope}:${id}`) ?? 0;
     const cardIds: number[] = [];
     if (maxHistId <= 0) {
-      const res = await client.call(method, { [idKey]: id }, 30000);
+      const res = await client.call(method, { [idKey]: id, ifcAuthorized: true }, 30000);
       if (stale()) throw new Error("recovery_stale");
       const rows = historyRows(res);
       applyHistoryRows(scope, id, rows);
@@ -724,14 +724,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
     let afterId = maxHistId;
     for (;;) {
       const rev = scopeRevisions.get(`${scope}:${id}`) ?? 0;
-      const res = await client.call(method, { [idKey]: id, afterId, limit: 500 }, 30000);
+      const res = await client.call(method, { [idKey]: id, afterId, limit: 500, ifcAuthorized: true }, 30000);
       if (stale()) throw new Error("recovery_stale");
       if (res.truncated === true) {
         const before = new Set(scopeItems(scope, id));
         const fullRows: Record<string, unknown>[] = [];
         let cursor = 0;
         for (;;) {
-          const full = await client.call(method, { [idKey]: id, afterId: cursor, limit: 500 }, 30000);
+          const full = await client.call(method, { [idKey]: id, afterId: cursor, limit: 500, ifcAuthorized: true }, 30000);
           if (stale()) throw new Error("recovery_stale");
           if (full.truncated === true) throw new Error("history_sync_truncated");
           const batch = historyRows(full);
@@ -828,7 +828,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       let applied = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         const rev = scopeRevisions.get(key) ?? 0;
-        const res = await client.call("room.sync", { roomId: id, knownCardIds: ids.slice(offset, offset + 200) }, 30000);
+        const res = await client.call("room.sync", { roomId: id, knownCardIds: ids.slice(offset, offset + 200), ifcAuthorized: true }, 30000);
         if (stale()) throw new Error("recovery_stale");
         if (!Array.isArray(res.cards)) throw new Error("history_cards_unavailable");
         if (rev !== (scopeRevisions.get(key) ?? 0)) continue;
@@ -1747,7 +1747,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           syncOutboxPending();
           return "blocked";
         }
-        const sync = await client.call(get().deliveryProtocol === 1 ? "room.sync" : "room.flow", { roomId }, 30000);
+        const sync = await client.call(get().deliveryProtocol === 1 ? "room.sync" : "room.flow", { roomId, ifcAuthorized: true }, 30000);
         if (stale()) return "blocked";
         if (item.deferred && typeof sync.mode !== "string") {
           item.status = "failed";
@@ -2592,7 +2592,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             const latest = rooms.find((r) => r.roomId === room.roomId);
             if (!latest) throw new Error("recovery_scope_missing");
             const rev = scopeRevisions.get(`room:${room.roomId}`) ?? 0;
-            const sync = await client.call(get().deliveryProtocol === 1 ? "room.sync" : "room.flow", { roomId: room.roomId }, 30000);
+            const sync = await client.call(get().deliveryProtocol === 1 ? "room.sync" : "room.flow", { roomId: room.roomId, ifcAuthorized: true }, 30000);
             if (stale()) throw new Error("recovery_stale");
             if (seq !== roomOpenSeq) continue;
             if (rev === (scopeRevisions.get(`room:${room.roomId}`) ?? 0)) {
@@ -4023,7 +4023,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const result = (await client.call(
           isRoom ? "room.artifacts" : "session.artifacts",
-          isRoom ? { roomId: scope.roomId } : { sessionId: scope.sessionId },
+          isRoom ? { roomId: scope.roomId, ifcAuthorized: true } : { sessionId: scope.sessionId },
         )) as Record<string, unknown>;
         const artifacts = ((result.artifacts as unknown[]) ?? []).map((it) => {
           const a = it as Record<string, unknown>;

@@ -215,7 +215,8 @@ export function ChatScreen() {
   const initialScrolledRef = useRef(false);
 
   const isRoom = !!store.currentRoom;
-  const title = store.currentRoom?.name || store.currentSession?.name || S.chatFallback;
+  const title = (store.currentRoom?.sensitivity === "private" ? "🔒 " : "") +
+    (store.currentRoom?.name || store.currentSession?.name || S.chatFallback);
   // 指挥家/主持人的 assistant 消息（汇总、求助等编排产物）按过程卡宽度满宽渲染；
   // author 可能是 "name (conn)" 形态，member/session 名是裸名，做前缀容错比较
   const hostName = store.currentRoom?.conductorId

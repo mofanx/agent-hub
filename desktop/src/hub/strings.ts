@@ -453,6 +453,7 @@ export interface Strings {
   cronExMonthly1st: string;
   cronExFirstMonday: string;
   chatFallback: string;
+  ifcPendingApproval: string;
   modeSelfLabel: string;
   modeDecidingLabel: string;
   prevMatchTitle: string;
@@ -1159,6 +1160,7 @@ const zh: Strings = {
   cronExMonthly1st: "每月 1 号 0:00",
   cronExFirstMonday: "每月第一个周一 9:00",
   chatFallback: "聊天",
+  ifcPendingApproval: "待批准",
   modeSelfLabel: "自己",
   modeDecidingLabel: "决策中",
   prevMatchTitle: "上一个 (Shift+Enter)",
@@ -1865,6 +1867,7 @@ const en: Strings = {
   cronExMonthly1st: "1st of each month at 0:00",
   cronExFirstMonday: "First Monday of month at 9:00",
   chatFallback: "Chat",
+  ifcPendingApproval: "Pending approval",
   modeSelfLabel: "Solo",
   modeDecidingLabel: "Deciding",
   prevMatchTitle: "Previous (Shift+Enter)",
