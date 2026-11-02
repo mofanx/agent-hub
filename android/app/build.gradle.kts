@@ -13,8 +13,8 @@ android {
         applicationId = "com.agenthub"
         minSdk = 26
         targetSdk = 37
-        versionCode = 18
-        versionName = "0.14.4"
+        versionCode = 19
+        versionName = "0.14.5"
     }
 
     buildFeatures {
