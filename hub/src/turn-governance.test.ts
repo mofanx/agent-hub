@@ -359,6 +359,43 @@ describe("turnGuards 生命周期", () => {
     assert.equal(manager.getFlow(croom.roomId), undefined);
     assert.equal(guardsOf(manager).has("w1"), false);
   });
+
+  it("agent 未连接：auto 决策启动失败不悬挂 autoDecisions/promptRooms/turnGuards/subMode", async () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create(
+      "auto-team",
+      [{ sessionId: "s1", name: "coder" }],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    room.mode = "auto";
+    const agent: AgentOps = {
+      // 同步 throw（旧 ownerOf 形态）：经 sendPrompt async 包装转 rejection，
+      // 不该同步逃逸绕过 .catch 清理
+      prompt: () => { throw new Error("agent 未连接"); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    manager.setStore(store);
+    appendUser(store, room.roomId, "做个任务");
+    await manager.handle(room, "做个任务", {});
+    await new Promise((r) => setTimeout(r, 0)); // 让 sendPrompt.catch 微任务跑完
+    const m = manager as unknown as {
+      autoDecisions: Map<string, unknown>;
+      promptRooms: Map<string, unknown>;
+    };
+    assert.equal(m.autoDecisions.size, 0, "悬挂决策必须清理");
+    assert.equal(m.promptRooms.size, 0, "promptRooms 不得残留");
+    assert.equal(guardsOf(manager).size, 0, "turnGuards 不得残留");
+    assert.equal(
+      manager.subModeFor(room.roomId),
+      undefined,
+      "deciding 子态必须释放",
+    );
+  });
 });
 
 describe("worker 过程输出归卡", () => {

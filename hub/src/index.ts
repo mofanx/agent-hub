@@ -58,6 +58,7 @@ import { MissionManager } from "./mission.js";
 import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook } from "./mission-schedule.js";
 import { shouldDeliver, type ClientSub } from "./subscribe.js";
 import { NtfyPusher, ntfyConfigFromEnv, type NtfyKind } from "./ntfy.js";
+import { wakeGateAllows, WakeGateStats } from "./wake-gate.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -673,7 +674,9 @@ async function resumeSessionById(sessionId: string) {
 }
 
 const agentOps: AgentOps = {
-  prompt: (sessionId, content) => {
+  prompt: async (sessionId, content) => {
+    // async 包装：ownerOf 的同步 throw（agent 未连接）转为 rejected promise，
+    // 使 sendPrompt/.catch 兜底可挂——否则同步逃逸导致 autoDecisions/turnGuards 悬挂
     const agent = ownerOf(sessionId);
     if (typeof content === "string") return agent.prompt(sessionId, content);
     return agent.promptContent(sessionId, content);
@@ -736,7 +739,7 @@ const missionManager = new MissionManager({
     if (method === "mission.update") {
       const m = (params as { mission?: { roomId?: string; status?: string } }).mission;
       if (m?.roomId && (m.status === "accepted" || m.status === "stopped" || m.status === "failed")) {
-        fireEventTasks(m.roomId, "task.done");
+        fireEventTasks(m.roomId, "task.done", { status: m.status });
         if (m.status === "accepted") notifyOffline(m.roomId, "task.done");
       }
     }
@@ -759,7 +762,7 @@ roomModeManager.onFlowCard = (roomId, flow) => {
   // flow waitingFor 转移（求助/澄清/交还）→ 唤醒订阅了该事件的任务
   const waiting = (flow as Record<string, unknown> | null | undefined)?.waitingFor;
   if (typeof waiting === "string" && waiting) {
-    fireEventTasks(roomId, "flow.waitingFor");
+    fireEventTasks(roomId, "flow.waitingFor", { waitingFor: waiting });
     notifyOffline(roomId, "attention");
   }
 };
@@ -929,13 +932,24 @@ function notifyOffline(roomId: string | undefined, kind: NtfyKind): void {
     .catch((e) => logError(`ntfy ${kind}`, e));
 }
 
-function fireEventTasks(roomId: string | undefined, event: string): void {
+/** 廉价决策层拦截计数（观测：被谓词省掉的唤醒次数，auto 路由复用同一 wakeGateAllows） */
+const wakeGateStats = new WakeGateStats();
+function fireEventTasks(
+  roomId: string | undefined,
+  event: string,
+  ctx: Record<string, unknown> = {},
+): void {
   if (!roomId) return;
   const now = Date.now();
+  const wakeCtx = { kind: event, ...ctx };
   for (const task of scheduler.list()) {
     const et = task.eventTrigger;
     if (!et || !task.enabled || task.targetType !== "room" || task.targetId !== roomId) continue;
     if (!et.events.includes(event)) continue;
+    if (!wakeGateAllows(et.filter, wakeCtx)) {
+      wakeGateStats.skip(task.id);
+      continue;
+    }
     if (now < (wakeSelfSuppress.get(task.id) ?? 0)) continue;
     if (!eventWakeBook.admit(task.id, et.debounceMs ?? 30_000, et.maxPerHour ?? 6)) continue;
     wakeSelfSuppress.set(task.id, now + WAKE_SELF_SUPPRESS_MS);
@@ -1340,7 +1354,10 @@ function onAgentEvent(event: HubEvent): void {
       requestedBy: displayNameFor(sessionId),
       ...(missionId ? { missionId } : {}),
     });
-    fireEventTasks(roomId, "decision");
+    fireEventTasks(roomId, "decision", {
+      scope: roomId ? "room" : "session",
+      decisionId: String((event.params as Record<string, unknown>).decisionId ?? ""),
+    });
     notifyOffline(roomId, "attention");
     return;
   }
@@ -3291,7 +3308,12 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       return { toggled: true };
     }
     case "task.list":
-      return { tasks: scheduler.list() };
+      return {
+        tasks: scheduler.list().map((t) => ({
+          ...t,
+          wakeSkips: wakeGateStats.count(t.id),
+        })),
+      };
     case "task.create": {
       const name = String(req.params?.name ?? "");
       const targetType = req.params?.targetType === "room" ? "room" : "session";
@@ -3369,6 +3391,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       if (!scheduler.delete(id)) throw new Error(`unknown task: ${id}`);
       eventWakeBook.drop(id);
       wakeSelfSuppress.delete(id);
+      wakeGateStats.remove(id);
       return { deleted: true };
     }
     case "task.toggle": {

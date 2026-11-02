@@ -389,15 +389,17 @@ export class RoomModeManager {
     this.broadcast("room.notice", n as unknown as Record<string, unknown>);
   }
 
-  private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
+  private async sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
     this.promptRooms.set(sessionId, roomId);
     const unguard = this.noteTurnGuard(sessionId, roomId, content);
-    return this.agent.prompt(sessionId, content).catch((err: unknown) => {
-      // 发送即失败（session 未知/忙碌）：不会有 prompt.done/error 事件兜底，就地清理
+    try {
+      return await this.agent.prompt(sessionId, content);
+    } catch (err) {
+      // 发送即失败（session 未知/忙碌/同步 throw）：不会有 prompt.done/error 兜底，就地清理
       if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
       unguard();
       throw err;
-    });
+    }
   }
 
   /** 登记回合游标；返回仅在登记未被覆盖时生效的清理函数（供发送失败路径回收） */
@@ -1984,6 +1986,12 @@ export class RoomModeManager {
       if (this.autoDecisions.get(conductorId) === autoCtx) {
         this.autoDecisions.delete(conductorId);
       }
+      // 同步释放 deciding 子态并告知用户，不等下条消息触发 cancelActive 才自愈
+      this.clearSubMode(room.roomId);
+      this.notice({
+        roomId: room.roomId,
+        message: `主持人决策启动失败：${err instanceof Error ? err.message : String(err)}`,
+      });
     });
     return { sent: [conductorId], mentioned: [], skipped: [] };
   }
