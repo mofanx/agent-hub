@@ -84,6 +84,10 @@ function makeEnv() {
     saveCurrentHistoryCache: () => {},
     saveCurrentScopeCounts: () => {},
     restoredCounts: () => ({}),
+    // openRoom/openChat 内的 scope 订阅调用桩：记录调用，默认无副作用
+    subscribeScope: (tier: string, opts?: Record<string, unknown>) => {
+      (state.subscribeCalls ??= []).push({ tier, ...opts });
+    },
     console,
   };
   vm.createContext(sandbox);

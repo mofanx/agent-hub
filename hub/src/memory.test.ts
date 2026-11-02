@@ -63,9 +63,27 @@ test("memory: deleteMemory 随房删除清空", (t) => {
   assert.equal(store.memoryList("r2", Date.now()).length, 1);
 });
 
+test("memoryRemove: 单条删除限房作用域", (t) => {
+  const store = makeStore(t);
+  store.memoryAdd("r1", "decision", "x", "s1", Date.now(), null);
+  store.memoryAdd("r1", "fact", "y", "s1", Date.now(), null);
+  const [y, x] = store.memoryList("r1", Date.now());
+  assert.equal(store.memoryRemove("r1", y!.id), true);
+  assert.equal(store.memoryList("r1", Date.now()).length, 1);
+  // 跨房 id 不误删、重复删除返回 false
+  assert.equal(store.memoryRemove("r2", x!.id), false);
+  assert.equal(store.memoryRemove("r1", y!.id), false);
+});
+
 test("distillMemoryText: 跳过围栏/JSON 取首个人话行，超长截断", () => {
   assert.equal(distillMemoryText("```json\n{}\n```\n完成了三件事"), "完成了三件事");
   assert.equal(distillMemoryText("{}\n结论：采用方案B"), "结论：采用方案B");
+  // markdown 标题/表格行跳过，取首个信息量行
+  assert.equal(
+    distillMemoryText("## 结论\n\n| a | b |\n已修复重复消息问题"),
+    "已修复重复消息问题",
+  );
+  assert.equal(distillMemoryText("# Summary\n- 决定采用方案 A"), "- 决定采用方案 A");
   const long = "x".repeat(MEMORY_TEXT_LIMIT + 10);
   assert.equal(distillMemoryText(long).length, MEMORY_TEXT_LIMIT + 1); // +省略号
   assert.equal(distillMemoryText("   \n  \n", 10), "");

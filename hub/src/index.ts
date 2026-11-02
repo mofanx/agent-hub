@@ -2432,6 +2432,20 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         ...(knownCardIds !== undefined ? { cards: store.readRoomCards(roomId, ids) } : {}),
       };
     }
+    case "room.memory": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      return { memories: store.memoryList(roomId, Date.now()) };
+    }
+    case "room.memory.delete": {
+      const roomId = String(req.params?.roomId ?? "");
+      const id = Number(req.params?.id ?? 0);
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      if (!Number.isInteger(id) || id <= 0) throw new Error("id required");
+      return { removed: store.memoryRemove(roomId, id) };
+    }
     case "room.flow.cancel": {
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);

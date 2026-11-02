@@ -995,6 +995,14 @@ export class Store {
     this.db.prepare("DELETE FROM memory WHERE room_id = ?").run(roomId);
   }
 
+  /** 单条删除（房作用域限定，防跨房误删） */
+  memoryRemove(roomId: string, id: number): boolean {
+    return (
+      this.db.prepare("DELETE FROM memory WHERE room_id = ? AND id = ?").run(roomId, id)
+        .changes > 0
+    );
+  }
+
   deleteHistory(scope: "session" | "room", id: string): void {
     this.db.prepare("DELETE FROM history WHERE scope = ? AND scope_id = ?").run(scope, id);
   }
