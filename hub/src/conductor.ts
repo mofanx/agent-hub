@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
+import { distillMemoryText } from "./memory.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
 import {
@@ -1357,6 +1358,12 @@ export class ConductorOrchestrator {
             flow.phase = "done";
             this.clearFlowRetryTimers(flow);
             flow.finishedAt = Date.now();
+            this.rooms.recordMemory(
+              roomId,
+              "decision",
+              `flow「${flow.goal.slice(0, 80)}」完成：${distillMemoryText(output, 160)}`,
+              sessionId,
+            );
             this.emitFlow?.(roomId);
           }
           return roomId;

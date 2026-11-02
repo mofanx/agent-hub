@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Store } from "./store.js";
+import {
+  MEMORY_PROMPT_LIMIT,
+  MEMORY_TEXT_LIMIT,
+  MEMORY_TTL_MS,
+  type MemoryEntry,
+  type MemoryKind,
+} from "./memory.js";
 
 export type RoomMode =
   | "mention"
@@ -817,6 +824,25 @@ export class RoomManager {
   getBlackboard(roomId: string): BlackboardEntry[] {
     const room = this.rooms.get(roomId);
     return [...(room?.blackboard ?? [])];
+  }
+
+  /** 写入蒸馏记忆条目：截断+默认 30 天 TTL，持久化到 store（不另造事件源） */
+  recordMemory(roomId: string, kind: MemoryKind, text: string, source: string, expiresAt?: number): void {
+    const trimmed = text.trim();
+    if (!trimmed || !this.store) return;
+    this.store.memoryAdd(
+      roomId,
+      kind,
+      trimmed.length > MEMORY_TEXT_LIMIT ? `${trimmed.slice(0, MEMORY_TEXT_LIMIT)}…` : trimmed,
+      source,
+      Date.now(),
+      expiresAt ?? Date.now() + MEMORY_TTL_MS,
+    );
+  }
+
+  /** prompt 注入用：非过期记忆按新到旧取前 N 条 */
+  memoryForPrompt(roomId: string): MemoryEntry[] {
+    return this.store?.memoryList(roomId, Date.now(), MEMORY_PROMPT_LIMIT) ?? [];
   }
 
   private nextAlias(roomId: string): string {
@@ -1665,6 +1691,11 @@ export class RoomManager {
       lines.push("（暂无）");
     } else {
       for (const e of board) lines.push(`- ${e.from}: ${e.text}`);
+    }
+    const mems = this.memoryForPrompt(roomId);
+    if (mems.length > 0) {
+      lines.push("", "长期记忆（蒸馏）：");
+      for (const m of mems) lines.push(`- [${m.kind}] ${m.text}`);
     }
     if (artifacts.length > 0) {
       lines.push("", "最近产物（文件）：");

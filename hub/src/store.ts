@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Artifact, Room, RoomEvent } from "./room.js";
 import { logWarn } from "./logger.js";
+import { MEMORY_LIMIT, type MemoryEntry } from "./memory.js";
 
 export type Connection = {
   id: string;
@@ -248,6 +249,16 @@ export class Store {
         result TEXT NOT NULL,
         at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        source TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        expires_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_room ON memory(room_id, at);
     `);
     this.migrateSchema();
     this.seedRoles();
@@ -951,6 +962,37 @@ export class Store {
 
   deleteRoomEvents(roomId: string): void {
     this.db.prepare("DELETE FROM room_events WHERE room_id = ?").run(roomId);
+  }
+
+  memoryAdd(roomId: string, kind: string, text: string, source: string, at: number, expiresAt: number | null): void {
+    this.db
+      .prepare(
+        "INSERT INTO memory(room_id, kind, text, source, at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(roomId, kind, text, source, at, expiresAt);
+    this.db
+      .prepare("DELETE FROM memory WHERE room_id = ? AND expires_at IS NOT NULL AND expires_at <= ?")
+      .run(roomId, at);
+    const over = this.db
+      .prepare("SELECT id FROM memory WHERE room_id = ? ORDER BY at DESC, id DESC LIMIT -1 OFFSET ?")
+      .all(roomId, MEMORY_LIMIT) as { id: number }[];
+    if (over.length > 0) {
+      this.db
+        .prepare(`DELETE FROM memory WHERE id IN (${over.map(() => "?").join(",")})`)
+        .run(...over.map((r) => r.id));
+    }
+  }
+
+  memoryList(roomId: string, now: number, limit = MEMORY_LIMIT): MemoryEntry[] {
+    return this.db
+      .prepare(
+        "SELECT id, room_id AS roomId, kind, text, source, at, expires_at AS expiresAt FROM memory WHERE room_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY at DESC, id DESC LIMIT ?",
+      )
+      .all(roomId, now, limit) as MemoryEntry[];
+  }
+
+  deleteMemory(roomId: string): void {
+    this.db.prepare("DELETE FROM memory WHERE room_id = ?").run(roomId);
   }
 
   deleteHistory(scope: "session" | "room", id: string): void {
