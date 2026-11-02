@@ -1711,6 +1711,9 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         deliveryProtocol: 1,
         maxReplayAgeMs: 24 * 3600_000,
         hubId,
+        ntfy: ntfyPusher.config.enabled
+          ? { url: ntfyPusher.config.url, topic: ntfyPusher.config.topic }
+          : null,
       };
     case "session.list":
       return { sessions: listAllSessions() };

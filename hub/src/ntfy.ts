@@ -75,6 +75,7 @@ export class NtfyPusher {
           Title: `[agent-hub] ${label}`,
           Priority: "4",
           Tags: kind === "attention" ? "bell" : "white_check_mark",
+          Click: `agenthub://attention?roomId=${encodeURIComponent(roomId)}`,
           ...(this.config.token
             ? { Authorization: `Bearer ${this.config.token}` }
             : {}),
