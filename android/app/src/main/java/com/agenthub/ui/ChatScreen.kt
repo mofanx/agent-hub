@@ -314,10 +314,111 @@ private fun ContextUsage.formatCompact(S: Strings): String {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
+internal fun AttentionManager(vm: ChatViewModel) {
+    if (!vm.showAttentionManager) return
+    val S = LocalStrings.current
+    val targets = vm.attentionItems.filter { vm.attentionCurrent(it) }.asReversed()
+    AlertDialog(
+        onDismissRequest = { vm.showAttentionManager = false },
+        title = { Text(S.attentionNeeded) },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 440.dp)) {
+                if (targets.isEmpty()) item { Text(S.attentionLabels.getValue("empty")) }
+                items(targets, key = { it.key }) { target ->
+                    Column(Modifier.padding(vertical = 8.dp)) {
+                        val room = vm.rooms.find { it.roomId == target.extras["navRoomId"] }
+                        val session = vm.sessions.find { it.sessionId == target.extras["navSessionId"] }
+                        Text(room?.name ?: session?.name ?: S.attentionNeeded, fontWeight = FontWeight.SemiBold)
+                        Text(S.attentionLabels[target.kind] ?: S.attentionNeeded, style = MaterialTheme.typography.labelSmall)
+                        if (target.label.isNotBlank()) Text(target.label, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        TextButton(onClick = { vm.showAttentionManager = false; vm.openAttentionTarget(target.extras) }) {
+                            Text(S.attentionLabels.getValue("open"))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.showAttentionManager = false }) { Text(S.cancel) } },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+internal fun DeliveryManager(vm: ChatViewModel) {
+    if (!vm.showDeliveryManager) return
+    val S = LocalStrings.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    var parked by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf<String?>(null) }
+    val rows = vm.deliveryRecords.filter { parked || vm.currentDelivery(it) }
+    AlertDialog(
+        onDismissRequest = { vm.showDeliveryManager = false },
+        title = { Text(S.deliveryLabels.getValue("title")) },
+        text = {
+            Column {
+                vm.deliveryError?.let { Text(S.deliveryLabels[it] ?: S.deliveryLabels.getValue("context"), color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = { vm.retryDeliveryRecovery() }) { Text(S.deliveryLabels.getValue("retry")) }
+                TextButton(onClick = { parked = !parked }) {
+                    Text(S.deliveryLabels.getValue("include"), fontWeight = if (parked) FontWeight.Bold else FontWeight.Normal)
+                }
+                LazyColumn(Modifier.heightIn(max = 380.dp)) {
+                    if (rows.isEmpty()) item { Text(S.deliveryLabels.getValue("empty")) }
+                    items(rows, key = { it.clientMessageId }) { record ->
+                        Column(Modifier.padding(vertical = 8.dp)) {
+                            Text(listOf(record.profileLabel, record.scopeLabel).filter { it.isNotBlank() }.joinToString(" / "))
+                            Text(record.text, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                            if (record.attachmentNames.isNotEmpty()) Text(record.attachmentNames.joinToString())
+                            Text(
+                                S.deliveryLabels[if (record.status == "pending" && record.deferred) "deferred" else record.status].orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            if (!vm.currentDelivery(record)) Text(S.deliveryLabels.getValue("parked"))
+                            record.error?.let { Text(S.deliveryLabels[it] ?: S.deliveryLabels.getValue("context")) }
+                            FlowRow {
+                                TextButton(onClick = { scope.launch {
+                                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(S.copy, record.text)))
+                                } }) { Text(S.copy) }
+                                if (vm.currentDelivery(record) && record.status != "sending" && record.attempted) {
+                                    TextButton(onClick = { vm.checkDelivery(record.clientMessageId) }) { Text(S.deliveryLabels.getValue("check")) }
+                                }
+                                TextButton(enabled = record.status != "sending", onClick = { removing = record.clientMessageId }) {
+                                    Text(S.deliveryLabels.getValue("remove"))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.showDeliveryManager = false }) { Text(S.cancel) } },
+    )
+    removing?.let { id ->
+        AlertDialog(
+            onDismissRequest = { removing = null },
+            text = { Text(S.deliveryLabels.getValue("confirm")) },
+            confirmButton = { TextButton(onClick = { vm.dismissDeliveries(setOf(id), parked); removing = null }) {
+                Text(S.deliveryLabels.getValue("remove"))
+            } },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text(S.cancel) } },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
 fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     val S = LocalStrings.current
-    val sessionKey = vm.currentRoom?.roomId ?: vm.currentSession?.sessionId ?: ""
+    val sessionKey = vm.composerKey()
     var input by remember(sessionKey) { mutableStateOf(vm.draftFor(sessionKey)) }
+    fun submitInput(queued: Boolean) {
+        val before = input
+        val key = sessionKey
+        val accepted: () -> Unit = { if (vm.composerKey() == key && input == before) input = "" }
+        if (queued) vm.enqueueMessage(key, before.trim(), accepted)
+        else if (vm.currentRoom != null) vm.sendRoomMessage(before.trim(), onAccepted = accepted)
+        else vm.sendPrompt(before.trim(), onAccepted = accepted)
+    }
     val context = LocalContext.current
     val listState = remember(sessionKey) { LazyListState(0, 0) }
     val activeSessionId = vm.currentRoom?.activeSpeaker ?: vm.currentSession?.sessionId
@@ -330,6 +431,19 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
     }
     val scope = rememberCoroutineScope()
     val messages by remember { derivedStateOf { vm.chatListItems.value.asReversed() } }
+    LaunchedEffect(sessionKey, vm.attentionRequestId, messages.size) {
+        val request = vm.attentionRequestId ?: return@LaunchedEffect
+        val index = messages.indexOfFirst { message ->
+            when (val item = (message as? ChatListItem.Other)?.item) {
+                is ChatItem.Decision -> item.requestId == request
+                is ChatItem.Elicitation -> item.requestId == request
+                is ChatItem.Permission -> item.requestId == request
+                else -> false
+            }
+        }
+        if (index >= 0) listState.scrollToItem(index) else vm.attentionNavError = "gone"
+        vm.attentionRequestId = null
+    }
     val isAtTop by remember { derivedStateOf { messages.isNotEmpty() && listState.firstVisibleItemIndex >= messages.lastIndex - 2 } }
 
     var activeDownload by remember { mutableStateOf<DownloadRequest?>(null) }
@@ -412,7 +526,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     LaunchedEffect(vm.jumpToHistoryId, matchPositions) {
         val targetId = vm.jumpToHistoryId ?: return@LaunchedEffect
-        val targetIndex = messages.indexOfFirst { it.originalId == -targetId }
+        val targetIndex = messages.indexOfFirst {
+            it.originalId == -targetId || ((it as? ChatListItem.Other)?.item as? ChatItem.User)?.historyId == targetId
+        }
         if (targetIndex >= 0) {
             val pos = matchPositions.indexOf(targetIndex).takeIf { it >= 0 } ?: 0
             vm.chatSearchMatchIndex = if (matchPositions.isNotEmpty()) pos else -1
@@ -888,6 +1004,17 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 flash = flashFlowId != null &&
                                     (item as? ChatListItem.FlowCard)?.item?.flowId == flashFlowId,
                             )
+                            if (item is ChatListItem.Message && item.isUser && item.sendStatus != null) {
+                                Text(
+                                    S.deliveryLabels[item.sendStatus].orEmpty(),
+                                    Modifier.fillMaxWidth().clickable { vm.showDeliveryManager = true }.padding(horizontal = 16.dp, vertical = 2.dp),
+                                    color = if (item.sendStatus in setOf("failed", "uncertain")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                            if (item is ChatListItem.Message && item.attachmentNames.isNotEmpty() && item.attachments.isEmpty()) {
+                                Text(item.attachmentNames.joinToString(), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                     if (vm.historyLoading) {
@@ -1105,11 +1232,29 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     )
                     Spacer(Modifier.weight(1f))
                     Text(
-                        S.queueClearHint,
+                        S.deliveryLabels.getValue("title"),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
+            }
+            // 连接状态/待发送提示：重连中与 outbox 积压可视化
+            if (vm.agentStatus == "reconnecting") {
+                Text(
+                    S.connReconnecting,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                )
+            }
+            val outboxPending = vm.deliveryRecords.count { vm.currentDelivery(it) && it.status == "pending" }
+            if (outboxPending > 0) {
+                Text(
+                    S.outboxPendingFmt.format(outboxPending),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                )
             }
             // 活跃编排中输入语义提示：普通消息补充进当前 flow，或在特定阶段结束并开新一轮；
             // 有显式求助答复目标时不展示（消息已定向）
@@ -1425,13 +1570,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     if (input.isNotBlank() || vm.pendingAttachments.isNotEmpty()) {
                         Spacer(Modifier.size(4.dp))
                         FilledIconButton(
+                            enabled = !vm.preparingDelivery(),
                             onClick = {
-                                if (flowAbsorbing) {
-                                    vm.sendRoomMessage(input.trim())
-                                } else {
-                                    vm.enqueueMessage(sessionKey, input.trim())
-                                }
-                                input = ""
+                                submitInput(!flowAbsorbing && vm.helpReplyTo == null)
                             },
                             modifier = Modifier.size(40.dp),
                         ) {
@@ -1452,9 +1593,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 } else if (input.isNotBlank() || vm.pendingAttachments.isNotEmpty()) {
                     Spacer(Modifier.size(4.dp))
                     FilledIconButton(
+                        enabled = !vm.preparingDelivery(),
                         onClick = {
-                            if (isRoom) vm.sendRoomMessage(input.trim()) else vm.sendPrompt(input.trim())
-                            input = ""
+                            submitInput(false)
                         },
                         modifier = Modifier.size(40.dp),
                     ) {

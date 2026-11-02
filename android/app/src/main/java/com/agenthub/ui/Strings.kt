@@ -142,6 +142,14 @@ interface Strings {
     val viewProcess: String
     val waitingDispatch: String
     val sendAsSupplement: String
+    val attentionNeeded: String
+    val attentionLabels: Map<String, String>
+    val attentionCountFmt: String
+    val serviceActivityFmt: String
+    val connReconnecting: String
+    val outboxPendingFmt: String
+    val deliveryLabels: Map<String, String>
+    val deliveryAttachmentFmt: String
     val flowStartsNewHint: String
     val dispatchCollapsedFmt: String
     val finalSummary: String
@@ -480,6 +488,12 @@ interface Strings {
     val binaryNoPreview: String
     val cannotParseImage: String
     val connectFailed: String
+    val connectionAuthFailed: String
+    val connectionPolicyRejected: String
+    val connectionInvalidAddress: String
+    val networkMonitoringUnavailable: String
+    val backgroundConnectionUnavailable: String
+    val backgroundConnectionTimeout: String
     val notifChannelReply: String
     val notifChannelReplyDesc: String
     val notifChannelApproval: String
@@ -757,6 +771,34 @@ object ZhStrings : Strings {
     override val viewProcess = "查看过程"
     override val waitingDispatch = "等待派发"
     override val sendAsSupplement = "普通新消息将补充到当前流程"
+    override val attentionNeeded = "有待你处理的事项"
+    override val attentionCountFmt = "%d 项待你处理"
+    override val serviceActivityFmt = "进行中 %d 个流程 · 待处理 %d 项"
+    override val attentionLabels = mapOf(
+        "app" to "Agent Hub", "flow" to "任务求助或澄清", "decision" to "审批或信息请求",
+        "body" to "请打开应用查看并处理；通知不显示任务正文", "reply" to "任务有新的完成结果，请打开应用查看",
+        "open" to "查看事项", "wrong_connection" to "这条提醒属于其他 Hub 或连接，请手动切换到原连接",
+        "gone" to "原事项已更新、过期或不再可用，请查看最新状态", "sync" to "待办提醒尚未完成恢复，暂不能保证后台触达",
+        "permission" to "系统通知已关闭，请在系统设置中启用；应用内待办仍可查看",
+        "unsupported" to "当前 Hub 不支持可恢复的待办提醒，请先更新 Hub", "empty" to "当前没有待处理事项",
+    )
+    override val connReconnecting = "重连中…"
+    override val outboxPendingFmt = "%d 条待发送"
+    override val deliveryAttachmentFmt = "\n附件：%s\n%s"
+    override val deliveryLabels = mapOf(
+        "title" to "发送记录", "pending" to "待发送", "deferred" to "等待恢复并校准上下文",
+        "sending" to "发送中", "sent" to "Hub 已接收", "uncertain" to "结果待确认，可能已经执行，请勿直接重发",
+        "failed" to "未发送，需重新确认", "dismissed" to "已移除，不再发送", "preparing" to "正在准备发送",
+        "sync" to "恢复同步未完成，消息不会自动重放", "storage" to "本地保存失败，请保留草稿并检查存储空间",
+        "corrupt" to "发送记录损坏，已保留原始数据并停止自动发送",
+        "context" to "原流程、工单或答复对象已变化，请重新确认",
+        "unsupported" to "此连接不支持可靠排队，请联网发送或升级 Hub",
+        "attachments" to "附件不能离线或忙时重放，请核对文件后重新附加",
+        "expired" to "消息已过期或设备时间异常，请重新确认", "full" to "发送记录已满或消息过大，原草稿保持不变",
+        "check" to "查询接收状态", "remove" to "移除记录", "include" to "显示其他连接的记录",
+        "confirm" to "移除不会撤销已经执行的操作。结果不确定时，请先核查任务状态，再决定是否重新发送。",
+        "empty" to "没有待处理的发送记录", "retry" to "重新同步", "parked" to "其他连接，已隔离",
+    )
     override val flowStartsNewHint = "此阶段普通新消息会结束当前流程并开启新一轮"
     override val dispatchCollapsedFmt = "已派发 %d 个子任务"
     override val finalSummary = "最终总结"
@@ -1103,10 +1145,16 @@ object ZhStrings : Strings {
     override val binaryNoPreview = "二进制文件，无法直接预览"
     override val cannotParseImage = "无法解析图片"
     override val connectFailed = "连接失败，请检查服务器或手动重连"
+    override val connectionAuthFailed = "凭据无效，请检查后手动重连"
+    override val connectionPolicyRejected = "策略拒绝，请检查配置或稍后手动重连"
+    override val connectionInvalidAddress = "服务器地址无效"
+    override val networkMonitoringUnavailable = "网络监听不可用，将依靠心跳检测并重连"
+    override val backgroundConnectionUnavailable = "后台连接不可用，暂停期间无法保证即时提醒；请打开应用重新连接"
+    override val backgroundConnectionTimeout = "后台连接已达到系统运行时限，暂停期间无法保证即时提醒；请打开应用恢复"
     override val notifChannelReply = "Agent 回复"
     override val notifChannelReplyDesc = "Agent 任务完成或回复消息时提醒"
-    override val notifChannelApproval = "审批请求"
-    override val notifChannelApprovalDesc = "Agent 发起权限审批时提醒"
+    override val notifChannelApproval = "待你处理"
+    override val notifChannelApprovalDesc = "任务求助、澄清和审批请求"
     override val notifChannelService = "后台连接"
     override val notifChannelServiceDesc = "保持与 Hub 的后台连接（常驻，可隐藏）"
     override val serviceRunning = "后台连接保持中"
@@ -1380,6 +1428,34 @@ object EnStrings : Strings {
     override val viewProcess = "View process"
     override val waitingDispatch = "Waiting for dispatch"
     override val sendAsSupplement = "New messages add context to the current flow"
+    override val attentionNeeded = "Needs your attention"
+    override val attentionCountFmt = "%d need your attention"
+    override val serviceActivityFmt = "%d active flows · %d need attention"
+    override val attentionLabels = mapOf(
+        "app" to "Agent Hub", "flow" to "Task help or clarification", "decision" to "Approval or information request",
+        "body" to "Open the app to review and respond. Task content is hidden in notifications", "reply" to "A task has new completion results. Open the app to review",
+        "open" to "View item", "wrong_connection" to "This reminder belongs to another Hub or connection. Switch to the original connection manually",
+        "gone" to "The original item changed, expired, or is no longer available. Review its latest state", "sync" to "Attention recovery is incomplete; background notifications are not guaranteed",
+        "permission" to "System notifications are disabled. Enable them in system settings; in-app items remain available",
+        "unsupported" to "This Hub does not support recoverable reminders. Update the Hub first", "empty" to "No items need your attention",
+    )
+    override val connReconnecting = "Reconnecting…"
+    override val outboxPendingFmt = "%d pending"
+    override val deliveryAttachmentFmt = "\nAttachment: %s\n%s"
+    override val deliveryLabels = mapOf(
+        "title" to "Delivery records", "pending" to "Pending", "deferred" to "Waiting for recovery and context validation",
+        "sending" to "Sending", "sent" to "Received by Hub", "uncertain" to "Outcome unconfirmed; may have executed. Do not resend blindly",
+        "failed" to "Not sent; review required", "dismissed" to "Removed; will not send", "preparing" to "Preparing message",
+        "sync" to "Recovery is incomplete; messages will not replay automatically", "storage" to "Local save failed. Keep your draft and check storage",
+        "corrupt" to "Delivery storage is corrupt. Original data is preserved; automatic sends are stopped",
+        "context" to "The original flow, Mission, or reply target changed. Review before sending",
+        "unsupported" to "Reliable queuing is unavailable. Send online or upgrade the Hub",
+        "attachments" to "Attachments cannot replay offline or while busy. Verify and attach the files again",
+        "expired" to "Message expired or device clock changed. Review before sending", "full" to "Delivery storage is full or the message is too large. Your draft is unchanged",
+        "check" to "Check receipt", "remove" to "Remove record", "include" to "Show other connections",
+        "confirm" to "Removal does not undo executed actions. For unknown outcomes, check task state before sending again.",
+        "empty" to "No delivery records to resolve", "retry" to "Synchronize again", "parked" to "Other connection; isolated",
+    )
     override val flowStartsNewHint = "At this stage, a new message ends the current flow and starts a new one"
     override val dispatchCollapsedFmt = "Dispatched %d subtasks"
     override val finalSummary = "Final summary"
@@ -1726,10 +1802,16 @@ object EnStrings : Strings {
     override val binaryNoPreview = "Binary file, cannot preview"
     override val cannotParseImage = "Cannot parse image"
     override val connectFailed = "Connection failed — check the server or reconnect manually"
+    override val connectionAuthFailed = "Invalid credentials; check them and reconnect manually"
+    override val connectionPolicyRejected = "Rejected by policy; check configuration or retry manually later"
+    override val connectionInvalidAddress = "Invalid server address"
+    override val networkMonitoringUnavailable = "Network monitoring is unavailable; heartbeat detection and reconnect remain active"
+    override val backgroundConnectionUnavailable = "Background connection is unavailable. Instant notifications are not guaranteed until you open the app and reconnect"
+    override val backgroundConnectionTimeout = "The background connection reached the system runtime limit. Instant notifications are not guaranteed until you open the app to resume"
     override val notifChannelReply = "Agent reply"
     override val notifChannelReplyDesc = "Notify when the agent finishes a task or replies"
-    override val notifChannelApproval = "Approval request"
-    override val notifChannelApprovalDesc = "Notify when the agent requests permission approval"
+    override val notifChannelApproval = "Needs attention"
+    override val notifChannelApprovalDesc = "Task help, clarification, and approval requests"
     override val notifChannelService = "Background connection"
     override val notifChannelServiceDesc = "Keeps a background connection to the Hub (ongoing, hideable)"
     override val serviceRunning = "Background connection active"

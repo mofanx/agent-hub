@@ -3,6 +3,7 @@ package com.agenthub
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Environment
 import android.util.Base64
@@ -21,6 +22,7 @@ import androidx.compose.runtime.State
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -32,6 +34,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -65,15 +68,6 @@ data class Attachment(
         get() = (if (base64.isNotEmpty()) base64.length.toLong()
             else localPath?.let { runCatching { java.io.File(it).length() }.getOrNull() } ?: 0L) * 3L / 4
 }
-
-data class QueuedMessage(
-    val scope: String,
-    val text: String,
-    val quote: Pair<String, String>?,
-    val attachments: List<Attachment>,
-    val replyTo: String? = null,
-)
-
 
 data class ModelInfo(
     val uid: String,
@@ -140,6 +134,12 @@ sealed class ChatItem {
         val quoteAuthor: String? = null,
         val quoteText: String? = null,
         override val at: Long = java.lang.System.currentTimeMillis(),
+        val clientMessageId: String? = null,
+        val historyId: Long? = null,
+        val historyAt: Long? = null,
+        val sendStatus: String? = null,
+        val sendError: String? = null,
+        val attachmentNames: List<String> = emptyList(),
     ) : ChatItem()
     data class System(
         override val id: Long,
@@ -269,6 +269,10 @@ sealed class ChatListItem {
         val quoteText: String? = null,
         val attachments: List<Attachment> = emptyList(),
         val usage: TokenUsage? = null,
+        val clientMessageId: String? = null,
+        val sendStatus: String? = null,
+        val sendError: String? = null,
+        val attachmentNames: List<String> = emptyList(),
     ) : ChatListItem()
 
     data class Other(val item: ChatItem) : ChatListItem() {
@@ -745,6 +749,42 @@ fun parseConnectUri(raw: String): ConnProfile? {
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val hub = HubClient(viewModelScope) { stringsFor(lang) }
     private val prefs = app.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
+    private var profileEpoch = 0
+    private var connectionWanted = false
+    private var networkMonitor: NetworkReconnectMonitor? = null
+    private var recoveryJob: Job? = null
+    private lateinit var delivery: DeliveryOutbox
+    private lateinit var deliveryRecovery: DeliveryRecovery
+    internal val deliveryRecords = mutableStateListOf<DeliveryRecord>()
+    var deliveryReady by mutableStateOf(false)
+        private set
+    var deliveryError by mutableStateOf<String?>(null)
+        private set
+    private var deliveryOrigin by mutableStateOf("")
+    private var deliveryHubId by mutableStateOf<String?>(null)
+    private var deliveryProtocol by mutableIntStateOf(0)
+    private var deliveryMaxAgeMs = 24 * 3600_000L
+    private var warmupSeq = 0
+    private val preparingScopes = mutableStateListOf<String>()
+    private val deliveryFiles = mutableMapOf<String, List<Attachment>>()
+    private val recoveryResetBase = mutableMapOf<String, Set<ChatItem>>()
+    private var anchorScopeKey: String? = null
+    private val historyMoreCache = mutableMapOf<String, Boolean>()
+    internal val attentionItems = mutableStateListOf<AttentionTarget>()
+    var showAttentionManager by mutableStateOf(false)
+    var attentionRequestId by mutableStateOf<String?>(null)
+    var attentionNavError by mutableStateOf<String?>(null)
+    private var pendingAttention: Map<String, String>? = null
+    var connectionState by mutableStateOf(HubConnectionState.Disconnected)
+        private set
+    private var networkMonitoringAvailable by mutableStateOf(true)
+    private var backgroundStopReason by mutableStateOf<String?>(null)
+    private var backgroundRunning by mutableStateOf(HubService.running)
+    private var attentionRecoveryState by mutableStateOf<String?>(null)
+    private var notificationsEnabled by mutableStateOf(true)
+    private val backgroundPrefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "background_stop_reason" || key == "attention_status") viewModelScope.launch { refreshBackgroundStatus() }
+    }
     suspend fun hubCall(method: String, params: JsonObject): JsonObject = hub.call(method, params)
 
     val profiles = mutableStateListOf<ConnProfile>()
@@ -795,7 +835,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         @Volatile
-        var appForeground = true
+        var appForeground = false
         const val LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]"
 
         fun missionTaskNavMatch(
@@ -910,8 +950,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val memberStatus = mutableStateMapOf<String, String>()
     val sessionUsage = mutableStateMapOf<String, ContextUsage>()
     val pendingAttachments = mutableStateListOf<Attachment>()
-    val messageQueue = mutableStateListOf<QueuedMessage>()
     private val drafts = mutableMapOf<String, String>()
+    private val attachmentDrafts = mutableMapOf<String, List<Attachment>>()
+    private val quoteDrafts = mutableMapOf<String, Pair<String, String>>()
+    private val replyDrafts = mutableMapOf<String, String>()
     var quote by mutableStateOf<Pair<String, String>?>(null)
     var helpReplyTo by mutableStateOf<String?>(null)
         private set
@@ -944,63 +986,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 当前选中会话的非模型 ACP 配置项（mode/thought_level 等） */
     val sessionConfigOptions = mutableStateListOf<SessionConfigOption>()
 
-    init {
-        val v2Profiles = prefs.getStringSet("profiles_v2", emptySet())!!
-        if (v2Profiles.isNotEmpty()) {
-            v2Profiles.forEach { line ->
-                val parts = line.split("\u0001")
-                if (parts.size >= 4) {
-                    profiles.add(ConnProfile(parts[0], parts[1], parts[2], parts[3]))
-                } else if (parts.size == 3) {
-                    profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
-                }
-            }
-        } else {
-            prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
-                val parts = line.split("\u0001")
-                when (parts.size) {
-                    3 -> profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
-                    4 -> {
-                        val (name, address, port, token) = parts
-                        val migrated = migrateAddress(address, port)
-                        profiles.add(ConnProfile(name, migrated, token))
-                    }
-                }
-            }
-        }
-        prefs.getString("last_v2", null)?.let { line ->
-            val parts = line.split("\u0001")
-            if (parts.size >= 3) {
-                val address = parts[0]
-                val token = parts[1]
-                val publicToken = parts[2]
-                val profile = profiles.find { it.address == address }
-                    ?: ConnProfile(
-                        address.removePrefix("wss://").removePrefix("ws://")
-                            .substringBefore("/").substringBefore(":").substringBefore("?"),
-                        address, token, publicToken,
-                    )
-                currentProfile = profile
-                connect(address, token, publicToken, profile.name)
-            }
-        } ?: prefs.getString("last", null)?.let { line ->
-            val parts = line.split("\u0001")
-            val (address, token) = when (parts.size) {
-                2 -> parts[0] to parts[1]
-                3 -> migrateAddress(parts[0], parts[1]) to parts[2]
-                else -> return@let
-            }
-            val profile = profiles.find { it.address == address }
-                ?: ConnProfile(
-                    address.removePrefix("wss://").removePrefix("ws://")
-                        .substringBefore("/").substringBefore(":").substringBefore("?"),
-                    address, token,
-                )
-            currentProfile = profile
-            connect(address, token, "", profile.name)
-        }
-    }
-
     private fun persistProfiles() {
         prefs.edit().putStringSet(
             "profiles_v2",
@@ -1017,7 +1002,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun switchProfile(p: ConnProfile) {
-        if (currentProfile == p) return
+        if (currentProfile == p && (hub.isConnected || connectionState == HubConnectionState.Connecting)) return
         connect(p.address, p.token, p.publicToken, p.name)
     }
 
@@ -1065,9 +1050,62 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (screen == Screen.Connect) screen = Screen.Sessions
     }
 
-    private fun startHubService() {
+    fun startHubService() {
         val app = getApplication<Application>()
-        app.startForegroundService(Intent(app, HubService::class.java))
+        if (!connectionWanted || savedHubConnection(app) == null) return
+        try {
+            app.startForegroundService(Intent(app, HubService::class.java))
+        } catch (_: Exception) {
+            prefs.edit().putString("background_stop_reason", "start_restricted").apply()
+        }
+        refreshBackgroundStatus()
+    }
+
+    fun refreshBackgroundStatus() {
+        backgroundStopReason = prefs.getString("background_stop_reason", null)
+        backgroundRunning = HubService.running
+        attentionRecoveryState = prefs.getString("attention_status", null)
+        notificationsEnabled = Notifier.notificationsAvailable(getApplication(), Notifier.CHANNEL_PERMISSION)
+    }
+
+    fun backgroundConnectionWarning(): String? {
+        val S = stringsFor(lang)
+        when (connectionState) {
+            HubConnectionState.AuthFailed -> return S.connectionAuthFailed
+            HubConnectionState.PolicyRejected -> return S.connectionPolicyRejected
+            HubConnectionState.InvalidConfig -> return S.connectionInvalidAddress
+            else -> Unit
+        }
+        return when (backgroundStopReason) {
+            "auth" -> S.connectionAuthFailed
+            "policy" -> S.connectionPolicyRejected
+            "invalid_config" -> S.connectionInvalidAddress
+            "timeout" -> S.backgroundConnectionTimeout
+            "network_monitor" -> S.networkMonitoringUnavailable
+            "start_restricted", "service_stopped" -> S.backgroundConnectionUnavailable
+            else -> when {
+                !networkMonitoringAvailable -> S.networkMonitoringUnavailable
+                connectionWanted && savedHubConnection(getApplication()) != null && !backgroundRunning ->
+                    S.backgroundConnectionUnavailable
+                connectionWanted && !notificationsEnabled -> S.attentionLabels.getValue("permission")
+                connectionWanted && attentionRecoveryState == "unsupported" -> S.attentionLabels.getValue("unsupported")
+                connectionWanted && attentionRecoveryState != null -> S.attentionLabels.getValue("sync")
+                else -> null
+            }
+        }
+    }
+
+    override fun onCleared() {
+        if (::delivery.isInitialized) delivery.pause()
+        profileEpoch++
+        missionConnectionGeneration++
+        connectionWanted = false
+        recoveryJob?.cancel()
+        eventJob?.cancel()
+        networkMonitor?.close()
+        prefs.unregisterOnSharedPreferenceChangeListener(backgroundPrefsListener)
+        hub.disconnect()
+        super.onCleared()
     }
 
     var themeMode by mutableStateOf(prefs.getString("theme", "system") ?: "system")
@@ -1718,61 +1756,204 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun connect(address: String, token: String, publicToken: String = "", name: String? = null) {
-        disconnect()
+        val profile = Triple(address, token, publicToken)
+        resetConnection(clearSaved = savedHubConnection(getApplication()) != profile)
+        deliveryOrigin = deliveryOriginFor(address, token, publicToken)
+        delivery.select(deliveryOrigin)
+        val epoch = profileEpoch
+        connectionWanted = true
+        currentProfile = ConnProfile(
+            name ?: address.removePrefix("wss://").removePrefix("ws://")
+                .substringBefore("/").substringBefore(":").substringBefore("?"),
+            address, token, publicToken,
+        )
         connecting = true
         connectError = null
+        var openedOnce = false
+        hub.onStateChanged = { state -> if (epoch == profileEpoch) connectionState = state }
+        hub.onClosed = {
+            if (epoch == profileEpoch) {
+                flushStreamChunks()
+                deliveryReady = false
+                delivery.pause()
+                missionConnectionGeneration++
+                historyLoading = false
+                recoveryJob?.cancel()
+                eventJob?.cancel()
+                eventJob = null
+                connecting = false
+                agentStatus = if (connectionWanted) "reconnecting" else "offline"
+            }
+        }
         val url = buildWsUrl(address, token)
         hub.connect(url, publicToken,
             onOpen = {
-                viewModelScope.launch {
-                    val firstConnect = connecting
+                if (epoch == profileEpoch && connectionWanted) {
+                    val generation = ++missionConnectionGeneration
+                    eventJob?.cancel()
+                    eventJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        hub.events.collect {
+                            if (!currentConnection(epoch, generation)) return@collect
+                            try {
+                                handleEvent(it)
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                Log.w("agenthub", "handleEvent dropped", e)
+                            }
+                        }
+                    }
                     connecting = false
                     connectError = null
                     saveProfile(address, token, publicToken, name)
                     startHubService()
                     agentStatus = "connected"
-                    if (firstConnect) screen = Screen.Sessions
-                    syncRefreshAll()
-                    restoreCurrentScreen()
+                    if (!openedOnce) screen = Screen.Sessions
+                    openedOnce = true
+                    startDeliveryRecovery(epoch, generation)
                 }
             },
             onFailure = { msg ->
-                if (connecting) {
+                if (epoch == profileEpoch) {
                     connecting = false
                     connectError = msg
-                } else {
-                    agentStatus = "reconnecting"
+                    if (hub.state.terminal) {
+                        connectionWanted = false
+                        agentStatus = "offline"
+                        val reason = when (hub.state) {
+                            HubConnectionState.AuthFailed -> "auth"
+                            HubConnectionState.PolicyRejected -> "policy"
+                            else -> "invalid_config"
+                        }
+                        prefs.edit().apply {
+                            if (savedHubConnection(getApplication()) == profile) remove("last").remove("last_v2")
+                            putString("background_stop_reason", reason)
+                        }.apply()
+                        getApplication<Application>().stopService(Intent(getApplication(), HubService::class.java))
+                        refreshBackgroundStatus()
+                    } else agentStatus = "reconnecting"
                 }
             })
-        hub.onClosed = {
-            if (connecting) {
-                connecting = false
-                connectError = stringsFor(lang).statusDisconnected
-            } else {
-                agentStatus = "reconnecting"
-            }
+    }
+
+    private fun currentConnection(epoch: Int, generation: Int) =
+        epoch == profileEpoch && generation == missionConnectionGeneration && connectionWanted && hub.isConnected
+
+    private fun adoptDeliveryInfo(info: JsonObject) {
+        val id = (info["hubId"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() && it.length <= 256 }
+        val maxAge = (info["maxReplayAgeMs"] as? JsonPrimitive)?.longOrNull ?: 24 * 3600_000L
+        val protocol = if ((info["deliveryProtocol"] as? JsonPrimitive)?.intOrNull == 1 && id != null && maxAge > 0) 1 else 0
+        if (deliveryHubId != null && deliveryHubId != id) {
+            saveComposition()
+            exitHistoryAnchor()
+            currentRoom = null
+            currentSession = null
+            chatItems.clear()
+            chatCache.clear()
+            historyMoreCache.clear()
+            chatCacheKeys.clear()
+            flowCache.clear()
+            panelsCache.clear()
+            scopeSeen.clear()
+            deliveryRecovery.clear()
+            recoveryResetBase.clear()
+            flow = null
+            quote = null
+            helpReplyTo = null
+            pendingAttachments.clear()
+            currentArtifacts.clear()
+            currentEvents.clear()
+            blackboard.clear()
+            missions.clear()
+            pendingDecisions.clear()
+            missionChecked = false
+            missionSupported = false
+            missionExecutionTarget = null
+            screen = Screen.Sessions
         }
-        eventJob = viewModelScope.launch {
-            val gen = missionConnectionGeneration
-            hub.events.collect {
-                if (gen != missionConnectionGeneration) return@collect
+        deliveryHubId = id
+        deliveryProtocol = protocol
+        deliveryMaxAgeMs = minOf(maxAge, 24 * 3600_000L)
+        delivery.bind(id, protocol, deliveryMaxAgeMs)
+        delivery.records.filter { currentDelivery(it) }.forEach { recordDelivery(it) }
+    }
+
+    private fun startDeliveryRecovery(epoch: Int = profileEpoch, generation: Int = missionConnectionGeneration) {
+        val seq = ++warmupSeq
+        deliveryReady = false
+        recoveryJob?.cancel()
+        recoveryJob = viewModelScope.launch {
+            repeat(3) { attempt ->
                 try {
-                    handleEvent(it)
+                    if (!syncRefreshAll(generation, epoch, ::adoptDeliveryInfo)) error("recovery_snapshot_unavailable")
+                    if (!currentConnection(epoch, generation) || seq != warmupSeq) return@launch
+                    val key = scopeKey()
+                    if (key != null) {
+                        val exists = if (key.startsWith("room:")) rooms.any { "room:${it.roomId}" == key }
+                            else sessions.any { "session:${it.sessionId}" == key }
+                        if (exists) recoverScope(key)
+                        else {
+                            saveComposition()
+                            currentRoom = null
+                            currentSession = null
+                            anchorScopeKey = null
+                            chatItems.clear()
+                            pendingAttachments.clear()
+                            quote = null
+                            helpReplyTo = null
+                            screen = Screen.Sessions
+                        }
+                    }
+                    if (!currentConnection(epoch, generation) || seq != warmupSeq) return@launch
+                    deliveryReady = true
+                    deliveryError = delivery.error
+                    delivery.resume()
+                    openPendingAttention()
+                    historyLoading = false
+                    return@launch
                 } catch (e: Exception) {
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    Log.w("agenthub", "handleEvent dropped: ${it.toString().take(200)}", e)
+                    if (e is CancellationException) throw e
+                    if (!currentConnection(epoch, generation) || seq != warmupSeq) return@launch
+                    deliveryError = "sync"
+                    if (attempt < 2) delay(250L * (attempt + 1))
                 }
             }
         }
     }
 
-    fun disconnect() {
+    fun retryDeliveryRecovery() {
+        if (!hub.isConnected) {
+            currentProfile?.let { connect(it.address, it.token, it.publicToken, it.name) }
+            return
+        }
+        if (deliveryReady) refreshAll() else startDeliveryRecovery()
+    }
+
+    fun disconnect() = resetConnection(clearSaved = true)
+
+    private fun resetConnection(clearSaved: Boolean) {
+        saveComposition()
+        if (::delivery.isInitialized) delivery.select(null)
+        if (::deliveryRecovery.isInitialized) deliveryRecovery.clear()
+        deliveryReady = false
+        deliveryOrigin = ""
+        deliveryHubId = null
+        deliveryProtocol = 0
+        anchorScopeKey = null
+        recoveryResetBase.clear()
+        profileEpoch++
+        missionConnectionGeneration++
+        connectionWanted = false
+        recoveryJob?.cancel()
         eventJob?.cancel()
         eventJob = null
         hub.disconnect()
-        val app = getApplication<Application>()
-        app.stopService(Intent(app, HubService::class.java))
-        prefs.edit().remove("last").apply()
+        if (clearSaved) {
+            prefs.edit().remove("last").remove("last_v2").remove("background_stop_reason").apply()
+            val app = getApplication<Application>()
+            app.stopService(Intent(app, HubService::class.java))
+        }
+        connectionState = HubConnectionState.Disconnected
+        refreshBackgroundStatus()
         sessions.clear()
         rooms.clear()
         roles.clear()
@@ -1788,8 +1969,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         blackboard.clear()
         flow = null
         quote = null
+        pendingAttachments.clear()
         fileRefToInsert = null
         chatCache.clear()
+        historyMoreCache.clear()
         chatCacheKeys.clear()
         scopeSeen.clear()
         flowCache.clear()
@@ -1807,7 +1990,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         missionExecutionTarget = null
         missionNavMessage = null
         roomOpenSeq++
-        missionConnectionGeneration++
         missionListSeq++
         decisionListSeq++
         pendingDecisions.clear()
@@ -1816,13 +1998,95 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshAll() {
-        viewModelScope.launch { syncRefreshAll() }
+        viewModelScope.launch {
+            if (syncRefreshAll()) {
+                if (deliveryReady) delivery.resume()
+            }
+        }
     }
 
-    private suspend fun syncRefreshAll() = coroutineScope {
+    internal fun attentionCurrent(target: AttentionTarget) =
+        target.extras["navOrigin"] == deliveryOrigin && target.extras["navHubId"] == deliveryHubId
+
+    fun openAttentionTarget(extras: Map<String, String>) {
+        if (extras["navOrigin"].isNullOrBlank() || extras["navHubId"].isNullOrBlank()) {
+            attentionNavError = "wrong_connection"
+            return
+        }
+        pendingAttention = extras.toMap()
+        openPendingAttention()
+    }
+
+    fun dismissAttentionNavigation() {
+        pendingAttention = null
+        attentionNavError = null
+    }
+
+    private fun openPendingAttention() {
+        val target = pendingAttention ?: return
+        if (!deliveryReady) return
+        if (target["navOrigin"] != deliveryOrigin || target["navHubId"] != deliveryHubId) {
+            attentionNavError = "wrong_connection"
+            return
+        }
+        pendingAttention = null
+        attentionNavError = null
+        attentionRequestId = null
+        val roomId = target["navRoomId"]
+        val anchor = target["navAt"]?.toLongOrNull()?.takeIf { it > 0 }
+        val request = target["navRequestId"]
+        if (roomId != null) {
+            val room = rooms.find { it.roomId == roomId }
+            if (room == null) { attentionNavError = "gone"; return }
+            openRoom(room, anchorAt = if (target["navDecisionId"] != null) anchor else null, readOnly = true) {
+                missionExecutionTarget = if (target["navFlowId"] == null) null else MissionExecutionTarget(
+                    missionId = "", roomId = roomId, flowId = target["navFlowId"], taskId = target["navTaskId"],
+                    dispatchedAt = target["navDispatchedAt"]?.toLongOrNull()?.takeIf { it > 0 }, nonce = System.nanoTime(),
+                )
+                attentionRequestId = request
+                target["navHelpId"]?.let { help ->
+                    if (flow?.flowId != target["navFlowId"] || (flow?.clarificationId != help &&
+                            flow?.tasks?.none { it.waitingHelpId == help && it.waitingFor == "user" } != false)) {
+                        attentionNavError = "gone"
+                    }
+                }
+                val batch = target["navBatchKey"]?.toLongOrNull()
+                val taskBatch = target["navDispatchedAt"]?.toLongOrNull()?.takeIf { it > 0 }
+                if (target["navFlowId"] != null && (flow?.flowId != target["navFlowId"] ||
+                    (batch != null && (flow?.tasks?.maxOfOrNull { it.dispatchedAt } ?: 0) != batch) ||
+                    (taskBatch != null && flow?.tasks?.find { it.id == target["navTaskId"] }?.dispatchedAt != taskBatch))) {
+                    attentionNavError = "gone"
+                }
+            }
+        } else {
+            val session = sessions.find { it.sessionId == target["navSessionId"] }
+            if (session == null) { attentionNavError = "gone"; return }
+            openChat(session, anchorAt = anchor, readOnly = true) { attentionRequestId = request }
+        }
+    }
+
+    private suspend fun syncRefreshAll(
+        generation: Int = missionConnectionGeneration,
+        epoch: Int = profileEpoch,
+        onInfo: (JsonObject) -> Unit = {},
+    ): Boolean = coroutineScope {
+        fun valid() = currentConnection(epoch, generation)
+        if (!valid()) return@coroutineScope false
+        try {
+            val info = hub.call("agent.info")
+            if (!valid()) return@coroutineScope false
+            onInfo(info)
+            val agents = info["agents"] as? JsonArray ?: JsonArray(emptyList())
+            hubAgentTypes.clear()
+            agents.forEach { hubAgentTypes.add(it.jsonPrimitive.content) }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            return@coroutineScope false
+        }
         try {
             val cResult = hub.call("connection.list")
-            val cList = cResult["connections"]?.jsonArray ?: return@coroutineScope
+            if (!valid()) return@coroutineScope false
+            val cList = cResult["connections"]?.jsonArray ?: JsonArray(emptyList())
                 connections.clear()
                 for (c in cList) {
                     val o = c.jsonObject
@@ -1839,12 +2103,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     )
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
+        if (!valid()) return@coroutineScope false
+        var sessionsReady = false
+        var roomsReady = false
+        var tasksReady = false
+        var missionsReady = false
         val jobs = listOf(
         async {
             try {
                 val result = hub.call("session.list")
+                if (!valid()) return@async
                 val list = result["sessions"]?.jsonArray ?: return@async
                 sessions.clear()
                 for (s in list) {
@@ -1868,12 +2139,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
                 }
                 syncBusyIdsFromList(sessions)
-            } catch (_: Exception) {
+                sessionsReady = true
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
         },
         async {
             try {
                 val result = hub.call("role.list")
+                if (!valid()) return@async
                 val list = result["roles"]?.jsonArray ?: return@async
                 roles.clear()
                 for (r in list) {
@@ -1889,13 +2163,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["builtin"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                     ))
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
         },
         async {
             try {
                 val connId = connections.firstOrNull()?.id
                 val result = if (connId != null) hub.call("skill.list", buildJsonObject { put("connectionId", connId) }) else hub.call("skill.list")
+                if (!valid()) return@async
                 val list = result["skills"]?.jsonArray ?: return@async
                 skills.clear()
                 for (s in list) {
@@ -1907,83 +2183,82 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["scope"]?.jsonPrimitive?.content ?: "user",
                     ))
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
         },
         async {
             try {
                 val result = hub.call("room.list")
+                if (!valid()) return@async
                 val list = result["rooms"]?.jsonArray ?: return@async
                 rooms.clear()
                 for (r in list) rooms.add(parseRoom(r.jsonObject))
                 currentRoom?.let { cur -> rooms.find { it.roomId == cur.roomId }?.let { currentRoom = it } }
-            } catch (_: Exception) {
+                roomsReady = true
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
         },
         async {
             try {
                 val result = hub.call("task.list")
+                if (!valid()) return@async
                 val list = result["tasks"]?.jsonArray ?: return@async
                 val parsed = list.map { parseTask(it.jsonObject) }
                 scheduledTasks.clear()
                 scheduledTasks.addAll(parsed)
-            } catch (_: Exception) {
+                tasksReady = true
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
         },
         async {
-            syncRefreshMissions()
-        },
-        async {
-            try {
-                val result = hub.call("agent.info")
-                val list = result["agents"]?.jsonArray ?: JsonArray(emptyList())
-                hubAgentTypes.clear()
-                for (a in list) hubAgentTypes.add(a.jsonPrimitive.content)
-            } catch (_: Exception) {
-            }
+            missionsReady = valid() && syncRefreshMissions()
         },
         )
         jobs.awaitAll()
-        refreshDecisions()
+        val decisionsReady = valid() && syncRefreshDecisions()
+        valid() && sessionsReady && roomsReady && tasksReady && missionsReady && decisionsReady
     }
 
-    private suspend fun syncRefreshMissions(retry: Boolean = true) {
-        if (missionChecked && !missionSupported) return
+    private suspend fun syncRefreshMissions(retry: Boolean = true): Boolean {
+        if (missionChecked && !missionSupported) return true
         val gen = missionConnectionGeneration
         val seq = ++missionListSeq
         val rev = missionEventRev
         missionLoading = true
         try {
             val result = hub.call("mission.list")
-            if (gen != missionConnectionGeneration || seq != missionListSeq) return
+            if (gen != missionConnectionGeneration || seq != missionListSeq) return false
             if (rev != missionEventRev) {
-                if (retry) viewModelScope.launch { syncRefreshMissions(false) }
-                return
+                return retry && syncRefreshMissions(false)
             }
-            val list = result["missions"]?.jsonArray
-            if (list != null) {
-                val fresh = list.map { parseMission(it.jsonObject) }
-                val byId = fresh.associateBy { it.id }.toMutableMap()
-                for (old in missions) {
-                    val f = byId[old.id]
-                    if (f != null && old.revision > f.revision) byId[old.id] = old
-                }
-                missions.clear()
-                missions.addAll(byId.values)
-                missionSupported = true
-                missionChecked = true
-                missionError = null
+            val list = result["missions"] as? JsonArray ?: return false
+            val fresh = list.map { parseMission(it.jsonObject) }
+            val byId = fresh.associateBy { it.id }.toMutableMap()
+            for (old in missions) {
+                val f = byId[old.id]
+                if (f != null && old.revision > f.revision) byId[old.id] = old
             }
+            missions.clear()
+            missions.addAll(byId.values)
+            missionSupported = true
+            missionChecked = true
+            missionError = null
+            return true
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            if (gen != missionConnectionGeneration || seq != missionListSeq || rev != missionEventRev) return
+            if (gen != missionConnectionGeneration || seq != missionListSeq || rev != missionEventRev) return false
             if (e.message?.contains("unknown method") == true || e.message?.contains("-32601") == true) {
                 missions.clear()
                 missionSupported = false
                 missionChecked = true
                 missionError = null
+                return true
             } else {
                 missionError = e.message ?: e.toString()
+                return false
             }
         } finally {
             if (gen == missionConnectionGeneration && seq == missionListSeq) missionLoading = false
@@ -1991,30 +2266,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshDecisions(retry: Boolean = true) {
-        viewModelScope.launch {
-            val gen = missionConnectionGeneration
-            val seq = ++decisionListSeq
-            val rev = decisionEventRev
-            decisionLoading = true
-            try {
-                val result = hub.call("decision.list")
-                if (gen != missionConnectionGeneration || seq != decisionListSeq) return@launch
-                if (rev != decisionEventRev) { if (retry) refreshDecisions(false); return@launch }
-                val list = result["decisions"]?.jsonArray ?: JsonArray(emptyList())
-                pendingDecisions.clear()
-                for (d in list) pendingDecisions.add(parseDecision(d.jsonObject))
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                if (gen == missionConnectionGeneration && seq == decisionListSeq && rev == decisionEventRev) {
-                    if (e.message?.contains("unknown method") == true || e.message?.contains("-32601") == true) {
-                        pendingDecisions.clear()
-                    } else {
-                        missionError = e.message ?: e.toString()
-                    }
+        viewModelScope.launch { syncRefreshDecisions(retry) }
+    }
+
+    private suspend fun syncRefreshDecisions(retry: Boolean = true): Boolean {
+        val gen = missionConnectionGeneration
+        val seq = ++decisionListSeq
+        val rev = decisionEventRev
+        decisionLoading = true
+        try {
+            val result = hub.call("decision.list")
+            if (gen != missionConnectionGeneration || seq != decisionListSeq) return false
+            if (rev != decisionEventRev) return retry && syncRefreshDecisions(false)
+            val list = result["decisions"] as? JsonArray ?: return false
+            pendingDecisions.clear()
+            for (d in list) pendingDecisions.add(parseDecision(d.jsonObject))
+            return true
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (gen == missionConnectionGeneration && seq == decisionListSeq && rev == decisionEventRev) {
+                if (e.message?.contains("unknown method") == true || e.message?.contains("-32601") == true) {
+                    pendingDecisions.clear()
+                    return true
+                } else {
+                    missionError = e.message ?: e.toString()
                 }
-            } finally {
-                if (gen == missionConnectionGeneration && seq == decisionListSeq) decisionLoading = false
             }
+            return false
+        } finally {
+            if (gen == missionConnectionGeneration && seq == decisionListSeq) decisionLoading = false
         }
     }
 
@@ -2574,24 +2854,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun restoreCurrentScreen() {
-        val room = currentRoom
-        if (room != null) {
-            val latestRoom = rooms.find { it.roomId == room.roomId } ?: room
-            openRoom(latestRoom)
-            return
-        }
-        val session = currentSession
-        if (session != null) {
-            val latestSession = sessions.find { it.sessionId == session.sessionId } ?: session
-            if (latestSession.offline) {
-                resumeSession(latestSession, autoOpen = true)
-            } else {
-                openChat(latestSession)
-            }
-        }
-    }
-
     fun createSession(
         cwd: String,
         name: String,
@@ -2909,15 +3171,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun openChat(session: SessionInfo, anchorAt: Long? = null) {
+    fun openChat(session: SessionInfo, anchorAt: Long? = null, readOnly: Boolean = false, onOpened: (() -> Unit)? = null) {
         roomOpenSeq++
         missionExecutionTarget = null
-        if (session.offline) {
+        if (session.offline && !readOnly) {
             resumeSession(session, autoOpen = true)
             return
         }
         val isSameSession = currentSession?.sessionId == session.sessionId
         saveCurrentScope()
+        exitHistoryAnchor()
         listTab.value = 0
         currentSession = session
         currentRoom = null
@@ -2942,7 +3205,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         chatSearchMatchIndex = -1
         chatSearchMatchCount = 0
         screen = Screen.Chat
-        loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
+        val history = loadHistory("session.history", "sessionId", session.sessionId, anchorAt)
+        if (onOpened != null) {
+            val seq = roomOpenSeq
+            val generation = missionConnectionGeneration
+            viewModelScope.launch {
+                history.join()
+                if (seq == roomOpenSeq && generation == missionConnectionGeneration && currentSession?.sessionId == session.sessionId) onOpened()
+            }
+        }
         viewModelScope.launch { refreshSessionArtifacts(session.sessionId) }
         refreshCurrentModel()
         refreshMemberStatus()
@@ -2973,6 +3244,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
                 val isSameRoom = currentRoom?.roomId == updatedRoom.roomId
                 saveCurrentScope()
+                exitHistoryAnchor()
                 listTab.value = 1
                 currentRoom = updatedRoom
                 currentSession = null
@@ -2997,15 +3269,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatSearchMatchIndex = -1
                 chatSearchMatchCount = 0
                 screen = Screen.Room
-                loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
+                val history = loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
                 syncBusyIdsFromList(sessions)
-                refreshFlow(updatedRoom.roomId)
                 refreshArtifacts(updatedRoom.roomId)
                 refreshCurrentModel()
                 refreshMemberStatus()
                 updatedRoom.activeSpeaker?.let { refreshSessionUsage(it) }
+                history.join()
                 if (seq == roomOpenSeq) onOpened?.invoke()
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 connectError = e.message
             }
         }
@@ -3018,23 +3291,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun ensureFlowCard(f: FlowInfo?) {
         if (f == null) return
+        val key = scopeKey() ?: return
+        val items = scopeItems(key).toMutableList()
         val flowId = f.flowId.ifEmpty { "__live" }
-        if (chatItems.any { it is ChatItem.Flow && it.flowId == flowId }) return
+        val existing = items.indexOfLast { it is ChatItem.Flow && it.flowId == flowId }
+        if (existing >= 0) {
+            items[existing] = (items[existing] as ChatItem.Flow).copy(snapshot = f)
+            updateScopeItems(key, items)
+            return
+        }
         if (f.flowId.isNotEmpty()) {
-            val liveIdx = chatItems.indexOfLast { it is ChatItem.Flow && it.flowId == "__live" }
+            val liveIdx = items.indexOfLast { it is ChatItem.Flow && it.flowId == "__live" }
             if (liveIdx >= 0) {
-                val prev = chatItems[liveIdx]
-                chatItems[liveIdx] = ChatItem.Flow(
+                val prev = items[liveIdx]
+                items[liveIdx] = ChatItem.Flow(
                     prev.id,
                     flowId,
                     f,
                     prev.author,
                     f.startedAt.takeIf { it > 0 } ?: prev.at,
                 )
+                updateScopeItems(key, items)
                 return
             }
         }
-        chatItems.add(
+        items.add(
             ChatItem.Flow(
                 ++itemSeq,
                 flowId,
@@ -3043,21 +3324,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 f.startedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
             )
         )
-    }
-
-    private suspend fun refreshFlow(roomId: String) {
-        try {
-            val result = hub.call("room.flow", buildJsonObject { put("roomId", roomId) })
-            val flowObj = result["flow"]?.jsonObject
-            val parsed = parseFlow(flowObj)
-            flowCache[roomId] = parsed
-            if (currentRoom?.roomId == roomId) {
-                flow = parsed
-                ensureFlowCard(parsed)
-            }
-        } catch (e: Exception) {
-            // ignore
-        }
+        updateScopeItems(key, items)
     }
 
     private suspend fun refreshArtifacts(roomId: String) {
@@ -3102,9 +3369,275 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun scopeKey(): String? =
         currentRoom?.let { "room:${it.roomId}" } ?: currentSession?.let { "session:${it.sessionId}" }
 
+    fun composerKey(): String = JsonArray(listOf(
+        JsonPrimitive(deliveryOrigin),
+        deliveryHubId?.let { JsonPrimitive(it) } ?: JsonNull,
+        scopeKey()?.let { JsonPrimitive(it) } ?: JsonNull,
+    )).toString()
+
+    private fun saveComposition() {
+        if (scopeKey() == null) return
+        val key = composerKey()
+        if (pendingAttachments.isEmpty()) attachmentDrafts.remove(key)
+        else attachmentDrafts[key] = pendingAttachments.toList()
+        quote?.let { quoteDrafts[key] = it } ?: quoteDrafts.remove(key)
+        helpReplyTo?.let { replyDrafts[key] = it } ?: replyDrafts.remove(key)
+    }
+
+    private fun restoreComposition() {
+        val key = composerKey()
+        pendingAttachments.clear()
+        pendingAttachments.addAll(attachmentDrafts[key].orEmpty())
+        quote = quoteDrafts[key]
+        helpReplyTo = replyDrafts[key]
+    }
+
+    private fun scopeItems(key: String): List<ChatItem> =
+        if (scopeKey() == key && anchorScopeKey != key) chatItems.toList() else chatCache[key].orEmpty()
+
+    private fun updateScopeItems(key: String, items: List<ChatItem>) {
+        chatCache[key] = items
+        chatCacheKeys.remove(key)
+        chatCacheKeys.addFirst(key)
+        trimChatCache()
+        if (scopeKey() == key && anchorScopeKey != key) {
+            chatItems.clear()
+            chatItems.addAll(items)
+        } else if (scopeKey() == key) {
+            for (i in chatItems.indices) {
+                items.find { sameHistoryItem(it, chatItems[i]) }?.let { chatItems[i] = it }
+            }
+        }
+    }
+
+    private fun trimChatCache() {
+        val protected = deliveryRecords.filter { currentDelivery(it) }.map { it.scopeKey }.toSet() + listOfNotNull(scopeKey())
+        while (chatCacheKeys.size > 20) {
+            val evicted = chatCacheKeys.reversed().firstOrNull { it !in protected } ?: break
+            chatCacheKeys.remove(evicted)
+            chatCache.remove(evicted)
+            panelsCache.remove(evicted)
+            scopeSeen.remove(evicted)
+            historyMoreCache.remove(evicted)
+            if (::deliveryRecovery.isInitialized) deliveryRecovery.forget(evicted)
+        }
+    }
+
+    private fun exitHistoryAnchor() {
+        val key = anchorScopeKey
+        if (key != null && scopeKey() == key) {
+            chatItems.clear()
+            chatItems.addAll(chatCache[key].orEmpty())
+        }
+        anchorScopeKey = null
+    }
+
+    private fun recordDelivery(record: DeliveryRecord) {
+        if (record.status in setOf("sent", "dismissed", "failed") && !currentDelivery(record)) {
+            deliveryFiles.remove(record.clientMessageId)
+        }
+        if (record.origin != deliveryOrigin || record.hubId != deliveryHubId) return
+        val items = scopeItems(record.scopeKey).toMutableList()
+        val index = items.indexOfFirst { it is ChatItem.User && it.clientMessageId == record.clientMessageId }
+        val previous = items.getOrNull(index) as? ChatItem.User
+        val status = if (record.status == "pending" && record.deferred) "deferred" else record.status
+        val bubble = previous?.copy(
+            historyId = record.historyId ?: previous.historyId,
+            sendStatus = status,
+            sendError = record.error,
+            attachmentNames = record.attachmentNames,
+        ) ?: ChatItem.User(
+            ++itemSeq, record.text,
+            attachments = deliveryFiles[record.clientMessageId].orEmpty(),
+            quoteAuthor = record.quoteAuthor,
+            quoteText = record.quoteText,
+            at = record.createdAt,
+            clientMessageId = record.clientMessageId,
+            historyId = record.historyId,
+            sendStatus = status,
+            sendError = record.error,
+            attachmentNames = record.attachmentNames,
+        )
+        if (index >= 0) items[index] = bubble else if (record.status != "dismissed") items.add(bubble)
+        updateScopeItems(record.scopeKey, items)
+        if (record.status in setOf("sent", "dismissed", "failed")) deliveryFiles.remove(record.clientMessageId)
+    }
+
+    private fun updateDeliveryRecords(records: List<DeliveryRecord>) {
+        deliveryRecords.clear()
+        deliveryRecords.addAll(records)
+    }
+
+    private fun historyIdOf(item: ChatItem): Long? =
+        (item as? ChatItem.User)?.historyId ?: item.id.takeIf { it < 0 }?.let { -it }
+
+    private fun sameHistoryItem(a: ChatItem, b: ChatItem): Boolean {
+        val id = historyIdOf(a)
+        if (id != null && id == historyIdOf(b)) return true
+        return when {
+            a is ChatItem.User && b is ChatItem.User ->
+                a.clientMessageId != null && a.clientMessageId == b.clientMessageId
+            a is ChatItem.Flow && b is ChatItem.Flow -> a.flowId.isNotEmpty() && a.flowId == b.flowId
+            a is ChatItem.Process && b is ChatItem.Process -> a.processId.isNotEmpty() && a.processId == b.processId
+            a is ChatItem.Decision && b is ChatItem.Decision -> a.decisionId.isNotEmpty() && a.decisionId == b.decisionId
+            a is ChatItem.Elicitation && b is ChatItem.Elicitation -> a.requestId.isNotEmpty() && a.requestId == b.requestId
+            else -> false
+        }
+    }
+
+    private fun applyRecoveredRows(key: String, rows: List<JsonObject>, reset: Boolean, cardsCurrent: Boolean) {
+        val previous = scopeItems(key)
+        val roomId = key.takeIf { it.startsWith("room:") }?.substringAfter(':')
+        val incoming = rows.mapNotNull { row ->
+            val id = (row["id"] as? JsonPrimitive)?.longOrNull ?: return@mapNotNull null
+            val parsed = parseHistoryItem(row, -id, roomId) ?: return@mapNotNull null
+            val original = previous.find { sameHistoryItem(it, parsed) }
+            when {
+                !cardsCurrent && (parsed is ChatItem.Flow || parsed is ChatItem.Decision) -> original ?: parsed
+                parsed is ChatItem.User && original is ChatItem.User -> original.copy(historyId = id, historyAt = parsed.at, at = parsed.at)
+                parsed is ChatItem.Decision && parsed.decisionType == "elicitation" -> {
+                    val elicitation = previous.filterIsInstance<ChatItem.Elicitation>().find { it.requestId == parsed.requestId }
+                    elicitation?.copy(id = -id, answered = if (parsed.status == "pending") elicitation.answered else parsed.answerLabel ?: parsed.status) ?: parsed
+                }
+                else -> parsed
+            }
+        }
+        val base = if (reset) {
+            val before = recoveryResetBase.remove(key).orEmpty()
+            val owned = deliveryRecords.filter {
+                it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == key
+            }.map { it.clientMessageId }.toSet()
+            previous.filter { it !in before || (it is ChatItem.User && it.clientMessageId in owned) }
+        } else previous
+        val tail = base.filter { old -> incoming.none {
+            sameHistoryItem(old, it) || (old is ChatItem.Permission && it is ChatItem.Decision && old.requestId == it.requestId)
+        } }
+        val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { if (it.at <= 0) Long.MAX_VALUE else it.at }
+        updateScopeItems(key, combined)
+        deliveryRecords.filter {
+            it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == key
+        }.forEach { recordDelivery(it) }
+    }
+
+    private fun applyRecoveryRoom(key: String, snapshot: JsonObject) {
+        val roomId = key.substringAfter(':')
+        val parsed = parseFlow(snapshot["flow"] as? JsonObject, roomId)
+        flowCache[roomId] = parsed
+        val index = rooms.indexOfFirst { it.roomId == roomId }
+        if (index >= 0) {
+            rooms[index] = rooms[index].copy(
+                mode = (snapshot["mode"] as? JsonPrimitive)?.contentOrNull ?: rooms[index].mode,
+                subMode = (snapshot["subMode"] as? JsonPrimitive)?.contentOrNull,
+                activeSpeaker = (snapshot["activeSpeaker"] as? JsonPrimitive)?.contentOrNull,
+            )
+        }
+        if (currentRoom?.roomId == roomId) {
+            if (index >= 0) currentRoom = rooms[index]
+            flow = parsed
+            ensureFlowCard(parsed)
+            (snapshot["blackboard"] as? JsonArray)?.let { list ->
+                blackboard.clear()
+                blackboard.addAll(list.map { parseBlackboardEntry(it.jsonObject) })
+            }
+        }
+    }
+
+    private suspend fun recoverScope(key: String): JsonObject? {
+        val generation = missionConnectionGeneration
+        val epoch = profileEpoch
+        val visible = scopeItems(key) + if (anchorScopeKey == key && scopeKey() == key) chatItems else emptyList()
+        deliveryRecovery.retainDrafts(key, visible.mapNotNull { historyIdOf(it) }.toSet())
+        return deliveryRecovery.recover(key, deliveryProtocol) { currentConnection(epoch, generation) }
+    }
+
+    private suspend fun recoveryRpc(method: String, params: JsonObject): JsonObject {
+        val generation = missionConnectionGeneration
+        val epoch = profileEpoch
+        val result = hub.call(method, params)
+        if (currentConnection(epoch, generation) && method in setOf("room.history", "session.history") &&
+            params["afterId"] == null && params["before"] == null && params["anchorAt"] == null) {
+            val kind = method.substringBefore('.')
+            val id = (params[if (kind == "room") "roomId" else "sessionId"] as? JsonPrimitive)?.contentOrNull
+            val key = "$kind:$id"
+            val more = (result["hasMore"] as? JsonPrimitive)?.booleanOrNull == true
+            historyMoreCache[key] = more
+            if (scopeKey() == key && anchorScopeKey != key) historyHasMore = more
+        }
+        return result
+    }
+
+    private fun deliveryFlowState(f: FlowInfo?, subMode: String?): String = when {
+        subMode == "deciding" -> "deciding"
+        f == null -> "none"
+        f.phase in setOf("done", "cancelled") -> "terminal"
+        f.phase == "awaiting-retry" || (f.mode in setOf("parallel", "debate") && f.phase == "summarizing") -> "restart"
+        else -> "active"
+    }
+
+    private suspend fun validateDelivery(record: DeliveryRecord): String? {
+        if (!deliveryReady || !hub.isConnected) return "busy"
+        val generation = missionConnectionGeneration
+        val epoch = profileEpoch
+        val origin = deliveryOrigin
+        val hubId = deliveryHubId
+        fun valid() = currentConnection(epoch, generation) && origin == deliveryOrigin && hubId == deliveryHubId
+        if (record.origin != origin || record.hubId != hubId) return "context"
+        val target = record.scopeKey.substringAfter(':')
+        if (record.method == "room.message") {
+            val room = rooms.find { it.roomId == target } ?: return "context"
+            val snapshot = recoverScope(record.scopeKey) ?: return "context"
+            if (!valid()) throw CancellationException("delivery_stale")
+            val expectedState = (record.params["expectedFlowState"] as? JsonPrimitive)?.contentOrNull ?: return "context"
+            val expectedMode = (record.params["expectedRoomMode"] as? JsonPrimitive)?.contentOrNull ?: return "context"
+            val mode = (snapshot["mode"] as? JsonPrimitive)?.contentOrNull ?: return "unsupported"
+            val f = parseFlow(snapshot["flow"] as? JsonObject, target)
+            val state = deliveryFlowState(f, (snapshot["subMode"] as? JsonPrimitive)?.contentOrNull)
+            if (f?.flowId?.takeIf { it.isNotBlank() } != (record.params["expectedFlowId"] as? JsonPrimitive)?.contentOrNull ||
+                f?.missionId != (record.params["expectedMissionId"] as? JsonPrimitive)?.contentOrNull || mode != expectedMode) return "context"
+            if (record.waitUntilIdle && expectedState == "terminal" && state == "active") return "busy"
+            if (state != expectedState || (record.deferred && state in setOf("restart", "deciding"))) return "context"
+            val reply = (record.params["replyTo"] as? JsonPrimitive)?.contentOrNull
+            if (reply != null && (state == "terminal" || f == null ||
+                    (f.clarificationId != reply && f.tasks.none { it.waitingFor == "user" && it.waitingHelpId == reply }))) return "context"
+            if (record.waitUntilIdle && state == "none") {
+                val list = hub.call("session.list")["sessions"] as? JsonArray ?: return "sync"
+                if (!valid()) throw CancellationException("delivery_stale")
+                val memberIds = room.members.map { it.first }.toSet()
+                if (list.any {
+                        val o = it.jsonObject
+                        (o["sessionId"] as? JsonPrimitive)?.contentOrNull in memberIds &&
+                            (o["busy"] as? JsonPrimitive)?.booleanOrNull == true
+                    }) return "busy"
+            }
+        } else {
+            recoverScope(record.scopeKey)
+            val list = hub.call("session.list")["sessions"] as? JsonArray ?: return "sync"
+            if (!valid()) throw CancellationException("delivery_stale")
+            val session = list.map { it.jsonObject }.find {
+                (it["sessionId"] as? JsonPrimitive)?.contentOrNull == target
+            } ?: return "context"
+            if ((session["offline"] as? JsonPrimitive)?.booleanOrNull == true) return "context"
+            if ((session["busy"] as? JsonPrimitive)?.booleanOrNull == true) return "busy"
+        }
+        return if (deliveryReady) null else "busy"
+    }
+
+    private suspend fun deliveryRpc(method: String, params: JsonObject): JsonObject {
+        val sid = (params["sessionId"] as? JsonPrimitive)?.contentOrNull
+        if (method == "prompt.send" && sid != null && !busyIds.contains(sid)) busyIds.add(sid)
+        return try { hub.call(method, params) }
+        catch (e: Exception) {
+            if (e is CancellationException) throw e
+            if (hub.isConnected) refreshBusy()
+            throw e
+        }
+    }
+
     private fun saveCurrentScope() {
         val key = scopeKey() ?: return
-        chatCache[key] = chatItems.toList()
+        flushStreamChunks()
+        saveComposition()
+        if (anchorScopeKey != key) chatCache[key] = chatItems.toList()
         panelsCache[key] = ScopePanels(
             currentArtifacts.toList(),
             currentEvents.toList(),
@@ -3114,12 +3647,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Triple(newArtifactCount, newEventCount, newBlackboardCount)
         chatCacheKeys.remove(key)
         chatCacheKeys.addFirst(key)
-        while (chatCacheKeys.size > 20) {
-            chatCache.remove(chatCacheKeys.removeLast())
-        }
+        trimChatCache()
     }
 
     private fun restoreScopeCounts() {
+        restoreComposition()
         ++artifactRefreshGeneration
         ++usageRefreshGeneration
         val key = scopeKey()
@@ -3502,7 +4034,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val text = o["text"]!!.jsonPrimitive.content
         val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
         return when (kind) {
-            "user" -> ChatItem.User(itemId, text, at = at)
+            "user" -> ChatItem.User(itemId, text, at = at,
+                clientMessageId = (o["clientMessageId"] as? JsonPrimitive)?.contentOrNull,
+                historyId = (o["id"] as? JsonPrimitive)?.longOrNull,
+                historyAt = at,
+            )
             "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
                 ChatItem.System(itemId, stringsFor(lang).lostReply, at = at)
             } else {
@@ -3686,16 +4222,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
         fun sameAuthor(h: ChatItem, t: ChatItem): Boolean =
             h.author == t.author || h.author.startsWith("${t.author} (") || t.author.startsWith("${h.author} (")
+        // 时间门控：仅 live 副本不晚于持久化版本（残副本场景）才按指纹吞并，
+        // 更晚到达的同文本/同前缀回复视为新回合保留
+        fun earlierLive(h: ChatItem, t: ChatItem): Boolean =
+            h.at <= 0L || t.at <= 0L || t.at <= h.at
         return tail.filter { t ->
             when (t) {
                 is ChatItem.User ->
-                    hist.none { it is ChatItem.User && sameWindow(it, t) && sameAuthor(it, t) && (it.text == t.text || it.text.endsWith(t.text)) }
+                    hist.none { it is ChatItem.User && if (it.clientMessageId != null || t.clientMessageId != null) {
+                        it.clientMessageId != null && it.clientMessageId == t.clientMessageId
+                    } else sameWindow(it, t) && sameAuthor(it, t) && (it.text == t.text || it.text.endsWith(t.text)) }
                 is ChatItem.System ->
                     hist.none { it is ChatItem.System && sameWindow(it, t) && it.text == t.text }
                 is ChatItem.Assistant ->
-                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && (it.text == t.text || (sameWindow(it, t) && (it.text.startsWith(t.text) || t.text.startsWith(it.text)))) }
+                    // 指纹级匹配不限 300s 窗口但带时间门控：同作者 + live 不晚于持久化 +
+                    // 全文相等或互为前缀（含持久化截断为前缀）
+                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Thought ->
-                    hist.none { it is ChatItem.Thought && sameAuthor(it, t) && (it.text == t.text || (sameWindow(it, t) && it.text.startsWith(t.text))) }
+                    hist.none { it is ChatItem.Thought && sameAuthor(it, t) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Tool ->
                     hist.none { it is ChatItem.Tool && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId }
                 is ChatItem.Plan ->
@@ -3711,60 +4255,53 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null) {
+    private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null): Job {
+        val key = if (method == "room.history") "room:$id" else "session:$id"
+        if (anchorAt == null) {
+            exitHistoryAnchor()
+            historyHasMore = historyMoreCache[key] ?: false
+        }
         val scopeAtStart = scopeKey()
         val seqAtStart = roomOpenSeq
         val genAtStart = missionConnectionGeneration
-        viewModelScope.launch {
+        return viewModelScope.launch {
             try {
+                if (anchorAt == null) {
+                    recoverScope(key)
+                    return@launch
+                }
                 val params = buildJsonObject {
                     put(idKey, id)
-                    if (anchorAt != null) put("anchorAt", anchorAt)
+                    put("anchorAt", anchorAt)
                 }
                 val result = hub.call(method, params)
                 if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
                 historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
-                val items = mutableListOf<ChatItem>()
-                for (e in entries) {
-                    val o = e.jsonObject
-                    val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
-                    val itemId = if (historyId != null) -historyId else ++itemSeq
-                    parseHistoryItem(o, itemId, if (method == "room.history") id else null)?.let { items.add(it) }
+                val rows = entries.map { it.jsonObject }
+                if (anchorScopeKey != key) chatCache[key] = chatItems.toList()
+                anchorScopeKey = key
+                val items = rows.mapNotNull { row ->
+                    val hid = row["id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
+                    parseHistoryItem(row, -hid, if (method == "room.history") id else null)
                 }
-                if (anchorAt != null) {
-                    // 搜索跳转加载锚点窗口：按历史 id 去重并按时间排序，避免重复/乱序
-                    val existingIds = chatItems.mapTo(HashSet()) { it.id }
-                    val existingFlowIds =
-                        chatItems.mapNotNullTo(HashSet()) { (it as? ChatItem.Flow)?.flowId }
-                    chatItems.addAll(
-                        items.filter {
-                            it.id !in existingIds &&
-                                (it as? ChatItem.Flow)?.flowId.let { fid ->
-                                    fid == null || fid !in existingFlowIds
-                                }
-                        },
-                    )
-                    chatItems.sortBy { if (it.at <= 0L) Long.MAX_VALUE else it.at }
-                    val scopeKey = if (method == "room.history") "room:$id" else "session:$id"
-                    chatCache[scopeKey] = chatItems.toList()
-                } else {
-                    val scopeKey = if (method == "room.history") "room:$id" else "session:$id"
-                    val tail = dedupeTail(items, chatItems.filter { it.id > 0 })
-                    chatItems.clear()
-                    chatItems.addAll(items + tail)
-                    chatCache[scopeKey] = chatItems.toList()
-                }
+                chatItems.clear()
+                chatItems.addAll(items)
+                deliveryRecovery.remember(key, rows)
+                recoverScope(key)
                 syncBusyIds()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (missionConnectionGeneration == genAtStart) deliveryError = "sync"
             }
         }
     }
 
     fun loadMoreHistory() {
         if (historyLoading || !historyHasMore) return
-        val oldest = chatItems.firstOrNull { it.id < 0 } ?: return
-        val oldestAt = oldest.at
+        val oldest = chatItems.filter { historyIdOf(it) != null && (it !is ChatItem.User || it.historyAt != null) }
+            .minWithOrNull(compareBy<ChatItem> { (it as? ChatItem.User)?.historyAt ?: it.at }.thenBy { historyIdOf(it) }) ?: return
+        val oldestAt = (oldest as? ChatItem.User)?.historyAt ?: oldest.at
         if (oldestAt == 0L) return
         historyLoading = true
         val scopeAtStart = scopeKey()
@@ -3780,33 +4317,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hub.call(method, buildJsonObject {
                     put(idKey, id)
                     put("before", JsonPrimitive(oldestAt))
-                    put("beforeId", JsonPrimitive(-oldest.id))
+                    put("beforeId", JsonPrimitive(historyIdOf(oldest)!!))
                     put("limit", 50)
                 })
                 if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
                 historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
-                val items = mutableListOf<ChatItem>()
-                for (e in entries) {
-                    val o = e.jsonObject
-                    val historyId = o["id"]?.jsonPrimitive?.content?.toLongOrNull()
-                    val itemId = if (historyId != null) -historyId else ++itemSeq
-                    parseHistoryItem(o, itemId, if (method == "room.history") id else null)?.let { items.add(it) }
+                val key = scopeAtStart ?: return@launch
+                val rows = entries.map { it.jsonObject }
+                if (anchorScopeKey == key) {
+                    val items = rows.mapNotNull { row ->
+                        val hid = row["id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
+                        parseHistoryItem(row, -hid, if (method == "room.history") id else null)
+                    }
+                    chatItems.addAll(0, items.filter { item -> chatItems.none { sameHistoryItem(it, item) } })
+                } else {
+                    historyMoreCache[key] = historyHasMore
+                    applyRecoveredRows(key, rows, false, false)
                 }
-                val existingIds = chatItems.map { it.id }.toSet()
-                val existingFlowIds =
-                    chatItems.mapNotNull { (it as? ChatItem.Flow)?.flowId }.toSet()
-                chatItems.addAll(
-                    0,
-                    items.filter {
-                        it.id !in existingIds &&
-                            (it as? ChatItem.Flow)?.flowId.let { fid ->
-                                fid == null || fid !in existingFlowIds
-                            }
-                    },
-                )
-                scopeKey()?.let { key -> chatCache[key] = chatItems.toList() }
-            } catch (_: Exception) {
+                deliveryRecovery.remember(key, rows)
+                recoverScope(key)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             } finally {
                 if (scopeKey() == scopeAtStart && roomOpenSeq == seqAtStart && missionConnectionGeneration == genAtStart) {
                     historyLoading = false
@@ -4230,106 +4762,189 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (text.isBlank()) drafts.remove(scope) else drafts[scope] = text
     }
 
-    fun queuedCount(scope: String) = messageQueue.count { it.scope == scope }
+    var showDeliveryManager by mutableStateOf(false)
 
-    fun clearQueue(scope: String) {
-        messageQueue.removeAll { it.scope == scope }
+    fun queuedCount(scope: String) = if (scope == composerKey()) deliveryRecords.count {
+        it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == scopeKey() && it.status != "sent"
+    } else 0
+
+    fun clearQueue(scope: String) { if (scope == composerKey()) showDeliveryManager = true }
+
+    fun enqueueMessage(scope: String, text: String, onAccepted: (() -> Unit)? = null) {
+        if (scope != composerKey()) return
+        if (currentRoom != null) sendRoomMessage(text, quote, pendingAttachments.toList(), true, helpReplyTo, onAccepted = onAccepted)
+        else sendPrompt(text, quote, pendingAttachments.toList(), true, onAccepted = onAccepted)
     }
 
-    fun enqueueMessage(scope: String, text: String) {
-        val t = text.trim()
-        if (t.isEmpty() && pendingAttachments.isEmpty()) return
-        if (handleSlashCommand(t)) return
-        // replyTo（求助答复）一并入队，否则下一条消息会误带过期关联
-        messageQueue.add(QueuedMessage(scope, t, quote, pendingAttachments.toList(), helpReplyTo))
-        quote = null
-        helpReplyTo = null
-        pendingAttachments.clear()
+    fun flushQueue(scope: String) { if (scope == composerKey() && deliveryReady) delivery.resume() }
+
+    fun preparingDelivery() = composerKey() in preparingScopes
+
+    internal fun currentDelivery(record: DeliveryRecord) = record.origin == deliveryOrigin && record.hubId == deliveryHubId
+
+    fun checkDelivery(id: String) { viewModelScope.launch { delivery.check(id) } }
+
+    fun dismissDeliveries(ids: Set<String>, includeParked: Boolean = false) {
+        viewModelScope.launch { delivery.dismissMany(ids, includeParked) }
     }
 
-    fun flushQueue(scope: String) {
-        viewModelScope.launch {
-            while (!generating) {
-                val idx = messageQueue.indexOfFirst { it.scope == scope }
-                if (idx < 0) break
-                val m = messageQueue.removeAt(idx)
-                if (currentRoom != null) {
-                    sendRoomMessage(m.text, m.quote, m.attachments, fromQueue = true, replyToOverride = m.replyTo)
-                } else {
-                    sendPrompt(m.text, m.quote, m.attachments, fromQueue = true)
+    private fun newClientMessageId() = "cm-${java.util.UUID.randomUUID()}"
+
+    private fun consumeComposition(
+        key: String, draft: String?, attachments: List<Attachment>, q: Pair<String, String>?, reply: String?,
+    ) {
+        val unchanged = drafts[key] == draft
+        if (unchanged) drafts.remove(key)
+        if (unchanged && attachmentDrafts[key] == attachments) attachmentDrafts.remove(key)
+        if (unchanged && quoteDrafts[key] == q) quoteDrafts.remove(key)
+        if (unchanged && replyDrafts[key] == reply) replyDrafts.remove(key)
+        if (composerKey() == key && unchanged) {
+            if (pendingAttachments.toList() == attachments) pendingAttachments.clear()
+            if (quote == q) quote = null
+            if (helpReplyTo == reply) helpReplyTo = null
+        }
+    }
+
+    private suspend fun prepareMessageContent(text: String, attachments: List<Attachment>, S: Strings): JsonArray =
+        withContext(Dispatchers.IO) {
+            require(attachments.size <= 5)
+            var total = 0L
+            buildJsonArray {
+                if (text.isNotBlank()) add(buildJsonObject { put("type", "text"); put("text", text) })
+                attachments.forEach { a ->
+                    val encoded = if (a.base64.isNotEmpty()) a.base64 else File(a.localPath ?: error("attachment_missing")).readText()
+                    val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                    require(bytes.size <= 10 * 1024 * 1024)
+                    total += bytes.size
+                    require(total <= 20L * 1024 * 1024)
+                    val decoded = if (attachTextLike(a.mimeType, a.name)) runCatching {
+                        Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString().takeIf { '\u0000' !in it }
+                    }.getOrNull() else null
+                    when {
+                        a.mimeType.startsWith("image/") -> add(buildJsonObject {
+                            put("type", "image"); put("mimeType", a.mimeType); put("data", encoded)
+                        })
+                        decoded != null -> add(buildJsonObject {
+                            put("type", "text"); put("text", S.deliveryAttachmentFmt.format(a.name, decoded))
+                        })
+                        else -> add(buildJsonObject {
+                            put("type", "resource")
+                            put("resource", buildJsonObject { put("mimeType", a.mimeType); put("uri", a.name); put("blob", encoded) })
+                        })
+                    }
                 }
             }
         }
-    }
 
-    fun sendPrompt(text: String, qOverride: Pair<String, String>? = null, attsOverride: List<Attachment>? = null, fromQueue: Boolean = false) {
-        val session = currentSession ?: return
-        if (text.isBlank() && attsOverride.isNullOrEmpty() && pendingAttachments.isEmpty()) return
-        if (handleSlashCommand(text)) return
-        // 队列冲刷时快照优先（null 即无引用），不回落也不消费当前草稿
-        val q = if (fromQueue) qOverride else (qOverride ?: quote)
-        val attachments = attsOverride ?: pendingAttachments.toList()
-        chatItems.add(
-            ChatItem.User(
-                ++itemSeq,
-                text,
-                attachments,
-                quoteAuthor = q?.first,
-                quoteText = q?.second,
-            ),
-        )
-        if (!fromQueue && qOverride == null) quote = null
-        if (attsOverride == null) pendingAttachments.clear()
-        val fullText = if (q != null) "${stringsFor(lang).quoteHeaderFmt.format(q.first, q.second.take(300))}\n$text" else text
-        busyIds.add(session.sessionId)
+    private fun submitDelivery(
+        text: String, room: RoomInfo?, session: SessionInfo?, q: Pair<String, String>?,
+        attachments: List<Attachment>, reply: String?, waitUntilIdle: Boolean,
+        clientMessageId: String, onAccepted: (() -> Unit)?,
+    ) {
+        val scope = room?.let { "room:${it.roomId}" } ?: session?.let { "session:${it.sessionId}" } ?: return
+        val key = composerKey()
+        if (key in preparingScopes) return
+        if (text.isBlank() && attachments.isEmpty()) return
+        if (handleSlashCommand(text)) {
+            drafts.remove(key)
+            onAccepted?.invoke()
+            return
+        }
+        val control = Regex("^(?:/?retry|重试)(?:\\s+.*)?$", RegexOption.IGNORE_CASE).matches(text.trim()) ||
+            (reply == null && (text.trimStart().startsWith("/") ||
+                Regex("^(?:stop|cancel|停止|取消)[.!。！]*$", RegexOption.IGNORE_CASE).matches(text.trim())))
+        if (room != null && reply == null && Regex("^\\s*(?:答\\s*[:：]|answer\\s*:|reply\\s*:)", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            deliveryError = "context"
+            return
+        }
+        val reliable = deliveryProtocol == 1 && !deliveryHubId.isNullOrBlank() && !control
+        if ((!reliable || attachments.isNotEmpty()) && (!hub.isConnected || !deliveryReady || waitUntilIdle)) {
+            deliveryError = if (attachments.isNotEmpty()) "attachments" else "unsupported"
+            return
+        }
+        val origin = deliveryOrigin
+        val hubId = deliveryHubId
+        val generation = missionConnectionGeneration
+        val draft = drafts[key]
+        val createdAt = System.currentTimeMillis()
+        val S = stringsFor(lang)
+        preparingScopes.add(key)
         viewModelScope.launch {
             try {
-                hub.call("prompt.send", buildJsonObject {
-                    put("sessionId", session.sessionId)
-                    put("content", buildJsonArray {
-                        if (fullText.isNotBlank()) {
-                            add(buildJsonObject {
-                                put("type", "text")
-                                put("text", fullText)
-                            })
+                if (room != null && !flowCache.containsKey(room.roomId)) {
+                    if (!deliveryReady) { deliveryError = "context"; return@launch }
+                    recoverScope(scope)
+                }
+                if (origin != deliveryOrigin || hubId != deliveryHubId) { deliveryError = "context"; return@launch }
+                val originalFlow = room?.let { flowCache[it.roomId] }
+                val originalRoom = room?.let { target -> rooms.find { it.roomId == target.roomId } ?: target }
+                val state = deliveryFlowState(originalFlow, originalRoom?.subMode)
+                val expectedState = if (waitUntilIdle && reply == null && state == "active") "terminal" else state
+                val fullText = if (room == null && q != null) S.quoteHeaderFmt.format(q.first, q.second) + "\n" + text else text
+                val content = prepareMessageContent(fullText, attachments, S)
+                if (origin != deliveryOrigin || hubId != deliveryHubId) { deliveryError = "context"; return@launch }
+                val method = if (room != null) "room.message" else "prompt.send"
+                val params = buildJsonObject {
+                    put(if (room != null) "roomId" else "sessionId", room?.roomId ?: session!!.sessionId)
+                    put("content", content)
+                    if (reliable) put("clientMessageId", clientMessageId)
+                    if (room != null) {
+                        put("text", text)
+                        if (reliable) {
+                            put("expectedFlowId", originalFlow?.flowId?.takeIf { it.isNotBlank() }?.let { JsonPrimitive(it) } ?: JsonNull)
+                            put("expectedMissionId", originalFlow?.missionId?.let { JsonPrimitive(it) } ?: JsonNull)
+                            put("expectedFlowState", expectedState)
+                            put("expectedRoomMode", originalRoom!!.mode)
                         }
-                        attachments.forEach { a ->
-                            when {
-                                a.mimeType.startsWith("image/") -> add(buildJsonObject {
-                                    put("type", "image")
-                                    put("mimeType", a.mimeType)
-                                    put("data", a.readBase64())
-                                })
-                                a.mimeType == "application/pdf" -> add(buildJsonObject {
-                                    put("type", "resource")
-                                    put("resource", buildJsonObject {
-                                        put("mimeType", a.mimeType)
-                                        put("uri", a.name)
-                                        put("blob", a.readBase64())
-                                    })
-                                })
-                                attachTextLike(a.mimeType, a.name) -> add(buildJsonObject {
-                                    put("type", "text")
-                                    put("text", "\n（附件 ${'$'}{a.name}）\n" +
-                                        String(Base64.decode(a.readBase64(), Base64.NO_WRAP)).take(200_000))
-                                })
-                                else -> add(buildJsonObject {
-                                    put("type", "resource")
-                                    put("resource", buildJsonObject {
-                                        put("mimeType", a.mimeType)
-                                        put("uri", a.name)
-                                        put("blob", a.readBase64())
-                                    })
-                                })
-                            }
+                        if (q != null) put("quote", buildJsonObject { put("author", q.first); put("text", q.second) })
+                        if (reply != null) { put("intent", "answer"); put("replyTo", reply) }
+                    }
+                }
+                if (reliable) {
+                    deliveryFiles[clientMessageId] = attachments
+                    val record = DeliveryRecord(
+                        clientMessageId, origin, hubId!!, scope, method, params, text, createdAt,
+                        deferred = !deliveryReady || waitUntilIdle, replayable = attachments.isEmpty(),
+                        profileLabel = currentProfile?.name.orEmpty(),
+                        scopeLabel = originalRoom?.name ?: session?.name.orEmpty(),
+                        attachmentNames = attachments.map { it.name }, quoteAuthor = q?.first, quoteText = q?.second,
+                        waitUntilIdle = waitUntilIdle,
+                    )
+                    if (!delivery.enqueue(record)) { deliveryFiles.remove(clientMessageId); return@launch }
+                } else {
+                    if (!deliveryReady || !currentConnection(profileEpoch, generation)) { deliveryError = "unsupported"; return@launch }
+                    val bubble = ChatItem.User(++itemSeq, text, attachments, quoteAuthor = q?.first, quoteText = q?.second, sendStatus = "sending")
+                    updateScopeItems(scope, scopeItems(scope) + bubble)
+                    try {
+                        deliveryRpc(method, params)
+                        if (origin != deliveryOrigin || hubId != deliveryHubId) return@launch
+                        updateScopeItems(scope, scopeItems(scope).map { if (it.id == bubble.id) bubble.copy(sendStatus = "sent") else it })
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        if (origin == deliveryOrigin && hubId == deliveryHubId) {
+                            updateScopeItems(scope, scopeItems(scope).map { if (it.id == bubble.id) bubble.copy(sendStatus = "uncertain") else it })
+                            deliveryError = "uncertain"
                         }
-                    })
-                })
+                        return@launch
+                    }
+                }
+                consumeComposition(key, draft, attachments, q, reply)
+                onAccepted?.invoke()
             } catch (e: Exception) {
-                busyIds.remove(session.sessionId)
-                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "send failed"))
+                if (e is CancellationException) throw e
+                if (origin == deliveryOrigin && hubId == deliveryHubId) deliveryError = if (attachments.isNotEmpty()) "attachments" else "sync"
+            } finally {
+                preparingScopes.remove(key)
             }
         }
+    }
+
+    fun sendPrompt(text: String, qOverride: Pair<String, String>? = null, attsOverride: List<Attachment>? = null,
+                   fromQueue: Boolean = false, clientMessageId: String = newClientMessageId(), onAccepted: (() -> Unit)? = null) {
+        val session = currentSession ?: return
+        val q = if (fromQueue) qOverride else (qOverride ?: quote)
+        submitDelivery(text, null, session, q, attsOverride ?: pendingAttachments.toList(), null, fromQueue,
+            clientMessageId, onAccepted)
     }
 
     fun retryTask(taskId: String) {
@@ -4373,88 +4988,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sendRoomMessage(text: String, qOverride: Pair<String, String>? = null, attsOverride: List<Attachment>? = null, fromQueue: Boolean = false, replyToOverride: String? = null) {
+    fun sendRoomMessage(text: String, qOverride: Pair<String, String>? = null, attsOverride: List<Attachment>? = null,
+                        fromQueue: Boolean = false, replyToOverride: String? = null,
+                        clientMessageId: String = newClientMessageId(), onAccepted: (() -> Unit)? = null) {
         val room = currentRoom ?: return
-        if (text.isBlank() && attsOverride.isNullOrEmpty() && pendingAttachments.isEmpty()) return
-        if (handleSlashCommand(text)) return
         val q = if (fromQueue) qOverride else (qOverride ?: quote)
         val helpReply = replyToOverride ?: if (fromQueue) null else helpReplyTo
-        val attachments = attsOverride ?: pendingAttachments.toList()
-        chatItems.add(
-            ChatItem.User(
-                ++itemSeq,
-                text,
-                attachments,
-                quoteAuthor = q?.first,
-                quoteText = q?.second,
-            ),
-        )
-        if (!fromQueue && qOverride == null) quote = null
-        if (!fromQueue) helpReplyTo = null
-        if (attsOverride == null) pendingAttachments.clear()
-        viewModelScope.launch {
-            try {
-                val content = buildJsonArray {
-                    if (text.isNotBlank()) {
-                        add(buildJsonObject {
-                            put("type", "text")
-                            put("text", text)
-                        })
-                    }
-                    attachments.forEach { a ->
-                        when {
-                            a.mimeType.startsWith("image/") -> add(buildJsonObject {
-                                put("type", "image")
-                                put("mimeType", a.mimeType)
-                                put("data", a.readBase64())
-                            })
-                            a.mimeType == "application/pdf" -> add(buildJsonObject {
-                                put("type", "resource")
-                                put("resource", buildJsonObject {
-                                    put("mimeType", a.mimeType)
-                                    put("uri", a.name)
-                                    put("blob", a.readBase64())
-                                })
-                            })
-                            attachTextLike(a.mimeType, a.name) -> add(buildJsonObject {
-                                put("type", "text")
-                                put("text", "\n（附件 ${'$'}{a.name}）\n" +
-                                    String(Base64.decode(a.readBase64(), Base64.NO_WRAP)).take(200_000))
-                            })
-                            else -> add(buildJsonObject {
-                                put("type", "resource")
-                                put("resource", buildJsonObject {
-                                    put("mimeType", a.mimeType)
-                                    put("uri", a.name)
-                                    put("blob", a.readBase64())
-                                })
-                            })
-                        }
-                    }
-                }
-                val result = hub.call("room.message", buildJsonObject {
-                    put("roomId", room.roomId)
-                    put("text", text)
-                    put("content", content)
-                    if (q != null) {
-                        put("quote", buildJsonObject {
-                            put("author", q.first)
-                            put("text", q.second)
-                        })
-                    }
-                    if (helpReply != null) {
-                        put("intent", "answer")
-                        put("replyTo", helpReply)
-                    }
-                })
-                result["sent"]?.jsonArray?.forEach {
-                    val sid = it.jsonPrimitive.content
-                    if (!busyIds.contains(sid)) busyIds.add(sid)
-                }
-            } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "send failed"))
-            }
-        }
+        submitDelivery(text, room, null, q, attsOverride ?: pendingAttachments.toList(), helpReply,
+            fromQueue && helpReply == null, clientMessageId, onAccepted)
     }
 
     fun quoteArtifact(artifact: ArtifactInfo) {
@@ -5248,7 +5789,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    private fun withLiveItems(update: () -> Unit) {
+        val key = anchorScopeKey?.takeIf { it == scopeKey() }
+        if (key == null) { update(); return }
+        val window = chatItems.toList()
+        val hasMore = historyHasMore
+        anchorScopeKey = null
+        chatItems.clear()
+        chatItems.addAll(chatCache[key].orEmpty())
+        try {
+            update()
+        } finally {
+            if (scopeKey() == key) {
+                val latest = chatItems.toList()
+                chatCache[key] = latest
+                chatItems.clear()
+                chatItems.addAll(window.map { item -> latest.find {
+                    sameHistoryItem(it, item) || (it is ChatItem.Decision && item is ChatItem.Permission && it.requestId == item.requestId)
+                } ?: item })
+                anchorScopeKey = key
+                historyHasMore = hasMore
+            }
+        }
+    }
+
     private fun handleEvent(obj: JsonObject) {
+        withLiveItems { handleEventNow(obj) }
+    }
+
+    private fun handleEventNow(obj: JsonObject) {
+        val params = obj["params"] as? JsonObject
+        val roomId = (params?.get("roomId") as? JsonPrimitive)?.contentOrNull
+        val scopedId = (params?.get("id") as? JsonPrimitive)?.contentOrNull
+        val scopedKind = (params?.get("scope") as? JsonPrimitive)?.contentOrNull
+        val key = roomId?.let { "room:$it" } ?: scopedId?.takeIf { scopedKind in setOf("room", "session") }?.let { "$scopedKind:$it" }
+        if (key != null) {
+            deliveryRecovery.changed(key)
+            if (scopeKey() == key || chatCache.containsKey(key) || deliveryRecords.any { currentDelivery(it) && it.scopeKey == key }) {
+                (params?.get("entry") as? JsonObject)?.let {
+                    applyRecoveredRows(key, listOf(it), false, true)
+                    deliveryRecovery.remember(key, listOf(it))
+                }
+            }
+        }
         if (obj["method"]?.jsonPrimitive?.content != "session.update") flushStreamChunks()
         when (obj["method"]?.jsonPrimitive?.content) {
             "agent.status" -> {
@@ -5317,42 +5900,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     chatItems.add(ChatItem.System(++itemSeq, p["message"]!!.jsonPrimitive.content))
                 }
             }
-            "room.process" -> {
-                val p = obj["params"]!!.jsonObject
-                val roomId = p["roomId"]?.jsonPrimitive?.contentOrNull
-                val entry = p["entry"]?.jsonObject
-                if (roomId != null && roomId == currentRoom?.roomId && entry != null) {
-                    val eid = entry["id"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
-                    val author = entry["author"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val at = entry["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
-                    val kind = entry["kind"]?.jsonPrimitive?.contentOrNull
-                    val meta = try {
-                        Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
-                    } catch (_: Exception) {
-                        null
-                    }
-                    if (kind == "decision") {
-                        upsertDecisionEntry(entry)
-                    } else if (meta != null && kind == "flow") {
-                        val snap = parseFlow(meta, roomId)
-                        if (snap != null && snap.flowId.isNotEmpty()) {
-                            val card = ChatItem.Flow(if (eid != null) -eid else ++itemSeq, snap.flowId, snap, author, at)
-                            val idx = chatItems.indexOfLast {
-                                it.id == card.id ||
-                                    (it is ChatItem.Flow && it.flowId.isNotEmpty() && it.flowId == card.flowId)
-                            }
-                            if (idx >= 0) chatItems[idx] = card else chatItems.add(persistedInsertIndex(card.at), card)
-                        }
-                    } else if (meta != null) {
-                        val card = parseProcessMeta(if (eid != null) -eid else ++itemSeq, meta, author, at)
-                        val idx = chatItems.indexOfLast {
-                            it.id == card.id ||
-                                (it is ChatItem.Process && it.processId.isNotEmpty() && it.processId == card.processId)
-                        }
-                        if (idx >= 0) chatItems[idx] = card else chatItems.add(persistedInsertIndex(card.at), card)
-                    }
-                }
-            }
             "room.modeSelected" -> {
                 val p = obj["params"]!!.jsonObject
                 val roomId = p["roomId"]!!.jsonPrimitive.content
@@ -5371,7 +5918,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "room.flowUpdate" -> {
                 val p = obj["params"]!!.jsonObject
                 val roomId = p["roomId"]!!.jsonPrimitive.content
-                flowCache[roomId] = parseFlow(p["flow"]?.jsonObject)
+                flowCache[roomId] = parseFlow(p["flow"] as? JsonObject, roomId)
+                if (deliveryReady) delivery.resume()
                 if (currentRoom?.roomId == roomId) {
                     flow = flowCache[roomId]
                     ensureFlowCard(flow)
@@ -5410,8 +5958,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "decision.update" -> {
                 decisionEventRev++
                 val p = obj["params"]!!.jsonObject
-                val scope = p["scope"]?.jsonPrimitive?.contentOrNull
-                val scopeId = p["id"]?.jsonPrimitive?.contentOrNull
                 val entry = p["entry"] as? JsonObject ?: return
                 try {
                     val meta = Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
@@ -5427,12 +5973,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 } catch (_: Exception) {
                 }
-                val inView = when (scope) {
-                    "room" -> scopeId == currentRoom?.roomId
-                    "session" -> currentRoom == null && scopeId == currentSession?.sessionId
-                    else -> false
-                }
-                if (inView) upsertDecisionEntry(entry)
             }
             "member.status" -> {
                 val p = obj["params"]!!.jsonObject
@@ -5529,7 +6069,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 流式合帧的有序 run：连续同 (sessionId,kind) 合并，保留 message/thought 交错与跨会话到达序 */
-    private data class StreamRun(val sessionId: String, val kind: String, val text: StringBuilder)
+    private data class StreamRun(val scopeKey: String, val epoch: Int, val generation: Int, val sessionId: String, val kind: String, val text: StringBuilder)
 
     private val streamRuns = mutableListOf<StreamRun>()
     private var streamFlushJob: kotlinx.coroutines.Job? = null
@@ -5545,11 +6085,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         streamingTail?.second == id && busyIds.contains(streamingTail?.first)
 
     private fun queueChunk(sessionId: String, kind: String, text: String) {
+        val key = scopeKey() ?: return
         val last = streamRuns.lastOrNull()
-        if (last != null && last.sessionId == sessionId && last.kind == kind) {
+        if (last != null && last.scopeKey == key && last.epoch == profileEpoch && last.generation == missionConnectionGeneration &&
+            last.sessionId == sessionId && last.kind == kind) {
             last.text.append(text)
         } else {
-            streamRuns.add(StreamRun(sessionId, kind, StringBuilder(text)))
+            streamRuns.add(StreamRun(key, profileEpoch, missionConnectionGeneration, sessionId, kind, StringBuilder(text)))
         }
         if (streamFlushJob?.isActive != true) {
             streamFlushJob = viewModelScope.launch {
@@ -5561,11 +6103,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun flushStreamChunks() {
         if (streamRuns.isEmpty()) return
+        withLiveItems { flushStreamChunksNow() }
+    }
+
+    private fun flushStreamChunksNow() {
         val runs = streamRuns.toList()
         streamRuns.clear()
         for (run in runs) {
             // 80ms 窗口内可能已切换会话/房间：scope 校验与事件入口一致，防止缓冲写进新 scope 的 chatItems
-            if (!inScope(run.sessionId) || !shouldShowInRoom(run.sessionId)) continue
+            if (run.scopeKey != scopeKey() || run.epoch != profileEpoch || run.generation != missionConnectionGeneration ||
+                !inScope(run.sessionId) || !shouldShowInRoom(run.sessionId)) continue
             val author = sessionName(run.sessionId)
             val text = run.text.toString()
             if (text.isEmpty()) continue
@@ -5670,7 +6217,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 result.addAll(
                     when (item) {
-                        is ChatItem.User -> chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = true) }
+                        is ChatItem.User -> splitItemBlocks(item, isUser = true)
                         is ChatItem.Assistant ->
                             // 流式中的尾部 item：跳过 splitMessageBlocks 块解析，整段作为单块直出；
                             // busyIds 离组（done/中断）后下次展开即恢复完整解析
@@ -5729,6 +6276,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 quoteText = quoteText,
                 attachments = attachments,
                 usage = usage,
+                clientMessageId = userItem?.clientMessageId,
+                sendStatus = if (isLast) userItem?.sendStatus else null,
+                sendError = if (isLast) userItem?.sendError else null,
+                attachmentNames = if (isFirst) userItem?.attachmentNames ?: emptyList() else emptyList(),
             )
         }
     }
@@ -5775,5 +6326,76 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             isCurrent = uid == current,
             backend = this["backend"]?.jsonPrimitive?.content ?: "devin",
         )
+    }
+
+    init {
+        deliveryRecovery = DeliveryRecovery(
+            rpc = ::recoveryRpc,
+            applyRows = ::applyRecoveredRows,
+            applyRoom = ::applyRecoveryRoom,
+            knownCards = { key ->
+                val visible = scopeItems(key) + if (scopeKey() == key && anchorScopeKey == key) chatItems else emptyList()
+                visible.filter { it is ChatItem.Flow || it is ChatItem.Decision || it is ChatItem.Elicitation }
+                    .mapNotNull { historyIdOf(it) }.distinct()
+            },
+            beforeReset = { key -> recoveryResetBase[key] = scopeItems(key).toSet() },
+        )
+        delivery = DeliveryOutbox(
+            scope = viewModelScope,
+            read = { prefs.getString("delivery_outbox_v1", null) },
+            write = { value -> withContext(Dispatchers.IO) { prefs.edit().putString("delivery_outbox_v1", value).commit() } },
+            rpc = ::deliveryRpc,
+            validate = ::validateDelivery,
+            onRecord = ::recordDelivery,
+            onChange = ::updateDeliveryRecords,
+            onError = { deliveryError = it },
+        )
+        updateDeliveryRecords(delivery.records)
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            HubService.attentionState.collect { targets ->
+                attentionItems.clear()
+                attentionItems.addAll(targets)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(backgroundPrefsListener)
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            HubService.runningState.collect { refreshBackgroundStatus() }
+        }
+        networkMonitoringAvailable = try {
+            NetworkReconnectMonitor(getApplication(), viewModelScope) { id -> hub.onNetworkChanged(id) }
+                .also { networkMonitor = it }.register()
+        } catch (_: Exception) { false }
+        hub.onNetworkChanged(networkMonitor?.currentNetworkId)
+        refreshBackgroundStatus()
+        val v2Profiles = prefs.getStringSet("profiles_v2", emptySet())!!
+        if (v2Profiles.isNotEmpty()) {
+            v2Profiles.forEach { line ->
+                val parts = line.split("\u0001")
+                if (parts.size >= 4) {
+                    profiles.add(ConnProfile(parts[0], parts[1], parts[2], parts[3]))
+                } else if (parts.size == 3) {
+                    profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
+                }
+            }
+        } else {
+            prefs.getStringSet("profiles", emptySet())!!.forEach { line ->
+                val parts = line.split("\u0001")
+                when (parts.size) {
+                    3 -> profiles.add(ConnProfile(parts[0], parts[1], parts[2]))
+                    4 -> {
+                        val (name, address, port, token) = parts
+                        val migrated = migrateAddress(address, port)
+                        profiles.add(ConnProfile(name, migrated, token))
+                    }
+                }
+            }
+        }
+        savedHubConnection(getApplication())?.let { (address, token, publicToken) ->
+            val name = profiles.find { it.address == address }?.name
+                ?: address.removePrefix("wss://").removePrefix("ws://")
+                    .substringBefore("/").substringBefore(":").substringBefore("?")
+            currentProfile = ConnProfile(name, address, token, publicToken)
+            connect(address, token, publicToken, name)
+        }
     }
 }
