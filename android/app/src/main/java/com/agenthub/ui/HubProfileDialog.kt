@@ -13,6 +13,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,6 +26,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.agenthub.ChatViewModel
 import com.agenthub.ConnProfile
@@ -38,6 +45,8 @@ fun HubProfileDialog(
     var publicToken by remember { mutableStateOf(profile?.publicToken ?: "") }
 
     var showScan by remember { mutableStateOf(false) }
+    var uriError by remember { mutableStateOf<String?>(null) }
+    var tokenVisible by remember { mutableStateOf(false) }
 
     val isCurrent = profile != null && vm.currentProfile == profile
     val hostChanged = profile != null && profile.address != host.trim()
@@ -46,12 +55,15 @@ fun HubProfileDialog(
         QrScanDialog(
             onResult = { raw ->
                 showScan = false
-                com.agenthub.parseConnectUri(raw)?.let { p ->
-                    host = p.address
-                    if (name.isBlank()) name = p.name
-                    token = p.token.ifBlank { token }
-                    publicToken = p.publicToken
-                } ?: vm.importConnectUri(raw)
+                if (raw.trim().startsWith("agenthub://")) {
+                    com.agenthub.parseConnectUri(raw)?.let { p ->
+                        host = p.address
+                        if (name.isBlank()) name = p.name
+                        token = p.token.ifBlank { token }
+                        publicToken = p.publicToken
+                        uriError = null
+                    } ?: run { uriError = S.invalidConnectUri }
+                } else vm.importConnectUri(raw)
             },
             onDismiss = { showScan = false },
         )
@@ -80,14 +92,17 @@ fun HubProfileDialog(
                     onValueChange = { v ->
                         // 粘贴 agenthub://connect 链接自动拆分填充
                         if (v.trim().startsWith("agenthub://")) {
-                            com.agenthub.parseConnectUri(v)?.let { p ->
+                            val p = com.agenthub.parseConnectUri(v)
+                            if (p != null) {
                                 host = p.address
                                 if (name.isBlank()) name = p.name
                                 token = p.token.ifBlank { token }
                                 publicToken = p.publicToken
-                                return@OutlinedTextField
                             }
+                            uriError = if (p == null) S.invalidConnectUri else null
+                            return@OutlinedTextField
                         }
+                        uriError = null
                         host = v
                     },
                     label = { Text(S.hubAddress) },
@@ -95,6 +110,14 @@ fun HubProfileDialog(
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
                 )
+                uriError?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = token,
@@ -103,6 +126,15 @@ fun HubProfileDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
+                    visualTransformation = if (tokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { tokenVisible = !tokenVisible }) {
+                            Icon(
+                                if (tokenVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (tokenVisible) S.hideSecret else S.showSecret,
+                            )
+                        }
+                    },
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
@@ -112,6 +144,7 @@ fun HubProfileDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
+                    visualTransformation = if (tokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 )
                 TextButton(onClick = { showScan = true }) {
                     Text(S.scanQrCode)

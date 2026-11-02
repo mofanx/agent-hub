@@ -403,6 +403,9 @@ interface Strings {
     val connectUriInvalid: String
     val scanQrTitle: String
     val scanQrCode: String
+    val invalidConnectUri: String
+    val showSecret: String
+    val hideSecret: String
     val cameraPermissionHint: String
     val copiedMessagesFmt: String
     val noDownloadableFile: String
@@ -1055,6 +1058,9 @@ object ZhStrings : Strings {
     override val connectUriInvalid = "无效的接入链接"
     override val scanQrTitle = "扫码接入"
     override val scanQrCode = "扫码"
+    override val invalidConnectUri = "无效的连接链接（应为 agenthub://connect?…）"
+    override val showSecret = "显示"
+    override val hideSecret = "隐藏"
     override val cameraPermissionHint = "需要相机权限才能扫码；也可以手动粘贴接入链接"
     override val copiedMessagesFmt = "已复制 %d 条消息"
     override val noDownloadableFile = "该产物没有可下载文件"
@@ -1715,6 +1721,9 @@ object EnStrings : Strings {
     override val connectUriInvalid = "Invalid connect link"
     override val scanQrTitle = "Scan to connect"
     override val scanQrCode = "Scan QR"
+    override val invalidConnectUri = "Invalid connect URI (expected agenthub://connect?…)"
+    override val showSecret = "Show"
+    override val hideSecret = "Hide"
     override val cameraPermissionHint = "Camera permission is required to scan; you can also paste the connect link manually"
     override val copiedMessagesFmt = "Copied %d messages"
     override val noDownloadableFile = "No downloadable file for this artifact"
