@@ -137,7 +137,10 @@ function compileIndexCase(body: string, sandbox: Record<string, unknown>): Index
     `module.exports = async (req) => ${body};`,
     { compilerOptions: { target: tsAst.ScriptTarget.ES2020, module: tsAst.ModuleKind.CommonJS } },
   ).outputText;
-  const box: Record<string, unknown> = { module: { exports: null }, console, Date, Promise, Error, String, Array, Number, Object, JSON, Set, Map, RegExp, clientMessageFlowState, ...sandbox };
+  const box: Record<string, unknown> = { module: { exports: null }, console, Date, Promise, Error, String, Array, Number, Object, JSON, Set, Map, RegExp, clientMessageFlowState,
+    // IFC 门控桩：测试 store 恒 shared 直通，保持原语义
+    ifcCheckRoomRead: () => {},
+    ...sandbox };
   vm.runInNewContext(fn, box, { timeout: 5000 });
   const fn2 = (box.module as { exports: (req: { params: Record<string, unknown> }) => Promise<unknown> }).exports;
   return (params) => fn2({ params });

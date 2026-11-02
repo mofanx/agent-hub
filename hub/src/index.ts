@@ -59,6 +59,12 @@ import { missionTemplateFrom, runMissionTask, parseEventTrigger, EventWakeBook }
 import { shouldDeliver, type ClientSub } from "./subscribe.js";
 import { NtfyPusher, ntfyConfigFromEnv, type NtfyKind } from "./ntfy.js";
 import { wakeGateAllows, WakeGateStats } from "./wake-gate.js";
+import {
+  ifcCheckRoomRead,
+  ifcCheckSensitiveWrite,
+  parseSensitivity,
+  type IfcRule,
+} from "./ifc.js";
 import { buildConnectUri, buildConnectInfo, lanIps, setGatewayInfo, getGatewayInfo, validateGatewayAnnounce, workerJoinCommand } from "./connect.js";
 
 const PORT = Number(process.env.HUB_PORT ?? 8787);
@@ -333,6 +339,7 @@ function enrichRoom(room: Room): Record<string, unknown> {
       }),
     })),
     subMode: sub?.mode,
+    sensitivity: store.ifcGet(room.roomId).sensitivity,
     activeSpeaker: sub?.activeSpeaker,
     reason: sub?.reason,
   };
@@ -2103,6 +2110,10 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
 
       const config = remapRoomModeConfig(source, idMap);
       const room = rooms.create(newName, newMembers, source.mode, config);
+      // IFC：克隆继承源房敏感度——private 房克隆产物不降级为 shared（防内容经克隆逃逸）
+      if ((store.ifcGet(roomId) as IfcRule).sensitivity === "private") {
+        store.ifcSet(room.roomId, "private");
+      }
       // 群聊 /new（fresh）断点条目：标注来源房间，供客户端渲染会话边界
       if (fresh) {
         store.append("room", room.roomId, {
@@ -2279,6 +2290,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     }
     case "room.history": {
       const roomId = String(req.params?.roomId ?? "");
+      // IFC：private 房历史拉取须授权标记或白名单请求房
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       const entryIds = req.params?.entryIds;
       if (entryIds !== undefined) {
         if (!Array.isArray(entryIds) || entryIds.length > 200 ||
@@ -2336,6 +2349,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
     case "room.list":
       return { rooms: rooms.list().map(enrichRoom) };
     case "room.memberModels": {
+      // IFC 豁免：仅成员元数据（模型 id/角色），不含房内容正文，v1 不门控
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
@@ -2358,6 +2372,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       return { blackboard: rooms.getBlackboard(roomId) };
     }
     case "room.blackboard.remove": {
@@ -2419,6 +2434,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
+      // IFC：flow 编排卡含任务正文，private 房须授权/白名单
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       return { flow: roomModeManager.getFlow(roomId) ?? null };
     }
     case "client.message.status": {
@@ -2441,6 +2458,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       const sub = roomModeManager.subModeFor(roomId);
       const rawIds = req.params?.knownCardIds;
       const knownCardIds = rawIds === undefined
@@ -2474,6 +2492,9 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
+      // IFC：private 房数据拉取须授权标记或白名单请求房
+      const rule = store.ifcGet(roomId) as IfcRule;
+      ifcCheckRoomRead(rule, roomId, req.params);
       return { memories: store.memoryList(roomId, Date.now()) };
     }
     case "room.memory.delete": {
@@ -2482,7 +2503,27 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const room = rooms.get(roomId);
       if (!room) throw new Error("unknown room");
       if (!Number.isInteger(id) || id <= 0) throw new Error("id required");
+      // IFC：敏感写操作统一要求显式授权标记
+      ifcCheckSensitiveWrite(req.params);
       return { removed: store.memoryRemove(roomId, id) };
+    }
+    case "room.sensitivity": {
+      const roomId = String(req.params?.roomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      const s = parseSensitivity(req.params?.sensitivity);
+      store.ifcSet(roomId, s);
+      return { sensitivity: s };
+    }
+    case "room.ifc.grant": {
+      const roomId = String(req.params?.roomId ?? "");
+      const allowRoomId = String(req.params?.allowRoomId ?? "");
+      const room = rooms.get(roomId);
+      if (!room) throw new Error("unknown room");
+      if (!allowRoomId) throw new Error("allowRoomId required");
+      const allowed = req.params?.allowed !== false;
+      store.ifcAllow(roomId, allowRoomId, allowed);
+      return { granted: allowed, rule: store.ifcGet(roomId) };
     }
     case "room.flow.cancel": {
       const roomId = String(req.params?.roomId ?? "");
@@ -2678,6 +2719,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       return {
         artifacts: rooms.getArtifacts(roomId, 100),
         events: rooms.getEvents(roomId, 100),
@@ -2688,6 +2730,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const roomId = String(req.params?.roomId ?? "");
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       return { events: rooms.getEvents(roomId, 100) };
     }
     case "room.appendArtifact": {
@@ -2788,6 +2831,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const author = typeof req.params?.author === "string" ? req.params.author : undefined;
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
+      // IFC：文件树属房内容，private 房须授权/白名单
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
       if (!dirPath) throw new Error("dir path required");
       return { nodes: rooms.listFiles(roomId, dirPath, author) };
     }
@@ -2812,6 +2857,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       if (roomId) {
         const room = rooms.get(roomId);
         if (!room) throw new Error(`unknown room: ${roomId}`);
+        // IFC：文件内容出房，private 房须授权/白名单
+        ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
         return rooms.getFile(roomId, ref);
       }
       return rooms.sessionGetFile(sessionId, ref);

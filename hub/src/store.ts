@@ -249,6 +249,11 @@ export class Store {
         result TEXT NOT NULL,
         at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS room_ifc (
+        room_id TEXT PRIMARY KEY,
+        sensitivity TEXT NOT NULL DEFAULT 'shared',
+        allow TEXT NOT NULL DEFAULT '[]'
+      );
       CREATE TABLE IF NOT EXISTS memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         room_id TEXT NOT NULL,
@@ -1003,6 +1008,40 @@ export class Store {
 
   deleteMemory(roomId: string): void {
     this.db.prepare("DELETE FROM memory WHERE room_id = ?").run(roomId);
+  }
+
+  /** IFC：房级 sensitivity 标签 + 跨房白名单（默认 shared 兼容） */
+  ifcGet(roomId: string): { sensitivity: string; allow: string[] } {
+    const row = this.db
+      .prepare("SELECT sensitivity, allow FROM room_ifc WHERE room_id = ?")
+      .get(roomId) as { sensitivity: string; allow: string } | undefined;
+    if (!row) return { sensitivity: "shared", allow: [] };
+    let allow: string[] = [];
+    try {
+      const a = JSON.parse(row.allow);
+      if (Array.isArray(a)) allow = a.map(String);
+    } catch {}
+    return { sensitivity: row.sensitivity, allow };
+  }
+
+  ifcSet(roomId: string, sensitivity: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO room_ifc(room_id, sensitivity, allow) VALUES (?, ?, '[]') ON CONFLICT(room_id) DO UPDATE SET sensitivity = excluded.sensitivity",
+      )
+      .run(roomId, sensitivity);
+  }
+
+  ifcAllow(roomId: string, allowRoomId: string, allowed: boolean): void {
+    const cur = this.ifcGet(roomId);
+    const set = new Set(cur.allow);
+    if (allowed) set.add(allowRoomId);
+    else set.delete(allowRoomId);
+    this.db
+      .prepare(
+        "INSERT INTO room_ifc(room_id, sensitivity, allow) VALUES (?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET allow = excluded.allow",
+      )
+      .run(roomId, cur.sensitivity, JSON.stringify([...set]));
   }
 
   /** 单条删除（房作用域限定，防跨房误删） */
