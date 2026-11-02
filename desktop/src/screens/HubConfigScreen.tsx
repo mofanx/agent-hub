@@ -13,12 +13,29 @@ function isRemote(p: ConnProfile) {
   return p.address.startsWith("wss://") || p.address.startsWith("https://");
 }
 
+/** 解析 agenthub://connect?u=<url>&t=<token>&mode=<lan|gateway> 接入链接（与 android 同构校验） */
+function parseConnectUri(raw: string): { address: string; token: string } | null {
+  try {
+    const t = raw.trim();
+    if (!t.startsWith("agenthub://connect")) return null;
+    const q = new URLSearchParams(t.slice("agenthub://connect".length).replace(/^\?/, ""));
+    let u = (q.get("u") ?? "").trim();
+    const tok = (q.get("t") ?? "").trim();
+    if (!u || !tok) return null;
+    if (!u.startsWith("ws://") && !u.startsWith("wss://")) u = `ws://${u}`;
+    return { address: u, token: tok };
+  } catch {
+    return null;
+  }
+}
+
 export function HubConfigScreen() {
   const store = useHubStore();
   const S = stringsFor(store.lang);
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [token, setToken] = useState("dev-token");
+  const [uriErr, setUriErr] = useState("");
   const [editing, setEditing] = useState<ConnProfile | null>(null);
 
   const last = useMemo(() => {
@@ -99,7 +116,31 @@ export function HubConfigScreen() {
               required
             />
           </FormRow>
-          {store.connectError && <div className="error">{store.connectError}</div>}
+          <FormRow label={S.pasteUriLabel}>
+            <input
+              placeholder="agenthub://connect?u=…&t=…"
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                if (!v) return;
+                const p = parseConnectUri(v);
+                if (p) {
+                  setHost(p.address);
+                  setToken(p.token);
+                  setUriErr("");
+                  e.currentTarget.value = "";
+                } else {
+                  setUriErr(S.invalidConnectUri);
+                }
+              }}
+            />
+          </FormRow>
+          {uriErr && <div className="error">{uriErr}</div>}
+          {store.connectError && (
+            <>
+              <div className="error">{store.connectError}</div>
+              <div className="connect-share-sub">{S.connectFailHint}</div>
+            </>
+          )}
           <div className="form-actions">
             {editing && (
               <button type="button" className="secondary" onClick={reset}>

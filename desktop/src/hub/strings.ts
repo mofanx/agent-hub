@@ -376,6 +376,9 @@ export interface Strings {
   memoriesTitle: string;
   memoryDeleteTitle: string;
   taskEventWake: string;
+  pasteUriLabel: string;
+  invalidConnectUri: string;
+  connectFailHint: string;
   lastSeenFmt: string;
   typeLabel: string;
   localStartLabel: string;
@@ -1079,6 +1082,9 @@ const zh: Strings = {
   memoriesTitle: "长期记忆（蒸馏）",
   memoryDeleteTitle: "删除此条记忆",
   taskEventWake: "事件唤醒",
+  pasteUriLabel: "粘贴接入链接",
+  invalidConnectUri: "无效的接入链接（应为 agenthub://connect?u=…&t=…）",
+  connectFailHint: "连接失败？可在另一台设备的「分享连接」里复制 agenthub:// 链接或扫码后粘贴到上方。",
   lastSeenFmt: "最近在线 %s",
   typeLabel: "类型",
   localStartLabel: "本地启动",
@@ -1782,6 +1788,9 @@ const en: Strings = {
   memoriesTitle: "Long-term memory (distilled)",
   memoryDeleteTitle: "Delete this memory",
   taskEventWake: "event wake",
+  pasteUriLabel: "Paste connect link",
+  invalidConnectUri: "Invalid connect link (expect agenthub://connect?u=…&t=…)",
+  connectFailHint: "Connection failed? Copy an agenthub:// link or scan the QR from \"Share connection\" on the other device and paste it above.",
   lastSeenFmt: "Last seen %s",
   typeLabel: "Type",
   localStartLabel: "Local launch",
