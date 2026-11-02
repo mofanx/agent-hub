@@ -63,6 +63,20 @@ test("memory: deleteMemory 随房删除清空", (t) => {
   assert.equal(store.memoryList("r2", Date.now()).length, 1);
 });
 
+test("memoryAdd: 同 room+kind+text 重复写入原位刷新不堆积", (t) => {
+  const store = makeStore(t);
+  store.memoryAdd("r1", "decision", "结论A", "s1", 1000, null);
+  store.memoryAdd("r1", "decision", "结论A", "s2", 2000, null);
+  const list = store.memoryList("r1", Date.now());
+  assert.equal(list.length, 1, "同文本不重复入库");
+  assert.equal(list[0]!.at, 2000, "刷新为最新时间戳");
+  assert.equal(list[0]!.source, "s2", "刷新为最新来源");
+  // 不同 kind/不同文本正常插入
+  store.memoryAdd("r1", "fact", "结论A", "s1", 3000, null);
+  store.memoryAdd("r1", "decision", "结论B", "s1", 3001, null);
+  assert.equal(store.memoryList("r1", Date.now()).length, 3);
+});
+
 test("memoryRemove: 单条删除限房作用域", (t) => {
   const store = makeStore(t);
   store.memoryAdd("r1", "decision", "x", "s1", Date.now(), null);

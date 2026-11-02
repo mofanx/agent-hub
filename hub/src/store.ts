@@ -965,6 +965,16 @@ export class Store {
   }
 
   memoryAdd(roomId: string, kind: string, text: string, source: string, at: number, expiresAt: number | null): void {
+    // 同 room+kind+text 蒸馏重复写入 → 原位刷新时间戳而非堆积副本
+    const dup = this.db
+      .prepare("SELECT id FROM memory WHERE room_id = ? AND kind = ? AND text = ? LIMIT 1")
+      .get(roomId, kind, text) as { id: number } | undefined;
+    if (dup) {
+      this.db
+        .prepare("UPDATE memory SET at = ?, expires_at = ?, source = ? WHERE id = ?")
+        .run(at, expiresAt, source, dup.id);
+      return;
+    }
     this.db
       .prepare(
         "INSERT INTO memory(room_id, kind, text, source, at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",

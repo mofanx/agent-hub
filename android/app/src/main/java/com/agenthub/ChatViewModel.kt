@@ -920,7 +920,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = hub.call("room.memory", buildJsonObject { put("roomId", roomId) })
-                val list = (result["memory"] ?: result["entries"])?.jsonArray ?: return@launch
+                val list = result["memories"]?.jsonArray ?: return@launch
                 roomMemories.clear()
                 for (m in list) {
                     val o = m.jsonObject
@@ -4434,6 +4434,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val processFetchFingerprints = mutableMapOf<String, String>()
     private val processFetchJobs = mutableMapOf<String, Job>()
 
+    /** 过程钻取元数据上限：LinkedHashMap 插入序淘汰最旧（jobs 先取消防泄漏） */
+    private fun pruneProcessFetchMaps(cap: Int = 200) {
+        for (m in listOf(processFetchJobs, processFetchSeq, processFetchFingerprints)) {
+            while (m.size > cap) {
+                val oldest = m.entries.first().key
+                processFetchJobs.remove(oldest)?.cancel()
+                processFetchSeq.remove(oldest)
+                processFetchFingerprints.remove(oldest)
+            }
+        }
+    }
+
     fun processKey(item: ChatItem.Process): String =
         item.processId.ifEmpty { "card:${item.id}" }
 
@@ -4474,6 +4486,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         processFetchFingerprints[key] = fingerprint
         if (identityChanged) processItems.remove(key)
         processFetchJobs[key]?.cancel()
+        pruneProcessFetchMaps()
         processLoading[key] = true
         processUnavailable.remove(key)
         processErrors.remove(key)
