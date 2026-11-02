@@ -490,6 +490,7 @@ data class ScheduledTask(
     val createdAt: Long = 0,
     val missionTemplate: JsonObject? = null,
     val missionAutoStart: Boolean = false,
+    val eventKind: String? = null,
 )
 
 data class TaskLog(
@@ -888,6 +889,64 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val connections = mutableStateListOf<ConnectionInfo>()
     val hubAgentTypes = mutableStateListOf<String>()
     val scheduledTasks = mutableStateListOf<ScheduledTask>()
+
+    /** 蒸馏记忆条目（hub memory 表经 room.memory RPC 读取） */
+    data class MemoryEntry(val id: Long, val kind: String, val text: String, val source: String, val at: Long)
+    val roomMemories = mutableStateListOf<MemoryEntry>()
+
+    /** scope 分层订阅：ViewModel 订 detail（当前房），切房重订并消费回包快照 */
+    private var subscribedRoomId: String? = null
+
+    fun subscribeScope(roomId: String? = null) {
+        val rid = roomId ?: currentRoom?.roomId
+        if (rid == subscribedRoomId) return
+        subscribedRoomId = rid
+        viewModelScope.launch {
+            try {
+                val result = hub.call("client.subscribe", buildJsonObject {
+                    put("tier", "detail")
+                    rid?.let { put("roomId", it) }
+                })
+                (result["snapshot"] as? JsonObject)?.let { snap ->
+                    rid?.let { applyRecoveryRoom("room:$it", snap) }
+                }
+            } catch (_: Exception) {
+                subscribedRoomId = null
+            }
+        }
+    }
+
+    fun loadRoomMemory(roomId: String) {
+        viewModelScope.launch {
+            try {
+                val result = hub.call("room.memory", buildJsonObject { put("roomId", roomId) })
+                val list = (result["memory"] ?: result["entries"])?.jsonArray ?: return@launch
+                roomMemories.clear()
+                for (m in list) {
+                    val o = m.jsonObject
+                    roomMemories.add(MemoryEntry(
+                        id = o["id"]!!.jsonPrimitive.content.toLong(),
+                        kind = o["kind"]?.jsonPrimitive?.contentOrNull ?: "fact",
+                        text = o["text"]?.jsonPrimitive?.contentOrNull ?: "",
+                        source = o["source"]?.jsonPrimitive?.contentOrNull ?: "",
+                        at = o["at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    ))
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
+    fun deleteRoomMemory(roomId: String, id: Long) {
+        viewModelScope.launch {
+            try {
+                hub.call("room.memory.delete", buildJsonObject {
+                    put("roomId", roomId)
+                    put("id", id)
+                })
+                roomMemories.removeAll { it.id == id }
+            } catch (_: Exception) { }
+        }
+    }
     val taskLogs = mutableStateListOf<TaskLog>()
     val missions = mutableStateListOf<Mission>()
     /** hub 是否支持 mission.* API；探测失败（unknown method）保持 false 隐藏入口 */
@@ -1816,6 +1875,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!openedOnce) screen = Screen.Sessions
                     openedOnce = true
+                    subscribedRoomId = null
+                    subscribeScope()
                     startDeliveryRecovery(epoch, generation)
                 }
             },
@@ -2694,6 +2755,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             createdAt = o["createdAt"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
             missionTemplate = o["missionTemplate"] as? JsonObject,
             missionAutoStart = o["missionAutoStart"]?.jsonPrimitive?.contentOrNull == "true",
+            eventKind = o["eventTrigger"]?.jsonObject?.get("events")?.jsonArray
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                ?.takeIf { it.isNotEmpty() }
+                ?.joinToString("/"),
         )
     }
 
@@ -3285,6 +3350,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 updatedRoom.activeSpeaker?.let { refreshSessionUsage(it) }
                 history.join()
                 if (seq == roomOpenSeq) onOpened?.invoke()
+                subscribeScope(room.roomId)
+                loadRoomMemory(room.roomId)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 connectError = e.message

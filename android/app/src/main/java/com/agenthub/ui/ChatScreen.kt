@@ -4850,6 +4850,39 @@ private fun BlackboardPanel(vm: ChatViewModel) {
                 .sortedBy { it.status == "resolved" }
             if (!collapsed) {
                 Spacer(Modifier.height(4.dp))
+                // 蒸馏记忆条目：room.memory RPC 拉取，可查看与删除
+                if (vm.roomMemories.isNotEmpty()) {
+                    Text(
+                        S.memorySection,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    vm.roomMemories.forEach { m ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                        ) {
+                            Text(
+                                "[${m.kind}] ${m.text}",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                S.actionDelete,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier
+                                    .clickable {
+                                        vm.currentRoom?.roomId?.let { vm.deleteRoomMemory(it, m.id) }
+                                    }
+                                    .padding(horizontal = 6.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
                 if (topicEntries.isNotEmpty()) {
                     topicEntries.forEach { t ->
                         val resolved = t.status == "resolved"

@@ -255,6 +255,10 @@ class HubService : Service() {
                         else putString("background_stop_reason", "network_monitor")
                     }.apply()
                     updateForegroundNotification()
+                    // 后台服务只订 global 层（待办/工单状态），高频流式事件不推
+                    scope.launch {
+                        try { client.call("client.subscribe", buildJsonObject { put("tier", "global") }) } catch (_: Exception) { }
+                    }
                     syncAttention()
                 }
             },

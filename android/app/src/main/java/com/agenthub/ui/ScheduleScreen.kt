@@ -268,6 +268,14 @@ private fun TaskCard(
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.CalendarMonth, contentDescription = null, modifier = Modifier.size(20.dp))
+                task.eventKind?.let {
+                    Text(
+                        "⚡ ${S.eventWakeTag}·$it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
                 Spacer(Modifier.size(8.dp))
                 Text(
                     task.name,
