@@ -1978,7 +1978,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!currentConnection(epoch, generation) || seq != warmupSeq) return@launch
                     deliveryReady = true
-                    deliveryError = delivery.error
+                    // 第三闸：recovery 直拷 delivery.error 同样按本连接在途记录过滤瞬态错误
+                    deliveryError = if (delivery.error != null && delivery.error in setOf(
+                            "context", "sync", "expired", "attachments", "unsupported") &&
+                        delivery.records.none {
+                            currentDelivery(it) && it.status in setOf("pending", "sending", "uncertain", "failed")
+                        }) null else delivery.error
                     delivery.resume()
                     openPendingAttention()
                     historyLoading = false
