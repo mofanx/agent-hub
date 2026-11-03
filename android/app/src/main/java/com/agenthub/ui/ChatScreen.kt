@@ -699,8 +699,43 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     }
                     if (isRoom) {
-                        IconButton(onClick = { editingRoom = true }) {
-                            Icon(Icons.Filled.MoreHoriz, contentDescription = S.editRoom)
+                        // 顶栏 ⋯ 溢出菜单：房间设置 + 发送记录管理（原 MainActivity banner 入口下沉至此），
+                        // 有待发送/失败/待定记录时图标挂徽标
+                        var moreMenu by remember { mutableStateOf(false) }
+                        val deliveryActionable = vm.deliveryRecords.count {
+                            it.status == "pending" || it.status == "sending" ||
+                            it.status == "failed" || it.status == "uncertain"
+                        }
+                        Box {
+                            BadgedBox(badge = {
+                                if (deliveryActionable > 0) Badge { Text("$deliveryActionable") }
+                            }) {
+                                IconButton(onClick = { moreMenu = true }) {
+                                    Icon(Icons.Filled.MoreHoriz, contentDescription = S.editRoom)
+                                }
+                            }
+                            DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text(S.editRoom) },
+                                    onClick = { editingRoom = true; moreMenu = false },
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(S.deliveryLabels.getValue("title"), Modifier.weight(1f))
+                                            if (deliveryActionable > 0) {
+                                                Text(
+                                                    "$deliveryActionable",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.padding(start = 8.dp),
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onClick = { vm.showDeliveryManager = true; moreMenu = false },
+                                )
+                            }
                         }
                     } else {
                         IconButton(onClick = { vm.backToList() }) {

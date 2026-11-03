@@ -132,7 +132,9 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             Text(S.attentionLabels[error] ?: S.attentionNeeded, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error)
             TextButton(onClick = { vm.dismissAttentionNavigation() }) { Text(S.cancel) }
         }
-        if (vm.deliveryRecords.isNotEmpty() || vm.deliveryError != null) {
+        // 发送记录 banner 事件化：仅"有动作价值"时占位——失败/结果待定记录或同步错误
+        if (vm.deliveryError != null ||
+            vm.deliveryRecords.any { it.status == "failed" || it.status == "uncertain" }) {
             TextButton(onClick = { vm.showDeliveryManager = true }) {
                 Text(stringsFor(vm.lang).deliveryLabels.getValue("title"))
             }

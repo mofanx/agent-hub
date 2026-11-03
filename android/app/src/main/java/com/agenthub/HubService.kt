@@ -89,6 +89,7 @@ class HubService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         attentionLedger = AttentionLedger(
             runCatching { prefs.getString("attention_v1", null) }.getOrNull(),
             write = { value -> withContext(Dispatchers.IO) { prefs.edit().putString("attention_v1", value).commit() } },
@@ -139,6 +140,7 @@ class HubService : Service() {
             stopConnection(if (savedHubConnection(this) != null) reason ?: "service_stopped" else null)
         }
         scope.cancel()
+        if (instance === this) instance = null
         super.onDestroy()
     }
 
@@ -316,7 +318,7 @@ class HubService : Service() {
                     if (!valid()) return@launch
                     val ids = rooms.map { it.jsonObject["roomId"]!!.jsonPrimitive.content }.toSet()
                     attentionFlows.keys.toList().filter { it !in ids && flowRevisions[it] == beforeList[it] }
-                        .forEach { attentionFlows.remove(it) }
+                        .forEach { attentionFlows.remove(it); flowRevisions.remove(it) }
                     val limit = Semaphore(4)
                     coroutineScope { ids.map { roomId -> async {
                         limit.withPermit {
@@ -415,7 +417,14 @@ class HubService : Service() {
         if (!attentionReady && isConnected && attentionJob?.isActive != true) syncAttention()
     }
 
+    private fun dropRoomAttention(roomId: String) {
+        attentionFlows.remove(roomId)
+        flowRevisions.remove(roomId)
+    }
+
     companion object {
+        internal var instance: HubService? = null
+        internal fun dropRoomAttention(roomId: String) = instance?.dropRoomAttention(roomId)
         private const val NOTIFICATION_ID = 1001
         private val runningStatus = MutableStateFlow(false)
         private val attentionStatus = MutableStateFlow<List<AttentionTarget>>(emptyList())

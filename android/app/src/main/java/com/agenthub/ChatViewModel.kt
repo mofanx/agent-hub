@@ -3192,7 +3192,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         chatCacheKeys.remove(key)
         scopeSeen.remove(key)
         panelsCache.remove(key)
-        if (scope == "room") flowCache.remove(id)
+        recoveryResetBase.remove(key)
+        historyMoreCache.remove(key)
+        if (scope == "room") {
+            flowCache.remove(id)
+            HubService.dropRoomAttention(id)
+        }
     }
 
     fun deleteRoom(room: RoomInfo) {
@@ -3563,6 +3568,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun updateDeliveryRecords(records: List<DeliveryRecord>) {
         deliveryRecords.clear()
         deliveryRecords.addAll(records)
+        // 陈腐瞬态错误清理：context/sync 等错误面向"需重确认的记录"，
+        // 全部记录处置完毕后不再挂 banner（storage/corrupt/full 为存储级故障保留）
+        if (deliveryError in setOf("context", "sync", "expired", "attachments", "unsupported") &&
+            records.none { it.status in setOf("pending", "sending", "uncertain", "failed") }) {
+            deliveryError = null
+        }
     }
 
     private fun historyIdOf(item: ChatItem): Long? =
