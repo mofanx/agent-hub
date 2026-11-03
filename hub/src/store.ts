@@ -704,6 +704,28 @@ export class Store {
     }
   }
 
+  /** 检索式调取旧记录：scope 内按关键词/作者/时间窗过滤，at 倒序分页 */
+  searchHistory(
+    scope: "session" | "room",
+    id: string,
+    opts: { query?: string | undefined; author?: string | undefined; fromAt?: number | undefined; toAt?: number | undefined; limit?: number | undefined; beforeId?: number | undefined } = {},
+  ): HistoryItem[] {
+    const conds = ["scope = ?", "scope_id = ?", "draft = 0"];
+    const args: unknown[] = [scope, id];
+    if (opts.query) { conds.push("LOWER(text) LIKE ?"); args.push(`%${opts.query.toLowerCase()}%`); }
+    if (opts.author) { conds.push("author = ?"); args.push(opts.author); }
+    if (opts.fromAt !== undefined) { conds.push("at >= ?"); args.push(opts.fromAt); }
+    if (opts.toAt !== undefined) { conds.push("at <= ?"); args.push(opts.toAt); }
+    if (opts.beforeId !== undefined) { conds.push("id < ?"); args.push(opts.beforeId); }
+    const limit = Math.max(1, Math.min(opts.limit ?? 20, 50));
+    return this.db
+      .prepare(
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+         WHERE ${conds.join(" AND ")} ORDER BY at DESC, id DESC LIMIT ?`,
+      )
+      .all(...args, limit) as HistoryItem[];
+  }
+
   read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryItem[] {
     const rows = this.db
       .prepare(

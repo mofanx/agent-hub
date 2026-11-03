@@ -2338,6 +2338,20 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const hasMore = entries.length > 0 ? store.hasMoreBefore("room", roomId, entries[0]!.at, entries[0]!.id) : false;
       return { entries, hasMore };
     }
+    case "room.history.search": {
+      // 检索式调取旧记录：关键词/作者/时间窗过滤+id 游标分页，IFC 读门控同 room.history
+      const roomId = String(req.params?.roomId ?? "");
+      ifcCheckRoomRead(store.ifcGet(roomId) as IfcRule, roomId, req.params);
+      const query = req.params?.query === undefined ? undefined : String(req.params.query).slice(0, 100);
+      const author = req.params?.author === undefined ? undefined : String(req.params.author).slice(0, 64);
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+      const limit = Math.max(1, Math.min(num(req.params?.limit) ?? 20, 50));
+      const items = store.searchHistory("room", roomId, {
+        query, author, fromAt: num(req.params?.fromAt), toAt: num(req.params?.toAt),
+        beforeId: num(req.params?.beforeId), limit,
+      });
+      return { entries: items, hasMore: items.length === limit };
+    }
     case "room.create": {
       const name = dedupeRoomName(String(req.params?.name ?? "群聊").trim() || "群聊");
       const ids = (req.params?.sessionIds as string[]) ?? [];
