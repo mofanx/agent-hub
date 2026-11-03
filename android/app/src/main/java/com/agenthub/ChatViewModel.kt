@@ -3917,19 +3917,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun parseFlowTask(obj: JsonObject): FlowTask {
         val artifacts = obj["artifacts"]?.jsonArray?.map { parseFlowArtifact(it.jsonObject) } ?: emptyList()
+        // 空白归一（数据层根治"任务间偶发大空白"）：task 是单行描述，全渲染路径折叠；
+        // 正文类字段保留换行但压缩连续空行——空行栈在展开态曾渲染成大段空白
+        val collapseBlank = { s: String? ->
+            // [ \t\r] 含 \r：CRLF 输出的空行栈（\r\n\r\n+）同样压缩
+            s?.replace(Regex("\n[ \t\r]*\n([ \t\r]*\n)+"), "\n\n")?.trim()
+        }
         return FlowTask(
             id = obj["id"]?.jsonPrimitive?.content ?: "",
             sessionId = obj["sessionId"]?.jsonPrimitive?.content ?: "",
             name = obj["name"]?.jsonPrimitive?.content ?: "",
             status = obj["status"]?.jsonPrimitive?.content ?: "pending",
-            task = obj["task"]?.jsonPrimitive?.content ?: "",
+            task = obj["task"]?.jsonPrimitive?.content
+                ?.replace(Regex("\\s+"), " ")?.trim() ?: "",
             dependsOn = obj["dependsOn"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
             artifacts = artifacts,
-            failureMessage = obj["failureMessage"]?.jsonPrimitive?.contentOrNull,
-            output = obj["output"]?.jsonPrimitive?.contentOrNull,
+            failureMessage = collapseBlank(obj["failureMessage"]?.jsonPrimitive?.contentOrNull),
+            output = collapseBlank(obj["output"]?.jsonPrimitive?.contentOrNull),
             retries = obj["retries"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             waitingFor = obj["waitingFor"]?.jsonPrimitive?.contentOrNull,
-            waitingQuestion = obj["waitingQuestion"]?.jsonPrimitive?.contentOrNull,
+            waitingQuestion = collapseBlank(obj["waitingQuestion"]?.jsonPrimitive?.contentOrNull),
             waitingHelpId = obj["waitingHelpId"]?.jsonPrimitive?.contentOrNull,
             verifications = obj["verifications"]?.jsonArray?.map { v ->
                 val vo = v.jsonObject
