@@ -132,9 +132,12 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             Text(S.attentionLabels[error] ?: S.attentionNeeded, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error)
             TextButton(onClick = { vm.dismissAttentionNavigation() }) { Text(S.cancel) }
         }
-        // 发送记录 banner 事件化：仅"有动作价值"时占位——失败/结果待定记录或同步错误
-        if (vm.deliveryError != null ||
-            vm.deliveryRecords.any { it.status == "failed" || it.status == "uncertain" }) {
+        // banner 纯派生：存储级错误（corrupt/storage/full）恒显；本连接有在途记录才显——
+        // 瞬态错误（context 等）挂在全局字段上无论哪条路径残留都不再撑横幅
+        val deliveryActionable = vm.deliveryRecords.any {
+            vm.currentDelivery(it) && it.status in setOf("pending", "sending", "uncertain", "failed")
+        }
+        if (vm.deliveryError in setOf("corrupt", "storage", "full") || deliveryActionable) {
             TextButton(onClick = { vm.showDeliveryManager = true }) {
                 Text(stringsFor(vm.lang).deliveryLabels.getValue("title"))
             }
