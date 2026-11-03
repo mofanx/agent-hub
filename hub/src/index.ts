@@ -3792,7 +3792,15 @@ wss.on("connection", (ws, req) => {
           typeof req2.params?.sessionId === "string" && req2.params.sessionId
             ? req2.params.sessionId
             : undefined;
-        clientSubs.set(ws, { tier, roomId, sessionId });
+        const taskIds = Array.isArray(req2.params?.taskIds)
+          ? new Set(
+              (req2.params.taskIds as unknown[])
+                .map((x) => String(x))
+                .filter((x) => x.length > 0)
+                .slice(0, 500),
+            )
+          : undefined;
+        clientSubs.set(ws, { tier, roomId, sessionId, ...(taskIds ? { taskIds } : {}) });
         let snapshot: Record<string, unknown> | undefined;
         if (tier === "detail" && roomId) {
           const room = rooms.get(roomId);

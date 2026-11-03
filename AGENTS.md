@@ -145,3 +145,9 @@ adb logcat -d | grep -i FATAL          # 应无输出
 - **ACP fs 能力**：Hub 声明 `fs.readTextFile` / `fs.writeTextFile`，直接感知 agent 文件写入并同步产物与事件。
 - **回合治理**：turn 提交不变量——外发 prompt 时记录房史"最后一条用户条目"游标，prompt.done 消费前若游标被新用户消息推进，输出作废并按原 prompt 重跑（上限 1 次，重跑仍过期则强制接受；被 cancel 的 turn 不重跑）。`OperationLedger`（内存 5000 LRU）按 opId 去重外发副作用（assistant 条目、过程卡、文件写入），防断连重放/重试重发重复提交，重跑生成新 opId 不受影响。mention 只向被 @ 成员派发（未点名零成本静默；无 @ 回退全体成员）。conductor 跟进派发轮次上限 `flow.maxRounds`（默认 8，`room.maxRounds` 覆盖），超限置 `awaiting-retry`/`waitingFor=user` 交还用户。worker 过程输出聚合为带 `flowId`/`taskId` 的 process 卡，为客户端归卡铺路。
 - **tool_call 捕获**：解析 `session/update` 中的 `tool_call` / `tool_call_update`，记录 edit/delete/move/execute 等关键动
+## 待验证（短期无法自动化验证，待真实使用浮现）
+
+- **ntfy 断连到达 + 点击深链定位**：通道/env/推送链路已实证，唯一未验环是真实离线 waitingFor 通知到达后点击 `agenthub://attention?roomId=…` 拉起并定位。下次收到离线通知时点一下即闭环。
+- **RSS 24h 曲线**：`dropScopeCache`/`dropRoomAttention` 内存清理成效待观察——`pm2 monit`（或 adb 侧内存）看 RSS 是否仍单调上行，上行则还有漏网 map（已知残余：`roomMemberModels`/`roomMemberTypes` sessionId 键小残留）。
+- **IFC 真机 UI 过眼**：协议层 10/10 已实证；私密房标题 🔒、跨房读"待批准"提示在 Android/Desktop 上的实际渲染待肉眼走查。
+- **观察指标待真实负载**：`wakeSkips` 拦截率（Jev 二阶段判据：高→YAGNI）、静默复现误触发率（误报→调 contains 关键词白名单）、`SilentReproBook` 每房日限 2 轮触顶率、IFC 误触发率（10 处门控漏标调用点会浮现）、蒸馏近重复堆积率（前缀去重判据）、`session.update` 降幅（订阅分层验收）。

@@ -1296,6 +1296,11 @@ export class RoomModeManager {
   }
 
   /** 该会话在此房间当前执行的子任务 id（conductor worker 回合；其他模式为 undefined） */
+  /** 工单订阅链：taskId → 关注成员集（负责 worker+求助协作方），flow 终结随任务清理 */
+  taskSubscribers(roomId: string, taskId: string): ReadonlySet<string> | undefined {
+    return this.conductor.taskSubscribers(roomId, taskId);
+  }
+
   taskIdForTurn(
     sessionId: string,
     roomId: string,

@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { distillMemoryText } from "./memory.js";
+import { TaskSubscriptions } from "./subscribe.js";
 import { logError, logWarn } from "./logger.js";
 import type { Store } from "./store.js";
 import {
@@ -779,9 +780,20 @@ export class ConductorOrchestrator {
     flow.retryTimers.clear();
   }
 
+  /** 工单订阅账本：taskId → 关注成员集（派工登记 owner、求助登记协作方），flow 终结随任务清理 */
+  private readonly taskSubs = new TaskSubscriptions();
+
+  /** 工单关注成员：含负责 worker 与求助协作方，供任务级事件过滤/注入用 */
+  taskSubscribers(roomId: string, taskId: string): ReadonlySet<string> | undefined {
+    return this.taskSubs.members(roomId, taskId);
+  }
+
   private removeFlow(roomId: string): boolean {
     const f = this.flows.get(roomId);
-    if (f) this.clearFlowRetryTimers(f);
+    if (f) {
+      this.clearFlowRetryTimers(f);
+      this.taskSubs.removeTasks(f.roomId, f.tasks.keys());
+    }
     return this.flows.delete(roomId);
   }
 
@@ -1612,6 +1624,7 @@ export class ConductorOrchestrator {
       dispatched: false,
     };
     flow.help.set(exchange.id, exchange);
+    if (exchange.to !== "user") this.taskSubs.add(flow.roomId, exchange.taskId, exchange.to);
     task.waitingForHelp = exchange.id;
     this.pendingToolCalls.delete(task.sessionId);
     const fromName = this.rooms.displayNameForId(flow.roomId, task.sessionId);
@@ -1888,6 +1901,7 @@ export class ConductorOrchestrator {
         status: "pending",
         iteration: flow.iteration,
       });
+      this.taskSubs.add(flow.roomId, taskId, member.sessionId);
       idMap.set(String(i), taskId);
     }
 
@@ -2779,6 +2793,7 @@ export class ConductorOrchestrator {
           status,
           dispatched: false,
         });
+        if (to !== "user") this.taskSubs.add(flow.roomId, taskId, to);
         // 等待中的任务恢复为 running 挂起，避免被重新派发丢失求助上下文
         const waitingTask = flow.tasks.get(taskId);
         if (
