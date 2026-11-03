@@ -3570,8 +3570,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         deliveryRecords.addAll(records)
         // 陈腐瞬态错误清理：context/sync 等错误面向"需重确认的记录"，
         // 全部记录处置完毕后不再挂 banner（storage/corrupt/full 为存储级故障保留）
+        // 只按"本连接"在途记录判定——parked（其他连接）记录本端无法处置不该撑 banner
         if (deliveryError in setOf("context", "sync", "expired", "attachments", "unsupported") &&
-            records.none { it.status in setOf("pending", "sending", "uncertain", "failed") }) {
+            records.none { currentDelivery(it) && it.status in setOf("pending", "sending", "uncertain", "failed") }) {
             deliveryError = null
         }
     }
@@ -6476,7 +6477,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             validate = ::validateDelivery,
             onRecord = ::recordDelivery,
             onChange = ::updateDeliveryRecords,
-            onError = { deliveryError = ifcHint(it.orEmpty()) },
+            // 瞬态错误（context 等）仅当本连接有在途记录时才上报——
+            // parked（其他连接）记录触发的失败不再复活 banner；存储级错误始终上报
+            onError = { err ->
+                deliveryError = if (err != null && err in setOf(
+                        "context", "sync", "expired", "attachments", "unsupported") &&
+                    delivery.records.none {
+                        currentDelivery(it) && it.status in setOf("pending", "sending", "uncertain", "failed")
+                    }) null else ifcHint(err.orEmpty())
+            },
         )
         updateDeliveryRecords(delivery.records)
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
