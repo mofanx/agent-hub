@@ -32,6 +32,14 @@ test("shouldDeliver 任务级订阅：声明 taskIds 后仅订阅工单放行，
   assert.equal(shouldDeliver(roomSub, ev("task.update", { roomId: "r1", taskId: "t2" })), false);
   assert.equal(shouldDeliver(roomSub, ev("task.update", { roomId: "r2", taskId: "t2" })), true);
   assert.equal(shouldDeliver(roomSub, ev("task.update", { roomId: "r2", taskId: "t1" })), true);
+  // 真实 room.process 信封：taskId 在 entry.text 的 JSON meta 里（过程卡）
+  const procEv = ev("room.process", { roomId: "r1", entry: { kind: "process", text: JSON.stringify({ taskId: "t1", steps: [] }) } });
+  const procEv2 = ev("room.process", { roomId: "r1", entry: { kind: "process", text: JSON.stringify({ taskId: "t2", steps: [] }) } });
+  assert.equal(shouldDeliver(roomSub, procEv), true);
+  assert.equal(shouldDeliver(roomSub, procEv2), false);
+  // 派发卡 tasks[].id 多任务命中其一即放行
+  const dispEv = ev("room.process", { roomId: "r1", entry: { kind: "process", text: JSON.stringify({ tasks: [{ id: "t1" }, { id: "t2" }] }) } });
+  assert.equal(shouldDeliver(roomSub, dispEv), true);
   // entry.taskId 路径
   assert.equal(shouldDeliver(sub, ev("room.process", { entry: { taskId: "t1" } })), true);
   assert.equal(shouldDeliver(sub, ev("room.process", { entry: { taskId: "t9" } })), false);

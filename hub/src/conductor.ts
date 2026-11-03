@@ -940,6 +940,7 @@ export class ConductorOrchestrator {
         task: t.task,
         dependsOn: t.dependsOn,
         iteration: t.iteration,
+        subscribers: [...(this.taskSubs.members(flow.roomId, t.id) ?? [])],
         ...(t.dispatchedAt !== undefined ? { dispatchedAt: t.dispatchedAt } : {}),
         ...(t.finishedAt !== undefined ? { finishedAt: t.finishedAt } : {}),
         verificationStatus,
