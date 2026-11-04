@@ -544,6 +544,16 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                     <ExternalLink size={14} />
                   </button>
                 )}
+                {m.status === "awaiting-acceptance" ? (
+                  <button className="secondary" disabled={busy} title={S.missionDeleteBlocked}
+                    onClick={() => alert(S.missionDeleteBlocked)}>{S.missionDelete}</button>
+                ) : (
+                  <button className="secondary" disabled={busy} onClick={() => {
+                    const active = m.status === "running" || m.status === "waiting-user";
+                    const hint = active ? `\n${S.missionDeleteActiveHint}` : "";
+                    if (confirm(`${S.missionDeleteConfirm}${hint}`)) void run(() => store.deleteMission(m.id, active));
+                  }}>{S.missionDelete}</button>
+                )}
               </div>
             );
           })}
@@ -628,4 +638,88 @@ function missionPhaseLabel(S: Strings, phase: string): string {
 
 function formatMissionTime(at: number): string {
   return at > 0 ? new Date(at).toLocaleString() : "";
+}
+
+// ---- 聊天内工单草稿卡（```mission JSON 块 → 可编辑确认卡，Android 同款） ----
+
+interface MissionDraft {
+  goal?: unknown;
+  acceptanceCriteria?: unknown;
+  scope?: unknown;
+  constraints?: unknown;
+  owner?: unknown;
+  maxAutoRetries?: unknown;
+}
+
+const MISSION_DRAFT_RE = /```mission\s*([\s\S]*?)```/g;
+
+function draftsFrom(text: string): MissionDraft[] {
+  const out: MissionDraft[] = [];
+  for (const m of text.matchAll(MISSION_DRAFT_RE)) {
+    try {
+      const j = JSON.parse(m[1].trim());
+      if (j && typeof j === "object" && !Array.isArray(j)) out.push(j as MissionDraft);
+    } catch { /* 非 JSON 跳过 */ }
+  }
+  return out;
+}
+
+const listField = (v: unknown): string =>
+  Array.isArray(v) ? v.map((x) => String(x)).join("\n") : typeof v === "string" ? v : "";
+
+export function MissionDraftCards({ text }: { text: string }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const room = store.currentRoom;
+  const drafts = useMemo(() => draftsFrom(text), [text]);
+  if (drafts.length === 0 || !room) return null;
+  return <>{drafts.map((d, i) => <MissionDraftCard key={i} draft={d} room={room} S={S} />)}</>;
+}
+
+function MissionDraftCard({ draft, room, S }: { draft: MissionDraft; room: { roomId: string; members: [string, string][] }; S: Strings }) {
+  const store = useHubStore();
+  const roomId = room.roomId;
+  const [goal, setGoal] = useState(typeof draft.goal === "string" ? draft.goal : "");
+  const [criteria, setCriteria] = useState(listField(draft.acceptanceCriteria));
+  const [scopeText, setScopeText] = useState(typeof draft.scope === "string" ? draft.scope : "");
+  const [constraints, setConstraints] = useState(listField(draft.constraints));
+  const [dismissed, setDismissed] = useState(false);
+  const [created, setCreated] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (dismissed) return null;
+  if (created) return <div className="mission-draft-card"><span className="nav-sub">✓ {S.missionCreatedOk}</span></div>;
+  const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
+  const ownerRaw = typeof draft.owner === "string" ? draft.owner.trim() : "";
+  const ownerSessionId = room.members.find((m) => m[0] === ownerRaw || m[1] === ownerRaw)?.[0];
+  const retries = typeof draft.maxAutoRetries === "number" ? Math.min(Math.max(draft.maxAutoRetries, 0), 3) : 0;
+  const valid = goal.trim() !== "" && lines(criteria).length > 0;
+  const submit = (start: boolean) => {
+    if (!valid || busy) return;
+    setBusy(true);
+    void store.createMission({
+      roomId, goal: goal.trim(), acceptanceCriteria: lines(criteria),
+      scope: scopeText.trim(), constraints: lines(constraints),
+      ownerSessionId, maxAutoRetries: retries,
+    }).then((m) => {
+      setBusy(false);
+      if (m) {
+        if (start) void store.startMission(m.id);
+        setCreated(true);
+      }
+    });
+  };
+  return (
+    <div className="mission-draft-card">
+      <div className="nav-sub">{S.missionDraftCard}</div>
+      <input value={goal} onChange={(e) => setGoal(e.target.value)} placeholder={S.missionGoal} />
+      <textarea value={criteria} onChange={(e) => setCriteria(e.target.value)} placeholder={S.missionCriteria} rows={3} />
+      <input value={scopeText} onChange={(e) => setScopeText(e.target.value)} placeholder={S.missionScope} />
+      <textarea value={constraints} onChange={(e) => setConstraints(e.target.value)} placeholder={S.missionConstraints} rows={2} />
+      <div className="mission-draft-actions">
+        <button className="secondary" disabled={busy} onClick={() => setDismissed(true)}>{S.missionDismissDraft}</button>
+        <button disabled={!valid || busy} onClick={() => submit(false)}>{S.missionCreateConfirm}</button>
+        <button disabled={!valid || busy} onClick={() => submit(true)}>{S.missionCreateAndStart}</button>
+      </div>
+    </div>
+  );
 }

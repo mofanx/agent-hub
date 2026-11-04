@@ -1387,3 +1387,21 @@ describe("mission.delete 分级删除", () => {
     assert.equal(h.manager.list("other-room", "draft").length, 0);
   });
 });
+
+describe("mission.delete awaiting-acceptance 拒删", () => {
+  it("awaiting-acceptance 必须先终态化（force 不豁免）", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    await h.manager.start(m.id);
+    // 全部派发回合完成 → finishNoFlow → awaiting-acceptance（先清 busy，否则 rescanBusy 回填 pending）
+    h.busy.delete("s1");
+    h.busy.delete("s2");
+    h.manager.onTurnDone("s1", h.room.roomId, "done1");
+    h.manager.onTurnDone("s2", h.room.roomId, "done2");
+    const snap = h.manager.get(m.id);
+    assert.equal(snap?.status, "awaiting-acceptance");
+    await assert.rejects(() => h.manager.delete(m.id), /not deletable/);
+    await assert.rejects(() => h.manager.delete(m.id, true), /not deletable/);
+    assert.ok(h.manager.get(m.id), "拒删后工单仍在");
+  });
+});

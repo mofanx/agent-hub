@@ -635,6 +635,15 @@ export interface Strings {
   missionFilterAcceptance: string;
   missionFilterClosed: string;
   missionNew: string;
+  missionDraftCard: string;
+  missionCreateConfirm: string;
+  missionCreateAndStart: string;
+  missionDismissDraft: string;
+  missionCreatedOk: string;
+  missionDelete: string;
+  missionDeleteConfirm: string;
+  missionDeleteActiveHint: string;
+  missionDeleteBlocked: string;
   missionReview: string;
   missionFieldOutput: string;
   missionFieldDiff: string;
@@ -1342,6 +1351,15 @@ const zh: Strings = {
   missionFilterAcceptance: "待验收",
   missionFilterClosed: "已结束",
   missionNew: "新建目标",
+  missionDraftCard: "工单草稿（可编辑后确认）",
+  missionCreateConfirm: "创建",
+  missionCreateAndStart: "创建并启动",
+  missionDismissDraft: "忽略",
+  missionCreatedOk: "工单已创建",
+  missionDelete: "删除",
+  missionDeleteConfirm: "确认删除该目标工单？验收记录与轨迹将一并清除，不可恢复。",
+  missionDeleteActiveHint: "该工单仍在执行中，删除将先停止在途任务。",
+  missionDeleteBlocked: "当前状态不能直接删除，请先停止或完成验收。",
   missionReview: "人工验收",
   missionFieldOutput: "输出",
   missionFieldDiff: "变更 diff",
@@ -2049,6 +2067,15 @@ const en: Strings = {
   missionFilterAcceptance: "To accept",
   missionFilterClosed: "Closed",
   missionNew: "New mission",
+  missionDraftCard: "Mission draft (edit, then confirm)",
+  missionCreateConfirm: "Create",
+  missionCreateAndStart: "Create & start",
+  missionDismissDraft: "Dismiss",
+  missionCreatedOk: "Mission created",
+  missionDelete: "Delete",
+  missionDeleteConfirm: "Delete this mission? Acceptance records and history will be removed and cannot be recovered.",
+  missionDeleteActiveHint: "This mission is still running — deleting will stop in-flight work first.",
+  missionDeleteBlocked: "This mission cannot be deleted in its current state. Stop it or finish acceptance first.",
   missionReview: "Manual review",
   missionFieldOutput: "Output",
   missionFieldDiff: "Diff",

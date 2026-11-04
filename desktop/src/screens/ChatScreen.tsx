@@ -39,6 +39,7 @@ import { OutboxPanel } from "../components/OutboxPanel";
 import { stringsFor, toolStatusLabel, planEntryLabel, flowMessageHint, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, DecisionMeta, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
+import { MissionDraftCards } from "./MissionPanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
 import { modeLabel } from "./session-shared";
@@ -1960,6 +1961,7 @@ const ChatMessage = memo(function ChatMessage({
             ) : (
               <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
             )}
+            <MissionDraftCards text={item.text} />
             {usageText}
           </div>
           {menuEl}

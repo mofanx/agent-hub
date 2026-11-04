@@ -342,6 +342,7 @@ interface Actions {
   createMission(input: MissionCreateInput): Promise<MissionInfo | null>;
   startMission(id: string): Promise<void>;
   stopMission(id: string): Promise<void>;
+  deleteMission(id: string, force?: boolean): Promise<boolean>;
   reviewMission(id: string, index: number, verdict: "pass" | "fail" | "unverified", taskIds: string[], note: string): Promise<boolean>;
   acceptMission(id: string, note: string): Promise<boolean>;
   reworkMission(id: string, note: string): Promise<MissionInfo | null>;
@@ -4632,6 +4633,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({ missions: upsertMission(get().missions, mission), missionError: null });
       } catch (e) {
         if (get().client === client) set({ missionError: String(e) });
+      }
+    },
+
+    deleteMission: async (id: string, force = false) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return false;
+      try {
+        await client.call("mission.delete", { id, force });
+        if (get().client !== client) return false;
+        set({ missions: get().missions.filter((m) => m.id !== id), missionError: null });
+        return true;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return false;
       }
     },
 
