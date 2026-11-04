@@ -2710,6 +2710,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun deleteMission(id: String, force: Boolean = false, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                hub.call("mission.delete", buildJsonObject { put("id", id); put("force", force) })
+                if (gen != missionConnectionGeneration) return@launch
+                missions.removeAll { it.id == id }
+                missionError = null
+                onDone(true)
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(false)
+                }
+            }
+        }
+    }
+
     fun stopMission(id: String, onDone: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration

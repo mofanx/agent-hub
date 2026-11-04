@@ -223,6 +223,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var confirmStart by remember { mutableStateOf<Mission?>(null) }
     var confirmStop by remember { mutableStateOf<Mission?>(null) }
+    var confirmDelete by remember { mutableStateOf<Mission?>(null) }
     var suppId by remember { mutableStateOf<String?>(null) }
     var suppText by rememberSaveable { mutableStateOf("") }
     var reworkId by remember { mutableStateOf<String?>(null) }
@@ -547,6 +548,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             if (rm != null) {
                                 TextButton(onClick = { vm.openMissionExecution(m.id) }) { Text(S.missionViewRoom) }
                             }
+                            TextButton(onClick = { confirmDelete = m }, enabled = !busy) { Text(S.missionDelete, color = MaterialTheme.colorScheme.error) }
                         }
                         if (suppId == m.id) {
                             Text(S.missionSupplementHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -578,6 +580,21 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                 TextButton(onClick = { busy = true; vm.stopMission(m.id) { busy = false }; confirmStop = null }) { Text(S.missionStop, color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmStop = null }) { Text(S.cancel) } },
+        )
+    }
+    confirmDelete?.let { m ->
+        val active = m.status == "running" || m.status == "waiting-user"
+        val blocked = m.status == "awaiting-acceptance"
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text(S.missionDelete) },
+            text = { Text(if (blocked) S.missionDeleteBlocked else "${S.missionDeleteConfirm}${if (active) "\n${S.missionDeleteActiveHint}" else ""}") },
+            confirmButton = {
+                if (!blocked) {
+                    TextButton(onClick = { busy = true; vm.deleteMission(m.id, force = active) { busy = false }; confirmDelete = null }) { Text(S.missionDelete, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text(S.cancel) } },
         )
     }
     schedId?.let { m ->

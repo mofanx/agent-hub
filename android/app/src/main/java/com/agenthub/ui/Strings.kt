@@ -570,6 +570,10 @@ interface Strings {
     val missionCreateAndStart: String
     val missionDismissDraft: String
     val missionCreatedOk: String
+    val missionDelete: String
+    val missionDeleteConfirm: String
+    val missionDeleteActiveHint: String
+    val missionDeleteBlocked: String
     val missionReview: String
     val missionReviewPass: String
     val missionReviewFail: String
@@ -1243,6 +1247,10 @@ object ZhStrings : Strings {
     override val missionCreateAndStart = "创建并启动"
     override val missionDismissDraft = "忽略"
     override val missionCreatedOk = "工单已创建"
+    override val missionDelete = "删除"
+    override val missionDeleteConfirm = "确认删除该目标工单？验收记录与轨迹将一并清除，不可恢复。"
+    override val missionDeleteActiveHint = "该工单仍在执行中，删除将先停止在途任务。"
+    override val missionDeleteBlocked = "当前状态不能直接删除，请先停止或完成验收。"
     override val missionReview = "人工验收"
     override val missionReviewPass = "通过"
     override val missionReviewFail = "不通过"
@@ -1916,6 +1924,10 @@ object EnStrings : Strings {
     override val missionCreateAndStart = "Create & start"
     override val missionDismissDraft = "Dismiss"
     override val missionCreatedOk = "Mission created"
+    override val missionDelete = "Delete"
+    override val missionDeleteConfirm = "Delete this mission? Acceptance records and history will be removed and cannot be recovered."
+    override val missionDeleteActiveHint = "This mission is still running — deleting will stop in-flight work first."
+    override val missionDeleteBlocked = "This mission cannot be deleted in its current state. Stop it or finish acceptance first."
     override val missionReview = "Manual review"
     override val missionReviewPass = "Pass"
     override val missionReviewFail = "Fail"
