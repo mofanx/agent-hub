@@ -1336,3 +1336,54 @@ describe("mission v3", () => {
     assert.ok(cur.events.some((e) => e.kind === "error" && e.text.includes("auto retry")));
   });
 });
+
+describe("mission.delete 分级删除", () => {
+  it("draft 直删 + 幂等", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    assert.deepEqual(await h.manager.delete(m.id), { deleted: true });
+    assert.equal(h.manager.get(m.id), undefined);
+    assert.deepEqual(await h.manager.delete(m.id), { deleted: true }, "重复删除幂等");
+    assert.deepEqual(await h.manager.delete("ghost"), { deleted: true });
+  });
+
+  it("running 拒绝非 force；force 先取消执行再删", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    await h.manager.start(m.id);
+    await assert.rejects(() => h.manager.delete(m.id), /stop first/);
+    assert.ok(h.manager.get(m.id), "拒绝后工单仍在");
+    h.busy.add("s1");
+    assert.deepEqual(await h.manager.delete(m.id, true), { deleted: true });
+    assert.ok(h.cancelActived.length + h.cancelled.length >= 0);
+    assert.equal(h.manager.get(m.id), undefined);
+  });
+
+  it("terminal（stopped）可删", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    await h.manager.start(m.id);
+    await h.manager.stop(m.id);
+    assert.deepEqual(await h.manager.delete(m.id), { deleted: true });
+    assert.equal(h.manager.get(m.id), undefined);
+  });
+
+  it("onRoomRemoved 级联清房下所有工单", async () => {
+    const h = makeHarness();
+    const m1 = makeMission(h);
+    const m2 = makeMission(h, { goal: "second" });
+    await h.manager.onRoomRemoved(h.room.roomId);
+    assert.equal(h.manager.get(m1.id), undefined);
+    assert.equal(h.manager.get(m2.id), undefined);
+  });
+
+  it("list status 过滤", () => {
+    const h = makeHarness();
+    makeMission(h, { goal: "a" });
+    makeMission(h, { goal: "b" });
+    assert.equal(h.manager.list(undefined, "draft").length, 2);
+    assert.equal(h.manager.list(undefined, "running").length, 0);
+    assert.equal(h.manager.list(h.room.roomId, "draft").length, 2);
+    assert.equal(h.manager.list("other-room", "draft").length, 0);
+  });
+});

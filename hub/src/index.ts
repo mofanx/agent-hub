@@ -2039,6 +2039,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       store.deleteHistory("room", roomId);
       store.deleteRoomEvents(roomId);
       store.deleteMemory(roomId);
+      missionManager.onRoomRemoved(roomId).catch((e) => logWarn("room.delete mission cascade", String(e)));
       persistState();
       return { deleted: true };
     }
@@ -2056,6 +2057,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         store.deleteHistory("room", roomId);
         store.deleteRoomEvents(roomId);
         store.deleteMemory(roomId);
+        missionManager.onRoomRemoved(roomId).catch((e) => logWarn("room.deleteBatch mission cascade", String(e)));
       }
       persistState();
       return { deleted: true, count: uniqueIds.length };
@@ -2384,20 +2386,28 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       );
       const ttlSec = Math.min(Math.max(Number(req.params?.ttl ?? 0) || 0, 0), 86400);
       if (ttlSec > 0) {
-        setTimeout(() => {
+        const sweep = async (retries: number) => {
           try {
-            rooms.delete(room.roomId);
-            sessionMetas.delete(s.sessionId);
+            await handleRequest({ id: 0, method: "session.delete", params: { sessionId: s.sessionId } } as RequestMessage);
+            try { rooms.delete(room.roomId); } catch { /* 单成员房常已随成员移除解散 */ }
             persistState();
-          } catch (err) { logWarn("test.sandbox ttl", String(err)); }
-        }, ttlSec * 1000).unref();
+          } catch (err) {
+            if (retries > 0) setTimeout(() => void sweep(retries - 1), 60_000).unref();
+            else logWarn("test.sandbox ttl", String(err));
+          }
+        };
+        setTimeout(() => void sweep(2), ttlSec * 1000).unref();
       }
       persistState();
       const text = req.params?.text;
-      const dispatch = typeof text === "string" && text.trim() !== ""
-        ? await handleRequest({ id: 0, method: "room.message", params: { roomId: room.roomId, text } } as RequestMessage)
-        : undefined;
-      return { sessionId: s.sessionId, roomId: room.roomId, room: enrichRoom(room), dispatch };
+      let dispatch: unknown;
+      let dispatchError: string | undefined;
+      if (typeof text === "string" && text.trim() !== "") {
+        try {
+          dispatch = await handleRequest({ id: 0, method: "room.message", params: { roomId: room.roomId, text } } as RequestMessage);
+        } catch (err) { dispatchError = err instanceof Error ? err.message : String(err); }
+      }
+      return { sessionId: s.sessionId, roomId: room.roomId, room: enrichRoom(room), dispatch, ...(dispatchError ? { dispatchError } : {}) };
     }
     case "room.list":
       return { rooms: rooms.list().map(enrichRoom) };
@@ -2616,7 +2626,17 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         typeof req.params?.roomId === "string" && req.params.roomId.trim()
           ? req.params.roomId.trim()
           : undefined;
-      return { missions: missionManager.list(roomId) };
+      const status =
+        typeof req.params?.status === "string" && req.params.status.trim()
+          ? req.params.status.trim()
+          : undefined;
+      return { missions: missionManager.list(roomId, status) };
+    }
+    case "mission.delete": {
+      const id = String(req.params?.id ?? req.params?.missionId ?? "");
+      const result = await missionManager.delete(id, req.params?.force === true);
+      persistState();
+      return result;
     }
     case "mission.get": {
       const id = String(req.params?.id ?? req.params?.missionId ?? "");

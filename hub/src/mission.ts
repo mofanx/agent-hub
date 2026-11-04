@@ -131,6 +131,8 @@ const TERMINAL: ReadonlySet<MissionStatus> = new Set(["accepted", "stopped", "fa
 const TERMINAL_KEEP = 50;
 /** 终态 mission 存活时长上限（30 天） */
 const TERMINAL_TTL_MS = 30 * 24 * 3600 * 1000;
+/** 未启动 draft 陈旧清理：超过 N 天未动的草稿随惰性 GC 一并清（误建垃圾低速泄漏面） */
+const DRAFT_TTL_MS = 7 * 24 * 3600 * 1000;
 const STATUSES: ReadonlySet<string> = new Set([
   "draft",
   "running",
@@ -363,6 +365,9 @@ export class MissionManager {
       const at = m.finishedAt ?? m.updatedAt;
       if (i >= TERMINAL_KEEP || now - at > TERMINAL_TTL_MS) this.missions.delete(m.id);
     }
+    for (const m of this.missions.values()) {
+      if (m.status === "draft" && now - m.updatedAt > DRAFT_TTL_MS) this.missions.delete(m.id);
+    }
   }
 
   private persist(): void {
@@ -526,9 +531,10 @@ export class MissionManager {
     return this.commit(m);
   }
 
-  list(roomId?: string): MissionSnapshot[] {
+  list(roomId?: string, status?: string): MissionSnapshot[] {
     return [...this.missions.values()]
       .filter((m) => roomId === undefined || m.roomId === roomId)
+      .filter((m) => status === undefined || m.status === status)
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
       .map(snapshot);
   }
@@ -659,6 +665,39 @@ export class MissionManager {
     await this.cancelOwnWork(m);
     if (m.error) this.commit(m);
     return snapshot(m);
+  }
+
+  /**
+   * 分级删除：draft/终态直删；running/waiting-user 须先 stop（force=true 先 cancelOwnWork 再删）；
+   * awaiting-acceptance 须先终态化。重复删除幂等返回 deleted:true。
+   * 轨迹（events/reviews/supplements）随 Map 条目释放；房史中的文本记录不受影响。
+   */
+  async delete(id: string, force = false): Promise<{ deleted: boolean }> {
+    const m = this.missions.get(id);
+    if (!m) return { deleted: true };
+    if (m.status === "running" || m.status === "waiting-user") {
+      if (!force) throw new Error(`mission active: stop first (or force): ${m.status}`);
+      await this.cancelOwnWork(m);
+    } else if (!TERMINAL.has(m.status) && m.status !== "draft") {
+      throw new Error(`mission not deletable in status: ${m.status}`);
+    }
+    this.missions.delete(id);
+    this.persist();
+    return { deleted: true };
+  }
+
+  /** 房删除级联：清掉引用死房的孤儿工单（活动中的先尽力取消执行） */
+  async onRoomRemoved(roomId: string): Promise<void> {
+    let touched = false;
+    for (const m of [...this.missions.values()]) {
+      if (m.roomId !== roomId) continue;
+      if (m.status === "running" || m.status === "waiting-user") {
+        try { await this.cancelOwnWork(m); } catch { /* best effort */ }
+      }
+      this.missions.delete(m.id);
+      touched = true;
+    }
+    if (touched) this.persist();
   }
 
   syncFlow(roomId: string, flow: Record<string, unknown> | undefined): void {
