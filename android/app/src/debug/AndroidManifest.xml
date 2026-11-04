@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- 无 UI 测试面：仅 debug 构建注册；debug-only exported=true——release 构建不含此类；
+             DUMP 权限门：signature 级权限普通 app 拿不到，adb shell 隐式持有——等价 shell-only 面 -->
+        <receiver
+            android:name=".DebugControl"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

@@ -839,6 +839,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         @Volatile
         var appForeground = false
+
+        /** debug 构建的无 UI 控制面入口（DebugControlReceiver 经此调 VM API）；release 无 receiver 不会被引用 */
+        @Volatile
+        var debugInstance: ChatViewModel? = null
         const val LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]"
 
         fun missionTaskNavMatch(
@@ -1195,6 +1199,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        if (debugInstance === this) debugInstance = null
         if (::delivery.isInitialized) delivery.pause()
         profileEpoch++
         missionConnectionGeneration++
@@ -6537,6 +6542,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        debugInstance = this
         deliveryRecovery = DeliveryRecovery(
             rpc = ::recoveryRpc,
             applyRows = ::applyRecoveredRows,
