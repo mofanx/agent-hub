@@ -1697,6 +1697,14 @@ export class RoomManager {
       lines.push("", "长期记忆（蒸馏）：");
       for (const m of mems) lines.push(`- [${m.kind}] ${m.text}`);
     }
+    lines.push(
+      "",
+      "检索工具：需要更早的房史时调用 RPC `room.history.search`，参数 roomId(必填)、query(关键词≤100字)、author、fromAt/toAt(毫秒时间窗)、beforeId(分页游标)、limit(≤50)——返回 {entries, hasMore}，beforeId 取上一页最旧 entry.id 继续翻页。",
+    );
+    lines.push(
+      "",
+      "目标工单起草：用户表达『想建目标工单/工作目标单/记个工单』类意图时，先引导其确认必填项方向——goal(目标，必填)、acceptanceCriteria(验收标准数组，必填，至少一条可检验项)、scope(范围说明)、constraints(约束数组)、owner(负责成员，可留空=自动)、maxAutoRetries(自动重试 0-3)；不强求一次给全，可多轮补齐。信息够时输出草稿块：```mission 包裹的 JSON（字段名同上，owner 用 sessionId 或成员名均可），客户端会渲染成可编辑确认卡，由用户点击创建——不要直接声称已创建。用户说『启动工单 X』时，提示其在工单卡/面板上点启动（mission.start 是客户端操作，成员无此工具）。",
+    );
     if (artifacts.length > 0) {
       lines.push("", "最近产物（文件）：");
       for (const a of artifacts) {
