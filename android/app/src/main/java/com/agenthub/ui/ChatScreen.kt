@@ -1026,33 +1026,31 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         val isQuoted = vm.quote?.let { (author, text) ->
                             author == item.author && item.text.startsWith(text)
                         } ?: false
-                        Column {
-                            if (item.at > 0 && (prev == null || !sameDay(prev.at, item.at))) {
-                                DateSeparator(item.at)
-                            }
-                            ChatBubble(
-                                item,
-                                vm,
-                                showAuthor = isRoom && item.isFirst && !grouped,
-                                grouped = grouped,
-                                highlight = vm.inChatSearchQuery,
-                                isCurrentMatch = currentMatchIndex == index,
-                                isQuoted = isQuoted,
-                                onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
-                                flash = flashFlowId != null &&
-                                    (item as? ChatListItem.FlowCard)?.item?.flowId == flashFlowId,
+                        if (item.at > 0 && (prev == null || !sameDay(prev.at, item.at))) {
+                            DateSeparator(item.at)
+                        }
+                        ChatBubble(
+                            item,
+                            vm,
+                            showAuthor = isRoom && item.isFirst && !grouped,
+                            grouped = grouped,
+                            highlight = vm.inChatSearchQuery,
+                            isCurrentMatch = currentMatchIndex == index,
+                            isQuoted = isQuoted,
+                            onMatchKeywordY = if (currentMatchIndex == index) onMatchKeywordY else null,
+                            flash = flashFlowId != null &&
+                                (item as? ChatListItem.FlowCard)?.item?.flowId == flashFlowId,
+                        )
+                        if (item is ChatListItem.Message && item.isUser && item.sendStatus != null) {
+                            Text(
+                                S.deliveryLabels[item.sendStatus].orEmpty(),
+                                Modifier.fillMaxWidth().clickable { vm.showDeliveryManager = true }.padding(horizontal = 16.dp, vertical = 2.dp),
+                                color = if (item.sendStatus in setOf("failed", "uncertain")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelSmall,
                             )
-                            if (item is ChatListItem.Message && item.isUser && item.sendStatus != null) {
-                                Text(
-                                    S.deliveryLabels[item.sendStatus].orEmpty(),
-                                    Modifier.fillMaxWidth().clickable { vm.showDeliveryManager = true }.padding(horizontal = 16.dp, vertical = 2.dp),
-                                    color = if (item.sendStatus in setOf("failed", "uncertain")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            }
-                            if (item is ChatListItem.Message && item.attachmentNames.isNotEmpty() && item.attachments.isEmpty()) {
-                                Text(item.attachmentNames.joinToString(), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
-                            }
+                        }
+                        if (item is ChatListItem.Message && item.attachmentNames.isNotEmpty() && item.attachments.isEmpty()) {
+                            Text(item.attachmentNames.joinToString(), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
                         }
                     }
                     if (vm.historyLoading) {
@@ -1699,6 +1697,70 @@ fun AttachmentImage(attachment: Attachment, modifier: Modifier = Modifier) {
     }
 }
 
+private val attachTextExtUi = setOf(
+    "txt","log","md","markdown","json","yaml","yml","toml","xml","ini","cfg","conf","properties",
+    "csv","html","css","sh","bash","zsh","py","kt","kts","java","go","rs","c","cc","cpp","h","hpp",
+    "ts","tsx","js","jsx","sql","vue","lua","rb","php","swift","dockerfile","gitignore","env",
+)
+
+private fun attachTextPreviewable(mime: String, name: String): Boolean =
+    mime.startsWith("text/") || mime == "application/json" || mime == "application/xml" ||
+        mime.endsWith("+json") || mime.endsWith("+xml") ||
+        (mime.isEmpty() && name.substringAfterLast('.', "").lowercase() in attachTextExtUi)
+
+private fun attachSizeLabel(a: Attachment): String {
+    val bytes = if (a.base64.isNotEmpty()) a.base64.length * 3 / 4
+        else a.localPath?.let { runCatching { java.io.File(it).length() }.getOrDefault(0L) }?.toInt() ?: 0
+    return if (bytes >= 1024 * 1024) "%.1f MB".format(bytes / 1048576f)
+        else "${(bytes / 1024).coerceAtLeast(1)} KB"
+}
+
+@Composable
+fun AttachmentThumb(attachment: Attachment, modifier: Modifier = Modifier) {
+    if (attachment.mimeType.startsWith("image/")) {
+        AttachmentImage(attachment, modifier)
+        return
+    }
+    var preview by remember { mutableStateOf<String?>(null) }
+    val previewable = attachTextPreviewable(attachment.mimeType, attachment.name)
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .then(if (previewable) Modifier.clickable {
+                preview = runCatching {
+                    Base64.decode(attachment.readBase64(), Base64.NO_WRAP).toString(Charsets.UTF_8)
+                }.getOrNull()?.take(4000) ?: ""
+            } else Modifier)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(Icons.Filled.AttachFile, contentDescription = null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            attachment.name.ifBlank { attachment.mimeType.substringAfterLast('/') },
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 2,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 96.dp),
+        )
+        Text(attachSizeLabel(attachment), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (preview != null) {
+        val S = LocalStrings.current
+        AlertDialog(
+            onDismissRequest = { preview = null },
+            title = { Text(attachment.name) },
+            text = {
+                SelectionContainer {
+                    Text(preview.orEmpty(), modifier = Modifier.verticalScroll(rememberScrollState()))
+                }
+            },
+            confirmButton = { TextButton(onClick = { preview = null }) { Text(S.ok) } },
+        )
+    }
+}
+
 @Composable
 fun AttachmentPreviews(
     attachments: List<Attachment>,
@@ -1709,7 +1771,7 @@ fun AttachmentPreviews(
     LazyRow(modifier = modifier.fillMaxWidth().height(96.dp)) {
         items(attachments, key = { (it.localPath ?: it.base64).hashCode() }) { a ->
             Box(Modifier.padding(4.dp).size(88.dp)) {
-                AttachmentImage(
+                AttachmentThumb(
                     a,
                     Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)),
                 )
@@ -2037,7 +2099,7 @@ private fun MessageBlock(
                             Spacer(Modifier.height(8.dp))
                             LazyRow(Modifier.height(120.dp)) {
                                 items(item.attachments, key = { (it.localPath ?: it.base64).hashCode() }) { a ->
-                                    AttachmentImage(
+                                    AttachmentThumb(
                                         a,
                                         Modifier
                                             .padding(end = 8.dp)
@@ -2533,7 +2595,7 @@ private fun RawChatBubble(
                             Spacer(Modifier.height(8.dp))
                             LazyRow(Modifier.height(120.dp)) {
                                 items(item.attachments, key = { (it.localPath ?: it.base64).hashCode() }) { a ->
-                                    AttachmentImage(
+                                    AttachmentThumb(
                                         a,
                                         Modifier
                                             .padding(end = 8.dp)
@@ -3268,8 +3330,7 @@ private fun FlowCardBlock(
                 }
                 Spacer(Modifier.height(6.dp))
                 val flowKey = flow.flowId.ifEmpty { item.flowId.ifEmpty { "__live" } }
-                // DEBUG：空白排查——任务行容器实测高度（Σrow-root vs 容器高=行间隙归属），logcat 过滤 FTROW
-                Column(Modifier.onGloballyPositioned { c -> android.util.Log.d("FTROW", "card-rows flow=$flowKey h=${c.size.height}") }) {
+                Column {
                     flow.tasks.forEach { task ->
                         key(flowKey, task.id) {
                             FlowTaskRow(task, flowKey, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
@@ -3367,9 +3428,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
     val context = LocalContext.current
     val S = LocalStrings.current
     val showRetryBtn = showRetry && task.status == "failed"
-    Column(Modifier.padding(vertical = 1.dp).bringIntoViewRequester(bringIntoViewRequester)
-        // DEBUG：空白排查——整行实测高度（覆盖行间隙区），logcat 过滤 FTROW
-        .onGloballyPositioned { c -> android.util.Log.d("FTROW", "row-root task=${task.id} h=${c.size.height}") }) {
+    Column(Modifier.padding(vertical = 1.dp).bringIntoViewRequester(bringIntoViewRequester)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.clickable { expanded = !expanded },
@@ -3445,9 +3504,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
             }
         }
         if (expanded) {
-            Column(Modifier.padding(start = 20.dp, top = 4.dp)
-                // DEBUG：空白排查——展开区根容器实测高度，logcat 过滤 FTROW
-                .onGloballyPositioned { c -> android.util.Log.d("FTROW", "expanded-root task=${task.id} h=${c.size.height}") }) {
+            Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
                 // 分区按状态：failed 失败原因优先
                 if (task.status == "failed") {
                     task.failureMessage?.let {
@@ -3463,7 +3520,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         .fillMaxWidth()
                         .heightIn(max = 240.dp)
                         .verticalScroll(rememberScrollState())
-                        .onGloballyPositioned { c -> android.util.Log.d("FTROW", "desc task=${task.id} h=${c.size.height}") },
+
                 )
                 if (task.status == "pending") {
                     if (task.dependsOn.isNotEmpty()) {
@@ -3480,8 +3537,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState())
-                            .onGloballyPositioned { c -> android.util.Log.d("FTROW", "output task=${task.id} h=${c.size.height}") },
+                            .verticalScroll(rememberScrollState()),
                     )
                 }
                 if (task.status == "done") {
@@ -3736,9 +3792,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         Text(S.viewProcess, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                     if (procVisible) {
-                        Column(Modifier.onGloballyPositioned { c -> android.util.Log.d("FTROW", "process task=${task.id} h=${c.size.height}") }) {
-                            TaskProcessSection(roomId, flowId, task, vm)
-                        }
+                        TaskProcessSection(roomId, flowId, task, vm)
                     }
                 }
             }

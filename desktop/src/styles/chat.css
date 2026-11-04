@@ -2812,3 +2812,9 @@ div.turn-tail {
 .mission-draft-card { border: 1px solid var(--border, #444); border-radius: 8px; padding: 10px; margin: 6px 0; display: flex; flex-direction: column; gap: 6px; }
 .mission-draft-card input, .mission-draft-card textarea { width: 100%; box-sizing: border-box; font-size: 12px; }
 .mission-draft-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+.attachment-cell { display: inline-flex; align-items: center; gap: 0.35rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 0.3rem 0.55rem; font-size: 0.75rem; color: var(--text); max-width: 220px; }
+.attachment-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-cell.previewable { cursor: pointer; }
+.attach-preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 200; }
+.attach-preview-body { max-width: 80vw; max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 1rem; font-size: 0.75rem; white-space: pre-wrap; }

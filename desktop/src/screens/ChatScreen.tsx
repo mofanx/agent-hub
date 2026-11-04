@@ -690,20 +690,25 @@ export function ChatScreen() {
     inputRef.current?.focus();
   };
 
-  // 附件白名单与限制（与 Android 对称）：图片/常见文档，≤10MB，≤5 个
-  const ATTACH_OK = (t: string, name = "") =>
-    t.startsWith("image/") || t.startsWith("text/") ||
-    ["application/pdf", "application/zip", "application/x-zip-compressed", "application/json"].includes(t) ||
-    (t === "application/octet-stream" && /\.(pdf|zip|json|md|txt|log|csv|ya?ml|toml|xml)$/i.test(name));
+  // 附件白名单与限制（与 Android 对称）：图片/常见文档，≤10MB/个，≤20MB 总，≤5 个
+  const ATTACH_EXT_OK = new Set([...ATTACH_TEXT_EXT,
+    "pdf","png","jpg","jpeg","gif","webp","svg","bmp","mjs","cjs","cs","scala","ps1","bat","r","m","pl"]);
+  const ATTACH_OK = (t: string, name = "") => {
+    const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+    return t.startsWith("image/") || t.startsWith("text/") || t === "application/pdf" ||
+      ATTACH_EXT_OK.has(ext);
+  };
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
     const rejected: string[] = [];
     let accepted = 0;
+    let totalBytes = store.pendingAttachments.reduce((s, a) => s + Math.ceil(a.base64.length * 3 / 4), 0);
     for (const f of files) {
-      if (!ATTACH_OK(f.type, f.name) || f.size > 10 * 1024 * 1024 ||
+      if (!ATTACH_OK(f.type, f.name) || f.size > 10 * 1024 * 1024 || totalBytes + f.size > 20 * 1024 * 1024 ||
           store.pendingAttachments.length + accepted >= 5) { rejected.push(f.name); continue; }
       accepted++;
+      totalBytes += f.size;
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = String(reader.result ?? "").split(",")[1] ?? "";
@@ -1570,7 +1575,7 @@ export function ChatScreen() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/*,text/*,.pdf,.zip,.json,.md"
+                  accept="image/*,text/*,.pdf,.json,.md"
                   multiple
                   style={{ display: "none" }}
                   onChange={onFileChange}
@@ -1885,13 +1890,7 @@ const ChatMessage = memo(function ChatMessage({
     item.kind === "user" && item.attachments?.length ? (
       <div className="message-attachments">
         {item.attachments.map((a, i) => (
-          <img
-            key={i}
-            className="message-image"
-            src={`data:${a.mimeType};base64,${a.base64}`}
-            alt={a.name}
-            onClick={() => onImageClick?.(`data:${a.mimeType};base64,${a.base64}`, a.name)}
-          />
+          <AttachmentCell key={i} a={a} onImageClick={onImageClick} />
         ))}
       </div>
     ) : null;
@@ -4245,5 +4244,60 @@ function ModelPicker() {
         </div>
       </div>
     </div>
+  );
+}
+
+
+const ATTACH_TEXT_EXT = new Set([
+  "txt","log","md","markdown","json","yaml","yml","toml","xml","ini","cfg","conf","properties",
+  "csv","html","css","sh","bash","zsh","py","kt","kts","java","go","rs","c","cc","cpp","h","hpp",
+  "ts","tsx","js","jsx","sql","vue","lua","rb","php","swift","dockerfile","gitignore","env",
+]);
+
+function attachTextPreviewable(mime: string, name: string): boolean {
+  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  return mime.startsWith("text/") || mime === "application/json" || mime === "application/xml" ||
+    mime.endsWith("+json") || mime.endsWith("+xml") || (mime === "" && ATTACH_TEXT_EXT.has(ext));
+}
+
+function AttachmentCell({ a, onImageClick }: {
+  a: { mimeType: string; base64: string; name?: string };
+  onImageClick?: (src: string, name?: string) => void;
+}) {
+  const [preview, setPreview] = useState<string | null>(null);
+  const isImage = (a.mimeType || "").startsWith("image/");
+  if (isImage) {
+    return (
+      <img
+        className="message-image"
+        src={`data:${a.mimeType};base64,${a.base64}`}
+        alt={a.name}
+        onClick={() => onImageClick?.(`data:${a.mimeType};base64,${a.base64}`, a.name)}
+      />
+    );
+  }
+  const previewable = attachTextPreviewable(a.mimeType, a.name ?? "");
+  return (
+    <>
+      <button
+        className={`attachment-cell ${previewable ? "previewable" : ""}`}
+        title={a.name}
+        onClick={() => {
+          if (!previewable) return;
+          try {
+            const bytes = Uint8Array.from(atob(a.base64), (c) => c.charCodeAt(0));
+            setPreview(new TextDecoder("utf-8").decode(bytes.subarray(0, 12000)));
+          } catch { /* ignore */ }
+        }}
+      >
+        <FileCode size={14} />
+        <span>{a.name || a.mimeType}</span>
+      </button>
+      {preview !== null && (
+        <div className="attach-preview-overlay" onClick={() => setPreview(null)}>
+          <pre className="attach-preview-body" onClick={(e) => e.stopPropagation()}>{preview}</pre>
+        </div>
+      )}
+    </>
   );
 }
