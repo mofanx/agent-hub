@@ -2367,6 +2367,38 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       persistState();
       return { room: enrichRoom(room) };
     }
+    case "test.sandbox": {
+      // 测试基建：一步造沙盒——clone(fresh) + 建房 + 可选派发 + ttl 自动清理
+      const srcId = String(req.params?.sourceSessionId ?? "");
+      const source = srcId
+        ? sessionMetas.get(srcId)
+        : [...sessionMetas.values()].find((m) => m.connectionId != null);
+      if (!source) throw new Error("no source session");
+      const s = await cloneSessionWithName(source, dedupeSessionName(`${source.name}-sandbox`), { fresh: true });
+      const members = [{ sessionId: s.sessionId, name: s.name }];
+      const room = rooms.create(
+        dedupeRoomName(String(req.params?.name ?? "sandbox").trim() || "sandbox"),
+        members,
+        parseRoomMode(req.params?.mode),
+        parseRoomModeConfig(req.params, members),
+      );
+      const ttlSec = Math.min(Math.max(Number(req.params?.ttl ?? 0) || 0, 0), 86400);
+      if (ttlSec > 0) {
+        setTimeout(() => {
+          try {
+            rooms.delete(room.roomId);
+            sessionMetas.delete(s.sessionId);
+            persistState();
+          } catch (err) { logWarn("test.sandbox ttl", String(err)); }
+        }, ttlSec * 1000).unref();
+      }
+      persistState();
+      const text = req.params?.text;
+      const dispatch = typeof text === "string" && text.trim() !== ""
+        ? await handleRequest({ id: 0, method: "room.message", params: { roomId: room.roomId, text } } as RequestMessage)
+        : undefined;
+      return { sessionId: s.sessionId, roomId: room.roomId, room: enrichRoom(room), dispatch };
+    }
     case "room.list":
       return { rooms: rooms.list().map(enrichRoom) };
     case "room.memberModels": {
@@ -3017,6 +3049,9 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           params: req.params as Record<string, unknown>,
           sessionNote: (sid) => sessionLostReplyNote(sid),
         });
+        // sent 是"已尝试派发"非"已送达"：agent 离线时 prompt 异步失败，
+        // 回包补 offline 标记，调用方（含无 UI 测试面）不再把死会话 sent 当成功
+        const offline = result.sent.filter((sid) => memberStatusOf(sid) === "offline");
         persistState();
         if (result.skipped.length > 0) {
           broadcast({
@@ -3027,7 +3062,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
             },
           });
         }
-        return result;
+        return { ...result, offline };
       };
       if (!clientMsgId || isRetryCmd) return dispatch();
 

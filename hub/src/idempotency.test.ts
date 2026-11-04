@@ -526,6 +526,7 @@ test("index prompt.send/room.message 提取：同 key 改 payload 冲突/控制�
       route: (_id: string, _text: string) => ({ targets: [], mentioned: [] }),
     },
     persistState() {}, broadcast() {},
+    memberStatusOf: () => "online" as const,
     parseRetryCommand: (txt: string) => (/^(?:retry|重试)(?:\s|$)/i.test(txt) ? { taskIds: [] } : null),
     helpAnswerIntent,
     CANCEL_TEXT: /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i,
@@ -595,6 +596,7 @@ function guardedRoom(t: { after: (fn: () => void) => void }) {
     store, runClientMessage, stableFingerprint: JSON.stringify,
     parseSlash: () => null, HUB_SLASH_COMMANDS: new Set(), handleRoomSlash: () => ({}),
     roomLostReplyNote: () => null, persistState() {}, broadcast() {},
+    memberStatusOf: () => "online" as const,
     parseRetryCommand: () => null, helpAnswerIntent,
     CANCEL_TEXT: /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i,
     rooms: { get: () => state.room, route: () => ({ targets: [], mentioned: [] }) },
@@ -771,4 +773,26 @@ test("room.sync 恢复协议：无 flow 时字段序列化为 null 且快照字�
   assert.equal(Object.hasOwn(noCards, "cards"), false, "无 knownCardIds 时不返回 cards 键");
 
   await assert.rejects(run({ roomId: "unknown" }), /unknown room/);
+});
+
+test("index room.message：sent 中死会话以 offline 标记回包（sent 不再对死会话撒谎）", async (t) => {
+  const { runClientMessage } = await import("./client-messages.js");
+  const store = makeStore(t);
+  const run = compileIndexCase(extractIndexCaseBody("room.message"), {
+    store, runClientMessage, stableFingerprint: JSON.stringify,
+    parseSlash: () => null, HUB_SLASH_COMMANDS: new Set(), handleRoomSlash: () => ({}),
+    roomLostReplyNote: () => null, persistState() {}, broadcast() {},
+    memberStatusOf: (sid: string) => (sid === "s2" ? "offline" : "online"),
+    parseRetryCommand: () => null, helpAnswerIntent,
+    CANCEL_TEXT: /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i,
+    rooms: { get: () => ({ roomId: "r1" }), route: () => ({ targets: [], mentioned: [] }) },
+    roomModeManager: {
+      getFlow: () => undefined, subModeFor: () => undefined,
+      hasAwaitingRetry: () => false,
+      handle: async () => ({ sent: ["s1", "s2"], skipped: [] }),
+    },
+  });
+  const r = await run({ roomId: "r1", text: "hi" }) as { sent: string[]; offline: string[] };
+  assert.deepEqual(r.sent, ["s1", "s2"], "sent 原样（已尝试派发）");
+  assert.deepEqual(r.offline, ["s2"], "死会话按 memberStatusOf 标记 offline");
 });
