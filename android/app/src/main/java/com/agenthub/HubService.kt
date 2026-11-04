@@ -90,6 +90,14 @@ class HubService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // 5 秒窗口内必须先 startForeground——重初始化（AttentionLedger/Notifier channels/语言包）
+        // 之前若阻塞或抛异常会超时 FATAL，先用最小通知占坑再异步完善
+        try {
+            startForegroundImmediate()
+        } catch (_: Exception) {
+            stopConnection("start_restricted")
+            return
+        }
         attentionLedger = AttentionLedger(
             runCatching { prefs.getString("attention_v1", null) }.getOrNull(),
             write = { value -> withContext(Dispatchers.IO) { prefs.edit().putString("attention_v1", value).commit() } },
@@ -105,8 +113,8 @@ class HubService : Service() {
             startForegroundWithNotification()
             runningStatus.value = true
         } catch (_: Exception) {
-            stopConnection("start_restricted")
-            return
+            // 占坑已 startForeground，富通知更新失败只降级（保留最小通知），不杀服务
+            runningStatus.value = true
         }
         networkMonitoringAvailable = try {
             NetworkReconnectMonitor(this, scope) { id ->
@@ -164,6 +172,34 @@ class HubService : Service() {
         if (forgetProfile || savedHubConnection(this) == null) attentionLedger.cancelVisible()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun startForegroundImmediate() {
+        Notifier.ensureChannels(this)
+        val pi = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification: Notification = NotificationCompat.Builder(this, Notifier.CHANNEL_SERVICE)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle("agent-hub")
+            .setContentText("…")
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startForegroundWithNotification() {
