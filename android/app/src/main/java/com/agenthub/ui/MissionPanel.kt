@@ -41,6 +41,8 @@ import com.agenthub.MissionReview
 import com.agenthub.RoomInfo
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 private fun ownerName(room: RoomInfo?, sessionId: String): String =
     room?.members?.firstOrNull { it.first == sessionId }?.second ?: sessionId
@@ -651,4 +653,95 @@ private fun missionTaskStatusStr(S: Strings, status: String): String = when (sta
     "failed" -> S.missionStatusFailed
     "pending" -> S.toolStatusPending
     else -> status
+}
+
+// ---- 聊天内工单草稿卡（```mission JSON 块 → 可编辑确认卡） ----
+
+private val missionDraftRe = Regex("```mission\\s*([\\s\\S]*?)```")
+
+fun parseMissionDrafts(text: String): List<kotlinx.serialization.json.JsonObject> =
+    missionDraftRe.findAll(text).mapNotNull {
+        runCatching {
+            kotlinx.serialization.json.Json.parseToJsonElement(it.groupValues[1].trim()).jsonObject
+        }.getOrNull()
+    }.toList()
+
+@Composable
+fun MissionDraftCards(text: String, vm: ChatViewModel) {
+    val drafts = parseMissionDrafts(text)
+    if (drafts.isEmpty()) return
+    val S = LocalStrings.current
+    Column {
+        drafts.forEachIndexed { i, draft -> MissionDraftCard(draft, vm, S, key = i) }
+    }
+}
+
+@Composable
+private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: ChatViewModel, S: Strings, key: Int) {
+    val room = vm.currentRoom ?: return
+    var dismissed by rememberSaveable(key) { mutableStateOf(false) }
+    var created by rememberSaveable(key) { mutableStateOf(false) }
+    if (dismissed) return
+    // 畸形草稿兜底：字段值非 string primitive（对象/数组）时 jsonPrimitive 会抛——一律 runCatching 降级为空串
+    val prim = { el: kotlinx.serialization.json.JsonElement? ->
+        el?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+    }
+    var goal by rememberSaveable(key) { mutableStateOf(prim(draft["goal"]) ?: "") }
+    val arrOrStr = { el: kotlinx.serialization.json.JsonElement? ->
+        el?.let {
+            runCatching { it.jsonArray.joinToString("\n") { v -> v.jsonPrimitive.content } }.getOrNull()
+                ?: prim(it)
+        } ?: ""
+    }
+    var criteria by rememberSaveable(key) { mutableStateOf(arrOrStr(draft["acceptanceCriteria"])) }
+    var scopeText by rememberSaveable(key) { mutableStateOf(prim(draft["scope"]) ?: "") }
+    var constraints by rememberSaveable(key) { mutableStateOf(arrOrStr(draft["constraints"])) }
+    val retries = (prim(draft["maxAutoRetries"])?.toIntOrNull() ?: 0).coerceIn(0, 3)
+    val ownerRaw = prim(draft["owner"])?.trim().orEmpty()
+    val ownerId = room.members.find { it.first == ownerRaw || it.second == ownerRaw }?.first
+    var busy by remember(key) { mutableStateOf(false) }
+    val lines = { v: String -> v.split("\n").map { it.trim() }.filter { it.isNotEmpty() } }
+    Card(
+        Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            if (created) {
+                Text("✓ ${S.missionCreatedOk}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                return@Column
+            }
+            Text(S.missionDraftCard, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedTextField(value = goal, onValueChange = { goal = it }, label = { Text(S.missionGoal) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(value = criteria, onValueChange = { criteria = it }, label = { Text(S.missionCriteria) }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = scopeText, onValueChange = { scopeText = it }, label = { Text(S.missionScope) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(value = constraints, onValueChange = { constraints = it }, label = { Text(S.missionConstraints) }, modifier = Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { dismissed = true }, enabled = !busy) { Text(S.missionDismissDraft) }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    enabled = !busy && goal.isNotBlank() && lines(criteria).isNotEmpty(),
+                    onClick = {
+                        busy = true
+                        vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries) { m ->
+                            busy = false
+                            if (m != null) created = true
+                        }
+                    },
+                ) { Text(S.missionCreateConfirm) }
+                TextButton(
+                    enabled = !busy && goal.isNotBlank() && lines(criteria).isNotEmpty(),
+                    onClick = {
+                        busy = true
+                        vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries) { m ->
+                            busy = false
+                            if (m != null) {
+                                created = true
+                                vm.startMission(m.id)
+                            }
+                        }
+                    },
+                ) { Text(S.missionCreateAndStart) }
+            }
+        }
+    }
 }

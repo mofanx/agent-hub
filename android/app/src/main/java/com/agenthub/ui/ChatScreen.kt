@@ -2083,6 +2083,7 @@ private fun MessageBlock(
                     )
                 }
             }
+            MissionDraftCards(item.text, vm)
             if (item.isLast && item.usage != null) {
                 Text(
                     item.usage.format(S),
@@ -3267,9 +3268,12 @@ private fun FlowCardBlock(
                 }
                 Spacer(Modifier.height(6.dp))
                 val flowKey = flow.flowId.ifEmpty { item.flowId.ifEmpty { "__live" } }
-                flow.tasks.forEach { task ->
-                    key(flowKey, task.id) {
-                        FlowTaskRow(task, flowKey, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
+                // DEBUG：空白排查——任务行容器实测高度（Σrow-root vs 容器高=行间隙归属），logcat 过滤 FTROW
+                Column(Modifier.onGloballyPositioned { c -> android.util.Log.d("FTROW", "card-rows flow=$flowKey h=${c.size.height}") }) {
+                    flow.tasks.forEach { task ->
+                        key(flowKey, task.id) {
+                            FlowTaskRow(task, flowKey, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
+                        }
                     }
                 }
                 if (flow.supplements.isNotEmpty()) {
@@ -3335,6 +3339,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val navT = vm.missionExecutionTarget
     val navHit = ChatViewModel.missionTaskNavMatch(navT, vm.currentRoom?.roomId, flowId, task)
+    LaunchedEffect(expanded) { if (expanded) vm.subscribeTask(task.id) }
     LaunchedEffect(if (navHit) navT?.nonce else 0L) {
         if (navHit) {
             expanded = true
@@ -3362,7 +3367,9 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
     val context = LocalContext.current
     val S = LocalStrings.current
     val showRetryBtn = showRetry && task.status == "failed"
-    Column(Modifier.padding(vertical = 1.dp).bringIntoViewRequester(bringIntoViewRequester)) {
+    Column(Modifier.padding(vertical = 1.dp).bringIntoViewRequester(bringIntoViewRequester)
+        // DEBUG：空白排查——整行实测高度（覆盖行间隙区），logcat 过滤 FTROW
+        .onGloballyPositioned { c -> android.util.Log.d("FTROW", "row-root task=${task.id} h=${c.size.height}") }) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.clickable { expanded = !expanded },
@@ -3438,7 +3445,9 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
             }
         }
         if (expanded) {
-            Column(Modifier.padding(start = 20.dp, top = 4.dp)) {
+            Column(Modifier.padding(start = 20.dp, top = 4.dp)
+                // DEBUG：空白排查——展开区根容器实测高度，logcat 过滤 FTROW
+                .onGloballyPositioned { c -> android.util.Log.d("FTROW", "expanded-root task=${task.id} h=${c.size.height}") }) {
                 // 分区按状态：failed 失败原因优先
                 if (task.status == "failed") {
                     task.failureMessage?.let {
@@ -3453,7 +3462,8 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 240.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(rememberScrollState())
+                        .onGloballyPositioned { c -> android.util.Log.d("FTROW", "desc task=${task.id} h=${c.size.height}") },
                 )
                 if (task.status == "pending") {
                     if (task.dependsOn.isNotEmpty()) {
@@ -3470,7 +3480,8 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState()),
+                            .verticalScroll(rememberScrollState())
+                            .onGloballyPositioned { c -> android.util.Log.d("FTROW", "output task=${task.id} h=${c.size.height}") },
                     )
                 }
                 if (task.status == "done") {
@@ -3725,7 +3736,9 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         Text(S.viewProcess, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                     if (procVisible) {
-                        TaskProcessSection(roomId, flowId, task, vm)
+                        Column(Modifier.onGloballyPositioned { c -> android.util.Log.d("FTROW", "process task=${task.id} h=${c.size.height}") }) {
+                            TaskProcessSection(roomId, flowId, task, vm)
+                        }
                     }
                 }
             }

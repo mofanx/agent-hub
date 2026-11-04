@@ -565,6 +565,11 @@ interface Strings {
     val missionFilterAcceptance: String
     val missionFilterClosed: String
     val missionNew: String
+    val missionDraftCard: String
+    val missionCreateConfirm: String
+    val missionCreateAndStart: String
+    val missionDismissDraft: String
+    val missionCreatedOk: String
     val missionReview: String
     val missionReviewPass: String
     val missionReviewFail: String
@@ -1233,6 +1238,11 @@ object ZhStrings : Strings {
     override val missionFilterAcceptance = "待验收"
     override val missionFilterClosed = "已结束"
     override val missionNew = "新建目标"
+    override val missionDraftCard = "工单草稿（可编辑后确认）"
+    override val missionCreateConfirm = "创建"
+    override val missionCreateAndStart = "创建并启动"
+    override val missionDismissDraft = "忽略"
+    override val missionCreatedOk = "工单已创建"
     override val missionReview = "人工验收"
     override val missionReviewPass = "通过"
     override val missionReviewFail = "不通过"
@@ -1901,6 +1911,11 @@ object EnStrings : Strings {
     override val missionFilterAcceptance = "To accept"
     override val missionFilterClosed = "Closed"
     override val missionNew = "New mission"
+    override val missionDraftCard = "Mission draft (edit, then confirm)"
+    override val missionCreateConfirm = "Create"
+    override val missionCreateAndStart = "Create & start"
+    override val missionDismissDraft = "Dismiss"
+    override val missionCreatedOk = "Mission created"
     override val missionReview = "Manual review"
     override val missionReviewPass = "Pass"
     override val missionReviewFail = "Fail"

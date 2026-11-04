@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Environment
 import android.util.Base64
@@ -901,15 +902,47 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** scope 分层订阅：ViewModel 订 detail（当前房），切房重订并消费回包快照 */
     private var subscribedRoomId: String? = null
 
+    /** 已声明的工单 taskId 集：仅展开态工单按需订阅，其余工单 tagged 事件被 hub 过滤 */
+    private val subscribedTaskIds = mutableSetOf<String>()
+    private var taskIdSubRoomId: String? = null
+
+    // DEBUG：__ftdbg__ 合成 flow 注入开关（空白排查造数）——连同 FTROW 探针一起摘除
+    private val isDebuggable by lazy {
+        (getApplication<Application>().applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
+
+    fun subscribeTask(taskId: String) {
+        val rid = currentRoom?.roomId ?: return
+        if (taskId.isBlank()) return
+        if (taskIdSubRoomId != rid) { subscribedTaskIds.clear(); taskIdSubRoomId = rid }
+        if (!subscribedTaskIds.add(taskId)) return
+        resubscribe()
+    }
+
+    private fun resubscribe() {
+        val rid = subscribedRoomId ?: return
+        viewModelScope.launch {
+            try {
+                hub.call("client.subscribe", buildJsonObject {
+                    put("tier", "detail")
+                    put("roomId", rid)
+                    if (subscribedTaskIds.isNotEmpty()) put("taskIds", JsonArray(subscribedTaskIds.map { JsonPrimitive(it) }))
+                })
+            } catch (_: Exception) { }
+        }
+    }
+
     fun subscribeScope(roomId: String? = null) {
         val rid = roomId ?: currentRoom?.roomId
         if (rid == subscribedRoomId) return
+        if (taskIdSubRoomId != rid) { subscribedTaskIds.clear(); taskIdSubRoomId = rid }
         subscribedRoomId = rid
         viewModelScope.launch {
             try {
                 val result = hub.call("client.subscribe", buildJsonObject {
                     put("tier", "detail")
                     rid?.let { put("roomId", it) }
+                    if (subscribedTaskIds.isNotEmpty()) put("taskIds", JsonArray(subscribedTaskIds.map { JsonPrimitive(it) }))
                 })
                 (result["snapshot"] as? JsonObject)?.let { snap ->
                     rid?.let { applyRecoveryRoom("room:$it", snap) }
@@ -3392,6 +3425,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * （旧 Hub 无 flowId、房史条目尚未广播/加载），尾部补一张 live 合成卡。
      * "__live" 占位卡在拿到真实 flowId 后就地升级为正式卡，随后由房史条目接管。
      */
+    // DEBUG：合成工单（CRLF/LF 空行栈+waiting+failed 混合）走真实 parse→render 管线
+    private fun debugInjectFlow(rid: String) {
+        val json = """
+            {"roomId":"$rid","phase":"working","flowId":"dbg-flow","mode":"conductor",
+             "startedAt":"${System.currentTimeMillis()}",
+             "progress":{"done":1,"running":0,"pending":1,"failed":1,"total":4},
+             "tasks":[
+              {"id":"d1","name":"alpha","status":"done","task":"desc line one and line two","sessionId":"dbg",
+               "output":"out line1\r\n\r\n\r\n\r\nout line2\n\n\n\nout line3",
+               "verifications":[{"by":"rev","verdict":"pass","evidence":"ev1\n\n\n\nev2"}]},
+              {"id":"d2","name":"beta","status":"failed","task":"failed task sample","sessionId":"dbg",
+               "failureMessage":"fail head\n\n\n\n\nfail tail"},
+              {"id":"d3","name":"gamma","status":"running","task":"waiting task sample","sessionId":"dbg",
+               "waitingFor":"user","waitingQuestion":"q head\r\n\r\n\r\nq tail?","waitingHelpId":"h1"},
+              {"id":"d4","name":"delta","status":"pending","task":"pending task sample","sessionId":"dbg",
+               "dependsOn":["d1","d2"]}
+             ]}
+        """.trimIndent()
+        val f = parseFlow(Json.parseToJsonElement(json).jsonObject, rid) ?: return
+        flowCache[rid] = f
+        if (currentRoom?.roomId == rid) {
+            flow = f
+            ensureFlowCard(f)
+        }
+    }
+
     private fun ensureFlowCard(f: FlowInfo?) {
         if (f == null) return
         val key = scopeKey() ?: return
@@ -5965,6 +6024,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val scopedKind = (params?.get("scope") as? JsonPrimitive)?.contentOrNull
         val key = roomId?.let { "room:$it" } ?: scopedId?.takeIf { scopedKind in setOf("room", "session") }?.let { "$scopedKind:$it" }
         if (key != null) {
+            // DEBUG：__ftdbg__ 文本触发合成 flow 注入（空白排查造数）——连同 FTROW 探针一起摘除
+            if (isDebuggable &&
+                (params?.get("entry") as? JsonObject)
+                    ?.get("text")?.jsonPrimitive?.contentOrNull == "__ftdbg__" &&
+                key.startsWith("room:")
+            ) {
+                debugInjectFlow(key.substringAfter(':'))
+            }
             deliveryRecovery.changed(key)
             if (scopeKey() == key || chatCache.containsKey(key) || deliveryRecords.any { currentDelivery(it) && it.scopeKey == key }) {
                 (params?.get("entry") as? JsonObject)?.let {
