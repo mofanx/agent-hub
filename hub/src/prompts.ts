@@ -60,7 +60,7 @@ export function conductorPlanningPrompt(args: {
   artifactLines?: string[] | undefined;
   openTopics?: OpenTopicInput[] | undefined;
 }): string {
-  const { roomName, memberList, task, example, qa, artifactLines } = args;
+  const { memberList, example, qa } = args; const roomName = sanitizeInline(args.roomName); const task = sanitizeBlock(args.task); const artifactLines = cleanLines(args.artifactLines);
   const prompt = [
     `你是群聊「${roomName}」的指挥家（Conductor）。`,
     `可派工的成员：${memberList}。`,
@@ -98,13 +98,13 @@ export function conductorPlanningPrompt(args: {
       ...qa.questions.map((q, i) => `${i + 1}. ${q}`),
       `用户答复：${qa.answer.slice(0, 2000)}`,
       ...(qa.criteria.length > 0
-        ? ["", "验收标准：", ...qa.criteria.map((c, i) => `${i + 1}. ${c}`)]
+        ? ["", "验收标准：", ...qa.criteria.map((c, i) => `${i + 1}. ${sanitizeBlock(c)}`)]
         : []),
       ...(qa.supplements.length > 0
         ? [
             "",
             "用户在等待答复期间补充的要求（请一并纳入拆解与验收）：",
-            ...qa.supplements.map((s) => `- ${s.slice(0, 400)}`),
+            ...qa.supplements.map((s) => `- ${sanitizeBlock(s.slice(0, 400))}`),
           ]
         : []),
       "",
@@ -118,6 +118,12 @@ export function conductorPlanningPrompt(args: {
   return prompt.join("\n");
 }
 
+import { sanitizeBlock, sanitizeInline } from "./sanitize.js";
+
+/** 成员可控字段净化：名字/路径等单行字段→inline，自由文本/Lines→block 防注入伪造 */
+const cleanLines = (ls: readonly string[] | undefined): string[] | undefined =>
+  ls?.map(sanitizeBlock);
+
 /** worker 子任务派发正文（经 rooms.buildPrompt 再包一层房间上下文） */
 export function workerTaskPrompt(args: {
   taskId: string;
@@ -130,17 +136,17 @@ export function workerTaskPrompt(args: {
     ...(args.upstreamLines && args.upstreamLines.length > 0
       ? [
           "前置任务结果（这是你的直接输入，请在此基础上继续）：",
-          ...args.upstreamLines,
+          ...cleanLines(args.upstreamLines) ?? [],
           "",
         ]
       : []),
-    `指挥家派发给你的子任务（id: ${args.taskId}）：${args.task}`,
-    ...(args.qaLines ?? []),
+    `指挥家派发给你的子任务（id: ${args.taskId}）：${sanitizeBlock(args.task)}`,
+    ...(cleanLines(args.qaLines) ?? []),
     ...(args.supplements && args.supplements.length > 0
       ? [
           "",
           "用户在执行中补充了要求（请遵循）：",
-          ...args.supplements.map((s) => `- ${s.slice(0, 400)}`),
+          ...args.supplements.map((s) => `- ${sanitizeBlock(s.slice(0, 400))}`),
         ]
       : []),
     "",
@@ -176,10 +182,10 @@ export function helpRequestPrompt(args: {
   context?: string | undefined;
 }): string {
   return [
-    `群聊「${args.roomName}」成员 @${args.fromName} 在执行子任务「${args.task.slice(0, 200)}」时向你求助：`,
+    `群聊「${sanitizeInline(args.roomName)}」成员 @${sanitizeInline(args.fromName)} 在执行子任务「${sanitizeBlock(args.task.slice(0, 200))}」时向你求助：`,
     "",
     args.question,
-    ...(args.context ? ["", `相关上下文：${args.context}`] : []),
+    ...(args.context ? ["", `相关上下文：${sanitizeBlock(args.context)}`] : []),
     "",
     "请直接给出结论与依据；这不是派工，无需执行完整任务。",
   ].join("\n");
@@ -195,11 +201,11 @@ export function helpResumePrompt(args: {
   remaining: number;
 }): string {
   return [
-    `你此前在执行子任务（id: ${args.taskId}）时向 ${args.fromLabel} 求助。`,
-    `你的问题：${args.question}`,
-    `${args.fromLabel} 的回复：${(args.answer ?? "（未获得回复）").slice(0, 2000)}`,
+    `你此前在执行子任务（id: ${args.taskId}）时向 ${sanitizeInline(args.fromLabel)} 求助。`,
+    `你的问题：${sanitizeBlock(args.question)}`,
+    `${sanitizeInline(args.fromLabel)} 的回复：${sanitizeBlock((args.answer ?? "（未获得回复）").slice(0, 2000))}`,
     "",
-    `请据此继续完成子任务：${args.task}`,
+    `请据此继续完成子任务：${sanitizeBlock(args.task)}`,
     args.remaining > 0
       ? `若仍有关键阻塞可再次求助（剩余 ${args.remaining} 次）；否则完成任务并输出 artifact 报告 JSON。`
       : "请基于现有信息完成任务并输出 artifact 报告 JSON。",
@@ -244,7 +250,7 @@ export function conductorReviewPrompt(args: {
     ? args.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
     : "（未提供，按用户目标自行判断）";
   return [
-    `你是群聊「${args.roomName}」的指挥家。`,
+    `你是群聊「${sanitizeInline(args.roomName)}」的指挥家。`,
     "",
     `原始目标：${args.goal || "（未记录）"}`,
     "",
@@ -252,8 +258,8 @@ export function conductorReviewPrompt(args: {
     criteria,
     "",
     `第 ${args.iteration}/${args.maxIterations} 轮子任务已全部完成，结果如下：`,
-    ...args.resultLines,
-    ...(args.qaLines ?? []),
+    ...cleanLines(args.resultLines) ?? [],
+    ...(cleanLines(args.qaLines) ?? []),
     ...(args.supplements && args.supplements.length > 0
       ? [
           "",
@@ -302,15 +308,15 @@ export function conductorSummarizePrompt(args: {
   openTopics?: OpenTopicInput[] | undefined;
 }): string {
   const promptLines: string[] = [
-    `你是群聊「${args.roomName}」的指挥家。`,
-    `原始目标：${args.goal || "（未记录）"}`,
-    `验收标准：${args.criteria.length > 0 ? args.criteria.join("；") : "（未提供）"}`,
-    ...(args.reviewReason ? [`验收结论：${args.reviewReason}`] : []),
+    `你是群聊「${sanitizeInline(args.roomName)}」的指挥家。`,
+    `原始目标：${sanitizeBlock(args.goal || "（未记录）")}`,
+    `验收标准：${args.criteria.length > 0 ? sanitizeBlock(args.criteria.join("；")) : "（未提供）"}`,
+    ...(args.reviewReason ? [`验收结论：${sanitizeBlock(args.reviewReason)}`] : []),
     args.hasFailures
       ? `你之前派发的子任务部分完成、部分失败，结果如下：`
       : `你之前派发的子任务已全部完成，结果如下：`,
-    ...args.resultLines,
-    ...(args.qaLines ?? []),
+    ...cleanLines(args.resultLines) ?? [],
+    ...(cleanLines(args.qaLines) ?? []),
     ...(args.supplements && args.supplements.length > 0
       ? [
           "",
@@ -373,8 +379,8 @@ export function autoDecisionPrompt(args: {
   openTopics?: OpenTopicInput[] | undefined;
 }): string {
   return [
-    `你是群聊「${args.roomName}」的主持人。请根据用户消息和成员信息，选择本轮最合适的协作模式。`,
-    `成员：${args.members}`,
+    `你是群聊「${sanitizeInline(args.roomName)}」的主持人。请根据用户消息和成员信息，选择本轮最合适的协作模式。`,
+    `成员：${sanitizeInline(args.members)}`,
     "",
     "可用模式及含义：",
     "- mention：用户明确@某人，或问题简单直接，应指定/全部成员独立回答",
@@ -419,10 +425,10 @@ export function autoDecisionPrompt(args: {
     "- 各任务之间应尽量文件级排他，可用 `files` 声明预计修改文件；若两个任务声明了相同文件，系统会自动合并为一个任务。",
     "",
     "最近上下文：",
-    args.boardText,
-    args.historyText,
+    sanitizeBlock(args.boardText),
+    sanitizeBlock(args.historyText),
     ...openTopicsSection(args.openTopics),
-    `${args.quoteText ?? ""}用户消息：${args.text}`,
+    `${args.quoteText ?? ""}用户消息：${sanitizeBlock(args.text)}`,
     args.noteText ?? "",
     args.sessionNoteText ?? "",
     "",
@@ -443,7 +449,7 @@ export function parallelSummarizerPrompt(args: {
   lines: string[];
   extras?: readonly string[] | undefined;
 }): string {
-  return `你是群聊「${args.roomName}」的汇总者。多位成员就同一问题给出了独立回答：\n${args.lines.join("\n")}${extrasBlock(args.extras)}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
+  return `你是群聊「${sanitizeInline(args.roomName)}」的汇总者。多位成员就同一问题给出了独立回答：\n${(cleanLines(args.lines) ?? []).join("\n")}${extrasBlock(args.extras)}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
 }
 
 /** pipeline 阶段任务正文与引用（首阶段带 note，后续阶段引用上一阶段输出） */
@@ -456,11 +462,11 @@ export function pipelineStage(args: {
   prevOutput?: string | undefined;
   extras?: readonly string[] | undefined;
 }): { task: string; quote: { author: string; text: string } | undefined } {
-  let task = args.topic;
-  if (args.note && args.stage === 0) task = `${args.note}\n\n${task}`;
+  let task = sanitizeBlock(args.topic);
+  if (args.note && args.stage === 0) task = `${sanitizeBlock(args.note)}\n\n${task}`;
   let quote = args.quote;
   if (args.prevName && args.prevOutput !== undefined) {
-    quote = { author: args.prevName, text: args.prevOutput };
+    quote = { author: sanitizeInline(args.prevName), text: sanitizeBlock(args.prevOutput) };
     task = `请继续下一阶段处理原始任务：${task}`;
   }
   if (args.extras?.length) task = `${task}${extrasBlock(args.extras)}`;
@@ -481,8 +487,8 @@ export function debateTurnTask(args: {
   const text = `这是辩论第 ${args.round}/${args.rounds} 轮，你是${position}。请就辩题继续阐述观点${
     args.hasOpponentOutput ? "并回应对方" : ""
   }。`;
-  let task = `${text}\n\n辩题：${args.topic}`;
-  if (args.note) task = `${args.note}\n\n${task}`;
+  let task = `${text}\n\n辩题：${sanitizeBlock(args.topic)}`;
+  if (args.note) task = `${sanitizeBlock(args.note)}\n\n${task}`;
   if (args.extras?.length) task = `${task}${extrasBlock(args.extras)}`;
   return task;
 }
@@ -493,5 +499,5 @@ export function debateJudgePrompt(args: {
   lines: string[];
   extras?: readonly string[] | undefined;
 }): string {
-  return `你是辩论裁判。辩题：${args.topic}\n\n辩论记录：\n${args.lines.join("\n")}${extrasBlock(args.extras)}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
+  return `你是辩论裁判。辩题：${sanitizeBlock(args.topic)}\n\n辩论记录：\n${(cleanLines(args.lines) ?? []).join("\n")}${extrasBlock(args.extras)}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
 }

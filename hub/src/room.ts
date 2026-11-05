@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { sanitizeBlock, sanitizeInline } from "./sanitize.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { Store } from "./store.js";
 import {
+  MEMORY_LIMIT,
   MEMORY_PROMPT_LIMIT,
   MEMORY_TEXT_LIMIT,
   MEMORY_TTL_MS,
+  isMemoryNearDup,
+  memoryExtends,
   type MemoryEntry,
   type MemoryKind,
 } from "./memory.js";
@@ -826,10 +830,30 @@ export class RoomManager {
     return [...(room?.blackboard ?? [])];
   }
 
-  /** 写入蒸馏记忆条目：截断+默认 30 天 TTL，持久化到 store（不另造事件源） */
+  /** 写入蒸馏记忆条目：截断+默认 30 天 TTL，持久化到 store（不另造事件源）。
+   *  近重复（措辞变体/截断扩写）不另起条目——刷新既有条目的 TTL 与来源 */
   recordMemory(roomId: string, kind: MemoryKind, text: string, source: string, expiresAt?: number): void {
     const trimmed = text.trim();
     if (!trimmed || !this.store) return;
+    const now = Date.now();
+    const dup = this.store
+      .memoryList(roomId, now, MEMORY_LIMIT)
+      .find((e) => isMemoryNearDup(e.text, trimmed));
+    if (dup) {
+      // 修正/扩展型新文本（归一化后旧文本是其前缀）→ 存更长的新文本而非只刷新旧的
+      const extended = memoryExtends(trimmed, dup.text);
+      const mergedText = extended ? trimmed : dup.text;
+      if (extended) this.store.memoryRemove(roomId, Number(dup.id));
+      this.store.memoryAdd(
+        roomId,
+        dup.kind,
+        mergedText,
+        source,
+        now,
+        expiresAt ?? now + MEMORY_TTL_MS,
+      );
+      return;
+    }
     this.store.memoryAdd(
       roomId,
       kind,
@@ -1677,25 +1701,25 @@ export class RoomManager {
     const artifacts = this.getArtifactsForPrompt(roomId, excludeSessionId, artifactContext);
     const others = room.members
       .filter((m) => m.sessionId !== excludeSessionId)
-      .map((m) => `@${m.name}`)
+      .map((m) => `@${sanitizeInline(m.name)}`)
       .join(" ");
     const lines = [
-      `[群聊「${room.name}」| 其他成员: ${others || "无"}]`,
+      `[群聊「${sanitizeInline(room.name)}」| 其他成员: ${others || "无"}]`,
     ];
     if (resolved) {
-      lines.push(`你的角色设定：${resolved}`);
+      lines.push(`你的角色设定：${sanitizeBlock(resolved)}`);
     } else {
       lines.push("你在一个多 agent 协作群聊中。用户和其他 agent 的最近结论如下：");
     }
     if (board.length === 0) {
       lines.push("（暂无）");
     } else {
-      for (const e of board) lines.push(`- ${e.from}: ${e.text}`);
+      for (const e of board) lines.push(`- ${sanitizeInline(e.from)}: ${sanitizeBlock(e.text)}`);
     }
     const mems = this.memoryForPrompt(roomId);
     if (mems.length > 0) {
       lines.push("", "长期记忆（蒸馏）：");
-      for (const m of mems) lines.push(`- [${m.kind}] ${m.text}`);
+      for (const m of mems) lines.push(`- [${m.kind}] ${sanitizeBlock(m.text)}`);
     }
     lines.push(
       "",
@@ -1708,9 +1732,9 @@ export class RoomManager {
     if (artifacts.length > 0) {
       lines.push("", "最近产物（文件）：");
       for (const a of artifacts) {
-        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${this.memberName(roomId, a.author)}`];
-        if (a.path) parts.push(a.path);
-        parts.push(a.summary.slice(0, ARTIFACT_SUMMARY_LEN));
+        const parts = [a.alias ? `[${a.alias}]` : `[${a.id}]`, `@${sanitizeInline(this.memberName(roomId, a.author))}`];
+        if (a.path) parts.push(sanitizeInline(a.path));
+        parts.push(sanitizeBlock(a.summary.slice(0, ARTIFACT_SUMMARY_LEN)));
         lines.push(`- ${parts.join(" ")}`);
       }
     }
@@ -1745,7 +1769,7 @@ export class RoomManager {
       }
     }
     if (quote) {
-      lines.push("", `用户引用了 ${quote.author} 的消息："${quote.text}"`);
+      lines.push("", `用户引用了 ${sanitizeInline(quote.author)} 的消息："${sanitizeBlock(quote.text)}"`);
     }
     lines.push("", `用户消息：${text}`);
     return lines.join("\n");
