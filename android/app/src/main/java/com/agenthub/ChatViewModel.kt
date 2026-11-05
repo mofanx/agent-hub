@@ -1167,32 +1167,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         notificationsEnabled = Notifier.notificationsAvailable(getApplication(), Notifier.CHANNEL_PERMISSION)
     }
 
-    fun backgroundConnectionWarning(): String? {
+    /** (文案, 硬错)——硬错=需要用户改配置/手动介入(auth/policy/invalid_config/start_restricted/service_stopped)，
+     * 软态=可自愈或仅提醒(timeout/sync/network_monitor/permission 等)，横幅据此分色与点击行为 */
+    fun backgroundConnectionBanner(): Pair<String, Boolean>? {
         val S = stringsFor(lang)
         when (connectionState) {
-            HubConnectionState.AuthFailed -> return S.connectionAuthFailed
-            HubConnectionState.PolicyRejected -> return S.connectionPolicyRejected
-            HubConnectionState.InvalidConfig -> return S.connectionInvalidAddress
+            HubConnectionState.AuthFailed -> return S.connectionAuthFailed to true
+            HubConnectionState.PolicyRejected -> return S.connectionPolicyRejected to true
+            HubConnectionState.InvalidConfig -> return S.connectionInvalidAddress to true
             else -> Unit
         }
         return when (backgroundStopReason) {
-            "auth" -> S.connectionAuthFailed
-            "policy" -> S.connectionPolicyRejected
-            "invalid_config" -> S.connectionInvalidAddress
-            "timeout" -> S.backgroundConnectionTimeout
-            "network_monitor" -> S.networkMonitoringUnavailable
-            "start_restricted", "service_stopped" -> S.backgroundConnectionUnavailable
+            "auth" -> S.connectionAuthFailed to true
+            "policy" -> S.connectionPolicyRejected to true
+            "invalid_config" -> S.connectionInvalidAddress to true
+            "timeout" -> S.backgroundConnectionTimeout to false
+            "network_monitor" -> S.networkMonitoringUnavailable to false
+            "start_restricted", "service_stopped" -> S.backgroundConnectionUnavailable to true
             else -> when {
-                !networkMonitoringAvailable -> S.networkMonitoringUnavailable
+                !networkMonitoringAvailable -> S.networkMonitoringUnavailable to false
                 connectionWanted && savedHubConnection(getApplication()) != null && !backgroundRunning ->
-                    S.backgroundConnectionUnavailable
-                connectionWanted && !notificationsEnabled -> S.attentionLabels.getValue("permission")
-                connectionWanted && attentionRecoveryState == "unsupported" -> S.attentionLabels.getValue("unsupported")
-                connectionWanted && attentionRecoveryState != null -> S.attentionLabels.getValue("sync")
+                    S.backgroundConnectionUnavailable to false
+                connectionWanted && !notificationsEnabled -> S.attentionLabels.getValue("permission") to false
+                connectionWanted && attentionRecoveryState == "unsupported" -> S.attentionLabels.getValue("unsupported") to false
+                connectionWanted && attentionRecoveryState != null -> S.attentionLabels.getValue("sync") to false
                 else -> null
             }
         }
     }
+
+    fun backgroundConnectionWarning(): String? = backgroundConnectionBanner()?.first
 
     override fun onCleared() {
         if (debugInstance === this) debugInstance = null

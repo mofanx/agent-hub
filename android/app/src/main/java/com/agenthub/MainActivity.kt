@@ -8,6 +8,7 @@ import androidx.core.view.WindowCompat
 import androidx.activity.compose.setContent
 import android.content.Intent
 import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -119,7 +120,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
-    val warning = vm.backgroundConnectionWarning()
+    val warningBanner = vm.backgroundConnectionBanner()
     // 根级统一消费状态栏 inset：待办/发送记录/警告条不再侵入系统时间区，
     // 且与内部 TopAppBar 不再叠加出双间距（TopAppBar 的 windowInsets 置 0）
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -142,13 +143,18 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 Text(stringsFor(vm.lang).deliveryLabels.getValue("title"))
             }
         }
-        if (warning != null) {
+        if (warningBanner != null) {
+            val (warning, isHard) = warningBanner
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.errorContainer,
+                // 硬错(需改配置/手动介入)→error 红；软态(可自愈/仅提醒)→tertiary 黄
+                color = if (isHard) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.tertiaryContainer,
             ) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(warning, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text(warning, Modifier.weight(1f).clickable {
+                        if (isHard) vm.screen = Screen.Settings
+                        else vm.currentProfile?.let { vm.connect(it.address, it.token, it.publicToken, it.name) }
+                    }, style = MaterialTheme.typography.bodySmall)
                     vm.currentProfile?.let { profile ->
                         TextButton(
                             enabled = vm.connectionState != HubConnectionState.Connecting,
@@ -158,7 +164,7 @@ fun AppRoot(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 }
             }
         }
-        Box(Modifier.weight(1f).then(if (warning != null) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)) {
+        Box(Modifier.weight(1f).then(if (warningBanner != null) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)) {
             when (vm.screen) {
                 Screen.Connect -> SessionListScreen(vm, onMenuClick)
                 Screen.Sessions -> SessionListScreen(vm, onMenuClick)
