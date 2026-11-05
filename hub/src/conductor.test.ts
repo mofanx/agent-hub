@@ -1680,6 +1680,71 @@ describe("conductor", () => {
     );
   });
 
+  it("import 恢复：running 无外发任务自动重派一次，二次恢复防循环落 failed", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-clean",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const mk = () =>
+      new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content: String(content) });
+          },
+          isBusy: () => false,
+        },
+        rooms,
+        (n) => notices.push(n.message),
+      );
+    const o1 = mk();
+    await o1.start(r, "任务");
+    await o1.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    const w1Before = prompts.filter((p) => p.sessionId === "w1").length;
+    assert.equal(w1Before, 1, "t1 已派发");
+
+    // 重启一：无 tool_call/结果/房史 → 可证无外发 → pending 自动重派
+    const o2 = mk();
+    await o2.import(o1.export());
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      w1Before + 1,
+      "无外发任务应由 scheduleTasks 自动重派一次",
+    );
+    assert.ok(
+      notices.some((m) => m.includes("自动重派")),
+      "应发出自动重派通知",
+    );
+
+    // 重启二：autoRetried 已打标 → 不再自动重派，保守落 failed 人工重试
+    const o3 = mk();
+    await o3.import(o2.export());
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    const t1 = (
+      o3.getFlow(r.roomId) as {
+        tasks: { id: string; status: string; failureMessage?: string }[];
+      }
+    ).tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.status, "failed", "autoRetried 已消费：二次恢复不再自动重派");
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      w1Before + 1,
+      "二次恢复不得重复派发",
+    );
+  });
+
   it("import 恢复：等待用户求助的任务不失败不重派，定向答复唤醒一次", async () => {
     const rooms = new RoomManager();
     const r = rooms.create(

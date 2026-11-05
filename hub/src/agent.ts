@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { logWarn } from "./logger.js";
+import { safetyFloorVerdict } from "./safety-floor.js";
 
 export type TokenUsage = {
   totalTokens?: number;
@@ -492,6 +493,10 @@ export class AcpAgent {
   private cachedConfigOptions: unknown[] | null = null;
   private sessionConfigOptions = new Map<string, unknown[]>();
   private supportsSessionFork = false;
+  /** steer-queue：busy 时 followUp FIFO（上限 5，溢出丢弃），finishTurn 后合并为单 turn drain */
+  private followUps = new Map<string, Array<Record<string, unknown>[]>>();
+  private readonly followUpLimit = 5;
+
   private promptOnceWaiters = new Map<
     string,
     {
@@ -734,6 +739,7 @@ export class AcpAgent {
       waiter.reject(new Error(`agent ${this.name} disconnected`));
     }
     this.promptOnceWaiters.clear();
+    this.followUps.clear();
     for (const resolve of this.pendingElicitations.values()) {
       resolve({ action: "cancel" }, "revoked");
     }
@@ -845,6 +851,18 @@ export class AcpAgent {
       waiter.resolve({ output: fullText, stopReason });
     }
     entry.turnText = "";
+    const queued = this.followUps.get(sessionId);
+    if (queued?.length) {
+      this.followUps.delete(sessionId);
+      const texts = queued
+        .flatMap((p) => p.map((b) => (b.type === "text" ? String(b.text ?? "") : "")))
+        .filter((t) => t.length > 0);
+      const extras = queued.flatMap((p) => p.filter((b) => b.type !== "text"));
+      this.promptContent(sessionId, [
+        { type: "text", text: texts.join("\n\n") },
+        ...extras,
+      ]).catch((err) => logWarn("followUp", `drain failed for ${sessionId}: ${err}`));
+    }
   }
 
   /** agent→hub 请求同样证明存活：permission/elicitation/fs 期间不得误判为无输出 */
@@ -895,6 +913,17 @@ export class AcpAgent {
         },
       });
 
+    // safety-floor：bypass/grant 自动放行之上的词法黑名单地板——命中危险命令
+    // 或 shell 类请求提取不到命令串时强制走交互卡，绝不静默放行
+    const floor = safetyFloorVerdict(params.toolCall);
+    if (floor.action === "interactive") {
+      logWarn(
+        "permission",
+        `safety-floor blocked auto-allow (${floor.reason}) for ${title} in session ${params.sessionId}`,
+      );
+      return this.awaitInteractive(requestId, params, () => emitDecisionRequest());
+    }
+
     if (permissionBypass) {
       const chosen =
         findAutoAllowOption(params.options) ??
@@ -931,7 +960,16 @@ export class AcpAgent {
       );
     }
 
-    emitDecisionRequest();
+    return this.awaitInteractive(requestId, params, () => emitDecisionRequest());
+  }
+
+  /** 交互决策卡路径（decision.request + permission.request + 超时兜底等待） */
+  private awaitInteractive(
+    requestId: string,
+    params: PermissionRequestParams,
+    emitCard?: () => void,
+  ): Promise<acp.RequestPermissionResponse> {
+    emitCard?.();
     this.emit({
       method: "permission.request",
       params: {
@@ -1316,6 +1354,8 @@ export class AcpAgent {
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
+    this.followUps.delete(sessionId);
+        this.followUps.delete(sessionId);
         this.contextUsage.delete(sessionId);
         logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
         if (this.wasAuthHandled(err) || this.isAuthRequired(err)) throw err;
@@ -1338,7 +1378,17 @@ export class AcpAgent {
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     // 宽限窗内新 prompt：先按已累积文本定稿旧回合（同步发 prompt.done），再开新回合
     this.flushPendingSettle(sessionId, entry);
-    if (entry.busy) throw new Error(`session busy: ${entry.name}`);
+    if (entry.busy) {
+      const q = this.followUps.get(sessionId) ?? [];
+      if (q.length < this.followUpLimit) {
+        q.push(prompt);
+        this.followUps.set(sessionId, q);
+        logWarn("followUp", `queued #${q.length} for busy session ${entry.name}`);
+      } else {
+        logWarn("followUp", `queue full (${this.followUpLimit}), dropping prompt for ${entry.name}`);
+      }
+      return;
+    }
     entry.busy = true;
     entry.stoppable = true;
     entry.turnText = "";
@@ -1440,6 +1490,9 @@ export class AcpAgent {
   ): Promise<{ output: string; stopReason: string }> {
     if (this.promptOnceWaiters.has(sessionId)) {
       throw new Error(`promptOnce already pending for session: ${sessionId}`);
+    }
+    if (this.sessions.get(sessionId)?.busy) {
+      throw new Error(`session busy: ${sessionId}`);
     }
     return new Promise<{ output: string; stopReason: string }>((resolve, reject) => {
       const timer = timeoutMs > 0 ? setTimeout(() => {

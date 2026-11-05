@@ -2591,8 +2591,15 @@ describe("collab-e2e", () => {
       assert.equal(h.flow()?.phase, "working");
       const entry0 = flowCardEntries(h.broadcasts)[0]!;
 
-      // 运行中导出 → 新实例恢复：running 任务降级 failed、流程 awaiting-retry
+      // 运行中导出 → 房史补一条该成员外发信号（重启对账 hadOutward 判据）
+      // → 新实例恢复：running 任务降级 failed、流程 awaiting-retry
       const state = h.manager.exportRuntime();
+      store.append("room", h.room.roomId, {
+        at: Date.now(),
+        kind: "tool",
+        author: "coder",
+        text: "execute: npm test",
+      });
       const h2 = makeHarness(
         [
           { sessionId: "s1", name: "leader" },

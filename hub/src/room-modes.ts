@@ -324,6 +324,7 @@ export class RoomModeManager {
     return {
       conductor: this.conductor.export(),
       subModes: Object.fromEntries(this.roomSubMode),
+      followUps: Object.fromEntries(this.followUps),
     };
   }
 
@@ -355,11 +356,31 @@ export class RoomModeManager {
         this.roomSubMode.set(roomId, { mode: sm.mode, activeSpeaker: sm.activeSpeaker, reason: sm.reason });
       }
     }
+    const fu = typeof state.followUps === "object" && state.followUps !== null
+      ? (state.followUps as Record<string, unknown[]>)
+      : undefined;
+    if (fu) {
+      for (const [sid, items] of Object.entries(fu)) {
+        if (!Array.isArray(items)) continue;
+        const valid = items.filter(
+          (it): it is { roomId: string; content: string | PromptContent } =>
+            typeof it === "object" && it !== null &&
+            typeof (it as { roomId?: unknown }).roomId === "string" &&
+            (typeof (it as { content?: unknown }).content === "string" ||
+              Array.isArray((it as { content?: unknown }).content)),
+        );
+        if (valid.length) this.followUps.set(sid, valid.slice(-RoomModeManager.FOLLOW_UP_LIMIT));
+      }
+    }
   }
 
   /** agent 连接后恢复所有活跃 flow 的调度（Fix C）。 */
   resumeFlows(): void {
     this.conductor.resumeFlows();
+    for (const sid of [...this.followUps.keys()]) {
+      if (this.agent.has?.(sid) === false) continue;
+      this.drainFollowUps(sid);
+    }
   }
 
   /** 检查房间是否有等待重试的 flow */
@@ -389,7 +410,56 @@ export class RoomModeManager {
     this.broadcast("room.notice", n as unknown as Record<string, unknown>);
   }
 
+  /** steer-queue：busy 会话的房侧待发送队列（外发时才登记 turnGuard/promptRooms） */
+  private followUps = new Map<string, Array<{ roomId: string; content: string | PromptContent }>>();
+  private static readonly FOLLOW_UP_LIMIT = 5;
+
+  private enqueueFollowUp(roomId: string, sessionId: string, content: string | PromptContent): void {
+    const q = this.followUps.get(sessionId) ?? [];
+    if (q.length >= RoomModeManager.FOLLOW_UP_LIMIT) {
+      logWarn("room-modes followUp", `queue full (${RoomModeManager.FOLLOW_UP_LIMIT}), dropping prompt for ${sessionId}`);
+      this.notice({
+        roomId,
+        message: `⚠️ @${this.nameFor(roomId, sessionId)} 忙碌队列已满（${RoomModeManager.FOLLOW_UP_LIMIT} 条），该消息已丢弃`,
+      });
+      return;
+    }
+    q.push({ roomId, content });
+    this.followUps.set(sessionId, q);
+  }
+
+  /** 回合结束后 drain 该会话的房侧队列：合并为单 prompt，经 sendPrompt 正常登记 guard/opId */
+  private drainFollowUps(sessionId: string): void {
+    if (this.agent.isBusy(sessionId)) return;
+    const q = this.followUps.get(sessionId);
+    if (!q?.length) return;
+    this.followUps.delete(sessionId);
+    const texts = q.map((it) =>
+      typeof it.content === "string"
+        ? it.content
+        : it.content.map((b) => (b.type === "text" ? String(b.text ?? "") : "")).join(""),
+    ).filter((t) => t.length > 0);
+    const extras = q.flatMap((it) =>
+      typeof it.content === "string" ? [] : it.content.filter((b) => b.type !== "text"),
+    );
+    const merged: string | PromptContent =
+      extras.length > 0
+        ? [{ type: "text", text: texts.join("\n\n") }, ...extras]
+        : texts.join("\n\n");
+    this.sendPrompt(q[0]!.roomId, sessionId, merged).catch((err) => {
+      logError("room-modes followUp drain", err);
+      // 发送失败不静默丢：重入队 + 告知
+      if (this.followUps.get(sessionId) === undefined) this.followUps.set(sessionId, q);
+      else this.followUps.get(sessionId)!.unshift(...q);
+      this.notice({ roomId: q[0]!.roomId, message: "⚠️ 排队消息补发失败，已暂存待重试" });
+    });
+  }
+
   private async sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
+    if (this.agent.isBusy(sessionId)) {
+      this.enqueueFollowUp(roomId, sessionId, content);
+      return;
+    }
     this.promptRooms.set(sessionId, roomId);
     const unguard = this.noteTurnGuard(sessionId, roomId, content);
     try {
@@ -996,6 +1066,7 @@ export class RoomModeManager {
   async onPromptDone(sessionId: string, output: string): Promise<boolean> {
     // turn 提交不变量：上下文游标推进的输出作废重跑（≤1 次）
     if (this.handleStaleTurn(sessionId)) return true;
+    this.drainFollowUps(sessionId);
     // auto 决策完成
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
@@ -1445,15 +1516,13 @@ export class RoomModeManager {
     const sent: string[] = [];
     const skipped: string[] = [];
     for (const sid of targets) {
-      if (this.agent.isBusy(sid)) {
-        skipped.push(sid);
-        continue;
-      }
+      const busy = this.agent.isBusy(sid);
       const prompt = this.buildPromptContent(room, segments[sid] ?? text, sid, options);
       this.sendPrompt(room.roomId, sid, prompt).catch((err) => {
         logError("room-modes mention prompt", err);
       });
-      sent.push(sid);
+      // busy 消息不再丢——agent.ts followUp 队列入队，skipped 如实标记"忙碌已排队"
+      (busy ? skipped : sent).push(sid);
     }
     if (sent.length === 1) {
       this.setSubMode(room.roomId, "mention", sent[0], undefined);
@@ -1594,7 +1663,12 @@ export class RoomModeManager {
     const pending = new Set<string>();
     for (const m of members) {
       if (this.agent.isBusy(m.sessionId)) {
+        // busy 成员消息入 followUp 队列（不丢、不进 flow 追踪），按 skipped 如实回报
         skipped.push(m.sessionId);
+        const queued = this.buildPromptContent(room, text, m.sessionId, options);
+        this.sendPrompt(room.roomId, m.sessionId, queued).catch((err) => {
+          logError("room-modes parallel queued prompt", err);
+        });
       } else {
         pending.add(m.sessionId);
         sent.push(m.sessionId);
@@ -1699,10 +1773,7 @@ export class RoomModeManager {
       return { sent: [], mentioned: [], skipped: [] };
     }
     const first = order[0]!;
-    if (this.agent.isBusy(first)) {
-      this.notice({ roomId: room.roomId, message: `流水线模式：首阶段 @${this.nameFor(room.roomId, first)} 忙碌` });
-      return { sent: [], mentioned: [], skipped: [first] };
-    }
+    const firstBusy = this.agent.isBusy(first);
     const flow: PipelineFlow = {
       id: newFlowId(),
       startedAt: Date.now(),
@@ -1724,7 +1795,7 @@ export class RoomModeManager {
     this.sendPrompt(room.roomId, first, prompt).catch((err) => {
       logError("room-modes pipeline prompt", err);
     });
-    return { sent: [first], mentioned: [], skipped: [] };
+    return { sent: firstBusy ? [] : [first], mentioned: [], skipped: firstBusy ? [first] : [] };
   }
 
   private onPipelineDone(sessionId: string, output: string): string | undefined {
@@ -1804,10 +1875,7 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: "辩论模式：成员不足，无法分配正反方" });
       return { sent: [], mentioned: [], skipped: [] };
     }
-    if (this.agent.isBusy(sideA)) {
-      this.notice({ roomId: room.roomId, message: `辩论模式：正方 @${this.nameFor(room.roomId, sideA)} 忙碌中` });
-      return { sent: [], mentioned: [], skipped: [sideA] };
-    }
+    const sideABusy = this.agent.isBusy(sideA);
     const flow: DebateFlow = {
       id: newFlowId(),
       startedAt: Date.now(),
@@ -1837,7 +1905,7 @@ export class RoomModeManager {
     this.sendPrompt(room.roomId, sideA, prompt).catch((err) => {
       logError("room-modes debate prompt", err);
     });
-    return { sent: [sideA], mentioned: [], skipped: [] };
+    return { sent: sideABusy ? [] : [sideA], mentioned: [], skipped: sideABusy ? [sideA] : [] };
   }
 
   private onDebateDone(sessionId: string, output: string): string | undefined {
@@ -1935,10 +2003,7 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: "自动模式未指定主持人，已兜底为点名应答" });
       return this.handleMention(room, text, options);
     }
-    if (this.agent.isBusy(room.conductorId)) {
-      this.notice({ roomId: room.roomId, message: `主持人 @${this.nameFor(room.roomId, room.conductorId)} 忙碌中` });
-      return { sent: [], mentioned: [], skipped: [room.conductorId] };
-    }
+    const conductorBusy = this.agent.isBusy(room.conductorId);
     this.setSubMode(room.roomId, "self", room.conductorId, undefined);
     this.notice({ roomId: room.roomId, message: `🎙️ 自动选择：主持人独立作答` });
     const selfNote = SELF_MODE_NOTE;
@@ -1954,7 +2019,7 @@ export class RoomModeManager {
       logError("room-modes self prompt", err);
       this.notice({ roomId: room.roomId, message: `主持人独立作答启动失败：${err instanceof Error ? err.message : String(err)}` });
     });
-    return { sent: [room.conductorId], mentioned: [], skipped: [] };
+    return { sent: conductorBusy ? [] : [room.conductorId], mentioned: [], skipped: conductorBusy ? [room.conductorId] : [] };
   }
 
   private async handleAuto(
@@ -1966,10 +2031,7 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: "自动模式未指定主持人，已兜底为点名应答" });
       return this.handleMention(room, text, options);
     }
-    if (this.agent.isBusy(room.conductorId)) {
-      this.notice({ roomId: room.roomId, message: `主持人 @${this.nameFor(room.roomId, room.conductorId)} 忙碌中` });
-      return { sent: [], mentioned: [], skipped: [room.conductorId] };
-    }
+    const conductorBusy = this.agent.isBusy(room.conductorId);
     const conductorId = room.conductorId;
     this.setSubMode(room.roomId, "deciding", conductorId, undefined);
     const autoCtx: AutoDecisionContext = {
@@ -1998,7 +2060,7 @@ export class RoomModeManager {
         message: `主持人决策启动失败：${err instanceof Error ? err.message : String(err)}`,
       });
     });
-    return { sent: [conductorId], mentioned: [], skipped: [] };
+    return { sent: conductorBusy ? [] : [conductorId], mentioned: [], skipped: conductorBusy ? [conductorId] : [] };
   }
 
   private buildAutoPrompt(

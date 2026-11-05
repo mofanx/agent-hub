@@ -1410,4 +1410,56 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+
+  it("busy 入队 → finishTurn 后 drain 合并为单 turn", async () => {
+    const received: string[] = [];
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const { hub, events } = setup({
+      promptHandler: (params) => {
+        received.push(
+          ((params.prompt ?? []) as Array<{ text?: string }>)
+            .map((b) => b.text ?? "").join(""),
+        );
+        return new Promise<acp.PromptResponse>((r) => { resolvers.push(r); });
+      },
+    });
+    await hub.createSession("/tmp", "s");
+    await hub.prompt("s1", "first");
+    await waitFor(() => (resolvers.length >= 1 ? resolvers.length : undefined));
+    assert.equal(hub.isBusy("s1"), true);
+    // busy 时两条后续入队而非抛错
+    await hub.prompt("s1", "follow A");
+    await hub.prompt("s1", "follow B");
+    assert.equal(hub.isBusy("s1"), true, "入队不打断运行中回合");
+    assert.equal(resolvers.length, 1, "入队未立即外发");
+    resolvers[0]!({ stopReason: "end_turn" });
+    await waitFor(() => (resolvers.length >= 2 ? resolvers.length : undefined));
+    assert.equal(received[1], "follow A\n\nfollow B", "drain 合并为单 prompt");
+    resolvers[1]!({ stopReason: "end_turn" });
+    await waitFor(
+      () => (events.filter((e) => e.method === "prompt.done").length >= 2 ? true : undefined),
+      3000,
+    );
+  });
+
+  it("队列上限 5：溢出丢弃并告警", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const received: string[] = [];
+    const { hub } = setup({
+      promptHandler: (params) => {
+        received.push(((params.prompt ?? []) as Array<{ text?: string }>).map((b) => b.text ?? "").join(""));
+        return new Promise<acp.PromptResponse>((r) => { resolvers.push(r); });
+      },
+    });
+    await hub.createSession("/tmp", "s");
+    await hub.prompt("s1", "first");
+    await waitFor(() => (resolvers.length >= 1 ? resolvers.length : undefined));
+    for (let i = 0; i < 7; i++) await hub.prompt("s1", `extra ${i}`);
+    resolvers[0]!({ stopReason: "end_turn" });
+    await waitFor(() => (resolvers.length >= 2 ? resolvers.length : undefined));
+    const drained = received[1]!.split("\n\n");
+    assert.equal(drained.length, 5, "仅前 5 条入队，溢出 2 条丢弃");
+    resolvers[1]!({ stopReason: "end_turn" });
+  });
+
 });

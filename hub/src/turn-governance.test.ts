@@ -313,6 +313,140 @@ describe("turnGuards 生命周期", () => {
     assert.equal(manager.isRoomTurn("s1"), false, "发送失败不得留下在途房间归属");
   });
 
+  it("steer-queue：busy 入队不登记 turnGuard，不覆盖在跑 turn 的游标", async () => {
+    const { store, room, agent, manager, prompts } = setup();
+    let busy = false;
+    agent.isBusy = () => busy;
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+    assert.equal(guardsOf(manager).size, 1, "在跑 turn 已登记游标");
+    const guard = [...guardsOf(manager).values()][0] as { content: unknown };
+
+    busy = true;
+    await manager.handle(room, "@coder 排队消息", {});
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 1, "busy 消息未外发");
+    assert.equal(guardsOf(manager).size, 1, "入队不得覆盖在跑 turn 的 guard");
+    assert.equal(
+      [...guardsOf(manager).values()][0] === guard,
+      true,
+      "在跑 turn 的 guard 未被入队内容替换",
+    );
+  });
+
+  it("steer-queue：turn 完成后 drain 合并走 sendPrompt 正常登记 guard", async () => {
+    const { store, room, agent, manager, prompts } = setup();
+    let busy = false;
+    agent.isBusy = () => busy;
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+
+    busy = true;
+    await manager.handle(room, "@coder 补充A", {});
+    await manager.handle(room, "@coder 补充B", {});
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 1);
+
+    busy = false;
+    await manager.onPromptDone("s1", "完成");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 2, "drain 后合并 prompt 外发");
+    assert.equal(guardsOf(manager).size, 1, "drain 出的 prompt 正常登记 guard");
+  });
+
+  it("steer-queue：在跑 turn 输出不误判 stale（入队消息不推进游标覆盖）", async () => {
+    const { store, room, agent, manager } = setup();
+    const contents: unknown[] = [];
+    agent.prompt = async (sid, content) => {
+      contents.push(content);
+    };
+    let busy = false;
+    agent.isBusy = () => busy;
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+    const firstPrompt = contents[0];
+
+    busy = true;
+    // 入队消息不经过 appendUser → 房史游标不推进 → 在跑 turn 不算 stale
+    await manager.handle(room, "@coder 排队", {});
+    busy = false;
+    await manager.onPromptDone("s1", "正常输出");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    // stale 重跑会用原 prompt 内容重发；这里第 2 次外发是 drain 的排队内容
+    assert.equal(contents.length, 2, "输出消费后 drain 排队消息");
+    assert.notEqual(contents[1], firstPrompt, "drain 外发的是排队内容，非 stale 重跑原 prompt");
+  });
+
+  it("队列上限 5：第 6 条丢弃", async () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create("team", [{ sessionId: "s1", name: "coder" }]);
+    const overflowAgent: AgentOps = {
+      prompt: async () => {},
+      isBusy: () => true,
+      cancel: async () => {},
+    };
+    const notices: string[] = [];
+    const manager = new RoomModeManager(overflowAgent, rooms, (_method, params) => {
+      notices.push(String((params as { message?: unknown }).message ?? ""));
+    });
+    manager.setStore(store);
+    for (let i = 0; i < 7; i++) {
+      await manager.handle(room, `@coder 第${i}条`, {});
+    }
+    const q = (manager as unknown as { followUps: Map<string, unknown[]> }).followUps.get("s1");
+    assert.equal(q?.length, 5, "队列封顶 5 条，溢出丢弃");
+    assert.equal(
+      notices.filter((m) => m.includes("已丢弃")).length,
+      2,
+      "溢出丢弃回执用户而非静默",
+    );
+  });
+
+  it("steer-queue：重启恢复后队列保留，成员 idle 即 drain", async () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create("team", [{ sessionId: "s1", name: "coder" }]);
+    let busy = true;
+    const prompts: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (_sid, content) => {
+        prompts.push(typeof content === "string" ? content : JSON.stringify(content));
+      },
+      isBusy: () => busy,
+      has: () => true,
+      cancel: async () => {},
+    };
+    const m1 = new RoomModeManager(agent, rooms, () => {});
+    m1.setStore(store);
+    await m1.handle(room, "@coder 排一", {});
+    await m1.handle(room, "@coder 排二", {});
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 0, "busy 期间全入队");
+
+    // 重启：新实例 import 持久化 runtime
+    const runtime = m1.exportRuntime();
+    const m2 = new RoomModeManager(agent, rooms, () => {});
+    m2.setStore(store);
+    await m2.importRuntime(runtime);
+    const q = (m2 as unknown as { followUps: Map<string, unknown[]> }).followUps.get("s1");
+    assert.equal(q?.length, 2, "恢复后队列保留 2 条");
+
+    busy = false; // 成员已 idle
+    m2.resumeFlows();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 1, "idle 后 drain 合并为单 prompt");
+    assert.ok(prompts[0]!.includes("排一") && prompts[0]!.includes("排二"));
+    assert.equal(
+      (m2 as unknown as { followUps: Map<string, unknown[]> }).followUps.size, 0,
+    );
+  });
+
   it("stale 重跑发送失败：走 prompt.error 终态收敛", async () => {
     const { store, room, agent, manager } = setup();
     appendUser(store, room.roomId, "@coder 问题");

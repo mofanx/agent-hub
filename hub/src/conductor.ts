@@ -169,6 +169,8 @@ type FlowTask = {
   finishedAt?: number;
   /** 最近一次派发失败时刻（重试链统计用，成功派发清零） */
   lastRetryAt?: number;
+  /** 重启对账已自动重跑过一次：再次恢复时不再自动重派（防循环） */
+  autoRetried?: boolean;
 };
 
 type Flow = {
@@ -2560,6 +2562,7 @@ export class ConductorOrchestrator {
         ...(t.verifications !== undefined ? { verifications: t.verifications } : {}),
         ...(t.backendRuns !== undefined ? { backendRuns: t.backendRuns } : {}),
         ...(t.automaticCheck !== undefined ? { automaticCheck: t.automaticCheck } : {}),
+        ...(t.autoRetried ? { autoRetried: true } : {}),
       })),
       supplements: flow.supplements,
       help: [...flow.help.values()],
@@ -2720,6 +2723,7 @@ export class ConductorOrchestrator {
               ? { failureMessage: o.failureMessage }
               : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
+          ...(o.autoRetried === true ? { autoRetried: true } : {}),
           ...(typeof o.helpRounds === "number" ? { helpRounds: o.helpRounds } : {}),
           ...(Array.isArray(o.verifications)
             ? {
@@ -2847,9 +2851,38 @@ export class ConductorOrchestrator {
         flow.phase = "planning";
       }
       const interrupted: string[] = [];
+      const autoResumed: string[] = [];
       if (flow.phase === "working") {
+        // 重启对账 outward()：running 任务查房史——该任务派发后若已有
+        // assistant/process/tool 外发信号则保守标 failed 人工重试；
+        // 可证无外发 → 回 pending 由 scheduleTasks 自动重派（每任务限 1 次防循环）
+        const roomHistory = this.store?.read("room", roomId) ?? [];
+        const OUTWARD_KINDS = new Set(["assistant", "process", "tool"]);
+        const memberName = (sid: string) =>
+          room.members.find((m) => m.sessionId === sid)?.name;
+        const hadOutward = (t: FlowTask): boolean => {
+          if (flow.results.has(t.id)) return true;
+          if ((t.backendRuns?.length ?? 0) > 0) return true;
+          if ((t.verifications?.length ?? 0) > 0) return true;
+          const name = memberName(t.sessionId);
+          if (name === undefined || t.dispatchedAt === undefined) return true;
+          return roomHistory.some(
+            (e) =>
+              e.at >= t.dispatchedAt! &&
+              OUTWARD_KINDS.has(e.kind) &&
+              (e.author === name || e.author.startsWith(`${name} (`)),
+          );
+        };
         for (const t of flow.tasks.values()) {
           if (t.status === "running" && !t.waitingForHelp) {
+            if (!t.autoRetried && !hadOutward(t)) {
+              t.status = "pending";
+              t.autoRetried = true;
+              delete t.failureMessage;
+              delete t.finishedAt;
+              autoResumed.push(t.id);
+              continue;
+            }
             t.status = "failed";
             t.failureMessage = "Hub 重启时执行状态未知，请检查工作区后重试";
             t.finishedAt = Date.now();
@@ -2882,7 +2915,9 @@ export class ConductorOrchestrator {
               ? "已恢复待规划任务，连接指挥家后继续规划。"
               : flow.phase === "awaiting-input"
                 ? `已恢复待确认的流程：指挥家正等待你答复 ${flow.clarification?.questions.length ?? 0} 个问题后继续规划。`
-                : "🔄 已恢复指挥编排，继续执行待派发任务",
+                : autoResumed.length > 0
+                  ? `🔄 已恢复指挥编排：任务 ${autoResumed.join(", ")} 确认无外发副作用，已自动重派；继续执行待派发任务`
+                  : "🔄 已恢复指挥编排，继续执行待派发任务",
       });
       if (flow.phase === "reviewing") {
         await this.review(flow, room).catch((err) => logError("conductor import review", err));

@@ -4,11 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { Store } from "./store.js";
+import { RoomManager } from "./room.js";
 import {
   MEMORY_LIMIT,
   MEMORY_PROMPT_LIMIT,
   MEMORY_TEXT_LIMIT,
   distillMemoryText,
+  isMemoryNearDup,
 } from "./memory.js";
 
 function makeStore(t?: { after: (fn: () => void) => void }): Store {
@@ -102,4 +104,60 @@ test("distillMemoryText: 跳过围栏/JSON 取首个人话行，超长截断", (
   assert.equal(distillMemoryText(long).length, MEMORY_TEXT_LIMIT + 1); // +省略号
   assert.equal(distillMemoryText("   \n  \n", 10), "");
   assert.ok(MEMORY_PROMPT_LIMIT <= MEMORY_LIMIT);
+});
+
+test("isMemoryNearDup: 全等/前缀变体/长公共前缀命中，短文本不误并", () => {
+  assert.equal(isMemoryNearDup("采用方案A", "采用方案a"), true);
+  assert.equal(isMemoryNearDup("决定：本周五发版，不再延期。", "决定本周五发版不再延期"), true);
+  // 截断/扩写互为前缀
+  const base = "修复了任务编排列表大空白问题，根因是 CRLF 空行未被折叠";
+  assert.equal(isMemoryNearDup(base, `${base}，已验证三形态`), true);
+  // 长公共前缀 ≥80%
+  const a = "工单系统现已支持创建、启动、停止、验收与删除全生命周期管理";
+  const b = "工单系统现已支持创建、启动、停止、验收与删除全生命周期的管理操作";
+  assert.equal(isMemoryNearDup(a, b), true);
+  // 短文本近似措辞不合并
+  assert.equal(isMemoryNearDup("修复了A问题", "修复了B问题"), false);
+  // 语义不同
+  assert.equal(
+    isMemoryNearDup("用户偏好中文回复", "目标工单需要交互式确认才能创建"),
+    false,
+  );
+});
+
+test("recordMemory: 近重复写入不堆积，刷新既有条目 TTL/来源", (t) => {
+  const store = makeStore(t);
+  const rooms = new RoomManager();
+  rooms.setStore(store);
+  const room = rooms.create("memdup", [{ sessionId: "s1", name: "a1" }]);
+  const now = Date.now();
+
+  rooms.recordMemory(room.roomId, "fact", "决定本周五发版，不再延期", "flow:x");
+  rooms.recordMemory(room.roomId, "fact", "决定：本周五发版，不再延期。", "flow:y");
+  const list = store.memoryList(room.roomId, now);
+  assert.equal(list.length, 1, "近重复应合并而非新增");
+  assert.equal(list[0]!.text, "决定本周五发版，不再延期");
+  assert.equal(list[0]!.source, "flow:y", "来源应刷新为最近写入");
+
+  // 非重复条目正常新增
+  rooms.recordMemory(room.roomId, "decision", "附件白名单放开文本与 PDF", "flow:z");
+  assert.equal(store.memoryList(room.roomId, now).length, 2);
+});
+
+test("清残留：脚手架长前缀+尾部分叉大→不误并", () => {
+  const a = "flow「修复登录页样式异常」完成：已修复 CSS 层叠问题，验证通过";
+  const b = "flow「修复登录页样式异常」完成：新增响应式断点，已回归";
+  assert.equal(isMemoryNearDup(a, b), false, "尾部分叉 25+ 不得误并");
+});
+
+test("清残留：修正型扩展新文本被合并保留（recordMemory 集成）", (t) => {
+  const store = makeStore(t);
+  const rooms = new RoomManager();
+  rooms.setStore(store);
+  const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+  rooms.recordMemory(room.roomId, "decision", "修复了 banner 分色", "s1");
+  rooms.recordMemory(room.roomId, "decision", "修复了 banner 分色并加了点击行为", "s1");
+  const mems = rooms.memoryForPrompt(room.roomId);
+  assert.equal(mems.length, 1, "扩展合并为一条");
+  assert.equal(mems[0]!.text, "修复了 banner 分色并加了点击行为", "保留信息更长的新文本");
 });

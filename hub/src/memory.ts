@@ -32,3 +32,30 @@ export function distillMemoryText(text: string, limit = MEMORY_TEXT_LIMIT): stri
       .find((l) => l && !NOISE_PREFIX.test(l)) ?? text.trim();
   return line.length > limit ? `${line.slice(0, limit)}…` : line;
 }
+
+/** 归一化：小写+剥标点/空白/截断省略号，把"同一事实的措辞变体"收敛到可比对形态 */
+const normMemory = (s: string): string =>
+  s.toLowerCase().replace(/[\s，。、：:；;,.!?！？·…\-—_（）()\[\]{}"'"'<>《》/\\]+/g, "");
+
+/** 近重复判定：归一化后全等 / 互为前缀（截断或扩写变体）/ 长公共前缀覆盖 ≥80%。
+ *  短文本（归一化 <20 字）只认全等与前缀，避免"修复A"/"修复B"级误合并 */
+export function isMemoryNearDup(a: string, b: string): boolean {
+  const na = normMemory(a);
+  const nb = normMemory(b);
+  if (!na || !nb) return false;
+  if (na === nb || na.startsWith(nb) || nb.startsWith(na)) return true;
+  const shorter = Math.min(na.length, nb.length);
+  if (shorter < 20) return false;
+  let i = 0;
+  while (i < shorter && na[i] === nb[i]) i++;
+  // ≥80% 公共前缀 且 分叉尾部够短——防模板/脚手架前缀放大误并两条不同内容
+  const maxLen = Math.max(na.length, nb.length);
+  return i / maxLen >= 0.8 && maxLen - i <= 25;
+}
+
+/** newer 是否为 older 的信息扩展（归一化后 older 是 newer 的前缀且更长） */
+export function memoryExtends(newer: string, older: string): boolean {
+  const nn = normMemory(newer);
+  const no = normMemory(older);
+  return nn.length > no.length && no.length > 0 && nn.startsWith(no);
+}
