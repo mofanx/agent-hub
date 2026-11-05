@@ -716,6 +716,7 @@ const roomModeManager = new RoomModeManager(
 );
 roomModeManager.setStore(store);
 
+let restoringRuntime = true;
 const missionManager = new MissionManager({
   store,
   getRoom: (roomId) => rooms.get(roomId),
@@ -873,6 +874,7 @@ restoreRuntime
     } catch (err) {
       logError("post-restore reconcile", err);
     }
+    restoringRuntime = false;
   });
 
 const scheduler = new Scheduler(
@@ -932,7 +934,7 @@ const wakeSelfSuppress = new Map<string, number>();
  *  正文只含房名+事件类型；NTFY_TOPIC 未配置时恒不推。 */
 const ntfyPusher = new NtfyPusher(ntfyConfigFromEnv());
 function notifyOffline(roomId: string | undefined, kind: NtfyKind): void {
-  if (!roomId) return;
+  if (restoringRuntime || !roomId) return;
   const room = rooms.get(roomId);
   void ntfyPusher
     .notifyIfOffline(roomId, room?.name ?? roomId, kind, clients.size)
@@ -948,7 +950,7 @@ function fireEventTasks(
   event: string,
   ctx: Record<string, unknown> = {},
 ): void {
-  if (!roomId) return;
+  if (restoringRuntime || !roomId) return;
   const now = Date.now();
   const wakeCtx = { kind: event, ...ctx };
   for (const task of scheduler.list()) {
