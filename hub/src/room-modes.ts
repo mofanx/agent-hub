@@ -1007,7 +1007,12 @@ export class RoomModeManager {
         this.rooms.route(room.roomId, text).mentioned.length > 0 ||
         (Array.isArray(options?.params?.targets) &&
           (options.params.targets as unknown[]).length > 0);
-      if (!explicit) {
+      // 待答豁免：成员正等待用户回答（澄清中/awaiting-retry 交还用户）时，
+      // 「好/可以/收到」这类正反短答是答复而非闲聊，跳过过滤直接放行
+      const awaitingAnswer =
+        this.conductor.pendingClarification(room.roomId) !== undefined ||
+        this.getFlow(room.roomId)?.waitingFor === "user";
+      if (!explicit && !awaitingAnswer) {
         const expects = options?.params;
         const expectsFlow = expects?.expectedFlowId !== undefined ? expects.expectedFlowId : undefined;
         const expectsMission = expects?.expectedMissionId !== undefined ? expects.expectedMissionId : undefined;
@@ -1087,6 +1092,25 @@ export class RoomModeManager {
       // 退化检测：conductor 全部任务指向同一成员时，编排开销无意义，降级执行
       let mode = decision.mode;
       let params = decision.params;
+      // 短回答兜底：判 self 但消息是 ≤10 字正反确认形态且房内有待答状态时，
+      // 多半是答复上文问题而非独立闲聊——回退派发最后发言成员（无待答不回退）
+      if (mode === "self") {
+        const SHORT_ANSWER = /^[\s\S]{1,10}$/;
+        const AFFIRM = /好|嗯|可以|是的|行|对|不|继续|ok|yes|sure|no/i;
+        const lastSpeaker = [...(room.blackboard ?? [])]
+          .reverse()
+          .map((e) => e.from)
+          .find((f) => room.members.some((m) => m.sessionId === f) && f !== room.conductorId);
+        const awaiting =
+          this.conductor.pendingClarification(room.roomId) !== undefined ||
+          this.getFlow(room.roomId)?.waitingFor === "user";
+        if (SHORT_ANSWER.test(autoCtx.text.trim()) && AFFIRM.test(autoCtx.text) &&
+            awaiting && lastSpeaker) {
+          mode = "mention";
+          params = { targets: [lastSpeaker] };
+          logWarn("room-modes auto", `短回答兜底：self→mention @${lastSpeaker}`);
+        }
+      }
       if (mode === "conductor" && Array.isArray(params?.tasks) && params.tasks.length > 0) {
         const resolved = (params.tasks as { to?: unknown }[]).map((t) =>
           typeof t.to === "string" ? resolveMemberByString(room, t.to)?.sessionId : undefined,

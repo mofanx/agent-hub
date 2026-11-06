@@ -570,3 +570,105 @@ describe("worker 过程输出归卡", () => {
     assert.equal(manager.flowIdForRoom(room.roomId), flow!.flowId);
   });
 });
+
+describe("短输入误判：待答豁免与 self 回退", () => {
+  const setup = () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "host" },
+      { sessionId: "s2", name: "worker" },
+    ], "auto", { conductorId: "s1" });
+    const sent: string[] = [];
+    const filtered: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid) => { sent.push(sid); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    manager.setStore(store);
+    return { store, room, sent, filtered, manager };
+  };
+
+  it("A：待答状态下短输入豁免 GREETING 拦截", async () => {
+    const { store, room, filtered, manager } = setup();
+    manager.setRelevanceFilter(async () => {
+      filtered.push("called");
+      return false; // 模拟闲聊判定
+    });
+    // 制造待答状态：conductor.pendingClarification stub
+    (manager as unknown as { conductor: { pendingClarification: (id: string) => unknown } }).conductor.pendingClarification =
+      () => ({ id: "c1", questions: ["确认继续吗？"] });
+    await manager.handle(room, "好", {});
+    assert.equal(filtered.length, 0, "待答状态不调过滤器——短答直接放行");
+  });
+
+  it("A：无待答状态短输入仍被拦截", async () => {
+    const { store, room, manager } = setup();
+    manager.setRelevanceFilter(async () => false);
+    (manager as unknown as { conductor: { pendingClarification: (id: string) => unknown } }).conductor.pendingClarification =
+      () => undefined;
+    const r = await manager.handle(room, "好", {});
+    assert.equal(r.sent.length, 0, "无待答状态仍走过滤拦截");
+  });
+});
+
+describe("self→lastSpeaker 回退收窄", () => {
+  const setup = () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "host" },
+      { sessionId: "s2", name: "worker" },
+    ], "auto", { conductorId: "s1" });
+    room.blackboard = room.blackboard ?? [];
+    room.blackboard.push({ id: "b1", from: "s2", detail: "", text: "上轮发言", at: Date.now() });
+    const agent: AgentOps = {
+      prompt: async () => {},
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    manager.setStore(store);
+    return { room, manager };
+  };
+
+  const stubPendingClar = (m: RoomModeManager, v: unknown) => {
+    (m as unknown as { conductor: { pendingClarification: (id: string) => unknown } })
+      .conductor.pendingClarification = () => v;
+  };
+
+  const selfDecision = async (m: RoomModeManager, roomId: string) => {
+    // 直接走决策消费分支：模拟 autoCtx 存在后 prompt.done 触发 self
+    const rm = m as unknown as {
+      autoDecisions: Map<string, unknown>;
+      executeMode: (room: unknown, mode: string, text: string, opts: unknown) => Promise<unknown>;
+    };
+    let executed: { mode: string; params: unknown } | undefined;
+    rm.executeMode = async (_r, mode, _t, opts) => {
+      executed = { mode, params: (opts as { params?: unknown }).params };
+      return { sent: [], mentioned: [], skipped: [] };
+    };
+    rm.autoDecisions.set("s1", { roomId, text: "好", note: undefined, quote: undefined, content: undefined, sessionNote: undefined, artifactContext: undefined, missionId: undefined });
+    await m.onPromptDone("s1", '```json\n{"mode":"self","reason":"简单对话"}\n```');
+    return executed;
+  };
+
+  it("无待答态+有 lastSpeaker+短回答→不回退（保 self）", async () => {
+    const { room, manager } = setup();
+    stubPendingClar(manager, undefined);
+    const r = await selfDecision(manager, room.roomId);
+    assert.equal(r?.mode, "self", "无待答态不触发回退");
+  });
+
+  it("有待答态→回退 mention lastSpeaker", async () => {
+    const { room, manager } = setup();
+    stubPendingClar(manager, { id: "c1", questions: ["继续吗？"] });
+    const r = await selfDecision(manager, room.roomId);
+    assert.equal(r?.mode, "mention", "待答态触发回退");
+    assert.deepEqual((r?.params as { targets?: string[] })?.targets, ["s2"]);
+  });
+});

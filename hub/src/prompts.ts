@@ -432,6 +432,7 @@ export function autoDecisionPrompt(args: {
     args.noteText ?? "",
     args.sessionNoteText ?? "",
     "",
+    "注意：短输入（好/可以/继续/嗯等）优先结合上下文判断是否在回答上文问题——若房内有待答任务或上轮成员提问，应派给等待中的成员，勿轻易判 self。",
     "现在请直接输出 JSON 代码块，不要有任何其他内容：",
   ].join("\n");
 }
