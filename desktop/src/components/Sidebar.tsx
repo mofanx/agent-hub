@@ -147,8 +147,8 @@ export function Sidebar() {
       })
       .sort((a, b) => {
         if (a.archived !== b.archived) return a.archived ? 1 : -1;
-        const pa = store.pinnedIds.includes(a.sessionId) ? 1 : 0;
-        const pb = store.pinnedIds.includes(b.sessionId) ? 1 : 0;
+        const pa = store.pinnedAt[a.sessionId] ?? -1;
+        const pb = store.pinnedAt[b.sessionId] ?? -1;
         if (pa !== pb) return pb - pa;
         return a.name.localeCompare(b.name);
       });
@@ -177,7 +177,12 @@ export function Sidebar() {
         }
         return true;
       })
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => {
+        const pa = store.pinnedRoomAt[a.roomId] ?? -1;
+        const pb = store.pinnedRoomAt[b.roomId] ?? -1;
+        if (pa !== pb) return pb - pa;
+        return a.name.localeCompare(b.name);
+      });
     if (roomFilter.groupBy === "none") return [{ title: "", rooms: list }];
     const map = new Map<string, RoomInfo[]>();
     for (const r of list) {
@@ -694,6 +699,11 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
         ) : (
           <>
             <span className="nav-title">
+              {store.pinnedRoomAt[r.roomId] !== undefined && (
+                <span className="pin-mark">
+                  <Pin size={10} />
+                </span>
+              )}
               {r.name}
               {r.archived && <span className="offline-tag">{S.statusArchived}</span>}
             </span>
@@ -705,6 +715,9 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
       </div>
       {!batch && !renaming && (
         <div className="nav-actions" onClick={(e) => e.stopPropagation()}>
+          <button className="icon-btn" title={store.pinnedRoomAt[r.roomId] !== undefined ? S.unpinTitle : S.pinTitle} onClick={() => store.toggleRoomPin(r.roomId)}>
+            <Pin size={12} />
+          </button>
           <button className="icon-btn" title={S.renameTitle} onClick={() => { setName(r.name); setRenaming(true); }}>
             <Pencil size={12} />
           </button>

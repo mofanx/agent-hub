@@ -552,6 +552,8 @@ export interface SkillInfo {
 export interface AppConfig {
   profiles: ConnProfile[];
   pinned: string[];
+  pinnedAt?: Record<string, number>;
+  pinnedRooms?: Record<string, number>;
   cwds: string[];
   commands: string[];
   theme: string;

@@ -792,13 +792,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     val profiles = mutableStateListOf<ConnProfile>()
 
-    val pinnedIds = mutableStateListOf<String>().apply {
-        addAll(prefs.getStringSet("pinned", emptySet())!!)
+    // 置顶时间戳：后置顶的排最前（pinnedAt 倒序）；旧 pinned set 迁移为 ts=0
+    val pinnedAt = mutableStateMapOf<String, Long>().apply {
+        prefs.getString("pinnedAt", "{}")!!.let { raw ->
+            runCatching {
+                org.json.JSONObject(raw).let { j -> j.keys().forEach { put(it, j.getLong(it)) } }
+            }
+        }
+        for (id in prefs.getStringSet("pinned", emptySet())!!) {
+            if (!containsKey(id)) put(id, 0L)
+        }
     }
+    val pinnedIds get() = pinnedAt.keys
 
     fun togglePin(sessionId: String) {
-        if (pinnedIds.contains(sessionId)) pinnedIds.remove(sessionId) else pinnedIds.add(sessionId)
-        prefs.edit().putStringSet("pinned", pinnedIds.toSet()).apply()
+        if (pinnedAt.containsKey(sessionId)) pinnedAt.remove(sessionId)
+        else pinnedAt[sessionId] = System.currentTimeMillis()
+        savePinnedMap("pinnedAt", pinnedAt)
+    }
+
+    val pinnedRoomAt = mutableStateMapOf<String, Long>().apply {
+        prefs.getString("pinnedRoomsAt", "{}")!!.let { raw ->
+            runCatching {
+                org.json.JSONObject(raw).let { j -> j.keys().forEach { put(it, j.getLong(it)) } }
+            }
+        }
+    }
+
+    fun toggleRoomPin(roomId: String) {
+        if (pinnedRoomAt.containsKey(roomId)) pinnedRoomAt.remove(roomId)
+        else pinnedRoomAt[roomId] = System.currentTimeMillis()
+        savePinnedMap("pinnedRoomsAt", pinnedRoomAt)
+    }
+
+    private fun savePinnedMap(key: String, map: Map<String, Long>) {
+        val j = org.json.JSONObject()
+        for ((k, v) in map) j.put(k, v)
+        prefs.edit().putString(key, j.toString()).apply()
     }
 
     val recentCwds = mutableStateListOf<String>().apply {
@@ -1320,7 +1350,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             s.busy || busyIds.contains(s.sessionId) -> add(SessionStatus.Busy)
             !s.archived -> add(SessionStatus.Online)
         }
-        if (pinnedIds.contains(s.sessionId)) add(SessionStatus.Pinned)
+        if (pinnedAt.containsKey(s.sessionId)) add(SessionStatus.Pinned)
     }
 
     fun filteredSessionGroups(): List<SessionListGroup> {
@@ -1338,7 +1368,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             true
         }.sortedWith(
             compareByDescending<SessionInfo> { !it.archived }
-                .thenByDescending { pinnedIds.contains(it.sessionId) }
+                .thenByDescending { pinnedAt[it.sessionId] != null }
+                .thenByDescending { pinnedAt[it.sessionId] ?: 0L }
                 .thenBy { it.name.lowercase() }
         )
         return when (filter.groupBy) {
@@ -1363,7 +1394,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             true
         }.sortedWith(
-            compareBy<RoomInfo> { it.name.lowercase() }
+            compareByDescending<RoomInfo> { pinnedRoomAt[it.roomId] != null }
+                .thenByDescending { pinnedRoomAt[it.roomId] ?: 0L }
+                .thenBy { it.name.lowercase() }
         )
         return when (filter.groupBy) {
             RoomGroupBy.None -> listOf(RoomListGroup("", filtered))
@@ -4845,7 +4878,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             hay.contains(query)
         }.sortedWith(
             compareByDescending<SessionInfo> { !it.archived }
-                .thenByDescending { pinnedIds.contains(it.sessionId) }
+                .thenByDescending { pinnedAt[it.sessionId] != null }
+                .thenByDescending { pinnedAt[it.sessionId] ?: 0L }
                 .thenBy { it.name.lowercase() }
         ).take(5)
     }
@@ -4858,7 +4892,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val members = r.members.joinToString(" ") { it.second }.lowercase()
             val hay = "${r.name} ${r.mode} $members".lowercase()
             hay.contains(query)
-        }.sortedBy { it.name.lowercase() }.take(5)
+        }.sortedWith(
+            compareByDescending<RoomInfo> { pinnedRoomAt[it.roomId] != null }
+                .thenByDescending { pinnedRoomAt[it.roomId] ?: 0L }
+                .thenBy { it.name.lowercase() }
+        ).take(5)
     }
 
     fun archiveSession(session: SessionInfo, archived: Boolean) {

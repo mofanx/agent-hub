@@ -66,6 +66,8 @@ interface State {
   client: HubClient | null;
   profiles: ConnProfile[];
   pinnedIds: string[];
+  pinnedAt: Record<string, number>;
+  pinnedRoomAt: Record<string, number>;
   recentCwds: string[];
   customCommands: string[];
   defaultCommands: string[];
@@ -159,6 +161,7 @@ interface Actions {
   persistConfig(): Promise<void>;
 
   togglePin(sessionId: string): void;
+  toggleRoomPin(roomId: string): void;
   noteCwd(cwd: string): void;
   removeCwd(cwd: string): void;
   addCommand(text: string): void;
@@ -474,6 +477,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const cfg: AppConfig = {
       profiles,
       pinned: pinnedIds,
+      pinnedAt: get().pinnedAt,
+      pinnedRooms: get().pinnedRoomAt,
       cwds: recentCwds,
       commands: customCommands,
       theme: themeMode,
@@ -1011,6 +1016,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       ...defaultConfig,
       profiles: get().profiles,
       pinned: get().pinnedIds,
+      pinnedAt: get().pinnedAt,
+      pinnedRooms: get().pinnedRoomAt,
       cwds: get().recentCwds,
       commands: get().customCommands,
       theme: get().themeMode,
@@ -2187,6 +2194,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     client: null,
     profiles: [],
     pinnedIds: [],
+      pinnedAt: {},
+      pinnedRoomAt: {},
     recentCwds: [],
     customCommands: [],
     defaultCommands: (() => {
@@ -2294,6 +2303,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         set({
           profiles,
           pinnedIds: cfg.pinned ?? [],
+          pinnedAt: { ...(cfg.pinnedAt ?? {}), ...Object.fromEntries((cfg.pinned ?? []).filter((id) => !(id in (cfg.pinnedAt ?? {}))).map((id) => [id, 0])) },
+          pinnedRoomAt: cfg.pinnedRooms ?? {},
           recentCwds: cfg.cwds ?? [],
           customCommands: cfg.commands ?? [],
           themeMode: cfg.theme ?? "system",
@@ -2310,11 +2321,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
     persistConfig: persist,
 
     togglePin: (sessionId: string) => {
-      const { pinnedIds } = get();
+      const { pinnedIds, pinnedAt } = get();
       const next = pinnedIds.includes(sessionId)
         ? pinnedIds.filter((id) => id !== sessionId)
         : [...pinnedIds, sessionId];
-      set({ pinnedIds: next });
+      const at = { ...pinnedAt };
+      if (pinnedIds.includes(sessionId)) delete at[sessionId]; else at[sessionId] = Date.now();
+      set({ pinnedIds: next, pinnedAt: at });
+      persist();
+    },
+    toggleRoomPin: (roomId: string) => {
+      const { pinnedRoomAt } = get();
+      const at = { ...pinnedRoomAt };
+      if (roomId in at) delete at[roomId]; else at[roomId] = Date.now();
+      set({ pinnedRoomAt: at });
       persist();
     },
 

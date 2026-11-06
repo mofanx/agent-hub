@@ -1981,6 +1981,14 @@ private fun RoomCard(
                         color = if (r.archived) MaterialTheme.colorScheme.onSurfaceVariant
                             else MaterialTheme.colorScheme.onSurface,
                     )
+                    if (vm.pinnedRoomAt.containsKey(r.roomId)) {
+                        Icon(
+                            Icons.Filled.PushPin,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
                     val modeLabel = when (r.mode) {
                         "mention" -> S.modeMention
                         "conductor" -> S.modeConductor
