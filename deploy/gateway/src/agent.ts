@@ -11,6 +11,14 @@ const PROTO_V = 1;
 
 const envelope = (msg: Record<string, unknown>) => JSON.stringify({ v: PROTO_V, ...msg });
 
+/** 日志脱敏：startAgent 注册密钥后，本模块所有日志出口统一替换为 <redacted>。
+ *  单点防护——后续新增日志点天然带上，优于逐点脱敏。 */
+let SECRETS: string[] = [];
+const redact = (v: unknown): unknown =>
+  typeof v === 'string' ? SECRETS.reduce((s, t) => (t ? s.split(t).join('<redacted>') : s), v) : v;
+const log = (...a: unknown[]) => console.log(...a.map(redact));
+const warn = (...a: unknown[]) => console.warn(...a.map(redact));
+
 export function startAgent(options: {
   hubId: string;
   gatewayUrl: string;
@@ -26,6 +34,7 @@ export function startAgent(options: {
   const base = gatewayUrl.replace(/\/$/, '');
   const controlUrl = `${base}/control/${encodeURIComponent(hubId)}`;
   const publicToken = resolvePublicToken(hubId, options.publicToken);
+  SECRETS = [gatewayToken, publicToken, hubToken].filter((t) => t.length >= 8);
   const localBase = localHubUrl.replace(/\/$/, '');
 
   let remote: WebSocket | null = null;
@@ -80,7 +89,7 @@ export function startAgent(options: {
         conns.find((c) => c.local && c.agent === 'devin')?.id ??
         null;
     } catch (err) {
-      console.warn(`[agent] connection.list failed: ${String(err)}`);
+      warn(`[agent] connection.list failed: ${String(err)}`);
     }
     // 解析不到时兜底标准种子 id：挂在不存在的连接上仅是不匹配，无副作用
     return quotaConnectionId ?? 'local-devin';
@@ -125,7 +134,7 @@ export function startAgent(options: {
       setTimeout(ensureHubConn, 5000);
     });
     ws.on('error', (err) => {
-      console.warn(`[agent] local hub conn error: ${err.message}`);
+      warn(`[agent] local hub conn error: ${err.message}`);
     });
   };
 
@@ -173,7 +182,7 @@ export function startAgent(options: {
     };
     conn.on('close', cleanup);
     conn.on('error', (err) => {
-      console.warn(`[agent] local conn ch=${ch} error: ${err.message}`);
+      warn(`[agent] local conn ch=${ch} error: ${err.message}`);
       conn.close();
     });
   };
@@ -185,6 +194,14 @@ export function startAgent(options: {
     conn?.close();
   };
 
+  /** 致命 code：认证/策略/协议类——重连无意义，exit 让 PM2 兜底 */
+  const FATAL_CODES = new Set([1000, 1008, 4001, 4003, 4403]);
+  /** 重连指标：重连风暴不能无声——结构化字段随重连日志输出 */
+  const stats = { reconnects: 0, lastCloseCode: -1, lastDisconnectAt: '' };
+  let reconnectAttempts = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const connect = () => {
   remote = new WebSocket(controlUrl, {
     headers: {
       Authorization: `Bearer ${gatewayToken}`,
@@ -200,13 +217,14 @@ export function startAgent(options: {
   let remoteAlive = false;
 
   remote.on('open', () => {
-    console.log(`[agent] connected to gateway as ${hubId}`);
+    log(`[agent] connected to gateway as ${hubId}`);
+    reconnectAttempts = 0;
     // 协议握手：server 要求 control 首帧为 hello，否则按旧版拒绝
     remote?.send(envelope({ type: 'hello', proto: PROTO_V }));
     remoteAlive = true;
     heartbeat = setInterval(() => {
       if (!remoteAlive) {
-        console.warn('[agent] heartbeat pong timeout, terminating');
+        warn('[agent] heartbeat pong timeout, terminating');
         remote?.terminate();
         return;
       }
@@ -225,13 +243,13 @@ export function startAgent(options: {
     try {
       msg = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      console.warn('[agent] protocol mismatch: non-JSON control frame (gateway upgrade required)');
+      warn('[agent] protocol mismatch: non-JSON control frame (gateway upgrade required)');
       remote?.close(1008, 'protocol mismatch');
       return;
     }
     if (msg.type === 'registered') {
-      console.log(`[agent] public url: ${msg.publicUrl}`);
-      console.log(`[agent] public token: ${msg.publicToken}`);
+      log(`[agent] public url: ${msg.publicUrl}`);
+      log('[agent] public token: <redacted>');
       if (typeof msg.publicUrl === 'string' && typeof msg.publicToken === 'string') {
         announceToHub({ publicUrl: msg.publicUrl, publicToken: msg.publicToken });
       }
@@ -239,7 +257,7 @@ export function startAgent(options: {
     }
     // 信封帧：v:1 + open/data/close
     if (msg.v !== PROTO_V) {
-      console.warn('[agent] protocol mismatch: non-envelope frame (gateway upgrade required)');
+      warn('[agent] protocol mismatch: non-envelope frame (gateway upgrade required)');
       remote?.close(1008, 'protocol mismatch');
       return;
     }
@@ -268,8 +286,9 @@ export function startAgent(options: {
     }
   });
 
-  remote.on('close', (code) => {
-    console.log(`[agent] gateway disconnected (code ${code})`);
+  remote.on('close', (code, reason) => {
+    const reasonText = reason?.toString() ?? '';
+    log(`[agent] gateway disconnected (code ${code}${reasonText ? `, reason: ${reasonText}` : ''})`);
     if (heartbeat) {
       clearInterval(heartbeat);
       heartbeat = null;
@@ -277,13 +296,34 @@ export function startAgent(options: {
     for (const conn of localConns.values()) conn.close();
     localConns.clear();
     pending.clear();
-    process.exit(code === 1000 ? 0 : 1);
+    stats.lastCloseCode = code;
+    stats.lastDisconnectAt = new Date().toISOString();
+    if (FATAL_CODES.has(code)) {
+      process.exit(code === 1000 ? 0 : 1);
+      return;
+    }
+    // 瞬态断连：进程内指数退避重连（1s ×2 封顶 30s + ±30% jitter）；
+    // 不设硬上限（长驻中继保活优于重启），连败 ≥10 次升 error 告警防静默
+    const attempt = reconnectAttempts++;
+    const base = Math.min(1000 * 2 ** attempt, 30_000);
+    const delay = Math.round(base * (0.7 + Math.random() * 0.6));
+    stats.reconnects++;
+    const meta = `attempt=${attempt + 1} delay=${delay}ms reconnects=${stats.reconnects} lastClose=${stats.lastCloseCode}`;
+    if (attempt + 1 >= 10) {
+      warn(`[agent] gateway reconnect backoff ${meta} lastDisconnectAt=${stats.lastDisconnectAt}`);
+    } else {
+      warn(`[agent] gateway reconnect backoff ${meta}`);
+    }
+    reconnectTimer = setTimeout(connect, delay);
   });
 
   remote.on('error', (err) => {
-    console.error('[agent] gateway error:', err.message);
-    process.exit(1);
+    // error→close 必然随后触发：只记日志，由 close 单点驱动重连/退出，防双计时器竞态
+    warn('[agent] gateway error:', err.message);
   });
+  };
+
+  connect();
 }
 
 function generateToken(): string {
@@ -312,9 +352,9 @@ function resolvePublicToken(hubId: string, configured?: string): string {
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, fresh, { mode: 0o600 });
-    console.log(`[agent] public token generated and persisted: ${file}`);
+    log(`[agent] public token generated and persisted: ${file}`);
   } catch (err) {
-    console.error(`[agent] failed to persist public token (${file}); clients will lose access on restart:`, err);
+    warn(`[agent] failed to persist public token (${file}); clients will lose access on restart:`, err);
   }
   return fresh;
 }
