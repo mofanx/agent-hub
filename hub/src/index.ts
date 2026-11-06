@@ -685,6 +685,7 @@ const agentOps: AgentOps = {
     // async 包装：ownerOf 的同步 throw（agent 未连接）转为 rejected promise，
     // 使 sendPrompt/.catch 兜底可挂——否则同步逃逸导致 autoDecisions/turnGuards 悬挂
     const agent = ownerOf(sessionId);
+    turnEnds.delete(sessionId);
     if (typeof content === "string") return agent.prompt(sessionId, content);
     return agent.promptContent(sessionId, content);
   },
@@ -1090,7 +1091,12 @@ const stableFingerprint = (v: unknown): string => {
 };
 /** 每会话当前 turn 起始时刻（首个 turn 事件记录，turn 结束清除），operation ledger 的 opId 限定符 */
 const turnStarts = new Map<string, number>();
+/** turn 已结束锁存：prompt.done/error 后置位、下次 prompt 派发清除。
+ *  ACP 会在 done 后补发尾部 session.update（tool_call_update 终态等），
+ *  若无此闸它们会 markTurnStart 复活幽灵 turn、污染下一回合过程卡或落出晚于总结的迟卡 */
+const turnEnds = new Map<string, number>();
 const markTurnStart = (sessionId: string): void => {
+  if (turnEnds.has(sessionId)) return;
   if (!turnStarts.has(sessionId)) turnStarts.set(sessionId, Date.now());
 };
 
@@ -1205,6 +1211,7 @@ function onTurnProgress(sessionId: string, fullText: string): void {
 
 function interruptTurnDrafts(sessionId: string): void {
   turnStarts.delete(sessionId);
+  turnEnds.set(sessionId, Date.now());
   flushTurnProcess(sessionId, "interrupted");
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
@@ -1227,6 +1234,7 @@ function onTurnEnd(
   const displayName = displayNameFor(sessionId);
   const t0 = turnStarts.get(sessionId) ?? Date.now();
   turnStarts.delete(sessionId);
+  turnEnds.set(sessionId, Date.now());
   flushTurnProcess(sessionId, status);
   const draft = turnDrafts.get(sessionId);
   dropTurnDraft(sessionId);
@@ -1473,7 +1481,7 @@ function onAgentEvent(event: HubEvent): void {
     });
   } else if (event.method === "session.update" && sessionId) {
     const update = (event.params as Record<string, unknown> | undefined)?.update;
-    if (update !== undefined) {
+    if (update !== undefined && !turnEnds.has(sessionId)) {
       markTurnStart(sessionId);
       turnProcess.record(sessionId, update as Record<string, unknown>, displayNameFor(sessionId));
       roomModeManager.observeToolUpdate(sessionId, update);
@@ -1988,6 +1996,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       sessionLedger.drop(sessionId);
       dropTurnDraft(sessionId);
       turnStarts.delete(sessionId);
+      turnEnds.delete(sessionId);
       turnProcess.clear(sessionId);
       modelManager.clearSessionConfig(sessionId);
       store.deleteHistory("session", sessionId);
@@ -2021,6 +2030,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         sessionLedger.drop(sessionId);
         dropTurnDraft(sessionId);
         turnStarts.delete(sessionId);
+        turnEnds.delete(sessionId);
         turnProcess.clear(sessionId);
         modelManager.clearSessionConfig(sessionId);
         store.deleteHistory("session", sessionId);
