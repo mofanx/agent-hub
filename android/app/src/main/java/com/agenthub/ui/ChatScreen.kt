@@ -61,6 +61,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -2439,7 +2440,7 @@ private fun TaskProcessSection(roomId: String, flowId: String, task: FlowTask, v
             vm.loadTaskProcess(roomId, task, flowId)
         }
     }
-    val procScroll = rememberScrollState()
+    val procScroll = rememberLazyListState()
     // 首次拿到条目滚底；之后仅视口本已贴底（canScrollForward==false）时跟随新条目，
     // 用户上翻不打断。canScrollForward 须在等帧前采样——等帧后新条目已布局，
     // maxValue 变大，贴底判定会永远为 false
@@ -2450,47 +2451,59 @@ private fun TaskProcessSection(roomId: String, flowId: String, task: FlowTask, v
         if (!follow) return@LaunchedEffect
         initialScrolled.value = true
         withFrameNanos { }
-        procScroll.scrollTo(procScroll.maxValue)
+        procScroll.scrollToItem(procScroll.layoutInfo.totalItemsCount - 1)
     }
-    Column(
-        Modifier
+    // LazyColumn 收包内容高度（content<280 不撑满）；verticalScroll 的 Column 恒吃满
+    // 约束上限——内容少时尾部留白，是卡内中段空白的来源
+    LazyColumn(
+        state = procScroll,
+        modifier = Modifier
             .padding(start = 20.dp, top = 2.dp)
-            .heightIn(max = 280.dp)
-            .verticalScroll(procScroll),
+            .heightIn(max = 280.dp),
     ) {
         when {
-            !items.isNullOrEmpty() -> items.forEach { child ->
+            !items.isNullOrEmpty() -> items(items) { child ->
                 ProcessStepRow(child)
             }
-            unavailable -> Text(
-                S.processUnavailable,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-            items == null -> Text(
-                failed?.let { S.loadFailedFmt.format(it) } ?: S.processLoading,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (failed != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            else -> Text(
-                if (task.status == "running") S.processRunningHint else S.processEmpty,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            unavailable -> item {
+                Text(
+                    S.processUnavailable,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            items == null -> item {
+                Text(
+                    failed?.let { S.loadFailedFmt.format(it) } ?: S.processLoading,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (failed != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> item {
+                Text(
+                    if (task.status == "running") S.processRunningHint else S.processEmpty,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         if (failed != null && items != null) {
-            Text(
-                S.loadFailedFmt.format(failed),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+            item {
+                Text(
+                    S.loadFailedFmt.format(failed),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
         if (task.status == "running" && !items.isNullOrEmpty()) {
-            Text(
-                S.processRunningHint,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.tertiary,
-            )
+            item {
+                Text(
+                    S.processRunningHint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
         }
     }
 }
@@ -2627,17 +2640,23 @@ private fun RawChatBubble(
                     shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
                     color = bgColor,
                 ) {
-                    MarkdownText(
-                        text = item.text,
-                        modifier = Modifier
-                            .then(if (innerScroll) Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()) else Modifier)
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        textColor = textColor,
-                        fontSize = MaterialTheme.typography.bodyLarge.fontSize,
-                        highlight = highlight,
-                        onMatchKeywordY = keywordCallback,
-                        streaming = vm.generating && vm.chatItems.lastOrNull() === item,
-                    )
+                    val md: @Composable () -> Unit = {
+                        MarkdownText(
+                            text = item.text,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            textColor = textColor,
+                            fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                            highlight = highlight,
+                            onMatchKeywordY = keywordCallback,
+                            streaming = vm.generating && vm.chatItems.lastOrNull() === item,
+                        )
+                    }
+                    if (innerScroll) {
+                        // LazyColumn 收包：短文本不撑满 400 上限（verticalScroll 恒占满留尾白）
+                        LazyColumn(Modifier.heightIn(max = 400.dp)) { item { md() } }
+                    } else {
+                        md()
+                    }
                 }
             }
             if (item.usage != null) {
@@ -2678,19 +2697,21 @@ private fun RawChatBubble(
                             color = bgColor,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .then(if (innerScroll) Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()) else Modifier)
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                            ) {
-                                HighlightText(
-                                    item.text,
-                                    highlight,
-                                    onMatchKeywordY = keywordCallback,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = textColor,
-                                )
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+                                val body: @Composable () -> Unit = {
+                                    HighlightText(
+                                        item.text,
+                                        highlight,
+                                        onMatchKeywordY = keywordCallback,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = textColor,
+                                    )
+                                }
+                                if (innerScroll) {
+                                    LazyColumn(Modifier.heightIn(max = 360.dp)) { item { body() } }
+                                } else {
+                                    body()
+                                }
                             }
                         }
                     }
@@ -3512,16 +3533,16 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         Spacer(Modifier.height(2.dp))
                     }
                 }
-                Text(
-                    task.task,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 240.dp)
-                        .verticalScroll(rememberScrollState())
-
-                )
+                // LazyColumn 收包：短文本不撑满 240 上限（verticalScroll 恒占满约束会留尾白）
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
+                    item {
+                        Text(
+                            task.task,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
                 if (task.status == "pending") {
                     if (task.dependsOn.isNotEmpty()) {
                         Text("${S.dependsOnLabel}${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3531,14 +3552,11 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                 }
                 task.output?.takeIf { it.isNotBlank() }?.let {
                     Spacer(Modifier.height(2.dp))
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState()),
-                    )
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
+                        item {
+                            Text(it, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
                 if (task.status == "done") {
                     val statusText = when (task.verificationStatus) {
