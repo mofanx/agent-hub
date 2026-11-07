@@ -4392,7 +4392,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var i = chatItems.size
         while (i > 0) {
             val it = chatItems[i - 1]
-            val inFlight = it.id > 0 && it.at <= 0L &&
+            // 在途回合条目（流式/刚完成、尚未合并 historyId）恒视作在飞——其 at 是
+            // 回合开始时刻而非完成时刻，迟到落库卡必须越过它们回到自己的时间位
+            val inFlight = historyIdOf(it) == null &&
                 (it is ChatItem.Assistant || it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan)
             if (it.at > at || inFlight) i-- else break
         }
