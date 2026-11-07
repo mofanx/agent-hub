@@ -3716,10 +3716,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             sameHistoryItem(old, it) || (old is ChatItem.Permission && it is ChatItem.Decision && old.requestId == it.requestId)
         } }
         // 过程卡 at<=0 时用 turnEndAt/turnStartAt 归位——否则晚到的执行过程排尾部而非汇总前
+        // 在途条目（流式/刚完成未合并 historyId）at 是回合开始时刻而非完成时刻，
+        // 按其 at 排序会把 at 更大的迟到落库卡钉在流式结论之后——在途条目恒置尾键
         val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { item ->
-            val at = if (item is ChatItem.Process && item.at <= 0)
-                item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
-            else item.at
+            val inFlight = historyIdOf(item) == null &&
+                (item is ChatItem.Assistant || item is ChatItem.Thought ||
+                    item is ChatItem.Tool || item is ChatItem.Plan)
+            val at = if (inFlight) Long.MAX_VALUE
+                else if (item is ChatItem.Process && item.at <= 0)
+                    item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
+                else item.at
             if (at <= 0) Long.MAX_VALUE else at
         }
         updateScopeItems(key, combined)
@@ -4378,27 +4384,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } ?: return
         val item = parseDecisionMeta(if (eid != null) -eid else ++itemSeq, meta, author, at) ?: return
         upsertDecision(item)
-    }
-
-    /**
-     * 已落库条目（room.process 推送的房史行）的插入位：
-     * 越过尾部两类条目以对齐房史持久化序——
-     * 1) at 大于卡时间的条目（卡是迟到补写，应回到自己的时间位）；
-     * 2) 未落库的在途回合流式条目（assistant/thought/tool/plan，其 live at 是回合开始时刻，
-     *    持久化 at 才是完成时刻）——否则过程卡会被追加到正在流式/刚完成的结论之后。
-     */
-    private fun persistedInsertIndex(at: Long): Int {
-        if (at <= 0L) return chatItems.size
-        var i = chatItems.size
-        while (i > 0) {
-            val it = chatItems[i - 1]
-            // 在途回合条目（流式/刚完成、尚未合并 historyId）恒视作在飞——其 at 是
-            // 回合开始时刻而非完成时刻，迟到落库卡必须越过它们回到自己的时间位
-            val inFlight = historyIdOf(it) == null &&
-                (it is ChatItem.Assistant || it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan)
-            if (it.at > at || inFlight) i-- else break
-        }
-        return i
     }
 
     private fun parseProcessMeta(itemId: Long, data: JsonObject, author: String, at: Long): ChatItem.Process =
