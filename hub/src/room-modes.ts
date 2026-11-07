@@ -292,6 +292,8 @@ export class RoomModeManager {
   private roomSubMode = new Map<string, { mode: RuntimeMode; activeSpeaker?: string | undefined; reason?: string | undefined }>();
   /** 决策回合锁存（sessionId→roomId）：决策应用即清 subMode，但 turnEnd flush 仍需识别该 turn 为内部决策 */
   private decidingTurnLatches = new Map<string, string>();
+  /** 回合 flow 上下文锁存：sendPrompt 派发时点快照，turnEnd 时 flow 已删除仍可正确归卡/判隐藏 */
+  private turnFlowCtx = new Map<string, { roomId: string; flowId?: string | undefined; taskId?: string | undefined; hidden: boolean }>();
   private promptRooms = new Map<string, string>();
   private autoHistory = new Map<string, { at: number; mode: string; reason: string; accepted?: boolean }[]>();
   private lastAuto = new Map<string, { at: number }>();
@@ -463,12 +465,23 @@ export class RoomModeManager {
       return;
     }
     this.promptRooms.set(sessionId, roomId);
+    // 派发时点锁存 flow 上下文：turnEnd flush 时 flow 可能已被 removeFlow，现查必落空
+    //（isHiddenTurn/taskIdForTurn/flowIdForRoom 全依赖运行期 flow——worker 孤儿卡与 assistant 泄漏同源）
+    const flowId = this.flowIdForRoom(roomId);
+    const taskId = this.conductor.taskIdForSession(sessionId, roomId, undefined, undefined, true);
+    const hidden = this.isHiddenTurn(sessionId, roomId);
+    if (flowId !== undefined || taskId !== undefined || hidden) {
+      this.turnFlowCtx.set(sessionId, { roomId, flowId, taskId, hidden });
+    } else {
+      this.turnFlowCtx.delete(sessionId);
+    }
     const unguard = this.noteTurnGuard(sessionId, roomId, content);
     try {
       return await this.agent.prompt(sessionId, content);
     } catch (err) {
       // 发送即失败（session 未知/忙碌/同步 throw）：不会有 prompt.done/error 兜底，就地清理
       if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
+      this.turnFlowCtx.delete(sessionId);
       unguard();
       throw err;
     }
@@ -1215,6 +1228,9 @@ export class RoomModeManager {
     for (const [sid, rid] of this.decidingTurnLatches) {
       if (rid === roomId) this.decidingTurnLatches.delete(sid);
     }
+    for (const [sid, ctx] of this.turnFlowCtx) {
+      if (ctx.roomId === roomId) this.turnFlowCtx.delete(sid);
+    }
     for (const [sid, ctx] of this.autoDecisions) {
       if (ctx.roomId === roomId) this.autoDecisions.delete(sid);
     }
@@ -1238,6 +1254,7 @@ export class RoomModeManager {
   onSessionCancelled(sessionId: string): void {
     this.turnGuards.delete(sessionId);
     this.decidingTurnLatches.delete(sessionId);
+    this.turnFlowCtx.delete(sessionId);
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
@@ -1343,6 +1360,7 @@ export class RoomModeManager {
     const erroredRoomId = this.promptRooms.get(sessionId);
     this.promptRooms.delete(sessionId);
     this.decidingTurnLatches.delete(sessionId);
+    this.turnFlowCtx.delete(sessionId);
     if (
       erroredRoomId &&
       !this.hasActiveFlow(erroredRoomId) &&
@@ -1360,14 +1378,17 @@ export class RoomModeManager {
     return sub?.mode === "deciding" && sub.activeSpeaker === sessionId;
   }
 
-  /** turnEnd 收尾：决策锁存随回合终结回收 */
+  /** turnEnd 收尾：决策锁存与 flow 上下文锁存随回合终结回收 */
   endDecidingTurn(sessionId: string): void {
     this.decidingTurnLatches.delete(sessionId);
+    this.turnFlowCtx.delete(sessionId);
   }
 
   /** 用于 onTurnEnd：某 session 的输出是否需要写入房间历史 */
   isHiddenTurn(sessionId: string, roomId: string): boolean {
     if (this.isDecidingTurn(sessionId, roomId)) return true;
+    const latched = this.turnFlowCtx.get(sessionId);
+    if (latched?.roomId === roomId && latched.hidden) return true;
     const flow = this.conductor.getFlowForSession(sessionId);
     if (flow && flow.roomId === roomId) {
       if (flow.role === "worker") return true;
@@ -1415,7 +1436,16 @@ export class RoomModeManager {
     turnStartAt?: number,
     turnEndAt?: number,
   ): string | undefined {
+    const latched = this.turnFlowCtx.get(sessionId);
+    if (latched?.roomId === roomId && latched.taskId !== undefined) return latched.taskId;
     return this.conductor.taskIdForSession(sessionId, roomId, turnStartAt, turnEndAt);
+  }
+
+  /** 该会话回合锁存的 flowId（turnEnd 时 flow 已删仍可取）；无锁存回退房间活跃 flow */
+  flowIdForTurn(sessionId: string, roomId: string): string | undefined {
+    const latched = this.turnFlowCtx.get(sessionId);
+    if (latched?.roomId === roomId) return latched.flowId;
+    return this.flowIdForRoom(roomId);
   }
 
   /** 这次输出是否属于某个房间回合（含隐藏编排） */

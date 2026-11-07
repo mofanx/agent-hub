@@ -562,6 +562,39 @@ describe("turnGuards 生命周期", () => {
     manager.endDecidingTurn("s1");
     assert.equal(manager.isDecidingTurn("s1", room.roomId), false, "turnEnd 后锁存回收");
   });
+
+  it("turnFlowCtx 锁存：flow 先于 turnEnd 移除时，归卡/隐藏判定仍按派发时点上下文", async () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const agent: AgentOps = {
+      prompt: async () => {},
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    manager.setStore(store);
+    // 模拟 worker turn 在跑期间 flow 被 removeFlow：锁存 ctx 兜底三查找
+    (manager as unknown as {
+      turnFlowCtx: Map<string, { roomId: string; flowId?: string; taskId?: string; hidden: boolean }>;
+    }).turnFlowCtx.set("worker", { roomId: room.roomId, flowId: "fl-1", taskId: "t1", hidden: true });
+    assert.equal(manager.isHiddenTurn("worker", room.roomId), true, "锁存 hidden：worker assistant 不泄漏");
+    assert.equal(manager.taskIdForTurn("worker", room.roomId), "t1");
+    assert.equal(manager.flowIdForTurn("worker", room.roomId), "fl-1");
+    manager.endDecidingTurn("worker");
+    assert.equal(manager.isHiddenTurn("worker", room.roomId), false, "turnEnd 后 ctx 回收");
+    assert.equal(manager.taskIdForTurn("worker", room.roomId), undefined);
+    assert.equal(manager.flowIdForTurn("worker", room.roomId), undefined);
+  });
 });
 
 describe("worker 过程输出归卡", () => {

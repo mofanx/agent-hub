@@ -1074,12 +1074,17 @@ export class ConductorOrchestrator {
     roomId: string,
     turnStartAt?: number,
     turnEndAt?: number,
+    includePending = false,
   ): string | undefined {
     const flow = this.flows.get(roomId);
     if (!flow) return undefined;
     const tasks = [...flow.tasks.values()].filter((t) => t.sessionId === sessionId);
     if (turnStartAt === undefined) {
-      return tasks.find((t) => t.status === "running")?.id;
+      // includePending：派发时点锁存窗口，sendPrompt 可能先于 status→running 翻转
+      return (
+        tasks.find((t) => t.status === "running") ??
+        (includePending ? tasks.find((t) => t.status === "pending") : undefined)
+      )?.id;
     }
     const end = turnEndAt ?? Number.MAX_SAFE_INTEGER;
     const hit = tasks
