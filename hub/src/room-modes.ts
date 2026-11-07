@@ -138,6 +138,9 @@ function mergeFileOverlappingTasks(tasks: ConductorTask[] | undefined): Conducto
 type AutoDecisionContext = PromptOptions & {
   roomId: string;
   text: string;
+  /** decision-model 一期 shadow 裁决（仅记录，不影响编排） */
+  shadow?: DecideVerdict | undefined;
+  decideInput?: DecideInput | undefined;
 };
 
 /** 运行时的模式（含 self 和 deciding，这两种不持久化到 Room.mode） */
@@ -314,9 +317,11 @@ export class RoomModeManager {
     private readonly broadcast: (method: string, params: Record<string, unknown>) => void,
     promptRetryMs?: number,
     isolatedChecks?: Readonly<Record<string, string>>,
+    private readonly autoDecideTimeoutMs = 0,
   ) {
     this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs, isolatedChecks);
     this.conductor.setTurnGuard((sid, rid, content) => this.noteTurnGuard(sid, rid, content));
+    this.conductor.setEnqueueFollowUp((sid, rid, content) => this.enqueueFollowUp(rid, sid, content));
   }
 
   setStore(store: Store): void {
@@ -419,10 +424,10 @@ export class RoomModeManager {
   }
 
   /** steer-queue：busy 会话的房侧待发送队列（外发时才登记 turnGuard/promptRooms） */
-  private followUps = new Map<string, Array<{ roomId: string; content: string | PromptContent }>>();
+  private followUps = new Map<string, Array<{ roomId: string; content: string | PromptContent; opts?: PromptOpts }>>();
   private static readonly FOLLOW_UP_LIMIT = 5;
 
-  private enqueueFollowUp(roomId: string, sessionId: string, content: string | PromptContent): void {
+  private enqueueFollowUp(roomId: string, sessionId: string, content: string | PromptContent, opts?: PromptOpts): void {
     const q = this.followUps.get(sessionId) ?? [];
     if (q.length >= RoomModeManager.FOLLOW_UP_LIMIT) {
       logWarn("room-modes followUp", `queue full (${RoomModeManager.FOLLOW_UP_LIMIT}), dropping prompt for ${sessionId}`);
@@ -432,7 +437,7 @@ export class RoomModeManager {
       });
       return;
     }
-    q.push({ roomId, content });
+    q.push({ roomId, content, ...(opts !== undefined ? { opts } : {}) });
     this.followUps.set(sessionId, q);
   }
 
@@ -454,7 +459,9 @@ export class RoomModeManager {
       extras.length > 0
         ? [{ type: "text", text: texts.join("\n\n") }, ...extras]
         : texts.join("\n\n");
-    this.sendPrompt(q[0]!.roomId, sessionId, merged).catch((err) => {
+    // 合并后沿用首个携带预算的 opts（如 auto 决策短超时）
+    const drainAck = q.map((it) => it.opts?.ackTimeoutMs).find((v): v is number => typeof v === "number");
+    this.sendPrompt(q[0]!.roomId, sessionId, merged, drainAck !== undefined ? { ackTimeoutMs: drainAck } : undefined).catch((err) => {
       logError("room-modes followUp drain", err);
       // 发送失败不静默丢：重入队 + 告知
       if (this.followUps.get(sessionId) === undefined) this.followUps.set(sessionId, q);
@@ -463,9 +470,14 @@ export class RoomModeManager {
     });
   }
 
-  private async sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
+  private async sendPrompt(
+    roomId: string,
+    sessionId: string,
+    content: string | PromptContent,
+    opts?: PromptOpts,
+  ): Promise<void> {
     if (this.agent.isBusy(sessionId)) {
-      this.enqueueFollowUp(roomId, sessionId, content);
+      this.enqueueFollowUp(roomId, sessionId, content, opts);
       return;
     }
     this.promptRooms.set(sessionId, roomId);
@@ -481,9 +493,17 @@ export class RoomModeManager {
     }
     const unguard = this.noteTurnGuard(sessionId, roomId, content);
     try {
-      return await this.agent.prompt(sessionId, content);
+      // queueIfBusy:false——竞态窗内变 busy 抛错转房侧队列，不错误落入 agent 层无 guard 队列
+      return await this.agent.prompt(sessionId, content, { ...opts, queueIfBusy: false });
     } catch (err) {
-      // 发送即失败（session 未知/忙碌/同步 throw）：不会有 prompt.done/error 兜底，就地清理
+      if (isSessionBusyError(err)) {
+        if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
+        this.turnFlowCtx.delete(sessionId);
+        unguard();
+        this.enqueueFollowUp(roomId, sessionId, content, opts);
+        return;
+      }
+      // 发送即失败（session 未知/同步 throw）：不会有 prompt.done/error 兜底，就地清理
       if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
       this.turnFlowCtx.delete(sessionId);
       unguard();
@@ -539,7 +559,11 @@ export class RoomModeManager {
         "room-modes stale",
         `${guard.roomId}:${sessionId} 回合期间上下文已更新，输出作废并按原 prompt 重跑一次`,
       );
-      this.agent.prompt(sessionId, guard.content).catch((err) => {
+      this.agent.prompt(sessionId, guard.content, { queueIfBusy: false }).catch((err) => {
+        if (isSessionBusyError(err)) {
+          this.enqueueFollowUp(guard.roomId, sessionId, guard.content);
+          return;
+        }
         // 重跑发送失败不会有 prompt.error 事件兜底，按 prompt 异常收敛（含 turnGuards 清理）
         logError("room-modes stale retry", err);
         this.onPromptError(sessionId);
@@ -1259,6 +1283,8 @@ export class RoomModeManager {
     this.turnGuards.delete(sessionId);
     this.decidingTurnLatches.delete(sessionId);
     this.turnFlowCtx.delete(sessionId);
+    // cancel 收尾后 busy 已清：排队消息应继续投递而非滞留
+    this.drainFollowUps(sessionId);
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
@@ -1301,6 +1327,9 @@ export class RoomModeManager {
       return true;
     }
 
+    // 非兜底分支：error 收尾后 busy 已清，排队消息应继续投递而非滞留
+    // （autoCtx 兜底会自起 self 回合，其 done 时自然 drain，不在此提前）
+    this.drainFollowUps(sessionId);
     const conductorRoom = this.conductor.onPromptError(sessionId, message);
     if (conductorRoom) {
       if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
@@ -1612,9 +1641,10 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: "指挥家模式未指定主持人，已兜底为点名应答" });
       return this.handleMention(room, text, options);
     }
-    if (this.agent.isBusy(room.conductorId)) {
-      this.notice({ roomId: room.roomId, message: `主持人 @${this.nameFor(room.roomId, room.conductorId)} 忙碌中` });
-      return { sent: [], mentioned: [], skipped: [room.conductorId] };
+    const conductorBusy = this.agent.isBusy(room.conductorId);
+    if (conductorBusy) {
+      // 不丢消息：planning prompt 经 sendPrompt 入房侧队列，主持人回合结束后 drain 续派
+      this.notice({ roomId: room.roomId, message: `主持人 @${this.nameFor(room.roomId, room.conductorId)} 忙碌中，消息已排队等待` });
     }
     this.setSubMode(room.roomId, "conductor", room.conductorId, undefined);
 
@@ -1668,7 +1698,7 @@ export class RoomModeManager {
     this.conductor.start(room, task, undefined, options?.artifactContext, options?.missionId).catch((err) => {
       logError("room-modes conductor start", err);
     });
-    return { sent: [room.conductorId], mentioned: [], skipped: [] };
+    return { sent: conductorBusy ? [] : [room.conductorId], mentioned: [], skipped: conductorBusy ? [room.conductorId] : [] };
   }
 
 

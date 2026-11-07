@@ -8,6 +8,16 @@ import { StringDecoder } from "node:string_decoder";
 import { logWarn } from "./logger.js";
 import { safetyFloorVerdict } from "./safety-floor.js";
 
+/** prompt 发送可选参数：busy 时是否允许入 agent 层队列、ACK 看门狗预算覆盖 */
+export type PromptOpts = {
+  queueIfBusy?: boolean;
+  ackTimeoutMs?: number;
+};
+
+export function isSessionBusyError(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith("session busy");
+}
+
 export type TokenUsage = {
   totalTokens?: number;
   inputTokens?: number;
@@ -851,18 +861,23 @@ export class AcpAgent {
       waiter.resolve({ output: fullText, stopReason });
     }
     entry.turnText = "";
+    this.drainFollowUps(sessionId);
+  }
+
+  /** agent 层 followUp 合并 drain：session 直发路径的 busy 排队（无房间 guard 语义），
+   *  finishTurn/error/cancel 收尾后调用；再遇 busy 会重新入队，不丢 */
+  private drainFollowUps(sessionId: string): void {
     const queued = this.followUps.get(sessionId);
-    if (queued?.length) {
-      this.followUps.delete(sessionId);
-      const texts = queued
-        .flatMap((p) => p.map((b) => (b.type === "text" ? String(b.text ?? "") : "")))
-        .filter((t) => t.length > 0);
-      const extras = queued.flatMap((p) => p.filter((b) => b.type !== "text"));
-      this.promptContent(sessionId, [
-        { type: "text", text: texts.join("\n\n") },
-        ...extras,
-      ]).catch((err) => logWarn("followUp", `drain failed for ${sessionId}: ${err}`));
-    }
+    if (!queued?.length) return;
+    this.followUps.delete(sessionId);
+    const texts = queued
+      .flatMap((p) => p.map((b) => (b.type === "text" ? String(b.text ?? "") : "")))
+      .filter((t) => t.length > 0);
+    const extras = queued.flatMap((p) => p.filter((b) => b.type !== "text"));
+    this.promptContent(sessionId, [
+      { type: "text", text: texts.join("\n\n") },
+      ...extras,
+    ]).catch((err) => logWarn("followUp", `drain failed for ${sessionId}: ${err}`));
   }
 
   /** agent→hub 请求同样证明存活：permission/elicitation/fs 期间不得误判为无输出 */
@@ -1354,7 +1369,6 @@ export class AcpAgent {
         console.log(`[agent] resumed ${sessionId} via session/load`);
       } catch (err) {
         this.sessions.delete(sessionId);
-    this.followUps.delete(sessionId);
         this.followUps.delete(sessionId);
         this.contextUsage.delete(sessionId);
         logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
@@ -1366,19 +1380,23 @@ export class AcpAgent {
     return true;
   }
 
-  async prompt(sessionId: string, text: string): Promise<void> {
-    await this.promptContent(sessionId, [{ type: "text", text }]);
+  async prompt(sessionId: string, text: string, opts?: PromptOpts): Promise<void> {
+    await this.promptContent(sessionId, [{ type: "text", text }], opts);
   }
 
   async promptContent(
     sessionId: string,
     prompt: Array<Record<string, unknown>>,
+    opts?: PromptOpts,
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     // 宽限窗内新 prompt：先按已累积文本定稿旧回合（同步发 prompt.done），再开新回合
     this.flushPendingSettle(sessionId, entry);
     if (entry.busy) {
+      // 房间编排路径传 queueIfBusy:false——竞态窗内宁抛不错误入 agent 层队列
+      // （房侧 followUps 才是带 turnGuard 的正规队列）
+      if (opts?.queueIfBusy === false) throw new Error(`session busy: ${entry.name}`);
       const q = this.followUps.get(sessionId) ?? [];
       if (q.length < this.followUpLimit) {
         q.push(prompt);
@@ -1405,13 +1423,15 @@ export class AcpAgent {
       params: { sessionId, stoppable: true },
     });
     clearTimeout(entry.watchdog);
+    // ACK 看门狗预算可 per-call 覆盖（如 auto 决策回合短超时），只兜"无输出卡死"
+    const ackTimeoutMs = opts?.ackTimeoutMs ?? promptAckTimeoutMs;
     entry.watchdog = setTimeout(() => {
       if (!isCurrentTurn()) return;
       entry.watchdog = undefined;
       if (!entry.busy || entry.turnGotUpdate) return;
       // 先以超时语义广播+拒 waiter，再做取消清理——cancel 会以 cancelled 语义收尾剩余 waiter
       const err = new Error(
-        `agent ${this.name} produced no output within ${promptAckTimeoutMs / 1000}s — request may have been rejected at transport level`,
+        `agent ${this.name} produced no output within ${ackTimeoutMs / 1000}s — request may have been rejected at transport level`,
       );
       this.emit({
         method: "prompt.error",
@@ -1424,7 +1444,7 @@ export class AcpAgent {
       }
       // 尽力取消僵尸回合（内部清 busy/stoppable、换代、onTurnEnd 收尾），避免重派叠 prompt
       this.cancel(sessionId).catch(() => {});
-    }, promptAckTimeoutMs);
+    }, ackTimeoutMs);
     entry.watchdog.unref?.();
     this.ctx!.request(acp.methods.agent.session.prompt, {
       sessionId,
@@ -1476,6 +1496,8 @@ export class AcpAgent {
           this.promptOnceWaiters.delete(sessionId);
           waiter.reject(err instanceof Error ? err : new Error(String(err)));
         }
+        // error 收尾后 busy 已清——agent 层排队消息此时补 drain，不再滞留
+        this.drainFollowUps(sessionId);
       });
   }
 
@@ -1551,6 +1573,8 @@ export class AcpAgent {
         method: "session.generating",
         params: { sessionId, stoppable: false },
       });
+      // cancel 收尾后补 drain：busy 已清，排队消息应继续而不是滞留
+      this.drainFollowUps(sessionId);
     }
   }
 

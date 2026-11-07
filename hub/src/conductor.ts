@@ -8,6 +8,7 @@ import { isEventAction, type Room, type RoomManager } from "./room.js";
 import { distillMemoryText } from "./memory.js";
 import { TaskSubscriptions } from "./subscribe.js";
 import { logError, logWarn } from "./logger.js";
+import { isSessionBusyError, type PromptOpts } from "./agent.js";
 import type { Store } from "./store.js";
 import {
   PLAN_FORMAT_FIX_PROMPT,
@@ -624,11 +625,23 @@ export class ConductorOrchestrator {
     this.turnGuard = fn;
   }
 
+  /** 房侧忙碌队列钩子（RoomModeManager 注入）：busy 派发入队等 drain，外发时才登记 guard */
+  private enqueueFollowUp?: (sessionId: string, roomId: string, content: string | PromptContent) => void;
+
+  setEnqueueFollowUp(fn: (sessionId: string, roomId: string, content: string | PromptContent) => void): void {
+    this.enqueueFollowUp = fn;
+  }
+
   private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
     const unguard = this.turnGuard?.(sessionId, roomId, content);
-    return this.agent.prompt(sessionId, content).catch((err: unknown) => {
-      // 发送即失败（session 未知/忙碌）：不会有 prompt.done/error 事件兜底，回收游标登记
+    return this.agent.prompt(sessionId, content, { queueIfBusy: false }).catch((err: unknown) => {
+      // 发送即失败（session 未知/忙碌/同步 throw）：不会有 prompt.done/error 兜底，回收游标登记
       unguard?.();
+      // 竞态窗内变 busy：转房侧 followUps 队列续派，不落 agent 层无 guard 队列
+      if (isSessionBusyError(err) && this.enqueueFollowUp) {
+        this.enqueueFollowUp(sessionId, roomId, content);
+        return;
+      }
       throw err;
     });
   }

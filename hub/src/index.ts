@@ -682,13 +682,13 @@ async function resumeSessionById(sessionId: string) {
 }
 
 const agentOps: AgentOps = {
-  prompt: async (sessionId, content) => {
+  prompt: async (sessionId, content, opts) => {
     // async 包装：ownerOf 的同步 throw（agent 未连接）转为 rejected promise，
     // 使 sendPrompt/.catch 兜底可挂——否则同步逃逸导致 autoDecisions/turnGuards 悬挂
     const agent = ownerOf(sessionId);
     turnEnds.delete(sessionId);
-    if (typeof content === "string") return agent.prompt(sessionId, content);
-    return agent.promptContent(sessionId, content);
+    if (typeof content === "string") return agent.prompt(sessionId, content, opts);
+    return agent.promptContent(sessionId, content, opts);
   },
   isBusy: (sessionId) => {
     try {
@@ -909,7 +909,7 @@ const scheduler = new Scheduler(
   store,
   () => scheduler.persistTo(store),
   (tasks) => broadcast({ method: "task.update", params: { tasks } } as HubEvent),
-  async (task) => {
+  async (task): Promise<void> => {
     if (task.missionTemplate) {
       await runMissionTask(task, {
         getRoom: (id) => rooms.get(id),
@@ -3088,7 +3088,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
             method: "prompt.error",
             params: {
               sessionId: result.skipped[0] ?? "",
-              message: `跳过忙碌会话: ${result.skipped.join(", ")}`,
+              message: `成员忙碌，消息已排队: ${result.skipped.join(", ")}`,
             },
           });
         }
@@ -3174,7 +3174,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
               method: "prompt.error",
               params: {
                 sessionId: result.skipped[0] ?? "",
-                message: `跳过忙碌会话: ${result.skipped.join(", ")}`,
+                message: `成员忙碌，消息已排队: ${result.skipped.join(", ")}`,
               },
             });
           }
