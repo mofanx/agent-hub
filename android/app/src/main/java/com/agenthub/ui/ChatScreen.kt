@@ -1158,101 +1158,99 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                 !vm.flow?.clarificationId.isNullOrBlank() &&
                 vm.flow?.clarificationQuestions?.isNotEmpty() == true
             ) vm.flow else null
-            Column(
-                Modifier
-                    .heightIn(max = 160.dp)
-                    .verticalScroll(rememberScrollState()),
+            LazyColumn(Modifier.heightIn(max = 160.dp)) {
+    item { Column {
+helpTasks.forEach { helpTask ->
+    val isReplyTarget = vm.helpReplyTo != null && helpTask.waitingHelpId == vm.helpReplyTo
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.QuestionAnswer,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.size(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (isReplyTarget) "${S.helpReplying} @${helpTask.name}" else "@${helpTask.name}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    helpTask.waitingQuestion.orEmpty().take(100),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                )
+            }
+            TextButton(
+                onClick = {
+                    if (isReplyTarget) vm.cancelHelpReply()
+                    else helpTask.waitingHelpId?.let { vm.startHelpReply(it) }
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
             ) {
-                helpTasks.forEach { helpTask ->
-                    val isReplyTarget = vm.helpReplyTo != null && helpTask.waitingHelpId == vm.helpReplyTo
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                    ) {
-                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.QuestionAnswer,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                            Spacer(Modifier.size(8.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    if (isReplyTarget) "${S.helpReplying} @${helpTask.name}" else "@${helpTask.name}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                                Text(
-                                    helpTask.waitingQuestion.orEmpty().take(100),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 2,
-                                )
-                            }
-                            TextButton(
-                                onClick = {
-                                    if (isReplyTarget) vm.cancelHelpReply()
-                                    else helpTask.waitingHelpId?.let { vm.startHelpReply(it) }
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            ) {
-                                Text(
-                                    if (isReplyTarget) S.exitHelpReply else S.helpReplyAction,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            }
-                        }
-                    }
-                }
-                pendingClarification?.let { clarFlow ->
-                    val clarId = clarFlow.clarificationId!!
-                    val isReplyTarget = vm.helpReplyTo == clarId
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                    ) {
-                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.QuestionAnswer,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                            Spacer(Modifier.size(8.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    if (isReplyTarget) S.clarificationReplying
-                                    else S.clarificationPending,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                                clarFlow.clarificationQuestions.forEachIndexed { i, q ->
-                                    Text(
-                                        "${i + 1}. ${q.take(200)}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                            }
-                            TextButton(
-                                onClick = {
-                                    if (isReplyTarget) vm.cancelHelpReply()
-                                    else vm.startHelpReply(clarId)
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            ) {
-                                Text(
-                                    if (isReplyTarget) S.exitHelpReply else S.helpReplyAction,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            }
-                        }
-                    }
+                Text(
+                    if (isReplyTarget) S.exitHelpReply else S.helpReplyAction,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+    }
+}
+pendingClarification?.let { clarFlow ->
+    val clarId = clarFlow.clarificationId!!
+    val isReplyTarget = vm.helpReplyTo == clarId
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.QuestionAnswer,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.size(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (isReplyTarget) S.clarificationReplying
+                    else S.clarificationPending,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                clarFlow.clarificationQuestions.forEachIndexed { i, q ->
+                    Text(
+                        "${i + 1}. ${q.take(200)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
+            TextButton(
+                onClick = {
+                    if (isReplyTarget) vm.cancelHelpReply()
+                    else vm.startHelpReply(clarId)
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
+                Text(
+                    if (isReplyTarget) S.exitHelpReply else S.helpReplyAction,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+    }
+}
+    } }
+}
             val queuedCount = vm.queuedCount(sessionKey)
             if (queuedCount > 0) {
                 Row(
@@ -1491,11 +1489,8 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             onDismissRequest = { },
                             properties = PopupProperties(focusable = false),
                         ) {
-                            Column(
-                                modifier = Modifier
-                                    .heightIn(max = 320.dp)
-                                    .verticalScroll(rememberScrollState()),
-                            ) {
+                            LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                                item { Column {
                                 if (localMatches.isNotEmpty()) {
                                     Text(
                                         S.eventCommand,
@@ -1571,8 +1566,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         )
                                     }
                                 }
+                                    } }
+                                }
                             }
-                        }
                     }
                     if (fileRefQuery != null) {
                         val filter = fileRefQuery.substringAfterLast("/")
@@ -2341,31 +2337,29 @@ private fun ProcessStepList(
     highlight: String,
     onMatchKeywordY: ((Float) -> Unit)?,
 ) {
-    Column(
-        Modifier
-            .heightIn(max = 280.dp)
-            .verticalScroll(rememberScrollState()),
-    ) {
-        steps.forEach { s ->
-            val label = when (s.kind) {
-                "tool" -> "🔧 ${s.title ?: s.text.orEmpty()}"
-                "plan" -> "📋 ${s.title ?: s.text.orEmpty()}"
-                else -> s.text ?: s.title.orEmpty()
-            }
-            if (label.isNotBlank()) {
-                HighlightText(
-                    text = label.trim(),
-                    highlight = highlight,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = color,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    onMatchKeywordY = onMatchKeywordY,
-                    modifier = Modifier.padding(vertical = 1.dp),
-                )
-            }
-        }
+    LazyColumn(Modifier.heightIn(max = 280.dp)) {
+    item { Column {
+steps.forEach { s ->
+    val label = when (s.kind) {
+        "tool" -> "🔧 ${s.title ?: s.text.orEmpty()}"
+        "plan" -> "📋 ${s.title ?: s.text.orEmpty()}"
+        else -> s.text ?: s.title.orEmpty()
     }
+    if (label.isNotBlank()) {
+        HighlightText(
+            text = label.trim(),
+            highlight = highlight,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            onMatchKeywordY = onMatchKeywordY,
+            modifier = Modifier.padding(vertical = 1.dp),
+        )
+    }
+}
+    } }
+}
 }
 
 
@@ -2453,8 +2447,8 @@ private fun TaskProcessSection(roomId: String, flowId: String, task: FlowTask, v
         withFrameNanos { }
         procScroll.scrollToItem(procScroll.layoutInfo.totalItemsCount - 1)
     }
-    // LazyColumn 收包内容高度（content<280 不撑满）；verticalScroll 的 Column 恒吃满
-    // 约束上限——内容少时尾部留白，是卡内中段空白的来源
+    // LazyColumn 收包内容高度（content<280 不撑满）；可滚容器恒吃满约束上限——
+    // 外层 heightIn 给界 + 内层 weight(fill=false) 才能短内容收包，这是卡内中段空白的来源
     LazyColumn(
         state = procScroll,
         modifier = Modifier
@@ -2593,16 +2587,17 @@ private fun RawChatBubble(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (item.text.isNotBlank()) {
-                            MarkdownText(
-                                text = item.text,
-                                modifier = Modifier
-                                    .heightIn(max = 400.dp)
-                                    .verticalScroll(rememberScrollState()),
-                                textColor = textColor,
-                                fontSize = MaterialTheme.typography.bodyLarge.fontSize,
-                                highlight = highlight,
-                                onMatchKeywordY = keywordCallback,
-                            )
+                            LazyColumn(Modifier.heightIn(max = 400.dp)) {
+    item {
+        MarkdownText(
+            text = item.text,
+            textColor = textColor,
+            fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+            highlight = highlight,
+            onMatchKeywordY = keywordCallback,
+        )
+    }
+}
                         }
                         if (item.attachments.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
@@ -3533,16 +3528,16 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         Spacer(Modifier.height(2.dp))
                     }
                 }
-                // LazyColumn 收包：短文本不撑满 240 上限（verticalScroll 恒占满约束会留尾白）
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
-                    item {
-                        Text(
-                            task.task,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                }
+                // LazyColumn 收包：短文本不撑满 240 上限（可滚容器恒占满约束——外层限高+weight(fill=false) 才真收包）
+                LazyColumn(Modifier.heightIn(max = 240.dp)) {
+    item {
+        Text(
+            task.task,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
                 if (task.status == "pending") {
                     if (task.dependsOn.isNotEmpty()) {
                         Text("${S.dependsOnLabel}${task.dependsOn.joinToString(", ")}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3552,11 +3547,11 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                 }
                 task.output?.takeIf { it.isNotBlank() }?.let {
                     Spacer(Modifier.height(2.dp))
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
-                        item {
-                            Text(it, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
+                    LazyColumn(Modifier.heightIn(max = 240.dp)) {
+    item {
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
                 }
                 if (task.status == "done") {
                     val statusText = when (task.verificationStatus) {
