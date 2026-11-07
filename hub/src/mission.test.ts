@@ -225,10 +225,10 @@ describe("mission", () => {
     assert.deepEqual(empty.list(), []);
   });
 
-  it("持久化：损坏数据显式失败而非静默覆盖", () => {
+  it("持久化：损坏 blob 隔离到 missions.v1.corrupt，不阻断启动", () => {
     const h = makeHarness();
     h.store.setMeta("missions.v1", "not-json{{{");
-    assert.throws(
+    assert.doesNotThrow(
       () =>
         new MissionManager({
           store: h.store,
@@ -244,8 +244,8 @@ describe("mission", () => {
           supplementActive: () => false,
           broadcast: () => {},
         }),
-      /missions\.v1/,
     );
+    assert.equal(h.store.getMeta("missions.v1.corrupt"), "not-json{{{");
   });
 
   it("start 拒绝：busy / 活跃flow / 房间被占 / 重复start", async () => {

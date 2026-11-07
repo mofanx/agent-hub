@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { logError } from "./logger.js";
+import { logError, logWarn } from "./logger.js";
 import type { Room } from "./room.js";
 import type { ModeResult } from "./room-modes.js";
 import type { Store } from "./store.js";
@@ -77,6 +77,8 @@ export type Mission = {
   maxAutoRetries: number;
   autoRetryCount: number;
   revision: number;
+  /** 结构化等待/失败原因（kebab-case），running/终态以外状态清除 */
+  reasonCode?: string | undefined;
 };
 
 export type MissionSnapshot = Mission;
@@ -117,7 +119,16 @@ export type MissionDeps = {
 };
 
 const META_KEY = "missions.v1";
+/** 损坏数据隔离键：blob 级写原文、记录级写坏条目 JSON 数组 */
+const CORRUPT_KEY = "missions.v1.corrupt";
 const OUTPUT_CAP = 4000;
+/** 迁移表：仅这些 flow phase 可把 mission 拉回 running；未识别 phase 不动 status */
+const RUNNING_PHASES: ReadonlySet<string> = new Set([
+  "planning",
+  "working",
+  "reviewing",
+  "summarizing",
+]);
 /** 单 mission 事件日志上限：超限淘汰最旧，防长跑 mission 的记录随时间无限膨胀 */
 const MISSION_EVENT_LIMIT = 200;
 const OCCUPYING: ReadonlySet<MissionStatus> = new Set([
@@ -299,6 +310,7 @@ function validateRecord(raw: unknown): MissionRecord {
   if (acceptance) inner.acceptance = acceptance;
   if (str(m.parentMissionId) !== undefined) inner.parentMissionId = str(m.parentMissionId);
   if (str(m.baselineFlowId) !== undefined) inner.baselineFlowId = str(m.baselineFlowId);
+  if (str(m.reasonCode) !== undefined) inner.reasonCode = str(m.reasonCode);
   return inner;
 }
 
@@ -345,13 +357,30 @@ export class MissionManager {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
-    } catch (e) {
-      throw new Error(`${META_KEY}: persisted payload is not valid JSON: ${String(e)}`);
+    } catch {
+      // blob 级损坏：原文隔离到 CORRUPT_KEY，空集启动不阻断 hub
+      deps.store.setMeta(CORRUPT_KEY, raw);
+      logWarn("mission", `${META_KEY}: unparsable payload quarantined to ${CORRUPT_KEY}`);
+      return;
     }
-    if (!Array.isArray(parsed)) throw new Error(`${META_KEY}: persisted payload must be an array`);
+    if (!Array.isArray(parsed)) {
+      deps.store.setMeta(CORRUPT_KEY, raw);
+      logWarn("mission", `${META_KEY}: non-array payload quarantined to ${CORRUPT_KEY}`);
+      return;
+    }
+    const corrupt: unknown[] = [];
     for (const item of parsed) {
-      const rec = validateRecord(item);
-      this.missions.set(rec.id, rec);
+      try {
+        const rec = validateRecord(item);
+        this.missions.set(rec.id, rec);
+      } catch {
+        // 记录级损坏：单条隔离，其余记录照常恢复
+        corrupt.push(item);
+      }
+    }
+    if (corrupt.length > 0) {
+      deps.store.setMeta(CORRUPT_KEY, JSON.stringify(corrupt));
+      logWarn("mission", `${META_KEY}: ${corrupt.length} corrupt record(s) quarantined to ${CORRUPT_KEY}`);
     }
   }
 
@@ -372,7 +401,12 @@ export class MissionManager {
 
   private persist(): void {
     this.sweepTerminal(Date.now());
-    this.deps.store.setMeta(META_KEY, JSON.stringify([...this.missions.values()]));
+    // 只落公共快照字段：sent/pending/dispatching 等 in-flight 簿记是内存态，
+    // 重启经 reconcile 重建或终止，持久化它们只会产生半真半假的恢复输入
+    this.deps.store.setMeta(
+      META_KEY,
+      JSON.stringify([...this.missions.values()].map((m) => snapshot(m))),
+    );
   }
 
   private log(m: MissionRecord, kind: string, text: string, context?: MissionTurnContext): void {
@@ -409,9 +443,14 @@ export class MissionManager {
     return undefined;
   }
 
-  private transition(m: MissionRecord, status: MissionStatus, kind: string, text: string): void {
-    if (m.status === status) return;
+  private transition(m: MissionRecord, status: MissionStatus, kind: string, text: string, reasonCode?: string): void {
+    if (m.status === status) {
+      // 同状态内等待原因可细化（awaiting-input → awaiting-retry）
+      if (reasonCode !== undefined) m.reasonCode = reasonCode;
+      return;
+    }
     m.status = status;
+    m.reasonCode = reasonCode;
     if (TERMINAL.has(status) || status === "awaiting-acceptance") m.finishedAt = Date.now();
     this.log(m, kind, text);
   }
@@ -591,7 +630,7 @@ export class MissionManager {
         this.commit(m);
         return snapshot(m);
       }
-      this.transition(m, "failed", "error", `dispatch failed: ${String(e)}`);
+      this.transition(m, "failed", "error", `dispatch failed: ${String(e)}`, "dispatch-failed");
       m.error = String(e);
       this.commit(m);
       throw e;
@@ -618,7 +657,7 @@ export class MissionManager {
     }
     if (!m.flowId && m.pending.length === 0 && !this.deps.hasActiveFlow(m.roomId) && (m.status === "running" || m.status === "waiting-user")) {
       if (m.sent.length === 0) {
-        this.transition(m, "failed", "error", "dispatch produced no prompts and no flow");
+        this.transition(m, "failed", "error", "dispatch produced no prompts and no flow", "dispatch-empty");
       } else {
         this.finishNoFlow(m);
       }
@@ -659,7 +698,7 @@ export class MissionManager {
     if (TERMINAL.has(m.status)) throw new Error(`mission not stoppable: ${m.status}`);
     const wasActive = m.status === "running" || m.status === "waiting-user";
     m.stopRequested = true;
-    this.transition(m, "stopped", "lifecycle", reason ? `stopped: ${reason}` : "stopped by user");
+    this.transition(m, "stopped", "lifecycle", reason ? `stopped: ${reason}` : "stopped by user", "user-stopped");
     this.commit(m);
     if (!wasActive) return snapshot(m);
     await this.cancelOwnWork(m);
@@ -713,7 +752,7 @@ export class MissionManager {
       this.log(m, "flow", `bound flow ${flowId}`);
     }
     if (!flow || flowId !== m.flowId) {
-      this.transition(m, "stopped", "flow", "bound flow cancelled or disappeared");
+      this.transition(m, "stopped", "flow", "bound flow cancelled or disappeared", "flow-lost");
       this.commit(m);
       return;
     }
@@ -747,19 +786,27 @@ export class MissionManager {
         anyFailed ? "failed" : "awaiting-acceptance",
         "flow",
         anyFailed ? "flow done with failed tasks" : "flow done",
+        anyFailed ? "flow-tasks-failed" : undefined,
       );
       if (anyFailed) {
         const taskFailure = tasks.find((t) => t.status === "failed" && typeof t.failureMessage === "string");
         m.error = flowFailure ?? (taskFailure?.failureMessage as string | undefined) ?? "flow finished with failed tasks";
       }
     } else if (phase === "cancelled") {
-      this.transition(m, "stopped", "flow", "flow cancelled");
+      this.transition(m, "stopped", "flow", "flow cancelled", "flow-cancelled");
     } else if (waitingUser) {
-      this.transition(m, "waiting-user", "flow", "flow waits for user");
+      this.transition(
+        m,
+        "waiting-user",
+        "flow",
+        "flow waits for user",
+        phase === "awaiting-retry" ? "awaiting-retry" : "awaiting-input",
+      );
       if (phase === "awaiting-retry") this.maybeAutoRetry(m, flow);
-    } else {
+    } else if (RUNNING_PHASES.has(phase)) {
       this.transition(m, "running", "flow", "flow active");
     }
+    // 未识别 phase：白名单忽略——仅 lastPhase/事件轨迹更新，不迁移 status
   }
 
   private maybeAutoRetry(m: MissionRecord, flow: Record<string, unknown>): void {
@@ -889,7 +936,7 @@ export class MissionManager {
   private finishNoFlow(m: MissionRecord): void {
     if (m.turnErrors.length > 0) {
       m.error = m.turnErrors[0]!.message;
-      this.transition(m, "failed", "error", `turn error on ${m.turnErrors[0]!.sid}: ${m.error.slice(0, 300)}`);
+      this.transition(m, "failed", "error", `turn error on ${m.turnErrors[0]!.sid}: ${m.error.slice(0, 300)}`, "turn-error");
     } else {
       this.transition(m, "awaiting-acceptance", "output", "all dispatched turns completed");
     }
@@ -1044,6 +1091,7 @@ export class MissionManager {
             "stopped",
             "lifecycle",
             "interrupted by hub restart; matching flow lost or absent, not re-dispatched",
+            "interrupted-restart",
           );
           this.commit(m);
         } catch (err) {
@@ -1105,9 +1153,9 @@ export class MissionManager {
     if (m.reviews.length < m.acceptanceCriteria.length ||
         m.acceptanceCriteria.some((_, i) => m.reviews.find((r) => r.index === i)?.verdict !== "pass"))
       throw new Error("all acceptance criteria must be manually passed first");
-    m.status = "accepted";
+    // acceptance.at 先落定，transition 再把 finishedAt 推到验收时刻（≥ acceptance.at）
     m.acceptance = { at: Date.now(), note: typeof note === "string" ? note.trim() : "" };
-    this.log(m, "lifecycle", "accepted by user");
+    this.transition(m, "accepted", "lifecycle", "accepted by user");
     return this.commit(m);
   }
 
@@ -1133,7 +1181,7 @@ export class MissionManager {
     const nm = this.missions.get(draft.id)!;
     this.log(nm, "rework", `rework of ${m.id}: ${note.trim().slice(0, 300)}`);
     if (m.status === "awaiting-acceptance") {
-      this.transition(m, "stopped", "lifecycle", "closed for rework");
+      this.transition(m, "stopped", "lifecycle", "closed for rework", "closed-for-rework");
     }
     this.log(m, "rework", `rework requested: ${note.trim().slice(0, 300)}`);
     this.commit(m);

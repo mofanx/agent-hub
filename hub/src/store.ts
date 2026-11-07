@@ -37,6 +37,8 @@ export type HistoryEntry = {
   author: string;
   text: string;
   clientMessageId?: string;
+  /** 工单派发产生的条目归属 mission id（真人输入为空，可区分来源） */
+  missionId?: string | undefined;
 };
 
 /**
@@ -56,6 +58,14 @@ export function lostReplyAction(
 }
 
 type HistoryItem = HistoryEntry & { id: number; at: number; draft?: number };
+
+/** SQLite NULL → undefined：HistoryItem.missionId 契约是可选字段而非 null */
+function normalizeItems<T extends HistoryItem>(rows: T[]): T[] {
+  for (const r of rows) {
+    if ((r as { missionId?: unknown }).missionId === null) r.missionId = undefined;
+  }
+  return rows;
+}
 
 export type Role = {
   id: string;
@@ -317,6 +327,7 @@ export class Store {
       { table: "roles", column: "builtin", def: "INTEGER NOT NULL DEFAULT 0" },
       { table: "history", column: "draft", def: "INTEGER NOT NULL DEFAULT 0" },
       { table: "history", column: "client_message_id", def: "TEXT" },
+      { table: "history", column: "mission_id", def: "TEXT" },
     ];
     for (const { table, column, def } of columns) {
       try {
@@ -556,9 +567,9 @@ export class Store {
     try {
       const r = this.db
         .prepare(
-          "INSERT INTO history(scope, scope_id, at, kind, author, text) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
+        .run(scope, id, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
       return Number(r.lastInsertRowid);
     } catch (err) {
       logWarn("store", `append failed: ${String(err)}`);
@@ -696,7 +707,7 @@ export class Store {
     try {
       this.db
         .prepare(
-          "INSERT INTO history(scope, scope_id, at, kind, author, text) SELECT scope, ?, at, kind, author, text FROM history WHERE scope = ? AND scope_id = ? ORDER BY id",
+          "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) SELECT scope, ?, at, kind, author, text, client_message_id, mission_id FROM history WHERE scope = ? AND scope_id = ? ORDER BY id",
         )
         .run(targetId, scope, sourceId);
     } catch (err) {
@@ -718,22 +729,22 @@ export class Store {
     if (opts.toAt !== undefined) { conds.push("at <= ?"); args.push(opts.toAt); }
     if (opts.beforeId !== undefined) { conds.push("id < ?"); args.push(opts.beforeId); }
     const limit = Math.max(1, Math.min(opts.limit ?? 20, 50));
-    return this.db
+    return normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE ${conds.join(" AND ")} ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(...args, limit) as HistoryItem[];
+      .all(...args, limit) as HistoryItem[]);
   }
 
   read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryItem[] {
-    const rows = this.db
+    const rows = normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ?
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(scope, id, limit) as HistoryItem[];
+      .all(scope, id, limit) as HistoryItem[]);
     return rows.reverse();
   }
 
@@ -743,20 +754,20 @@ export class Store {
     at: number,
     limit = 50,
   ): HistoryItem[] {
-    const before = this.db
+    const before = normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND at <= ?
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(scope, id, at, limit) as HistoryItem[];
-    const after = this.db
+      .all(scope, id, at, limit) as HistoryItem[]);
+    const after = normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND at >= ?
          ORDER BY at ASC, id ASC LIMIT ?`,
       )
-      .all(scope, id, at, limit) as HistoryItem[];
+      .all(scope, id, at, limit) as HistoryItem[]);
     const seen = new Set<number>();
     const merged: HistoryItem[] = [];
     for (const row of [...before, ...after]) {
@@ -778,13 +789,13 @@ export class Store {
     limit = 50,
     beforeId?: number,
   ): HistoryItem[] {
-    const rows = this.db
+    const rows = normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND (at < ? OR (at = ? AND id < ?))
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
-      .all(scope, id, at, at, beforeId ?? -1, limit) as HistoryItem[];
+      .all(scope, id, at, at, beforeId ?? -1, limit) as HistoryItem[]);
     return rows.reverse();
   }
 
@@ -794,13 +805,13 @@ export class Store {
     at: number,
     limit = 200,
   ): HistoryItem[] {
-    return this.db
+    return normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND at >= ?
          ORDER BY at ASC, id ASC LIMIT ?`,
       )
-      .all(scope, id, at, limit) as HistoryItem[];
+      .all(scope, id, at, limit) as HistoryItem[]);
   }
 
   /**
@@ -819,13 +830,13 @@ export class Store {
       )
       .get(scope, id, afterId);
     if (afterId !== 0 && !exists) return { entries: [], truncated: true };
-    const entries = this.db
+    const entries = normalizeItems(this.db
       .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND id > ?
          ORDER BY id ASC LIMIT ?`,
       )
-      .all(scope, id, afterId, limit) as HistoryItem[];
+      .all(scope, id, afterId, limit) as HistoryItem[]);
     return { entries, truncated: false };
   }
 
@@ -883,9 +894,9 @@ export class Store {
       if (count >= 10000) throw new Error("client_message_capacity");
       const r = this.db
         .prepare(
-          "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(scope, scopeId, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null);
+        .run(scope, scopeId, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
       const historyId = Number(r.lastInsertRowid);
       if (!(historyId > 0)) throw new Error("client_message_history");
       const receipt = {
@@ -920,10 +931,10 @@ export class Store {
   readEntries(scope: "room" | "session", scopeId: string, ids: number[]): HistoryItem[] {
     if (!ids.length) return [];
     const marks = ids.map(() => "?").join(",");
-    return this.db.prepare(
-      `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId FROM history
+    return normalizeItems(this.db.prepare(
+      `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
        WHERE scope = ? AND scope_id = ? AND id IN (${marks}) ORDER BY id ASC`,
-    ).all(scope, scopeId, ...ids) as HistoryItem[];
+    ).all(scope, scopeId, ...ids) as HistoryItem[]);
   }
 
   readRoomCards(roomId: string, ids: number[]): HistoryItem[] {

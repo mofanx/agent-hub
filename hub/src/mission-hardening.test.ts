@@ -353,6 +353,68 @@ describe("TDD-red：派发窗口簿记不落盘", () => {
   });
 });
 
+describe("stopped 五路径 reasonCode（设计 9 码表）", () => {
+  const reasonOf = (h: Harness, id: string) =>
+    (h.manager.get(id) as { reasonCode?: string } | undefined)?.reasonCode;
+
+  it("user-stopped / flow-cancelled / flow-lost", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    await h.manager.stop(m.id, "不用了");
+    assert.equal(reasonOf(h, m.id), "user-stopped");
+
+    const h2 = makeHarness(undefined, "conductor");
+    const m2 = makeMission(h2);
+    await startWithFlow(h2, m2.id);
+    pushFlow(h2, "cancelled");
+    assert.equal(reasonOf(h2, m2.id), "flow-cancelled");
+
+    const h3 = makeHarness(undefined, "conductor");
+    const m3 = makeMission(h3);
+    await startWithFlow(h3, m3.id);
+    h3.state.flow = undefined;
+    h3.manager.syncFlow(h3.room.roomId, undefined);
+    assert.equal(h3.manager.get(m3.id)?.status, "stopped");
+    assert.equal(reasonOf(h3, m3.id), "flow-lost");
+  });
+
+  it("interrupted-restart：reconcile 丢失匹配 flow", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    const r = new MissionManager({
+      store: h.store,
+      getRoom: (id) => h.rooms.get(id),
+      getFlow: () => undefined,
+      hasActiveFlow: () => false,
+      isBusy: () => false,
+      isAvailable: () => true,
+      dispatch: async () => ({ sent: [], mentioned: [], skipped: [] }),
+      cancelActive: async () => {},
+      cancel: async () => {},
+      retryFailedTasks: () => false,
+      supplementActive: () => false,
+      broadcast: () => {},
+    });
+    r.reconcile();
+    const rec = r.get(m.id) as { status: string; reasonCode?: string } | undefined;
+    assert.equal(rec?.status, "stopped");
+    assert.equal(rec?.reasonCode, "interrupted-restart");
+  });
+
+  it("closed-for-rework：母单随 rework 关闭", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    driveToAcceptance(h, m.id);
+    const child = h.manager.rework(m.id, "验收不通过");
+    assert.equal(reasonOf(h, m.id), "closed-for-rework");
+    assert.equal(h.manager.get(m.id)?.status, "stopped");
+    assert.equal(child.parentMissionId, m.id);
+  });
+});
+
 describe("TDD-red：accept() 固化 finishedAt", () => {
   it("finishedAt 取验收时刻而非 flow done 时刻", async () => {
     const h = makeHarness(undefined, "conductor");
