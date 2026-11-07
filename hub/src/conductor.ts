@@ -27,11 +27,13 @@ import {
 export type PromptContent = Array<Record<string, unknown>>;
 
 export interface AgentOps {
-  prompt(sessionId: string, content: string | PromptContent): Promise<void>;
+  prompt(sessionId: string, content: string | PromptContent, opts?: PromptOpts): Promise<void>;
   isBusy(sessionId: string): boolean;
   /** 会话是否仍存在（被删除的会话返回 false），用于编排恢复时识别失效成员 */
   has?(sessionId: string): boolean;
   cwd?(sessionId: string): string | undefined;
+  /** 会话显示名（`name (origin)` 形态）：历史条目 author 归属判定用 */
+  displayName?(sessionId: string): string | undefined;
   runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
 }
 
@@ -171,6 +173,8 @@ type FlowTask = {
   lastRetryAt?: number;
   /** 重启对账已自动重跑过一次：再次恢复时不再自动重派（防循环） */
   autoRetried?: boolean;
+  /** 重启自动重派后注入一次恢复提示（瞬时不持久化）：派发后即消费 */
+  recoveryNote?: boolean;
 };
 
 type Flow = {
@@ -308,6 +312,12 @@ const DISPATCH_RETRY_WINDOW_MS = 10 * 60 * 1000;
 const DISPATCH_RETRY_WINDOW_MAX = 8;
 
 const PROMPT_RETRY_MS = 5000;
+
+/** 重启自动重派的任务恢复提示：宿主侧已判"可证无外发"，但判据有盲区（纯 tool 回合/SIGKILL
+ *  无持久迹），让最了解现场的 worker 先自查工作区再决定是否重复动作 */
+const RECOVERY_NOTE =
+  "[恢复提示] 本任务上一次执行被 Hub 重启打断，宿主侧未发现外发痕迹。开始前请先检查工作区" +
+  "（git status/diff、文件改动、已执行命令的效果），确认哪些已生效，不要重复已完成的外发动作，再继续任务。";
 const SUMMARIZE_RETRY_MS = 5000;
 const TOOL_CALL_ID_MAX = 128;
 const TOOL_COMMAND_MAX = 8192;
@@ -2205,9 +2215,12 @@ export class ConductorOrchestrator {
         qaLines: this.clarificationQaLines(flow),
         supplements: flow.supplements.map((s) => s.text),
       });
+      // 重启自动重派的任务：注入恢复提示让 worker 自查已生效外发（dsh recovery note），消费一次即清
+      const body = t.recoveryNote ? `${RECOVERY_NOTE}\n\n${taskBody}` : taskBody;
+      delete t.recoveryNote;
       const prompt = this.rooms.buildPrompt(
         room.roomId,
-        taskBody,
+        body,
         t.sessionId,
         undefined,
         undefined,
@@ -2933,19 +2946,37 @@ export class ConductorOrchestrator {
         // 可证无外发 → 回 pending 由 scheduleTasks 自动重派（每任务限 1 次防循环）
         const roomHistory = this.store?.read("room", roomId) ?? [];
         const OUTWARD_KINDS = new Set(["assistant", "process", "tool"]);
-        const memberName = (sid: string) =>
-          room.members.find((m) => m.sessionId === sid)?.name;
+        // 房史 author 归属三形态：成员裸名、会话显示名 `name (origin)`、成员展示名 `name·agent·origin`
+        //（以分隔符做前缀匹配防 1→12 级误命中；形态全集缺失时保守按有外发处理）
+        const authorBases = (t: FlowTask): string[] => {
+          const bases: string[] = [];
+          const member = room.members.find((m) => m.sessionId === t.sessionId);
+          if (member?.name) bases.push(member.name);
+          const disp = this.agent.displayName?.(t.sessionId);
+          if (disp) {
+            bases.push(disp);
+            const bare = disp.replace(/ \([^)]*\)$/, "");
+            if (bare !== disp) bases.push(bare);
+          }
+          return [...new Set(bases)];
+        };
         const hadOutward = (t: FlowTask): boolean => {
           if (flow.results.has(t.id)) return true;
           if ((t.backendRuns?.length ?? 0) > 0) return true;
           if ((t.verifications?.length ?? 0) > 0) return true;
-          const name = memberName(t.sessionId);
-          if (name === undefined || t.dispatchedAt === undefined) return true;
+          if (t.dispatchedAt === undefined) return true;
+          const bases = authorBases(t);
+          if (bases.length === 0) return true;
           return roomHistory.some(
             (e) =>
               e.at >= t.dispatchedAt! &&
               OUTWARD_KINDS.has(e.kind) &&
-              (e.author === name || e.author.startsWith(`${name} (`)),
+              bases.some(
+                (b) =>
+                  e.author === b ||
+                  e.author.startsWith(`${b}·`) ||
+                  e.author.startsWith(`${b} (`),
+              ),
           );
         };
         for (const t of flow.tasks.values()) {
@@ -2953,6 +2984,7 @@ export class ConductorOrchestrator {
             if (!t.autoRetried && !hadOutward(t)) {
               t.status = "pending";
               t.autoRetried = true;
+              t.recoveryNote = true;
               delete t.failureMessage;
               delete t.finishedAt;
               autoResumed.push(t.id);

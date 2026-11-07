@@ -12,18 +12,22 @@ import {
   type OpenTopicInput,
 } from "./prompts.js";
 import { logError, logWarn } from "./logger.js";
+import { isSessionBusyError, type PromptOpts } from "./agent.js";
+import type { DecideInput, DecideVerdict, ModeDecider } from "./decide.js";
 import type { Store } from "./store.js";
 import { clientMessageFlowState } from "./client-messages.js";
 
 export type PromptContent = Array<Record<string, unknown>>;
 
 export interface AgentOps {
-  prompt(sessionId: string, content: string | PromptContent): Promise<void>;
+  prompt(sessionId: string, content: string | PromptContent, opts?: PromptOpts): Promise<void>;
   isBusy(sessionId: string): boolean;
   /** 会话是否仍存在（被删除的会话返回 false），用于编排恢复时识别失效成员 */
   has?(sessionId: string): boolean;
   cancel(sessionId: string): Promise<void>;
   cwd?(sessionId: string): string | undefined;
+  /** 会话显示名（`name (origin)` 形态）：历史条目 author 归属判定用 */
+  displayName?(sessionId: string): string | undefined;
   runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
 }
 

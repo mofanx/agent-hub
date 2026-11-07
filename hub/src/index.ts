@@ -700,8 +700,10 @@ const agentOps: AgentOps = {
   has: (sessionId) => sessionMetas.has(sessionId),
   cancel: (sessionId) => ownerOf(sessionId).cancel(sessionId),
   cwd: (sessionId) => sessionMetas.get(sessionId)?.cwd,
+  displayName: (sessionId) => displayNameFor(sessionId),
   runIsolatedCheck,
 };
+const isolatedChecks = parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS);
 const roomModeManager = new RoomModeManager(
   agentOps,
   rooms,

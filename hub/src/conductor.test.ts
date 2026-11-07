@@ -15,6 +15,7 @@ import {
 } from "./conductor.js";
 import { createPromptDoneParams, promptDoneInternalOutput, toPublicHubEvent } from "./agent.js";
 import { RoomManager, type Room } from "./room.js";
+import { Store } from "./store.js";
 
 /** 沙箱基建（systemd-run/bwrap/dbus）瞬时失败映射为 blocked("start_failed")，重试几次再判失败 */
 async function runCheck(cwd: string, command: string) {
@@ -1724,6 +1725,10 @@ describe("conductor", () => {
       "无外发任务应由 scheduleTasks 自动重派一次",
     );
     assert.ok(
+      prompts.at(-1)!.content.includes("恢复提示"),
+      "自动重派的 prompt 应携带 recovery note（worker 自查已生效外发）",
+    );
+    assert.ok(
       notices.some((m) => m.includes("自动重派")),
       "应发出自动重派通知",
     );
@@ -1743,6 +1748,79 @@ describe("conductor", () => {
       w1Before + 1,
       "二次恢复不得重复派发",
     );
+  });
+
+  it("import 恢复：房史 author 三形态匹配——有外发任务保守落 failed 不自动重派", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-outward",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-outward-"));
+    const store = new Store(dir);
+    const prompts: { sessionId: string; content: string }[] = [];
+    const mk = () => {
+      const o = new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content: String(content) });
+          },
+          isBusy: () => false,
+          // 会话显示名与成员裸名不同（真实房间常见）：author 用 `name (origin)` 形态
+          displayName: (sid) =>
+            sid === "w1" ? "hub-room-1 (devin)" : "leader (devin)",
+        },
+        rooms,
+        () => {},
+      );
+      o.setStore(store);
+      return o;
+    };
+    try {
+      const o1 = mk();
+      await o1.start(r, "任务");
+      await o1.onPromptDone(
+        "conductor",
+        '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"}]}\n```',
+      );
+      for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+      assert.equal(
+        prompts.filter((p) => p.sessionId === "w1").length,
+        1,
+        "t1 已派发",
+      );
+
+      // 模拟 w1 回合期间已产生外发：房史 assistant 条目的 author 是会话显示名
+      // `name (origin)` 形态——member.name 比对（旧实现）无法命中，三形态映射必须命中
+      store.append("room", r.roomId, {
+        at: Date.now(),
+        kind: "assistant",
+        author: "hub-room-1 (devin)",
+        text: "已开始修改文件",
+      });
+
+      const o2 = mk();
+      await o2.import(o1.export());
+      for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+      const t1 = (
+        o2.getFlow(r.roomId) as {
+          tasks: { id: string; status: string }[];
+        }
+      ).tasks.find((t) => t.id === "t1")!;
+      assert.equal(t1.status, "failed", "有外发任务必须保守落 failed，不得自动重派");
+      assert.equal(
+        prompts.filter((p) => p.sessionId === "w1").length,
+        1,
+        "有外发任务不得重复派发（防重复副作用）",
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("import 恢复：等待用户求助的任务不失败不重派，定向答复唤醒一次", async () => {
