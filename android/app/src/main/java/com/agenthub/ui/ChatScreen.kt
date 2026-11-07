@@ -843,7 +843,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         )
                                         Spacer(Modifier.width(3.dp))
                                         Text(
-                                            name,
+                                            room.memberDisplay[sid] ?: name,
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (st == "generating") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,

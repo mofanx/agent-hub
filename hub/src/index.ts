@@ -332,6 +332,7 @@ function enrichRoom(room: Room): Record<string, unknown> {
     ...room,
     members: room.members.map((m) => ({
       ...m,
+      displayName: rooms.displayNameFor(m),
       status: memberStatusOf(m.sessionId),
       quota: quotaFor({
         sessionId: m.sessionId,

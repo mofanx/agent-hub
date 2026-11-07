@@ -354,6 +354,8 @@ data class RoomInfo(
     val mode: String,
     val conductorId: String?,
     val members: List<Pair<String, String>>,
+    /** sessionId → hub 拼接展示名（name·agent·origin）；旧 hub 缺省回退 members 原名 */
+    val memberDisplay: Map<String, String> = emptyMap(),
     val archived: Boolean = false,
     val subMode: String? = null,
     val activeSpeaker: String? = null,
@@ -1273,6 +1275,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sessionName(sessionId: String): String {
         if (sessionId.isBlank()) return sessionId
+        currentRoom?.memberDisplay?.get(sessionId)?.let { return it }
         currentRoom?.members?.find { it.first == sessionId }?.second?.let { return it }
         sessions.find { it.sessionId == sessionId }?.let { return displayName(it) }
         currentRoom?.members?.find { it.second == sessionId }?.second?.let { return it }
@@ -3324,9 +3327,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun parseRoom(o: JsonObject): RoomInfo {
+        val memberDisplay = mutableMapOf<String, String>()
         val members = o["members"]!!.jsonArray.map {
             val m = it.jsonObject
             parseReportedQuota(m["quota"])?.let { memberQuotas[m["sessionId"]!!.jsonPrimitive.content] = it }
+            (m["displayName"] as? JsonPrimitive)?.contentOrNull
+                ?.let { d -> memberDisplay[m["sessionId"]!!.jsonPrimitive.content] = d }
             m["sessionId"]!!.jsonPrimitive.content to
                 m["name"]!!.jsonPrimitive.content
         }
@@ -3340,6 +3346,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             mode = o["mode"]?.jsonPrimitive?.content ?: "mention",
             conductorId = o["conductorId"]?.jsonPrimitive?.content,
             members = members,
+            memberDisplay = memberDisplay,
             archived = o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
             subMode = o["subMode"]?.jsonPrimitive?.contentOrNull,
             activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.contentOrNull,
