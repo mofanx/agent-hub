@@ -290,6 +290,8 @@ export class RoomModeManager {
   private pipelineFlows = new Map<string, PipelineFlow>();
   private debateFlows = new Map<string, DebateFlow>();
   private roomSubMode = new Map<string, { mode: RuntimeMode; activeSpeaker?: string | undefined; reason?: string | undefined }>();
+  /** 决策回合锁存（sessionId→roomId）：决策应用即清 subMode，但 turnEnd flush 仍需识别该 turn 为内部决策 */
+  private decidingTurnLatches = new Map<string, string>();
   private promptRooms = new Map<string, string>();
   private autoHistory = new Map<string, { at: number; mode: string; reason: string; accepted?: boolean }[]>();
   private lastAuto = new Map<string, { at: number }>();
@@ -1210,6 +1212,9 @@ export class RoomModeManager {
     this.roomSubMode.delete(roomId);
     this.autoHistory.delete(roomId);
     this.lastAuto.delete(roomId);
+    for (const [sid, rid] of this.decidingTurnLatches) {
+      if (rid === roomId) this.decidingTurnLatches.delete(sid);
+    }
     for (const [sid, ctx] of this.autoDecisions) {
       if (ctx.roomId === roomId) this.autoDecisions.delete(sid);
     }
@@ -1232,6 +1237,7 @@ export class RoomModeManager {
    */
   onSessionCancelled(sessionId: string): void {
     this.turnGuards.delete(sessionId);
+    this.decidingTurnLatches.delete(sessionId);
     const autoCtx = this.autoDecisions.get(sessionId);
     if (autoCtx) {
       this.autoDecisions.delete(sessionId);
@@ -1336,6 +1342,7 @@ export class RoomModeManager {
 
     const erroredRoomId = this.promptRooms.get(sessionId);
     this.promptRooms.delete(sessionId);
+    this.decidingTurnLatches.delete(sessionId);
     if (
       erroredRoomId &&
       !this.hasActiveFlow(erroredRoomId) &&
@@ -1348,8 +1355,14 @@ export class RoomModeManager {
 
   /** 自动决策回合：主持人的模式选择思考属内部编排，其过程卡不应落房史（assistant 草稿已被 isHiddenTurn 抑制） */
   isDecidingTurn(sessionId: string, roomId: string): boolean {
+    if (this.decidingTurnLatches.get(sessionId) === roomId) return true;
     const sub = this.roomSubMode.get(roomId);
     return sub?.mode === "deciding" && sub.activeSpeaker === sessionId;
+  }
+
+  /** turnEnd 收尾：决策锁存随回合终结回收 */
+  endDecidingTurn(sessionId: string): void {
+    this.decidingTurnLatches.delete(sessionId);
   }
 
   /** 用于 onTurnEnd：某 session 的输出是否需要写入房间历史 */
@@ -2069,6 +2082,7 @@ export class RoomModeManager {
       missionId: options?.missionId,
     };
     this.autoDecisions.set(conductorId, autoCtx);
+    this.decidingTurnLatches.set(conductorId, room.roomId);
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
     this.sendPrompt(room.roomId, conductorId, prompt).catch((err) => {
@@ -2077,6 +2091,7 @@ export class RoomModeManager {
       if (this.autoDecisions.get(conductorId) === autoCtx) {
         this.autoDecisions.delete(conductorId);
       }
+      this.decidingTurnLatches.delete(conductorId);
       // 同步释放 deciding 子态并告知用户，不等下条消息触发 cancelActive 才自愈
       this.clearSubMode(room.roomId);
       this.notice({

@@ -734,6 +734,8 @@ const missionManager = new MissionManager({
         kind: "user",
         author: "我",
         text,
+        // 工单派发条目打 missionId 标：房史中与真人输入可区分
+        ...(options.missionId ? { missionId: options.missionId } : {}),
       });
     }
     return roomModeManager.handle(room, text, { ...options, bypassFilter: true });
@@ -1248,6 +1250,7 @@ function onTurnEnd(
     if (draft?.roomDraftId !== undefined) {
       store.interruptReplyDraft(draft.roomDraftId);
     }
+    roomModeManager.endDecidingTurn(sessionId);
     return;
   }
   if (text.trim()) {
@@ -1288,6 +1291,7 @@ function onTurnEnd(
       store.interruptReplyDraft(draft.roomDraftId);
     }
   }
+  roomModeManager.endDecidingTurn(sessionId);
 }
 
 function onFileWrite(sessionId: string, relPath: string, existed: boolean, content?: string): void {

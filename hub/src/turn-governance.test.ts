@@ -530,6 +530,38 @@ describe("turnGuards 生命周期", () => {
       "deciding 子态必须释放",
     );
   });
+
+  it("deciding 锁存：决策应用清除 subMode 后，turnEnd 前仍判内部决策回合", async () => {
+    const store = tmpStore();
+    const rooms = new RoomManager();
+    rooms.setStore(store);
+    const room = rooms.create(
+      "auto-team",
+      [{ sessionId: "s1", name: "coder" }],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    room.mode = "auto";
+    const agent: AgentOps = {
+      prompt: async () => {},
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    manager.setStore(store);
+    appendUser(store, room.roomId, "做个任务");
+    await manager.handle(room, "做个任务", {});
+    assert.equal(manager.subModeFor(room.roomId)?.mode, "deciding");
+    assert.equal(manager.isDecidingTurn("s1", room.roomId), true);
+    // live 竞态：决策应用先于 turnEnd——subMode 已被清除/切换
+    (manager as unknown as { roomSubMode: Map<string, unknown> }).roomSubMode.delete(
+      room.roomId,
+    );
+    assert.equal(manager.isDecidingTurn("s1", room.roomId), true, "锁存期内仍判内部决策");
+    assert.equal(manager.isHiddenTurn("s1", room.roomId), true, "assistant 草稿同样抑制");
+    manager.endDecidingTurn("s1");
+    assert.equal(manager.isDecidingTurn("s1", room.roomId), false, "turnEnd 后锁存回收");
+  });
 });
 
 describe("worker 过程输出归卡", () => {
