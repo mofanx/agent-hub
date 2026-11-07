@@ -1823,6 +1823,67 @@ describe("conductor", () => {
     }
   });
 
+  it("import 恢复：recoveryNote 派发失败保留，补派仍携带提示且成功后才消费", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "note-retry",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    let failOnce = false;
+    const mk = () =>
+      new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            const c = String(content);
+            if (failOnce && sessionId === "w1") {
+              failOnce = false;
+              throw new Error("agent 未连接");
+            }
+            prompts.push({ sessionId, content: c });
+          },
+          isBusy: () => false,
+        },
+        rooms,
+        () => {},
+      );
+    const o1 = mk();
+    await o1.start(r, "任务");
+    await o1.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(prompts.filter((p) => p.sessionId === "w1").length, 1, "t1 已派发");
+
+    // 恢复一：自动重派但发送即失败（agent 未连接）→ pending，recoveryNote 必须保留
+    failOnce = true;
+    const o2 = mk();
+    await o2.import(o1.export());
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "w1").length,
+      1,
+      "发送失败的补派不计入成功投递",
+    );
+
+    // 恢复二：补派成功 → prompt 仍携带恢复提示（flag 发送成功才消费）
+    const o3 = mk();
+    await o3.import(o2.export());
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    const w1Prompts = prompts.filter((p) => p.sessionId === "w1");
+    assert.equal(w1Prompts.length, 2, "补派成功投递一次");
+    assert.ok(
+      w1Prompts[1]!.content.includes("恢复提示"),
+      "补派 prompt 必须仍携带 recovery note",
+    );
+  });
+
   it("import 恢复：等待用户求助的任务不失败不重派，定向答复唤醒一次", async () => {
     const rooms = new RoomManager();
     const r = rooms.create(
@@ -3078,6 +3139,50 @@ describe("conductor", () => {
     const legacy = orch3.getFlow(room.roomId) as Record<string, unknown>;
     assert.match(String(legacy.flowId), /^fl-\d+-\d+$/, "旧快照无 id 时补生成");
     assert.equal(orch3.flowCardRowId(room.roomId), undefined);
+  });
+
+  it("agent 未连接派发失败不烧重试预算：task 留 pending，resumeFlows 唤醒重派", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "offline-race",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    let offline = true;
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          if (sessionId === "worker1" && offline) throw new Error("agent 未连接");
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    await orchestrator.start(room, "任务");
+    const plan = `\`\`\`json\n{"tasks":[{"id":"t1","to":"worker1","task":"离线派发"}]}\n\`\`\``;
+    await orchestrator.onPromptDone("conductor", plan);
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 1));
+      const f = orchestrator.getFlow(room.roomId);
+      if (f && (f.tasks as { status: string }[])[0]?.status === "pending") break;
+    }
+    const flow = orchestrator.getFlow(room.roomId);
+    const t1 = (flow!.tasks as { id: string; status: string; retries?: number }[]).find((t) => t.id === "t1");
+    assert.equal(t1?.status, "pending", "连接性失败应留 pending 而非烧完重试标 failed");
+    assert.ok(!t1?.retries, "agent 未连接不计 retries");
+    offline = false;
+    orchestrator.resumeFlows();
+    for (let i = 0; i < 20 && prompts.length === 0; i++) await new Promise((r) => setTimeout(r, 1));
+    assert.ok(prompts.some((p) => p.sessionId === "worker1"), "agent 连接恢复后 resumeFlows 应补派");
   });
 
 });

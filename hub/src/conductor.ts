@@ -2228,9 +2228,9 @@ export class ConductorOrchestrator {
         qaLines: this.clarificationQaLines(flow),
         supplements: flow.supplements.map((s) => s.text),
       });
-      // 重启自动重派的任务：注入恢复提示让 worker 自查已生效外发（dsh recovery note），消费一次即清
+      // 重启自动重派的任务：注入恢复提示让 worker 自查已生效外发（dsh recovery note）。
+      // 发送成功才消费——派发失败退 pending 后补派仍需携带提示（幂等：flag 未删则下次照旧注入）
       const body = t.recoveryNote ? `${RECOVERY_NOTE}\n\n${taskBody}` : taskBody;
-      delete t.recoveryNote;
       const prompt = this.rooms.buildPrompt(
         room.roomId,
         body,
@@ -2243,9 +2243,24 @@ export class ConductorOrchestrator {
         .then(() => {
           t.retries = 0;
           delete t.lastRetryAt;
+          delete t.recoveryNote;
         })
         .catch((err: unknown) => {
           const msg = String(err);
+          // 恢复派发 vs agent 重连竞态：连接性失败（agent 未连接）不是任务缺陷，
+          // 不烧 3 次重试预算——task 留 pending，唤醒源=agent ensureStarted→resumeFlows
+          // 重驱动 scheduleTasks；另留 BUSY_RETRY_MS 慢速兜底轮询防唤醒遗漏
+          if (msg.includes("agent 未连接")) {
+            t.status = "pending";
+            delete t.dispatchedAt;
+            logWarn("conductor dispatch", `task ${t.id} deferred: agent offline, waits reconnect`);
+            this.scheduleReschedule(flow, BUSY_RETRY_MS, () => {
+              this.scheduleTasks(flow, room).catch((e) => {
+                logError("conductor offline retry reschedule", e);
+              });
+            });
+            return;
+          }
           if (this.noteDispatchFailure(flow, t, msg)) return;
           t.status = "pending";
           this.notice({
@@ -2664,6 +2679,7 @@ export class ConductorOrchestrator {
         ...(t.backendRuns !== undefined ? { backendRuns: t.backendRuns } : {}),
         ...(t.automaticCheck !== undefined ? { automaticCheck: t.automaticCheck } : {}),
         ...(t.autoRetried ? { autoRetried: true } : {}),
+        ...(t.recoveryNote ? { recoveryNote: true } : {}),
       })),
       supplements: flow.supplements,
       help: [...flow.help.values()],
@@ -2825,6 +2841,7 @@ export class ConductorOrchestrator {
               : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
           ...(o.autoRetried === true ? { autoRetried: true } : {}),
+          ...(o.recoveryNote === true ? { recoveryNote: true } : {}),
           ...(typeof o.helpRounds === "number" ? { helpRounds: o.helpRounds } : {}),
           ...(Array.isArray(o.verifications)
             ? {
