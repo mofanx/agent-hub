@@ -64,10 +64,11 @@ export class NtfyPusher {
     roomName: string,
     kind: NtfyKind,
     clientCount: number,
+    detail?: string,
   ): Promise<boolean> {
     if (!this.config.enabled || clientCount > 0) return false;
     if (!this.limiter.admit(roomId, this.config.maxPerHour)) return false;
-    const label = KIND_LABEL[kind];
+    const label = detail ? `${KIND_LABEL[kind]}·${detail}` : KIND_LABEL[kind];
     try {
       const res = await this.fetchFn(`${this.config.url}/${this.config.topic}`, {
         method: "POST",

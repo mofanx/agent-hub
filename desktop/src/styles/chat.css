@@ -2735,6 +2735,8 @@ div.turn-tail {
 .send-status .link { font-size: inherit; }
 .send-status-hint { opacity: 0.85; }
 
+.mission-tag { font-size: 0.72em; color: var(--text-dim, #888); margin-top: 4px; display: inline-block; border: 1px solid var(--border, #444); border-radius: 4px; padding: 1px 6px; }
+
 .outbox-panel { margin: 4px 8px; font-size: 0.85em; }
 .outbox-list { max-height: 280px; overflow-y: auto; border: 1px solid var(--border, #333); border-radius: 6px; margin-top: 4px; }
 .outbox-row { padding: 6px 8px; border-bottom: 1px solid var(--border, #333); }

@@ -391,7 +391,9 @@ export type ChatItem =
   | { kind: "user"; at?: number; historyId?: number; text: string; author: string; attachments?: Attachment[]; quoteAuthor?: string; quoteText?: string; clientMessageId?: string; sendStatus?: "pending" | "sending" | "sent" | "uncertain" | "failed" | "dismissed";
   deliveryTracked?: boolean;
   attachmentNames?: string[];
-  sendError?: "context" | "expired" }
+  sendError?: "context" | "expired";
+  /** 工单派发产生的条目：气泡上展示归因标记 */
+  missionId?: string }
   | { kind: "system"; at?: number; historyId?: number; text: string; author: string }
   | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string; /** 流式进行中：渲染层用轻量纯文本，turn 结束后完整 markdown 重排 */ streaming?: boolean }
   | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string; streaming?: boolean }
@@ -626,6 +628,7 @@ export interface MissionInfo {
   flow?: Record<string, unknown>;
   output?: string;
   error?: string;
+  reasonCode?: string;
   events: MissionEvent[];
   reviews: MissionCriterionReview[];
   acceptance?: { at: number; note: string };

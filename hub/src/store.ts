@@ -36,7 +36,7 @@ export type HistoryEntry = {
   kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow" | "decision";
   author: string;
   text: string;
-  clientMessageId?: string;
+  clientMessageId?: string | undefined;
   /** 工单派发产生的条目归属 mission id（真人输入为空，可区分来源） */
   missionId?: string | undefined;
 };
@@ -59,10 +59,12 @@ export function lostReplyAction(
 
 type HistoryItem = HistoryEntry & { id: number; at: number; draft?: number };
 
-/** SQLite NULL → undefined：HistoryItem.missionId 契约是可选字段而非 null */
+/** SQLite NULL → undefined：可选字段契约是 undefined 而非 null */
 function normalizeItems<T extends HistoryItem>(rows: T[]): T[] {
   for (const r of rows) {
-    if ((r as { missionId?: unknown }).missionId === null) r.missionId = undefined;
+    const rr = r as { missionId?: unknown; clientMessageId?: unknown };
+    if (rr.missionId === null) r.missionId = undefined;
+    if (rr.clientMessageId === null) r.clientMessageId = undefined;
   }
   return rows;
 }
@@ -719,12 +721,13 @@ export class Store {
   searchHistory(
     scope: "session" | "room",
     id: string,
-    opts: { query?: string | undefined; author?: string | undefined; fromAt?: number | undefined; toAt?: number | undefined; limit?: number | undefined; beforeId?: number | undefined } = {},
+    opts: { query?: string | undefined; author?: string | undefined; missionId?: string | undefined; fromAt?: number | undefined; toAt?: number | undefined; limit?: number | undefined; beforeId?: number | undefined } = {},
   ): HistoryItem[] {
     const conds = ["scope = ?", "scope_id = ?", "draft = 0"];
     const args: unknown[] = [scope, id];
     if (opts.query) { conds.push("LOWER(text) LIKE ?"); args.push(`%${opts.query.toLowerCase()}%`); }
     if (opts.author) { conds.push("author = ?"); args.push(opts.author); }
+    if (opts.missionId) { conds.push("mission_id = ?"); args.push(opts.missionId); }
     if (opts.fromAt !== undefined) { conds.push("at >= ?"); args.push(opts.fromAt); }
     if (opts.toAt !== undefined) { conds.push("at <= ?"); args.push(opts.toAt); }
     if (opts.beforeId !== undefined) { conds.push("id < ?"); args.push(opts.beforeId); }

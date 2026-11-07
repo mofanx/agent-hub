@@ -749,10 +749,32 @@ const missionManager = new MissionManager({
     broadcast({ method, params } as HubEvent);
     // mission 进入终态 → "task.done" 事件唤醒（roomId 取自 mission 快照）
     if (method === "mission.update") {
-      const m = (params as { mission?: { roomId?: string; status?: string } }).mission;
-      if (m?.roomId && (m.status === "accepted" || m.status === "stopped" || m.status === "failed")) {
+      const m = (params as { mission?: { id?: string; roomId?: string; status?: string; reasonCode?: string } }).mission;
+      if (!m?.roomId) return;
+      if (m.status === "accepted" || m.status === "stopped" || m.status === "failed") {
         fireEventTasks(m.roomId, "task.done", { status: m.status });
         if (m.status === "accepted") notifyOffline(m.roomId, "task.done");
+        // 系统原因失败/中断对用户可见（user-stopped/closed-for-rework 是用户自己点的）
+        else if (m.status === "failed" || (m.reasonCode !== undefined && m.reasonCode !== "user-stopped" && m.reasonCode !== "closed-for-rework"))
+          notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode));
+      } else if (m.status === "waiting-user") {
+        notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode));
+      }
+      // awaiting-acceptance 提醒定时器：进入排一次，离开取消
+      if (m.id) {
+        const key = m.id;
+        if (m.status === "awaiting-acceptance" && !aaReminders.has(key)) {
+          const t = setTimeout(() => {
+            aaReminders.delete(key);
+            if (missionManager.get(key)?.status === "awaiting-acceptance")
+              notifyOffline(m.roomId, "attention", reasonLabel("awaiting-acceptance"));
+          }, AWAITING_ACCEPTANCE_REMINDER_MS);
+          t.unref?.();
+          aaReminders.set(key, t);
+        } else if (m.status !== "awaiting-acceptance" && aaReminders.has(key)) {
+          clearTimeout(aaReminders.get(key));
+          aaReminders.delete(key);
+        }
       }
     }
   },
@@ -937,13 +959,35 @@ const wakeSelfSuppress = new Map<string, number>();
 /** ntfy 触达兜底：仅客户端全部离线时推（有客户端时走 WS 已可达）。
  *  正文只含房名+事件类型；NTFY_TOPIC 未配置时恒不推。 */
 const ntfyPusher = new NtfyPusher(ntfyConfigFromEnv());
-function notifyOffline(roomId: string | undefined, kind: NtfyKind): void {
+function notifyOffline(roomId: string | undefined, kind: NtfyKind, detail?: string): void {
   if (restoringRuntime || !roomId) return;
   const room = rooms.get(roomId);
   void ntfyPusher
-    .notifyIfOffline(roomId, room?.name ?? roomId, kind, clients.size)
+    .notifyIfOffline(roomId, room?.name ?? roomId, kind, clients.size, detail)
     .catch((e) => logError(`ntfy ${kind}`, e));
 }
+
+/** mission reasonCode → 本地化短文案（ntfy 正文/标题尾部），未知码原样透传 */
+const REASON_LABEL: Record<string, string> = {
+  "awaiting-input": "等待输入",
+  "awaiting-retry": "等待重试确认",
+  "dispatch-failed": "派发失败",
+  "dispatch-empty": "派发为空",
+  "flow-tasks-failed": "任务失败",
+  "turn-error": "回合错误",
+  "user-stopped": "用户停止",
+  "flow-lost": "flow 丢失",
+  "flow-cancelled": "flow 已取消",
+  "interrupted-restart": "重启中断",
+  "closed-for-rework": "返工关闭",
+  "awaiting-acceptance": "等待验收",
+};
+const reasonLabel = (code: string | undefined): string | undefined =>
+  code === undefined ? undefined : (REASON_LABEL[code] ?? code);
+
+/** awaiting-acceptance 挂起提醒：进入时排一次性定时器（不自动过期），离开即取消 */
+const AWAITING_ACCEPTANCE_REMINDER_MS = 30 * 60 * 1000;
+const aaReminders = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** 廉价决策层拦截计数（观测：被谓词省掉的唤醒次数，auto 路由复用同一 wakeGateAllows） */
 const wakeGateStats = new WakeGateStats();
@@ -1748,7 +1792,52 @@ type RequestMessage = {
   params?: Record<string, unknown>;
 };
 
+// mission.* RPC 表格化：参数提取收口到表内，id/missionId 双键统一，persistState 由分发器尾统一执行
+const missionIdOf = (p: Record<string, unknown>) => String(p.id ?? p.missionId ?? "");
+const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Promise<unknown>> = {
+  "mission.create": (p) => ({
+    mission: missionManager.create({
+      roomId: p.roomId, goal: p.goal, acceptanceCriteria: p.acceptanceCriteria,
+      scope: p.scope, constraints: p.constraints,
+      ownerSessionId: p.ownerSessionId, maxAutoRetries: p.maxAutoRetries,
+    }),
+  }),
+  "mission.list": (p) => {
+    const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+    return { missions: missionManager.list(str(p.roomId), str(p.status)) };
+  },
+  "mission.delete": (p) => missionManager.delete(missionIdOf(p), p.force === true),
+  "mission.get": (p) => {
+    const mission = missionManager.get(missionIdOf(p));
+    if (!mission) throw new Error(`unknown mission: ${missionIdOf(p)}`);
+    return { mission };
+  },
+  "mission.start": (p) => missionManager.start(missionIdOf(p)).then((mission) => ({ mission })),
+  "mission.stop": (p) =>
+    missionManager.stop(missionIdOf(p), typeof p.reason === "string" ? p.reason : undefined).then((mission) => ({ mission })),
+  "mission.review": (p) => ({
+    mission: missionManager.review(missionIdOf(p), { index: p.index, verdict: p.verdict, taskIds: p.taskIds, note: p.note }),
+  }),
+  "mission.accept": (p) => ({ mission: missionManager.accept(missionIdOf(p), p.note) }),
+  "mission.rework": (p) => ({ mission: missionManager.rework(missionIdOf(p), p.note) }),
+  "mission.updateContract": (p) => ({
+    mission: missionManager.updateContract(missionIdOf(p), {
+      goal: p.goal, acceptanceCriteria: p.acceptanceCriteria, scope: p.scope,
+      constraints: p.constraints, ownerSessionId: p.ownerSessionId, maxAutoRetries: p.maxAutoRetries,
+    }),
+  }),
+  "mission.supplement": (p) => missionManager.supplement(missionIdOf(p), p.text).then((mission) => ({ mission })),
+  "mission.retry": (p) => ({ mission: missionManager.retry(missionIdOf(p)) }),
+};
+const MISSION_RPC_READONLY: ReadonlySet<string> = new Set(["mission.list", "mission.get"]);
+
 async function handleRequest(req: RequestMessage, relayed = false): Promise<unknown> {
+  const missionHandler = MISSION_RPC[req.method];
+  if (missionHandler) {
+    const out = await missionHandler((req.params ?? {}) as Record<string, unknown>);
+    if (!MISSION_RPC_READONLY.has(req.method)) persistState();
+    return out;
+  }
   switch (req.method) {
     case "agent.info":
       return {
@@ -2625,98 +2714,6 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       persistState();
       return { retried };
     }
-    case "mission.create": {
-      const mission = missionManager.create({
-        roomId: req.params?.roomId,
-        goal: req.params?.goal,
-        acceptanceCriteria: req.params?.acceptanceCriteria,
-        scope: req.params?.scope,
-        constraints: req.params?.constraints,
-        ownerSessionId: req.params?.ownerSessionId,
-        maxAutoRetries: req.params?.maxAutoRetries,
-      });
-      persistState();
-      return { mission };
-    }
-    case "mission.list": {
-      const roomId =
-        typeof req.params?.roomId === "string" && req.params.roomId.trim()
-          ? req.params.roomId.trim()
-          : undefined;
-      const status =
-        typeof req.params?.status === "string" && req.params.status.trim()
-          ? req.params.status.trim()
-          : undefined;
-      return { missions: missionManager.list(roomId, status) };
-    }
-    case "mission.delete": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const result = await missionManager.delete(id, req.params?.force === true);
-      persistState();
-      return result;
-    }
-    case "mission.get": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = missionManager.get(id);
-      if (!mission) throw new Error(`unknown mission: ${id}`);
-      return { mission };
-    }
-    case "mission.start": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = await missionManager.start(id);
-      persistState();
-      return { mission };
-    }
-    case "mission.stop": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const reason =
-        typeof req.params?.reason === "string" ? req.params.reason : undefined;
-      const mission = await missionManager.stop(id, reason);
-      persistState();
-      return { mission };
-    }
-    case "mission.review": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = missionManager.review(id, {
-        index: req.params?.index,
-        verdict: req.params?.verdict,
-        taskIds: req.params?.taskIds,
-        note: req.params?.note,
-      });
-      persistState();
-      return { mission };
-    }
-    case "mission.accept": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = missionManager.accept(id, req.params?.note);
-      persistState();
-      return { mission };
-    }
-    case "mission.rework": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = missionManager.rework(id, req.params?.note);
-      persistState();
-      return { mission };
-    }
-    case "mission.updateContract": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = missionManager.updateContract(id, {
-        goal: req.params?.goal,
-        acceptanceCriteria: req.params?.acceptanceCriteria,
-        scope: req.params?.scope,
-        constraints: req.params?.constraints,
-        ownerSessionId: req.params?.ownerSessionId,
-        maxAutoRetries: req.params?.maxAutoRetries,
-      });
-      persistState();
-      return { mission };
-    }
-    case "mission.supplement": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = await missionManager.supplement(id, req.params?.text);
-      persistState();
-      return { mission };
-    }
     case "decision.list": {
       // 可选过滤：roomId/sessionId/missionId 命中任一即收窄；均不传返回全部 pending
       const str = (k: string) => {
@@ -2730,12 +2727,6 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           missionId: str("missionId"),
         }),
       };
-    }
-    case "mission.retry": {
-      const id = String(req.params?.id ?? req.params?.missionId ?? "");
-      const mission = missionManager.retry(id);
-      persistState();
-      return { mission };
     }
     case "session.artifacts": {
       const sessionId = String(req.params?.sessionId ?? "");

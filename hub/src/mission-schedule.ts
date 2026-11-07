@@ -1,5 +1,5 @@
 import type { Room } from "./room.js";
-import type { MissionSnapshot } from "./mission.js";
+import { allMembersAvailable, type MissionSnapshot } from "./mission.js";
 import {
   EVENT_WAKE_KINDS,
   type EventTrigger,
@@ -165,7 +165,7 @@ export async function runMissionTask(
     throw new Error("mission template target mismatch");
   const room = deps.getRoom(tpl.roomId);
   if (!room) throw new Error(`unknown room: ${tpl.roomId}`);
-  if (task.missionAutoStart && !room.members.every((mem) => deps.isAvailable(mem.sessionId)))
+  if (task.missionAutoStart && !allMembersAvailable(room, deps.isAvailable))
     throw new Error(`room ${room.roomId} has unavailable members; auto start skipped`);
   const occupied =
     deps.hasActiveFlow(room.roomId) ||

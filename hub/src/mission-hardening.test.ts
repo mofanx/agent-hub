@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MissionManager, type MissionDeps } from "./mission.js";
+import { MissionManager, MISSION_TRANSITIONS, type MissionDeps } from "./mission.js";
+import { asFlowView, flowOwnerOf } from "./conductor.js";
 import { RoomManager, type Room } from "./room.js";
 import { Store, type HistoryEntry } from "./store.js";
 import type { ModeResult } from "./room-modes.js";
@@ -350,6 +351,133 @@ describe("TDD-red：派发窗口簿记不落盘", () => {
     ]) {
       assert.equal(key in rec!, false, `persisted record 不应含 ${key}`);
     }
+  });
+});
+
+describe("统一状态迁移表", () => {
+  it("合法边集合与设计一致，非法边缺席", () => {
+    const legal = (from: string, to: string) =>
+      (MISSION_TRANSITIONS as Record<string, ReadonlySet<string>>)[from]?.has(to) === true;
+    // 15 条合法边
+    const legalEdges: [string, string][] = [
+      ["draft", "running"], ["draft", "stopped"],
+      ["running", "waiting-user"], ["running", "awaiting-acceptance"], ["running", "stopped"], ["running", "failed"],
+      ["waiting-user", "running"], ["waiting-user", "awaiting-acceptance"], ["waiting-user", "stopped"], ["waiting-user", "failed"],
+      ["awaiting-acceptance", "accepted"], ["awaiting-acceptance", "stopped"],
+    ];
+    for (const [f, t] of legalEdges) assert.ok(legal(f, t), `${f}→${t} 应为合法边`);
+    // 非法边：终态出边、跳级、回退
+    const illegalEdges: [string, string][] = [
+      ["draft", "accepted"], ["draft", "awaiting-acceptance"], ["draft", "failed"],
+      ["awaiting-acceptance", "running"], ["awaiting-acceptance", "failed"],
+      ["accepted", "running"], ["accepted", "stopped"], ["accepted", "failed"],
+      ["stopped", "running"], ["stopped", "failed"],
+      ["failed", "running"], ["failed", "stopped"], ["failed", "awaiting-acceptance"],
+    ];
+    for (const [f, t] of illegalEdges) assert.ok(!legal(f, t), `${f}→${t} 不得为合法边`);
+  });
+});
+
+describe("FlowView 窄化与归属谓词", () => {
+  it("asFlowView：tasks 非数组归一为空数组，其余字段透传", () => {
+    const v = asFlowView({ flowId: "f1", phase: "working", tasks: "bogus" });
+    assert.deepEqual(v?.tasks, []);
+    assert.equal(v?.phase, "working");
+    const v2 = asFlowView({ flowId: "f1", phase: "working", tasks: [{ id: "t1", status: "running" }] });
+    assert.equal(v2?.tasks.length, 1);
+    assert.equal(asFlowView(undefined), undefined);
+  });
+
+  it("asFlowView 标量防御：非 string 契约字段归一 undefined，良构快照零拷贝", () => {
+    const dirty = asFlowView({ flowId: 123, phase: 42, waitingFor: {}, failureMessage: null, tasks: [{ id: "t1" }] });
+    assert.equal(dirty?.flowId, undefined);
+    assert.equal(dirty?.phase, undefined);
+    assert.equal(dirty?.waitingFor, undefined);
+    assert.equal(dirty?.failureMessage, undefined);
+    assert.equal(dirty?.tasks.length, 1);
+    // 良构快照：tasks 数组引用不变（零拷贝路径）
+    const tasks = [{ id: "t1", status: "running" }];
+    const v2 = asFlowView({ flowId: "f1", phase: "working", tasks });
+    assert.ok(v2);
+    assert.equal(v2.tasks, tasks as unknown as typeof v2.tasks);
+    assert.equal(v2.flowId, "f1");
+  });
+
+  it("start 经统一迁移表：单条 started 生命周期事件", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    const snap = await startWithFlow(h, m.id);
+    assert.equal(snap.status, "running");
+    const started = snap.events.filter((e) => e.kind === "lifecycle" && e.text === "started");
+    assert.equal(started.length, 1, "draft→running 走 transition 只记一次 started");
+  });
+
+  it("flowOwnerOf：非空 missionId 才认归属", () => {
+    assert.equal(flowOwnerOf({ missionId: "m1" }), "m1");
+    assert.equal(flowOwnerOf({ missionId: "" }), undefined);
+    assert.equal(flowOwnerOf({}), undefined);
+    assert.equal(flowOwnerOf(undefined), undefined);
+  });
+
+  it("flowSig 噪声免疫：无关字段变化不再 bump revision", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    const rev1 = h.manager.get(m.id)!.revision;
+    // 仅 flow 级无关字段（goal/rounds/results）变化，phase/tasks/missionId 同 → 不产生新 commit
+    h.state.flow = { ...flowView("f1", "working", [{ id: "t1", sessionId: "s1", status: "running" }], m.id), goal: "changed", rounds: 99, results: { x: 1 } };
+    h.manager.syncFlow(h.room.roomId, h.state.flow);
+    assert.equal(h.manager.get(m.id)!.revision, rev1, "无关字段 churn 不应触发 commit");
+  });
+});
+
+describe("history.search missionId 过滤", () => {
+  it("missionId 过滤只命中带标条目", () => {
+    const { store } = tmpStore();
+    store.append("room", "r1", { at: 1, kind: "user", author: "我", text: "工单派发", missionId: "m1" });
+    store.append("room", "r1", { at: 2, kind: "user", author: "我", text: "普通输入" });
+    store.append("room", "r1", { at: 3, kind: "user", author: "我", text: "另一工单", missionId: "m2" });
+    const rows = store.searchHistory("room", "r1", { missionId: "m1" });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.text, "工单派发");
+  });
+});
+
+describe("awaiting-acceptance 不占房", () => {
+  it("AA 状态下同房间可开新工单", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    driveToAcceptance(h, m.id);
+    assert.equal(h.manager.get(m.id)?.status, "awaiting-acceptance");
+    const m2 = makeMission(h, { goal: "second" });
+    const snap = await startWithFlow(h, m2.id);
+    assert.equal(snap.status, "running");
+  });
+});
+
+describe("m.output 单写者", () => {
+  it("回合输出走 events(kind=output)，output 仅终态 summarizeFlow", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    h.manager.onTurnDone("s1", h.room.roomId, "mid-run result");
+    const cur = h.manager.get(m.id)!;
+    assert.ok(cur.events.some((e) => e.kind === "output" && e.text.includes("mid-run")));
+    // flow 未 done 时 output 不被片段写入
+    assert.equal(cur.output?.includes("mid-run") ?? false, false);
+    pushFlow(h, "done", [{ id: "t1", name: "coder", status: "done", output: "shipped" }]);
+    const done = h.manager.get(m.id)!;
+    assert.ok(done.output?.includes("shipped"), "done 后 output 由 summarizeFlow 写入任务摘要");
+  });
+});
+
+describe("history clientMessageId NULL 归一", () => {
+  it("无 clientMessageId 的条目读回为 undefined 而非 null", () => {
+    const { store } = tmpStore();
+    store.append("room", "r1", { at: 1, kind: "user", author: "我", text: "hi" });
+    const rows = store.read("room", "r1");
+    assert.equal(rows[0]?.clientMessageId, undefined);
   });
 });
 

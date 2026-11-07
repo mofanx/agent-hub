@@ -391,6 +391,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             Text(S.missionAwaitingHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
                         }
                         m.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                        m.reasonCode?.let { Text("${S.missionReason}: ${missionReasonLabel(S, it)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         val roomDecisions = vm.pendingDecisions.count { it.roomId == m.roomId }
                         if (roomDecisions > 0) {
                             Text(

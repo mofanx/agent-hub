@@ -653,6 +653,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             TopAppBar(
                 windowInsets = WindowInsets(0),
                 title = {
+                    val conn = vm.connTag()
                     if (isRoom) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
@@ -662,9 +663,28 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(" (${vm.currentRoom?.members?.size ?: 0})")
+                            conn?.let {
+                                Text(
+                                    " " + S.connTag.format(it),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                            }
                         }
                     } else {
-                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false))
+                            conn?.let {
+                                Text(
+                                    " " + S.connTag.format(it),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
                     }
                 },
                 navigationIcon = {
@@ -843,7 +863,9 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                         )
                                         Spacer(Modifier.width(3.dp))
                                         Text(
-                                            room.memberDisplay[sid] ?: name,
+                                            (room.memberDisplay[sid] ?: name)
+                                                .substringBefore('·')
+                                                .let { if (it.length <= 6) it else it.take(5) + "…" },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (st == "generating") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,
@@ -2577,6 +2599,10 @@ private fun RawChatBubble(
                     color = bgColor,
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        if (item.missionId != null) {
+                            Text(S.missionDrivenTag, style = MaterialTheme.typography.labelSmall, color = textColor.copy(alpha = 0.6f))
+                            Spacer(Modifier.height(2.dp))
+                        }
                         if (item.quoteAuthor != null) {
                             Text(
                                 "${S.quoting} @${item.quoteAuthor}: ${item.quoteText?.take(80).orEmpty()}",

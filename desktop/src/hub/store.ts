@@ -276,6 +276,7 @@ interface Actions {
   sessionName(sessionId: string): string;
   sessionOrigin(s: SessionInfo): string;
   displayName(s: SessionInfo): string;
+  connTag(): string | null;
   slashCommands: SlashCommand[];
   isGenerating(): boolean;
 
@@ -512,7 +513,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       case "user": {
         const clientMessageId = typeof o.clientMessageId === "string" ? o.clientMessageId : undefined;
         const queued = clientMessageId ? outbox.find((i) => i.clientMessageId === clientMessageId) : undefined;
-        return { kind: "user", at, historyId, text, author, attachments, clientMessageId, sendStatus: queued?.status };
+        return { kind: "user", at, historyId, text, author, attachments, clientMessageId, sendStatus: queued?.status,
+          ...(typeof o.missionId === "string" ? { missionId: o.missionId } : {}) };
       }
       case "assistant":
         return { kind: "assistant", at, historyId, id: 0, text, author, usage: usage ? parseTokenUsage(usage) : undefined };
@@ -2042,6 +2044,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         : {}),
       ...(typeof o.output === "string" ? { output: o.output } : {}),
       ...(typeof o.error === "string" ? { error: o.error } : {}),
+      ...(typeof o.reasonCode === "string" ? { reasonCode: o.reasonCode } : {}),
       events: Array.isArray(o.events)
         ? (o.events as unknown[]).map((e) => {
             const ev = e as Record<string, unknown>;
@@ -3695,6 +3698,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
     displayName: (s) => {
       const origin = get().sessionOrigin(s);
       return origin ? `${s.name} (${origin})` : s.name;
+    },
+
+    connTag: () => {
+      const { profiles, currentProfile } = get();
+      if (profiles.length <= 1 || !currentProfile) return null;
+      const label = currentProfile.name ||
+        currentProfile.address.replace(/^wss?:\/\//, "").replace(/^https?:\/\//, "")
+          .split("/")[0].split(":")[0];
+      return label.length <= 20 ? label : label.slice(0, 19) + "…";
     },
 
     slashCommands: [],

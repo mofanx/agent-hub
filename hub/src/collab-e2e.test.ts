@@ -2870,7 +2870,7 @@ describe("collab-e2e", () => {
       await turnDone("s2", "b 的评估");
       const cur = missions.get(m.id)!;
       assert.equal(cur.status, "awaiting-acceptance");
-      assert.ok(cur.output?.includes("评估"));
+      assert.ok(cur.events.some((e) => e.kind === "output" && e.text.includes("评估")));
     } finally {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -2958,7 +2958,7 @@ describe("mission e2e v3", () => {
       await h.turnDone("s1", "方案评估完成：选 A");
       const cur = h.missions.get(m.id)!;
       assert.equal(cur.status, "awaiting-acceptance");
-      assert.ok(cur.output?.includes("方案评估"));
+      assert.ok(cur.events.some((e) => e.kind === "output" && e.text.includes("方案评估")));
     } finally {
       h.cleanup();
     }

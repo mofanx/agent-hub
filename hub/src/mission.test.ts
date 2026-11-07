@@ -321,7 +321,7 @@ describe("mission", () => {
     h.manager.onTurnDone("s1", h.room.roomId, "done: all good");
     const cur = h.manager.get(m.id)!;
     assert.equal(cur.status, "awaiting-acceptance");
-    assert.ok(cur.output?.includes("all good"));
+    assert.ok(cur.events.some((e) => e.kind === "output" && e.text.includes("all good")));
     assert.ok(cur.finishedAt);
   });
 
@@ -836,7 +836,7 @@ describe("mission v2", () => {
     resolveDispatch({ sent: ["s1"], mentioned: [], skipped: [] });
     const cur = await started;
     assert.equal(cur.status, "awaiting-acceptance", "早完成应计入收敛");
-    assert.ok(cur.output?.includes("early result"));
+    assert.ok(cur.events.some((e) => e.kind === "output" && e.text.includes("early result")));
   });
 
   it("无关成员 done/error 不消费；ownsTurn 限制", async () => {
@@ -951,7 +951,7 @@ describe("mission v2", () => {
     assert.throws(() => h.manager.review(m.id, { index: 0, verdict: "pass", taskIds: ["t1"], note: " " }), /non-empty/);
     const r = h.manager.review(m.id, { index: 0, verdict: "pass", taskIds: ["t1"], note: "核对过输出" });
     assert.equal(r.reviews[0]!.verdict, "pass");
-    assert.equal(r.reviews[0]!.source, "user");
+    assert.equal(r.reviews[0]!.note, "核对过输出");
     const r2 = h.manager.review(m.id, { index: 1, verdict: "fail", taskIds: [], note: "不符合" });
     assert.equal(r2.reviews.find((x) => x.index === 1)?.verdict, "fail");
     // 非 awaiting-acceptance 拒绝

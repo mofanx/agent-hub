@@ -657,6 +657,7 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
   const active = store.currentRoom?.roomId === r.roomId;
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(r.name);
+  const connTag = store.connTag();
 
   const commitRename = () => {
     const trimmed = name.trim();
@@ -705,6 +706,7 @@ function RoomNavItem({ r, batch }: { r: RoomInfo; batch: boolean }) {
                 </span>
               )}
               {r.name}
+              {connTag && <span className="offline-tag"> {S.connTag.replace("%s", connTag)}</span>}
               {r.archived && <span className="offline-tag">{S.statusArchived}</span>}
             </span>
             <span className="nav-sub">

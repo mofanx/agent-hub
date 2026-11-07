@@ -627,6 +627,19 @@ export interface Strings {
   missionStatusAccepted: string;
   missionStatusStopped: string;
   missionStatusFailed: string;
+  missionReason: string;
+  missionReasonAwaitingInput: string;
+  missionReasonAwaitingRetry: string;
+  missionReasonDispatchFailed: string;
+  missionReasonDispatchEmpty: string;
+  missionReasonTurnError: string;
+  missionReasonFlowTasksFailed: string;
+  missionReasonUserStopped: string;
+  missionReasonFlowLost: string;
+  missionReasonFlowCancelled: string;
+  missionReasonInterruptedRestart: string;
+  missionReasonClosedForRework: string;
+  missionDrivenTag: string;
   missionCriteriaShort: string;
   missionFilterAll: string;
   missionFilterActive: string;
@@ -707,6 +720,7 @@ export interface Strings {
   decisionWaitingFmt: string;
   decisionLocate: string;
   decisionRedacted: string;
+  connTag: string;
   missionAutoRetries: string;
   missionAutoRetriesHint: string;
   missionAutoStart: string;
@@ -1343,6 +1357,19 @@ const zh: Strings = {
   missionStatusAccepted: "已验收",
   missionStatusStopped: "已停止",
   missionStatusFailed: "失败",
+  missionReason: "原因",
+  missionReasonAwaitingInput: "等待你提供输入",
+  missionReasonAwaitingRetry: "等待重试决策",
+  missionReasonDispatchFailed: "任务派发失败",
+  missionReasonDispatchEmpty: "派发未产生任务",
+  missionReasonTurnError: "回合执行出错",
+  missionReasonFlowTasksFailed: "编排存在失败任务",
+  missionReasonUserStopped: "已被你停止",
+  missionReasonFlowLost: "关联编排已丢失",
+  missionReasonFlowCancelled: "编排已取消",
+  missionReasonInterruptedRestart: "被服务重启中断",
+  missionReasonClosedForRework: "已关闭并转返工",
+  missionDrivenTag: "工单驱动",
   missionCriteriaShort: "验收标准",
   missionFilterAll: "全部",
   missionFilterActive: "执行中",
@@ -1423,6 +1450,7 @@ const zh: Strings = {
   decisionWaitingFmt: "等待 %s 分钟",
   decisionLocate: "定位到会话",
   decisionRedacted: "敏感内容已隐藏",
+  connTag: "@%s",
   missionAutoRetries: "失败自动重试",
   missionAutoRetriesHint: "额外的失败重试轮次（0-3），不包含编排引擎已有重试；默认关闭。",
   missionAutoStart: "自动启动",
@@ -2059,6 +2087,19 @@ const en: Strings = {
   missionStatusAccepted: "Accepted",
   missionStatusStopped: "Stopped",
   missionStatusFailed: "Failed",
+  missionReason: "Reason",
+  missionReasonAwaitingInput: "Waiting for your input",
+  missionReasonAwaitingRetry: "Awaiting retry decision",
+  missionReasonDispatchFailed: "Dispatch failed",
+  missionReasonDispatchEmpty: "Dispatch produced no work",
+  missionReasonTurnError: "Turn execution error",
+  missionReasonFlowTasksFailed: "Flow finished with failed tasks",
+  missionReasonUserStopped: "Stopped by you",
+  missionReasonFlowLost: "Bound flow lost",
+  missionReasonFlowCancelled: "Flow cancelled",
+  missionReasonInterruptedRestart: "Interrupted by hub restart",
+  missionReasonClosedForRework: "Closed for rework",
+  missionDrivenTag: "Mission-driven",
   missionCriteriaShort: "Acceptance criteria",
   missionFilterAll: "All",
   missionFilterActive: "Active",
@@ -2139,6 +2180,7 @@ const en: Strings = {
   decisionWaitingFmt: "Waiting %s min",
   decisionLocate: "Locate session",
   decisionRedacted: "Sensitive content redacted",
+  connTag: "@%s",
   missionAutoRetries: "Auto retry on failure",
   missionAutoRetriesHint: "Extra failure retry rounds (0-3), on top of the orchestrator's own retries. Off by default.",
   missionAutoStart: "Auto start",
@@ -2162,6 +2204,23 @@ export function missionStatusLabel(S: Strings, status: string): string {
     case "stopped": return S.missionStatusStopped;
     case "failed": return S.missionStatusFailed;
     default: return status;
+  }
+}
+
+export function missionReasonLabel(S: Strings, code: string): string {
+  switch (code) {
+    case "awaiting-input": return S.missionReasonAwaitingInput;
+    case "awaiting-retry": return S.missionReasonAwaitingRetry;
+    case "dispatch-failed": return S.missionReasonDispatchFailed;
+    case "dispatch-empty": return S.missionReasonDispatchEmpty;
+    case "turn-error": return S.missionReasonTurnError;
+    case "flow-tasks-failed": return S.missionReasonFlowTasksFailed;
+    case "user-stopped": return S.missionReasonUserStopped;
+    case "flow-lost": return S.missionReasonFlowLost;
+    case "flow-cancelled": return S.missionReasonFlowCancelled;
+    case "interrupted-restart": return S.missionReasonInterruptedRestart;
+    case "closed-for-rework": return S.missionReasonClosedForRework;
+    default: return code;
   }
 }
 

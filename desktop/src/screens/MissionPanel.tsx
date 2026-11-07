@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { MissionEvidence } from "./MissionEvidence";
 import { ExternalLink, Play, Square, Target } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { missionEventKindLabel, missionStatusLabel, missionTaskStatusLabel, stringsFor, type Strings } from "../hub/strings";
+import { missionEventKindLabel, missionReasonLabel, missionStatusLabel, missionTaskStatusLabel, stringsFor, type Strings } from "../hub/strings";
 import { FormRow } from "../components/FormRow";
 import type { DecisionInfo, MissionCriterionReview, MissionInfo, RoomInfo } from "../hub/types";
 
@@ -398,6 +398,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                     </span>
                   )}
                   {m.status === "awaiting-acceptance" && <span className="nav-sub mission-hint">{S.missionAwaitingHint}</span>}
+                  {m.reasonCode && <span className="nav-sub mission-reason">{S.missionReason}: {missionReasonLabel(S, m.reasonCode)}</span>}
                   {m.error && <span className="nav-sub mission-error">{m.error}</span>}
                   <MissionExecSummary mission={m} S={S} />
                   <MissionEvidence mission={m} />

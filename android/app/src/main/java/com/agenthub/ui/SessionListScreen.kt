@@ -2004,6 +2004,14 @@ private fun RoomCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
+                    vm.connTag()?.let {
+                        Text(
+                            " " + S.connTag.format(it),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
                 }
                 Text(
                     r.members.joinToString("、") { it.second },

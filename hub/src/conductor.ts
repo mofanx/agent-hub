@@ -225,6 +225,76 @@ export type ConductorNotice = {
   meta?: Record<string, unknown>;
 };
 
+/**
+ * flow 快照公共契约：getFlow/emitFlow 广播到下游（mission/客户端）的形状。
+ * 内部 Flow.tasks 是 Map，emit 时已展平为数组；本类型只声明下游消费的字段，
+ * 快照其余字段经 index signature 透传不复制。
+ */
+export type FlowTaskView = {
+  id?: string | undefined;
+  sessionId?: string | undefined;
+  status?: string | undefined;
+  waitingFor?: string | undefined;
+  name?: string | undefined;
+  output?: string | undefined;
+  failureMessage?: string | undefined;
+  dispatchedAt?: number | undefined;
+  backendRuns?: { status?: string | undefined; exitCode?: number | undefined }[] | undefined;
+  [key: string]: unknown;
+};
+
+export type FlowView = {
+  flowId?: string | undefined;
+  missionId?: string | undefined;
+  phase?: string | undefined;
+  waitingFor?: string | undefined;
+  failureMessage?: string | undefined;
+  tasks: FlowTaskView[];
+  [key: string]: unknown;
+};
+
+/**
+ * Record 快照 → FlowView 窄化：标量契约字段（flowId/missionId/phase/waitingFor/
+ * failureMessage）非 string 归一为 undefined；tasks 非数组/含非对象项归一为空数组。
+ * 良构快照零拷贝直返原引用，脏输入浅拷贝一次；tasks 元素字段仍按 FlowTaskView
+ * 类型信任（conductor 产出自有契约，不再逐字段运行时校验）。
+ */
+export function asFlowView(raw: Record<string, unknown> | undefined): FlowView | undefined {
+  if (raw === undefined) return undefined;
+  const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const scalars = {
+    flowId: str(raw.flowId),
+    missionId: str(raw.missionId),
+    phase: str(raw.phase),
+    waitingFor: str(raw.waitingFor),
+    failureMessage: str(raw.failureMessage),
+  };
+  const tasks = Array.isArray(raw.tasks)
+    ? raw.tasks.filter((t): t is FlowTaskView => typeof t === "object" && t !== null)
+    : [];
+  const clean =
+    scalars.flowId === raw.flowId &&
+    scalars.missionId === raw.missionId &&
+    scalars.phase === raw.phase &&
+    scalars.waitingFor === raw.waitingFor &&
+    scalars.failureMessage === raw.failureMessage &&
+    Array.isArray(raw.tasks) &&
+    tasks.length === raw.tasks.length;
+  if (clean) return raw as FlowView;
+  return { ...raw, ...scalars, tasks };
+}
+
+/** flow 归属标记：非空 missionId 才认归属（无标=非 mission 派发） */
+export function flowOwnerOf(flow: { missionId?: unknown } | undefined): string | undefined {
+  const owner = flow?.missionId;
+  return typeof owner === "string" && owner !== "" ? owner : undefined;
+}
+
+/** flow 是否归属指定 mission */
+export function flowOwnedBy(flow: { missionId?: unknown } | undefined, missionId: string): boolean {
+  return flowOwnerOf(flow) === missionId;
+}
+
 const PLAN_RESULT_LEN = 4000;
 const MAX_ITERATIONS = 3;
 const DEFAULT_MAX_ROUNDS = 8;

@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { logError, logWarn } from "./logger.js";
+import {
+  asFlowView,
+  flowOwnedBy,
+  flowOwnerOf,
+  type FlowTaskView,
+  type FlowView,
+} from "./conductor.js";
 import type { Room } from "./room.js";
 import type { ModeResult } from "./room-modes.js";
 import type { Store } from "./store.js";
@@ -13,10 +20,19 @@ export type MissionStatus =
   | "stopped"
   | "failed";
 
+export type MissionEventKind =
+  | "lifecycle"
+  | "flow"
+  | "error"
+  | "review"
+  | "rework"
+  | "supplement"
+  | "output";
+
 export type MissionEvent = {
   id: string;
   at: number;
-  kind: string;
+  kind: MissionEventKind | (string & {});
   text: string;
   flowId?: string;
   taskId?: string;
@@ -40,7 +56,6 @@ export type MissionCriterionReview = {
   verdict: "pass" | "fail" | "unverified";
   taskIds: string[];
   note: string;
-  source: "user";
   at: number;
 };
 
@@ -83,7 +98,9 @@ export type Mission = {
 
 export type MissionSnapshot = Mission;
 
-type MissionRecord = Mission & {
+type MissionRecord = Omit<Mission, "flow"> & {
+  /** flow 窄化视图（透传快照全部字段，tasks 保证为对象数组） */
+  flow?: FlowView | undefined;
   sent: string[];
   pending: string[];
   baselineFlowId?: string | undefined;
@@ -129,12 +146,21 @@ const RUNNING_PHASES: ReadonlySet<string> = new Set([
   "reviewing",
   "summarizing",
 ]);
+/** 状态迁移表：合法边白名单，transition 对表外迁移拒绝并告警（防静默状态损坏） */
+export const MISSION_TRANSITIONS: Readonly<Record<MissionStatus, ReadonlySet<MissionStatus>>> = {
+  draft: new Set<MissionStatus>(["running", "stopped"]),
+  running: new Set<MissionStatus>(["waiting-user", "awaiting-acceptance", "stopped", "failed"]),
+  "waiting-user": new Set<MissionStatus>(["running", "awaiting-acceptance", "stopped", "failed"]),
+  "awaiting-acceptance": new Set<MissionStatus>(["accepted", "stopped"]),
+  accepted: new Set<MissionStatus>(),
+  stopped: new Set<MissionStatus>(),
+  failed: new Set<MissionStatus>(),
+};
 /** 单 mission 事件日志上限：超限淘汰最旧，防长跑 mission 的记录随时间无限膨胀 */
 const MISSION_EVENT_LIMIT = 200;
 const OCCUPYING: ReadonlySet<MissionStatus> = new Set([
   "running",
   "waiting-user",
-  "awaiting-acceptance",
 ]);
 const TERMINAL: ReadonlySet<MissionStatus> = new Set(["accepted", "stopped", "failed"]);
 
@@ -196,7 +222,6 @@ function defaultReviews(criteria: string[]): MissionCriterionReview[] {
     verdict: "unverified" as const,
     taskIds: [],
     note: "",
-    source: "user" as const,
     at: 0,
   }));
 }
@@ -248,8 +273,7 @@ function validateRecord(raw: unknown): MissionRecord {
         index: rv.index as number,
         verdict: rv.verdict as MissionCriterionReview["verdict"],
         taskIds: list(rv.taskIds ?? [], "review.taskIds"),
-        note: typeof rv.note === "string" ? rv.note : "",
-        source: "user" as const,
+        note: String(rv.note ?? ""),
         at: typeof rv.at === "number" ? rv.at : 0,
       };
     });
@@ -304,7 +328,7 @@ function validateRecord(raw: unknown): MissionRecord {
   if (num(m.startedAt) !== undefined) inner.startedAt = num(m.startedAt);
   if (num(m.finishedAt) !== undefined) inner.finishedAt = num(m.finishedAt);
   if (str(m.flowId) !== undefined) inner.flowId = str(m.flowId);
-  if (typeof m.flow === "object" && m.flow !== null) inner.flow = m.flow as Record<string, unknown>;
+  if (typeof m.flow === "object" && m.flow !== null) inner.flow = asFlowView(m.flow as Record<string, unknown>);
   if (str(m.output) !== undefined) inner.output = str(m.output);
   if (str(m.error) !== undefined) inner.error = str(m.error);
   if (acceptance) inner.acceptance = acceptance;
@@ -314,32 +338,73 @@ function validateRecord(raw: unknown): MissionRecord {
   return inner;
 }
 
-const INTERNAL_KEYS = new Set([
-  "sent",
-  "pending",
-  "baselineFlowId",
-  "dispatching",
-  "stopRequested",
-  "earlyDone",
-  "turnErrors",
-  "lastPhase",
-  "lastFlowSig",
-]);
-
+/**
+ * 快照白名单投影：新增内部字段默认不进广播/持久化（漏出方向与黑名单相反，安全）；
+ * flow 透传引用——flow 整体替换不可变，省掉每次 commit 的 JSON 双重深拷贝。
+ */
 function snapshot(m: MissionRecord): MissionSnapshot {
-  const pub = Object.fromEntries(
-    Object.entries(m).filter(([k]) => !INTERNAL_KEYS.has(k)),
-  ) as Mission;
-  return {
-    ...pub,
+  const s: MissionSnapshot = {
+    id: m.id,
+    roomId: m.roomId,
+    goal: m.goal,
     acceptanceCriteria: [...m.acceptanceCriteria],
+    scope: m.scope,
     constraints: [...m.constraints],
+    ownerSessionId: m.ownerSessionId,
+    status: m.status,
+    createdAt: m.createdAt,
+    updatedAt: m.updatedAt,
     events: m.events.map((e) => ({ ...e })),
     reviews: m.reviews.map((r) => ({ ...r, taskIds: [...r.taskIds] })),
-    supplements: m.supplements.map((s) => ({ ...s })),
-    ...(m.flow ? { flow: JSON.parse(JSON.stringify(m.flow)) as Record<string, unknown> } : {}),
-    ...(m.acceptance ? { acceptance: { ...m.acceptance } } : {}),
+    supplements: m.supplements.map((sp) => ({ ...sp })),
+    maxAutoRetries: m.maxAutoRetries,
+    autoRetryCount: m.autoRetryCount,
+    revision: m.revision,
   };
+  if (m.startedAt !== undefined) s.startedAt = m.startedAt;
+  if (m.finishedAt !== undefined) s.finishedAt = m.finishedAt;
+  if (m.flowId !== undefined) s.flowId = m.flowId;
+  if (m.flow !== undefined) s.flow = m.flow;
+  if (m.output !== undefined) s.output = m.output;
+  if (m.error !== undefined) s.error = m.error;
+  if (m.acceptance !== undefined) s.acceptance = { ...m.acceptance };
+  if (m.parentMissionId !== undefined) s.parentMissionId = m.parentMissionId;
+  if (m.reworkReason !== undefined) s.reworkReason = m.reworkReason;
+  if (m.reasonCode !== undefined) s.reasonCode = m.reasonCode;
+  return s;
+}
+
+/** flow 变更签名：只覆盖 mission 消费/客户端展示的契约字段——
+ *  flow 级噪声字段（goal/rounds/results 等）churn 不触发重同步 */
+function flowSig(flow: FlowView): string {
+  return JSON.stringify({
+    flowId: flow.flowId,
+    missionId: flow.missionId,
+    phase: flow.phase,
+    waitingFor: flow.waitingFor,
+    failureMessage: flow.failureMessage,
+    tasks: flow.tasks,
+  });
+}
+
+/** 失败任务可否自动重试：存在 failed、全部有后端非零退出码证据、无等待用户任务。
+ *  返回阻塞原因（undefined=可重试），供双围栏两处共用 */
+export function retryEligibility(tasks: FlowTaskView[]): "no-failed-tasks" | "no-evidence" | "waiting-user" | undefined {
+  const failed = tasks.filter((t) => t.status === "failed");
+  if (failed.length === 0) return "no-failed-tasks";
+  const evidenced = failed.every((t) =>
+    (t.backendRuns ?? []).some(
+      (r) => r.status === "failed" && typeof r.exitCode === "number" && Number.isFinite(r.exitCode) && r.exitCode !== 0,
+    ),
+  );
+  if (!evidenced) return "no-evidence";
+  if (tasks.some((t) => t.waitingFor === "user")) return "waiting-user";
+  return undefined;
+}
+
+/** 房间全体成员会话在线（mission 派发/自动重试的前置条件） */
+export function allMembersAvailable(room: Room, isAvailable: (sessionId: string) => boolean): boolean {
+  return room.members.every((mem) => isAvailable(mem.sessionId));
 }
 
 export class MissionManager {
@@ -399,7 +464,12 @@ export class MissionManager {
     }
   }
 
+  // persist 插桩：写放大立项判据——累计耗时 >1ms 才上报（常态应 <<1ms）
+  private persistTotalMs = 0;
+  private persistCalls = 0;
+
   private persist(): void {
+    const t0 = performance.now();
     this.sweepTerminal(Date.now());
     // 只落公共快照字段：sent/pending/dispatching 等 in-flight 簿记是内存态，
     // 重启经 reconcile 重建或终止，持久化它们只会产生半真半假的恢复输入
@@ -407,6 +477,13 @@ export class MissionManager {
       META_KEY,
       JSON.stringify([...this.missions.values()].map((m) => snapshot(m))),
     );
+    this.persistTotalMs += performance.now() - t0;
+    this.persistCalls += 1;
+  }
+
+  /** persist 插桩读数：累计耗时/调用次数（写放大立项判据） */
+  persistStats(): { calls: number; totalMs: number } {
+    return { calls: this.persistCalls, totalMs: this.persistTotalMs };
   }
 
   private log(m: MissionRecord, kind: string, text: string, context?: MissionTurnContext): void {
@@ -443,10 +520,18 @@ export class MissionManager {
     return undefined;
   }
 
+  private flowOf(roomId: string): FlowView | undefined {
+    return asFlowView(this.deps.getFlow(roomId));
+  }
+
   private transition(m: MissionRecord, status: MissionStatus, kind: string, text: string, reasonCode?: string): void {
     if (m.status === status) {
       // 同状态内等待原因可细化（awaiting-input → awaiting-retry）
       if (reasonCode !== undefined) m.reasonCode = reasonCode;
+      return;
+    }
+    if (!MISSION_TRANSITIONS[m.status]?.has(status)) {
+      logError(`mission ${m.id} illegal transition refused: ${m.status}→${status} (${kind}: ${text})`, undefined);
       return;
     }
     m.status = status;
@@ -565,6 +650,7 @@ export class MissionManager {
     m.constraints = c.constraints;
     m.ownerSessionId = c.ownerSessionId;
     m.maxAutoRetries = retries;
+    // draft 态 reviews 恒为 unverified 占位——重置只兜 criteria 长度同步，无人为评审可丢
     m.reviews = defaultReviews(c.acceptanceCriteria);
     this.log(m, "lifecycle", "contract updated");
     return this.commit(m);
@@ -591,22 +677,19 @@ export class MissionManager {
     if (!room) throw new Error(`unknown room: ${m.roomId}`);
     if (!room.members.some((mem) => mem.sessionId === m.ownerSessionId))
       throw new Error(`owner is not a room member: ${m.ownerSessionId}`);
-    for (const mem of room.members) {
-      if (!this.deps.isAvailable(mem.sessionId))
-        throw new Error(`member session not connected: ${mem.sessionId}`);
-    }
+    const unavailable = room.members.find((mem) => !this.deps.isAvailable(mem.sessionId));
+    if (unavailable) throw new Error(`member session not connected: ${unavailable.sessionId}`);
     for (const other of this.missions.values()) {
       if (other.id !== m.id && other.roomId === m.roomId && OCCUPYING.has(other.status))
         throw new Error(`room already occupied by mission ${other.id}`);
     }
-    const preFlow = this.deps.getFlow(m.roomId);
+    const preFlow = this.flowOf(m.roomId);
     const roomActive = this.deps.hasActiveFlow(m.roomId);
     if (roomActive) throw new Error(`room ${m.roomId} already has an active flow`);
     for (const mem of room.members) {
       if (this.deps.isBusy(mem.sessionId)) throw new Error(`member busy: ${mem.name}`);
     }
-    m.baselineFlowId = typeof preFlow?.flowId === "string" ? preFlow.flowId : undefined;
-    m.status = "running";
+    m.baselineFlowId = preFlow?.flowId;
     m.startedAt = Date.now();
     m.finishedAt = undefined;
     m.error = undefined;
@@ -617,7 +700,7 @@ export class MissionManager {
     m.lastPhase = "";
     m.lastFlowSig = "";
     m.dispatching = true;
-    this.log(m, "lifecycle", "started");
+    this.transition(m, "running", "lifecycle", "started");
     this.commit(m);
     let result: ModeResult;
     try {
@@ -638,24 +721,26 @@ export class MissionManager {
     m.dispatching = false;
     m.sent = [...(result?.sent ?? [])];
     m.pending = m.sent.filter((s) => !m.earlyDone.includes(s) && !m.turnErrors.some((t) => t.sid === s));
-    const flow = this.deps.getFlow(m.roomId);
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+    const flow = this.flowOf(m.roomId);
+    const flowId = flow?.flowId;
     // 只绑定本 mission 派发创建的 flow（missionId 打标），不按 roomId 认领外来 flow
-    if (flowId && flowId !== m.baselineFlowId && flow?.missionId === m.id) {
+    if (flowId && flowId !== m.baselineFlowId && flowOwnedBy(flow, m.id)) {
       // dispatch await 期间 syncFlow 可能已绑定同一 flow：不重复记 bound 事件
       const alreadyBound = m.flowId === flowId;
       m.flowId = flowId;
-      if (flow) m.flow = flow;
-      m.lastPhase = flow ? String(flow.phase ?? "") : "";
-      m.lastFlowSig = JSON.stringify(flow);
+      m.flow = flow;
+      m.lastPhase = flow?.phase ?? "";
+      m.lastFlowSig = flowSig(flow);
       if (!alreadyBound) this.log(m, "flow", `bound flow ${flowId} (${m.lastPhase || "?"})`);
-      if (flow) this.applyFlowPhase(m, flow);
+      this.applyFlowPhase(m, flow);
     }
     if (m.stopRequested) {
       await this.cancelOwnWork(m);
       return this.commit(m);
     }
-    if (!m.flowId && m.pending.length === 0 && !this.deps.hasActiveFlow(m.roomId) && (m.status === "running" || m.status === "waiting-user")) {
+    // dispatch 窗口内 syncFlow 可能已改过 status：按当前值判定（transition 不更新 TS 收窄）
+    const curStatus = m.status as MissionStatus;
+    if (!m.flowId && m.pending.length === 0 && !this.deps.hasActiveFlow(m.roomId) && (curStatus === "running" || curStatus === "waiting-user")) {
       if (m.sent.length === 0) {
         this.transition(m, "failed", "error", "dispatch produced no prompts and no flow", "dispatch-empty");
       } else {
@@ -667,8 +752,8 @@ export class MissionManager {
 
   private async cancelOwnWork(m: MissionRecord): Promise<void> {
     const errors: string[] = [];
-    const flow = this.deps.getFlow(m.roomId);
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+    const flow = this.flowOf(m.roomId);
+    const flowId = flow?.flowId;
     if (m.flowId && flowId === m.flowId && this.deps.hasActiveFlow(m.roomId)) {
       try {
         await this.deps.cancelActive(m.roomId, `mission ${m.id} stopped`);
@@ -742,43 +827,45 @@ export class MissionManager {
   syncFlow(roomId: string, flow: Record<string, unknown> | undefined): void {
     const m = this.activeFor(roomId);
     if (!m) return;
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+    const fv = asFlowView(flow);
+    const flowId = fv?.flowId;
     if (!m.flowId) {
       if (!flowId || flowId === m.baselineFlowId) return;
       // 无归属标记的 flow 不认领：同房间可能跑着与 mission 无关的编排
-      if (flow?.missionId !== m.id) return;
+      if (!flowOwnedBy(fv, m.id)) return;
       if (!this.restoreDone) return;
       m.flowId = flowId;
       this.log(m, "flow", `bound flow ${flowId}`);
     }
-    if (!flow || flowId !== m.flowId) {
+    if (!fv || flowId !== m.flowId) {
       this.transition(m, "stopped", "flow", "bound flow cancelled or disappeared", "flow-lost");
       this.commit(m);
       return;
     }
-    const sig = JSON.stringify(flow);
+    const sig = flowSig(fv);
     if (sig === m.lastFlowSig) return;
     m.lastFlowSig = sig;
-    m.flow = flow;
-    this.applyFlowPhase(m, flow);
+    m.flow = fv;
+    this.applyFlowPhase(m, fv);
     this.commit(m);
   }
 
-  private applyFlowPhase(m: MissionRecord, flow: Record<string, unknown>): void {
-    if (TERMINAL.has(m.status)) return;
-    const phase = String(flow.phase ?? "");
+  private applyFlowPhase(m: MissionRecord, flow: FlowView): void {
+    // 状态白名单守卫：仅活跃态响应 flow phase——awaiting-acceptance/终态不被拉回
+    if (m.status !== "running" && m.status !== "waiting-user") return;
+    const phase = flow.phase ?? "";
     if (phase !== m.lastPhase) {
       m.lastPhase = phase;
       this.log(m, "flow", `phase: ${phase || "unknown"}`);
     }
-    const tasks = Array.isArray(flow.tasks) ? (flow.tasks as Record<string, unknown>[]) : [];
+    const tasks = flow.tasks;
     const waitingUser =
       phase === "awaiting-input" ||
       phase === "awaiting-retry" ||
       flow.waitingFor === "user" ||
       tasks.some((t) => t.waitingFor === "user");
     if (phase === "done") {
-      const flowFailure = typeof flow.failureMessage === "string" && flow.failureMessage ? flow.failureMessage : undefined;
+      const flowFailure = flow.failureMessage ? flow.failureMessage : undefined;
       const anyFailed = tasks.some((t) => t.status === "failed") || flowFailure !== undefined;
       m.output = summarizeFlow(flow);
       this.transition(
@@ -790,7 +877,7 @@ export class MissionManager {
       );
       if (anyFailed) {
         const taskFailure = tasks.find((t) => t.status === "failed" && typeof t.failureMessage === "string");
-        m.error = flowFailure ?? (taskFailure?.failureMessage as string | undefined) ?? "flow finished with failed tasks";
+        m.error = flowFailure ?? taskFailure?.failureMessage ?? "flow finished with failed tasks";
       }
     } else if (phase === "cancelled") {
       this.transition(m, "stopped", "flow", "flow cancelled", "flow-cancelled");
@@ -809,30 +896,21 @@ export class MissionManager {
     // 未识别 phase：白名单忽略——仅 lastPhase/事件轨迹更新，不迁移 status
   }
 
-  private maybeAutoRetry(m: MissionRecord, flow: Record<string, unknown>): void {
+  private maybeAutoRetry(m: MissionRecord, flow: FlowView): void {
     if (!this.restoreDone || m.stopRequested || m.status !== "waiting-user") return;
     if (m.maxAutoRetries <= m.autoRetryCount) {
       if (m.maxAutoRetries > 0)
         this.log(m, "flow", `auto retries exhausted (${m.autoRetryCount}/${m.maxAutoRetries}); waiting for user`);
       return;
     }
-    const tasks = Array.isArray(flow.tasks) ? (flow.tasks as Record<string, unknown>[]) : [];
-    const failedTasks = tasks.filter((t) => t.status === "failed");
-    if (failedTasks.length === 0) return;
-    const evidenced = failedTasks.every((t) => {
-      const runs = Array.isArray(t.backendRuns) ? (t.backendRuns as Record<string, unknown>[]) : [];
-      return runs.some(
-        (r) => r.status === "failed" &&
-          typeof r.exitCode === "number" && Number.isFinite(r.exitCode) && r.exitCode !== 0,
-      );
-    });
-    if (!evidenced) {
+    const blocked = retryEligibility(flow.tasks);
+    if (blocked === "no-failed-tasks" || blocked === "waiting-user") return;
+    if (blocked === "no-evidence") {
       this.log(m, "flow", "failed tasks lack recorded backend failure evidence; not auto-retrying");
       return;
     }
-    if (tasks.some((t) => t.waitingFor === "user")) return;
     const room = this.deps.getRoom(m.roomId);
-    if (!room || !room.members.every((mem) => this.deps.isAvailable(mem.sessionId))) {
+    if (!room || !allMembersAvailable(room, (sid) => this.deps.isAvailable(sid))) {
       this.log(m, "flow", "room member unavailable; not auto-retrying");
       return;
     }
@@ -841,29 +919,22 @@ export class MissionManager {
     this.retryScheduled.add(key);
     queueMicrotask(() => {
       try {
+        // 双围栏第二段：microtask 内按当前快照原样重验（与预检同谓词）
         const cur = this.missions.get(m.id);
         if (!cur || cur.status !== "waiting-user" || cur.stopRequested || !this.restoreDone) return;
         if (cur.maxAutoRetries <= cur.autoRetryCount) return;
-        const curFlow = this.deps.getFlow(cur.roomId);
-        const curFlowId = typeof curFlow?.flowId === "string" ? curFlow.flowId : undefined;
-        if (curFlowId !== cur.flowId || String(curFlow?.phase ?? "") !== "awaiting-retry") return;
-        const curTasks = Array.isArray(curFlow?.tasks) ? (curFlow.tasks as Record<string, unknown>[]) : [];
-        const curFailed = curTasks.filter((t) => t.status === "failed");
-        if (curFailed.length === 0) return;
-        if (curTasks.some((t) => t.waitingFor === "user")) return;
-        const stillEvidenced = curFailed.every((t) => {
-          const runs = Array.isArray(t.backendRuns) ? (t.backendRuns as Record<string, unknown>[]) : [];
-          return runs.some((r) => r.status === "failed" && typeof r.exitCode === "number" && Number.isFinite(r.exitCode) && r.exitCode !== 0);
-        });
-        if (!stillEvidenced) return;
+        const curFlow = this.flowOf(cur.roomId);
+        if (!curFlow || curFlow.flowId !== cur.flowId || curFlow.phase !== "awaiting-retry") return;
+        if (retryEligibility(curFlow.tasks) !== undefined) return;
         const curRoom = this.deps.getRoom(cur.roomId);
-        if (!curRoom || !curRoom.members.every((mem) => this.deps.isAvailable(mem.sessionId))) return;
+        if (!curRoom || !allMembersAvailable(curRoom, (sid) => this.deps.isAvailable(sid))) return;
+        const curFailed = curFlow.tasks.filter((t) => t.status === "failed");
         cur.autoRetryCount += 1;
         this.log(cur, "flow", `auto retry ${cur.autoRetryCount}/${cur.maxAutoRetries}`);
         this.persist();
         let okRetry = false;
         try {
-          okRetry = this.deps.retryFailedTasks(cur.roomId, curFailed.map((t) => String(t.id ?? "")));
+          okRetry = this.deps.retryFailedTasks(cur.roomId, curFailed.map((t) => t.id ?? ""));
         } catch (e) {
           this.log(cur, "error", `auto retry failed: ${String(e).slice(0, 200)}`);
         }
@@ -881,12 +952,11 @@ export class MissionManager {
     if (!m) throw new Error(`unknown mission: ${id}`);
     if (m.status !== "waiting-user" && m.status !== "running")
       throw new Error(`retry requires an active mission: ${m.status}`);
-    const flow = this.deps.getFlow(m.roomId);
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
-    if (!flow || !m.flowId || flowId !== m.flowId || String(flow.phase ?? "") !== "awaiting-retry")
+    const flow = this.flowOf(m.roomId);
+    const flowId = flow?.flowId;
+    if (!flow || !m.flowId || flowId !== m.flowId || flow.phase !== "awaiting-retry")
       throw new Error("no matching awaiting-retry flow for this mission");
-    const tasks = Array.isArray(flow.tasks) ? (flow.tasks as Record<string, unknown>[]) : [];
-    const failedIds = tasks.filter((t) => t.status === "failed").map((t) => String(t.id ?? ""));
+    const failedIds = flow.tasks.filter((t) => t.status === "failed").map((t) => t.id ?? "");
     if (failedIds.length === 0) throw new Error("no failed tasks to retry");
     if (!this.deps.retryFailedTasks(m.roomId, failedIds)) {
       this.log(m, "error", "manual retry declined by room orchestrator; still waiting for user");
@@ -904,7 +974,7 @@ export class MissionManager {
       m.earlyDone.includes(sessionId)
     ) return true;
     if (m.flowId) {
-      const tasks = Array.isArray(m.flow?.tasks) ? (m.flow!.tasks as Record<string, unknown>[]) : [];
+      const tasks = m.flow?.tasks ?? [];
       if (tasks.some((t) => t.sessionId === sessionId)) return true;
     }
     if (m.dispatching && this.isRoomMember(m, sessionId)) return true;
@@ -951,14 +1021,14 @@ export class MissionManager {
       if (!m.earlyDone.includes(sessionId) && this.isRoomMember(m, sessionId))
         m.earlyDone.push(sessionId);
     }
-    appendOutput(m, sessionId, output);
+    this.log(m, "output", `${sessionId}: ${output.length > 200 ? `${output.slice(0, 200)}…` : output}`);
     const active = this.deps.hasActiveFlow(m.roomId);
-    const flow = this.deps.getFlow(m.roomId);
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
-    const ownFlow = !!flowId && flow?.missionId === m.id;
+    const flow = this.flowOf(m.roomId);
+    const flowId = flow?.flowId;
+    const ownFlow = !!flowId && flowOwnedBy(flow, m.id);
     // 明确归属他人且进行中的 flow 不再阻断本 mission 的回合收敛；
     // 活跃但视图缺席（auto 决策在途）或仅残留 done 快照时仍按原语义等待
-    const foreignActive = active && !!flow && !ownFlow && String(flow.phase ?? "") !== "done";
+    const foreignActive = active && !!flow && !ownFlow && flow.phase !== "done";
     if (m.flowId || (active && !foreignActive)) {
       if (!m.flowId && ownFlow && flowId !== m.baselineFlowId) {
         m.flowId = flowId;
@@ -980,19 +1050,18 @@ export class MissionManager {
   captureTurnContext(sessionId: string, roomId: string | undefined): MissionTurnContext | undefined {
     const m = roomId ? this.activeFor(roomId) : this.findPending(sessionId);
     if (!m || !this.ownsTurn(m, sessionId)) return undefined;
-    const flow = (m.flow ?? this.deps.getFlow(m.roomId)) as Record<string, unknown> | undefined;
-    const tasks = Array.isArray(flow?.tasks) ? (flow!.tasks as Record<string, unknown>[]) : [];
-    const running = tasks.find((t) => t.sessionId === sessionId && t.status === "running");
+    const flow = m.flow ?? this.flowOf(m.roomId);
+    const running = flow?.tasks.find((t) => t.sessionId === sessionId && t.status === "running");
     return {
       missionId: m.id,
       roomId: m.roomId,
       sessionId,
-      ...(typeof flow?.flowId === "string" && flow.flowId ? { flowId: flow.flowId } : {}),
-      ...(typeof flow?.phase === "string" && flow.phase ? { phase: flow.phase } : {}),
+      ...(flow?.flowId ? { flowId: flow.flowId } : {}),
+      ...(flow?.phase ? { phase: flow.phase } : {}),
       ...(running
         ? {
-            taskId: String(running.id ?? ""),
-            ...(typeof running.dispatchedAt === "number" ? { dispatchedAt: running.dispatchedAt } : {}),
+            taskId: running.id ?? "",
+            ...(running.dispatchedAt !== undefined ? { dispatchedAt: running.dispatchedAt } : {}),
           }
         : {}),
     };
@@ -1032,10 +1101,8 @@ export class MissionManager {
     if (!m || m.roomId !== context.roomId || context.sessionId !== sessionId) return undefined;
     if (m.flowId && context.flowId && m.flowId !== context.flowId) return undefined;
     if (context.taskId !== undefined) {
-      const tasks = Array.isArray(m.flow?.tasks)
-        ? (m.flow!.tasks as Record<string, unknown>[])
-        : (Array.isArray(this.deps.getFlow(m.roomId)?.tasks) ? (this.deps.getFlow(m.roomId)!.tasks as Record<string, unknown>[]) : []);
-      const cur = tasks.find((t) => String(t.id ?? "") === context.taskId && t.sessionId === sessionId);
+      const tasks = m.flow?.tasks ?? this.flowOf(m.roomId)?.tasks ?? [];
+      const cur = tasks.find((t) => (t.id ?? "") === context.taskId && t.sessionId === sessionId);
       if (!cur) return undefined;
       if (context.dispatchedAt !== undefined && cur.dispatchedAt !== context.dispatchedAt) return undefined;
     }
@@ -1048,10 +1115,10 @@ export class MissionManager {
       m.turnErrors.push({ sid: sessionId, message });
     }
     const active = this.deps.hasActiveFlow(m.roomId);
-    const flow = this.deps.getFlow(m.roomId);
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
-    const ownFlow = !!flowId && flow?.missionId === m.id;
-    const foreignActive = active && !!flow && !ownFlow && String(flow.phase ?? "") !== "done";
+    const flow = this.flowOf(m.roomId);
+    const flowId = flow?.flowId;
+    const ownFlow = !!flowId && flowOwnedBy(flow, m.id);
+    const foreignActive = active && !!flow && !ownFlow && flow.phase !== "done";
     if (m.flowId || (active && !foreignActive) || m.dispatching) {
       if (!m.flowId && ownFlow && flowId !== m.baselineFlowId) {
         m.flowId = flowId;
@@ -1072,12 +1139,12 @@ export class MissionManager {
       for (const m of this.missions.values()) {
         if (m.status !== "running" && m.status !== "waiting-user") continue;
         try {
-          const flow = this.deps.getFlow(m.roomId);
-          const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+          const flow = this.flowOf(m.roomId);
+          const flowId = flow?.flowId;
           const active = this.deps.hasActiveFlow(m.roomId);
           // 认领依据：mission 显式持有的 flowId 匹配，或 flow 打标 missionId 归属
           // （派发窗口内崩溃导致 flowId 未落盘的场景可按归属恢复）；roomId 匹配不算数
-          const bound = (!!m.flowId && flowId === m.flowId) || (!!flowId && flow?.missionId === m.id);
+          const bound = (!!m.flowId && flowId === m.flowId) || (!!flowId && flowOwnedBy(flow, m.id));
           if (active && bound && flow) {
             if (!m.flowId && flowId) m.flowId = flowId;
             m.lastFlowSig = "";
@@ -1122,8 +1189,8 @@ export class MissionManager {
     const verdict = String(input.verdict ?? "");
     if (!VERDICTS.has(verdict)) throw new Error(`invalid verdict: ${verdict}`);
     const taskIds = stringList(input.taskIds, "taskIds");
-    const flowTasks = Array.isArray(m.flow?.tasks) ? (m.flow!.tasks as Record<string, unknown>[]) : [];
-    const validIds = new Set(flowTasks.map((t) => String(t.id ?? "")));
+    const flowTasks = m.flow?.tasks ?? [];
+    const validIds = new Set(flowTasks.map((t) => t.id ?? ""));
     for (const tid of taskIds) {
       if (!validIds.has(tid)) throw new Error(`taskId not in bound flow: ${tid}`);
     }
@@ -1135,7 +1202,6 @@ export class MissionManager {
       verdict: verdict as MissionCriterionReview["verdict"],
       taskIds,
       note,
-      source: "user",
       at: Date.now(),
     };
     const i = m.reviews.findIndex((r) => r.index === index);
@@ -1199,11 +1265,8 @@ export class MissionManager {
     const t = text.trim();
     // 归属预检：明确归属他人的活跃 flow 显式失败，补充不得被他人流程吞掉；
     // 无标记（兼容旧 flow）或本 mission 的 flow 维持 supplementActive 吸收语义
-    const flow = this.deps.getFlow(m.roomId);
-    const flowOwner =
-      typeof flow?.missionId === "string" && flow.missionId !== "" && String(flow.phase ?? "") !== "done"
-        ? flow.missionId
-        : undefined;
+    const flow = this.flowOf(m.roomId);
+    const flowOwner = flow?.phase !== "done" ? flowOwnerOf(flow) : undefined;
     if (this.deps.hasActiveFlow(m.roomId) && flowOwner !== undefined && flowOwner !== m.id)
       throw new Error(`room already occupied by an active flow of mission ${flowOwner}`);
     const sup: MissionSupplement = {
@@ -1215,7 +1278,7 @@ export class MissionManager {
     m.supplements.push(sup);
     m.updatedAt = Date.now();
     this.persist();
-    const flowId = typeof flow?.flowId === "string" ? flow.flowId : undefined;
+    const flowId = flow?.flowId;
     const bound = !!m.flowId && flowId === m.flowId && this.deps.hasActiveFlow(m.roomId);
     if (bound) {
       try {
@@ -1246,23 +1309,16 @@ export class MissionManager {
   }
 }
 
-function summarizeFlow(flow: Record<string, unknown>): string {
-  const tasks = Array.isArray(flow.tasks) ? (flow.tasks as Record<string, unknown>[]) : [];
-  const lines = tasks.map((t) => {
-    const name = String(t.name ?? t.id ?? "");
-    const status = String(t.status ?? "");
-    const out = typeof t.output === "string" ? ` ${t.output.slice(0, 200)}` : "";
+function summarizeFlow(flow: FlowView): string {
+  const lines = flow.tasks.map((t) => {
+    const name = t.name ?? t.id ?? "";
+    const status = t.status ?? "";
+    const out = t.output ? ` ${t.output.slice(0, 200)}` : "";
     return `${name} [${status}]${out}`;
   });
   const text = lines.join("\n").trim();
   return text.length > OUTPUT_CAP ? `${text.slice(0, OUTPUT_CAP)}…` : text;
 }
 
-function appendOutput(m: MissionRecord, sessionId: string, output: string): void {
-  const snippet = output.trim().slice(0, 500);
-  if (!snippet) return;
-  const line = `${sessionId}: ${snippet}`;
-  const prev = m.output ? `${m.output}\n` : "";
-  const merged = `${prev}${line}`;
-  m.output = merged.length > OUTPUT_CAP ? merged.slice(merged.length - OUTPUT_CAP) : merged;
-}
+/** m.output 单写者语义：仅 summarizeFlow（flow done）写终态交付摘要；
+ *  回合过程片段走 events(kind:"output") 审计轨迹，不占 output 字段 */

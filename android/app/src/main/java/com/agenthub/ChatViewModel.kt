@@ -141,6 +141,8 @@ sealed class ChatItem {
         val sendStatus: String? = null,
         val sendError: String? = null,
         val attachmentNames: List<String> = emptyList(),
+        /** 工单派发产生的条目：气泡上展示归因标记 */
+        val missionId: String? = null,
     ) : ChatItem()
     data class System(
         override val id: Long,
@@ -421,6 +423,7 @@ data class Mission(
     val flow: JsonObject? = null,
     val output: String? = null,
     val error: String? = null,
+    val reasonCode: String? = null,
     val events: List<MissionEvent> = emptyList(),
     val reviews: List<MissionReview> = emptyList(),
     val acceptanceNote: String? = null,
@@ -922,6 +925,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var ntfyTopic by mutableStateOf<String?>(null)
     var ntfyUrl by mutableStateOf("https://ntfy.sh")
     var currentProfile by mutableStateOf<ConnProfile?>(null)
+
+    /** 多连接标识：>1 个保存 profile 时返回展示连接名（空名回退地址主机段，>20 字符截断），否则 null */
+    fun connTag(): String? {
+        if (profiles.size <= 1) return null
+        val p = currentProfile ?: return null
+        val label = p.name.ifBlank {
+            p.address.removePrefix("wss://").removePrefix("ws://")
+                .removePrefix("https://").removePrefix("http://")
+                .substringBefore('/').substringBefore(':')
+        }
+        return if (label.length <= 20) label else label.take(19) + "…"
+    }
 
     val sessions = mutableStateListOf<SessionInfo>()
     val rooms = mutableStateListOf<RoomInfo>()
@@ -2805,6 +2820,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             flow = o["flow"] as? JsonObject,
             output = str("output"),
             error = str("error"),
+            reasonCode = str("reasonCode"),
             events = (o["events"] as? JsonArray)?.mapNotNull {
                 val ev = it as? JsonObject ?: return@mapNotNull null
                 MissionEvent(
@@ -4267,6 +4283,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 clientMessageId = (o["clientMessageId"] as? JsonPrimitive)?.contentOrNull,
                 historyId = (o["id"] as? JsonPrimitive)?.longOrNull,
                 historyAt = at,
+                missionId = (o["missionId"] as? JsonPrimitive)?.contentOrNull,
             )
             "assistant" -> if (text == LOST_REPLY_PLACEHOLDER) {
                 ChatItem.System(itemId, stringsFor(lang).lostReply, at = at)

@@ -35,6 +35,7 @@ fun MissionEvidence(m: Mission, S: Strings) {
     if (tasks.isEmpty() && m.output.isNullOrBlank()) return
     var expanded by remember { mutableStateOf(false) }
     Column {
+        m.reasonCode?.let { Field(S.missionReason, missionReasonLabel(S, it), S) }
         if (!m.output.isNullOrBlank()) {
             Text("${S.missionOutput}: ${m.output}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

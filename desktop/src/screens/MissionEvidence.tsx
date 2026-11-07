@@ -1,5 +1,5 @@
 import type { MissionInfo } from "../hub/types";
-import { missionCheckStatusLabel, missionTaskStatusLabel, missionVerdictLabel, stringsFor, type Strings } from "../hub/strings";
+import { missionCheckStatusLabel, missionReasonLabel, missionTaskStatusLabel, missionVerdictLabel, stringsFor, type Strings } from "../hub/strings";
 import { useHubStore } from "../hub/store";
 import type {
   FlowTask,
@@ -43,6 +43,7 @@ export function MissionEvidence({ mission }: { mission: MissionInfo }) {
   return (
     <details className="mission-evidence">
       <summary className="nav-sub">{S.missionEvidenceDetail}</summary>
+      {mission.reasonCode && <Field label={S.missionReason} value={missionReasonLabel(S, mission.reasonCode)} S={S} />}
       {mission.output && (
         <span className="nav-sub mission-ev-field">
           {S.missionOutput}: <pre className="mission-ev-pre">{mission.output}</pre>

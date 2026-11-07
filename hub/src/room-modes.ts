@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
-import { ConductorOrchestrator, extractTaskResult, newFlowId, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
+import { ConductorOrchestrator, extractTaskResult, flowOwnerOf, newFlowId, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
 import {
   SELF_MODE_NOTE,
   autoDecisionPrompt,
@@ -944,8 +944,8 @@ export class RoomModeManager {
   private foreignFlowOwner(roomId: string, missionId: string): string | undefined {
     const flow = this.getFlow(roomId);
     if (!flow || String(flow.phase ?? "") === "done") return undefined;
-    const owner = flow.missionId;
-    return typeof owner === "string" && owner !== "" && owner !== missionId ? owner : undefined;
+    const owner = flowOwnerOf(flow);
+    return owner !== missionId ? owner : undefined;
   }
 
   supplementActive(room: Room, text: string, missionId?: string): boolean {

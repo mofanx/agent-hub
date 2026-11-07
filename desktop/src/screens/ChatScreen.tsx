@@ -251,6 +251,7 @@ export function ChatScreen() {
     store.currentRoom?.subMode && store.currentRoom.subMode !== store.currentRoom.mode
       ? modeLabel(S, store.currentRoom.subMode)
       : undefined;
+  const connTag = store.connTag();
   const subtitle = store.currentRoom
     ? (roomModeLabel ?? store.currentRoom.mode)
     : store.currentSession
@@ -944,6 +945,7 @@ export function ChatScreen() {
                 </span>
               )}
               {isRoom && <span className="chat-title-count"> ({store.currentRoom?.members.length})</span>}
+              {connTag && <span className="chat-title-count"> {S.connTag.replace("%s", connTag)}</span>}
               {isRoom && <MemberPresence />}
             </div>
             {isRoom ? (
@@ -1937,6 +1939,7 @@ const ChatMessage = memo(function ChatMessage({
               </div>
             )}
             <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
+            {item.missionId && <div className="mission-tag">{S.missionDrivenTag}</div>}
           </div>
           {attachmentsEl}
           {menuEl}

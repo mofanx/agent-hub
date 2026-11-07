@@ -557,6 +557,19 @@ interface Strings {
     val missionStatusAccepted: String
     val missionStatusStopped: String
     val missionStatusFailed: String
+    val missionReason: String
+    val missionReasonAwaitingInput: String
+    val missionReasonAwaitingRetry: String
+    val missionReasonDispatchFailed: String
+    val missionReasonDispatchEmpty: String
+    val missionReasonTurnError: String
+    val missionReasonFlowTasksFailed: String
+    val missionReasonUserStopped: String
+    val missionReasonFlowLost: String
+    val missionReasonFlowCancelled: String
+    val missionReasonInterruptedRestart: String
+    val missionReasonClosedForRework: String
+    val missionDrivenTag: String
     val missionCriteriaShort: String
     val missionFilterAll: String
     val missionFilterActive: String
@@ -649,6 +662,7 @@ interface Strings {
     val decisionWaitingFmt: String
     val decisionLocate: String
     val decisionRedacted: String
+    val connTag: String
 }
 
 object ZhStrings : Strings {
@@ -1234,6 +1248,19 @@ object ZhStrings : Strings {
     override val missionStatusAccepted = "已验收"
     override val missionStatusStopped = "已停止"
     override val missionStatusFailed = "失败"
+    override val missionReason = "原因"
+    override val missionReasonAwaitingInput = "等待你提供输入"
+    override val missionReasonAwaitingRetry = "等待重试决策"
+    override val missionReasonDispatchFailed = "任务派发失败"
+    override val missionReasonDispatchEmpty = "派发未产生任务"
+    override val missionReasonTurnError = "回合执行出错"
+    override val missionReasonFlowTasksFailed = "编排存在失败任务"
+    override val missionReasonUserStopped = "已被你停止"
+    override val missionReasonFlowLost = "关联编排已丢失"
+    override val missionReasonFlowCancelled = "编排已取消"
+    override val missionReasonInterruptedRestart = "被服务重启中断"
+    override val missionReasonClosedForRework = "已关闭并转返工"
+    override val missionDrivenTag = "工单驱动"
     override val missionCriteriaShort = "验收标准"
     override val missionFilterAll = "全部"
     override val missionFilterActive = "执行中"
@@ -1326,6 +1353,7 @@ object ZhStrings : Strings {
     override val decisionWaitingFmt = "等待 %s 分钟"
     override val decisionLocate = "定位到会话"
     override val decisionRedacted = "敏感内容已隐藏"
+    override val connTag = "@%s"
 }
 
 object EnStrings : Strings {
@@ -1911,6 +1939,19 @@ object EnStrings : Strings {
     override val missionStatusAccepted = "Accepted"
     override val missionStatusStopped = "Stopped"
     override val missionStatusFailed = "Failed"
+    override val missionReason = "Reason"
+    override val missionReasonAwaitingInput = "Waiting for your input"
+    override val missionReasonAwaitingRetry = "Awaiting retry decision"
+    override val missionReasonDispatchFailed = "Dispatch failed"
+    override val missionReasonDispatchEmpty = "Dispatch produced no work"
+    override val missionReasonTurnError = "Turn execution error"
+    override val missionReasonFlowTasksFailed = "Flow finished with failed tasks"
+    override val missionReasonUserStopped = "Stopped by you"
+    override val missionReasonFlowLost = "Bound flow lost"
+    override val missionReasonFlowCancelled = "Flow cancelled"
+    override val missionReasonInterruptedRestart = "Interrupted by hub restart"
+    override val missionReasonClosedForRework = "Closed for rework"
+    override val missionDrivenTag = "Mission-driven"
     override val missionCriteriaShort = "Acceptance criteria"
     override val missionFilterAll = "All"
     override val missionFilterActive = "Active"
@@ -2003,6 +2044,7 @@ object EnStrings : Strings {
     override val decisionWaitingFmt = "Waiting %s min"
     override val decisionLocate = "Locate session"
     override val decisionRedacted = "Sensitive content redacted"
+    override val connTag = "@%s"
 }
 
 val LocalStrings = staticCompositionLocalOf<Strings> { ZhStrings }
@@ -2027,6 +2069,21 @@ fun missionStatusLabel(S: Strings, status: String): String = when (status) {
     "stopped" -> S.missionStatusStopped
     "failed" -> S.missionStatusFailed
     else -> status
+}
+
+fun missionReasonLabel(S: Strings, code: String): String = when (code) {
+    "awaiting-input" -> S.missionReasonAwaitingInput
+    "awaiting-retry" -> S.missionReasonAwaitingRetry
+    "dispatch-failed" -> S.missionReasonDispatchFailed
+    "dispatch-empty" -> S.missionReasonDispatchEmpty
+    "turn-error" -> S.missionReasonTurnError
+    "flow-tasks-failed" -> S.missionReasonFlowTasksFailed
+    "user-stopped" -> S.missionReasonUserStopped
+    "flow-lost" -> S.missionReasonFlowLost
+    "flow-cancelled" -> S.missionReasonFlowCancelled
+    "interrupted-restart" -> S.missionReasonInterruptedRestart
+    "closed-for-rework" -> S.missionReasonClosedForRework
+    else -> code
 }
 
 private val PLAN_STATUS_RE = Regex("^\\[(pending|in_progress|completed|failed|cancelled)\\]\\s*")
