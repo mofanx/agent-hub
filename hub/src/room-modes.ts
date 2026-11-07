@@ -333,6 +333,12 @@ export class RoomModeManager {
     this.relevanceFilter = fn;
   }
 
+  /** decision-model 一期：廉价裁决层（shadow 默认不接管编排） */
+  private modeDecider?: ModeDecider;
+  setModeDecider(d: ModeDecider): void {
+    this.modeDecider = d;
+  }
+
   exportRuntime(): Record<string, unknown> {
     return {
       conductor: this.conductor.export(),
@@ -1126,6 +1132,12 @@ export class RoomModeManager {
         return true;
       }
       const decision = this.parseAutoDecision(output);
+      // 一期日志对：shadow 判决 vs 主持人实际裁决，攒标注数据
+      if (autoCtx.decideInput) {
+        try {
+          this.modeDecider?.recordHostOutcome(autoCtx.decideInput, autoCtx.shadow, decision.mode);
+        } catch {}
+      }
       const at = Date.now();
       const list = this.autoHistory.get(room.roomId) ?? [];
       list.push({ at, mode: decision.mode, reason: decision.reason });
@@ -2145,11 +2157,38 @@ export class RoomModeManager {
       artifactContext: options?.artifactContext,
       missionId: options?.missionId,
     };
+    // decision-model 一期：廉价裁决层前置分流
+    // - shadow（默认）：fire-and-forget 并行裁决，verdict 挂到 autoCtx 供结果回收，编排零变化
+    // - enforce：await 裁决，仅 explicit/高置信无参模式直执行，其余一切 fail-open 走主持人
+    const decideInput: DecideInput = {
+      roomId: room.roomId,
+      text,
+      members: room.members.map((m) => ({ sessionId: m.sessionId, name: m.name })),
+    };
+    if (this.modeDecider?.enforced) {
+      const dv = await this.modeDecider.decide(decideInput);
+      if (dv.action === "direct" && dv.mode !== undefined) {
+        logWarn(
+          "room-modes auto",
+          `decision-model direct: mode=${dv.mode} conf=${dv.confidence} via=${dv.via}`,
+        );
+        return this.executeMode(room, dv.mode as RuntimeMode, text, options);
+      }
+    } else if (this.modeDecider) {
+      void this.modeDecider
+        .decide(decideInput)
+        .then((v) => {
+          autoCtx.shadow = v;
+        })
+        .catch(() => {});
+    }
+    autoCtx.decideInput = decideInput;
     this.autoDecisions.set(conductorId, autoCtx);
     this.decidingTurnLatches.set(conductorId, room.roomId);
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
-    this.sendPrompt(room.roomId, conductorId, prompt).catch((err) => {
+    // 决策回合专属 ACK 预算：只兜"无输出卡死"，超时走 prompt.error→fail-open self 现行兜底
+    this.sendPrompt(room.roomId, conductorId, prompt, this.autoDecideTimeoutMs > 0 ? { ackTimeoutMs: this.autoDecideTimeoutMs } : undefined).catch((err) => {
       logError("room-modes auto decision", err);
       // 发送失败不会有 prompt.done/error 兜底，清掉悬挂决策避免下次 done 误消费
       if (this.autoDecisions.get(conductorId) === autoCtx) {

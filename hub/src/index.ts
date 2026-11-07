@@ -21,6 +21,8 @@ import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult, parseIsolatedChecks, runIsolatedCheck } from "./conductor.js";
+import { ModeDecider } from "./decide.js";
+import { sanitizeInline } from "./sanitize.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { startPerfMonitor } from "./monitor.js";
@@ -716,7 +718,12 @@ const roomModeManager = new RoomModeManager(
     broadcast({ method, params } as HubEvent);
   },
   undefined,
-  parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS),
+  isolatedChecks,
+  // auto 决策回合 ACK 预算：只兜"无输出卡死"，默认 30s 超时走 fail-open self 兜底
+  (() => {
+    const v = Number(process.env.HUB_AUTO_DECIDE_TIMEOUT_MS ?? 30_000);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  })(),
 );
 roomModeManager.setStore(store);
 
@@ -862,6 +869,28 @@ roomModeManager.setRelevanceFilter(async (room, text, note) => {
   return r.relevant;
 });
 
+// decision-model 一期：廉价裁决层 shadow——默认只记录不接管编排；
+// HUB_DECIDE_MODE=enforce 时无参高置信模式可直执行，其余 fail-open 走主持人 LLM 现行路径。
+// 日志落 decisions.ndjson（stateHash 不落原文），供 decide-eval 回放攒标注
+{
+  const decider = new ModeDecider({
+    model: process.env.HUB_DECIDE_MODEL || undefined,
+    baseUrl: process.env.HUB_DECIDE_BASE_URL || undefined,
+    apiKey: process.env.HUB_DECIDE_API_KEY || undefined,
+    timeoutMs: Number(process.env.HUB_DECIDE_TIMEOUT_MS ?? 5000) || undefined,
+    enforce: /^enforce$/i.test(process.env.HUB_DECIDE_MODE ?? ""),
+    log: (rec) => {
+      try {
+        fs.mkdirSync(store.dir, { recursive: true });
+        fs.appendFileSync(path.join(store.dir, "decisions.ndjson"), JSON.stringify(rec) + "\n");
+      } catch (err) {
+        logWarn("decide", `decision log write failed: ${String(err)}`);
+      }
+    },
+  });
+  roomModeManager.setModeDecider(decider);
+}
+
 // 孤儿编排卡收尾：重启后非终态 kind:"flow" 卡对应的 flow 已不存在
 // （parallel/pipeline/debate 不持久化，或 conductor 快照缺失）→ 定稿为已中断并重播条目
 function sweepOrphanFlowCards(): void {
@@ -944,6 +973,20 @@ const scheduler = new Scheduler(
       });
       await agentOps.prompt(task.targetId, [{ type: "text", text: task.message }]);
     }
+  },
+  async (task) => {
+    const checkId = task.precheckCheckId;
+    if (!checkId) return undefined;
+    const command = isolatedChecks[checkId];
+    if (!command) return `precheck unknown preset: ${checkId}`;
+    const room = task.targetType === "room" ? rooms.get(task.targetId) : undefined;
+    const sid = task.targetType === "session" ? task.targetId : (room?.conductorId ?? room?.members[0]?.sessionId);
+    const cwd = sid ? sessionMetas.get(sid)?.cwd : undefined;
+    if (!cwd) return "precheck skipped: no cwd for target";
+    const r = await runIsolatedCheck(cwd, command);
+    return r.status === "exited_zero"
+      ? undefined
+      : `precheck ${r.status}${r.exitCode !== undefined ? ` exit=${r.exitCode}` : ""}`;
   },
 );
 scheduler.start();
@@ -2456,11 +2499,21 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const author = req.params?.author === undefined ? undefined : String(req.params.author).slice(0, 64);
       const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
       const limit = Math.max(1, Math.min(num(req.params?.limit) ?? 20, 50));
+      const missionId = req.params?.missionId === undefined ? undefined : String(req.params.missionId).slice(0, 64);
       const items = store.searchHistory("room", roomId, {
-        query, author, fromAt: num(req.params?.fromAt), toAt: num(req.params?.toAt),
+        query, author, missionId, fromAt: num(req.params?.fromAt), toAt: num(req.params?.toAt),
         beforeId: num(req.params?.beforeId), limit,
       });
-      return { entries: items, hasMore: items.length === limit };
+      // trusted:false——房史条目是成员可控文本，消费方须按不可信数据处理；
+      // inline:true 时 text 单行化（剥换行/Unicode 行分隔符，防注入伪造前缀行）
+      const inline = req.params?.inline === true;
+      return {
+        entries: inline
+          ? items.map((e) => (typeof e.text === "string" ? { ...e, text: sanitizeInline(e.text) } : e))
+          : items,
+        hasMore: items.length === limit,
+        trusted: false,
+      };
     }
     case "room.create": {
       const name = dedupeRoomName(String(req.params?.name ?? "群聊").trim() || "群聊");
@@ -3477,10 +3530,14 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       }
       if (!message) throw new Error("message required");
       const eventTrigger = parseEventTrigger(req.params?.eventTrigger, targetType);
+      const precheckCheckId = req.params?.precheckCheckId;
+      if (precheckCheckId !== undefined && (typeof precheckCheckId !== "string" || !Object.hasOwn(isolatedChecks, precheckCheckId)))
+        throw new Error("precheckCheckId must reference an isolatedChecks preset");
       const task = scheduler.create({
         name, targetType, targetId, targetName, message, schedule, enabled,
         ...(missionTemplate ? { missionTemplate, missionAutoStart } : {}),
         ...(eventTrigger ? { eventTrigger } : {}),
+        ...(precheckCheckId !== undefined ? { precheckCheckId } : {}),
       });
       return { task };
     }
@@ -3519,6 +3576,12 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           req.params.eventTrigger === null
             ? undefined
             : parseEventTrigger(req.params.eventTrigger, patch.targetType ?? existing.targetType);
+      }
+      if (req.params?.precheckCheckId !== undefined) {
+        const v = req.params.precheckCheckId;
+        if (v !== null && (typeof v !== "string" || !Object.hasOwn(isolatedChecks, v)))
+          throw new Error("precheckCheckId must reference an isolatedChecks preset");
+        patch.precheckCheckId = v ?? undefined;
       }
       const task = scheduler.update(id, patch);
       if (!task) throw new Error(`unknown task: ${id}`);

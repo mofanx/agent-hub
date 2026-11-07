@@ -76,6 +76,9 @@ export type ScheduledTask = {
   missionAutoStart?: boolean | undefined;
   /** 事件唤醒配置：存在则房内指定事件可触发本任务（与时间表可并存） */
   eventTrigger?: EventTrigger | undefined;
+  /** 免 AI 预检：引用 isolatedChecks 预设 id；tick 先跑 bubblewrap 隔离检查，
+   *  仅 exited_zero 放行开回合，其余一律跳过本次触发并记日志 */
+  precheckCheckId?: string | undefined;
 };
 
 export type TaskLog = {
@@ -89,11 +92,18 @@ export type TaskLog = {
   at: number;
   success: boolean;
   error: string | null;
+  /** 预检跳过标记：非 null 表示本次 tick 被 precheckCheckId 拦截未开回合 */
+  skipped?: string | undefined;
 };
 
 export type TaskTriggerFn = (
   task: ScheduledTask,
 ) => Promise<void>;
+
+/** 免 AI 预检回调：返回 undefined 放行触发；返回原因串则跳过本次（不开 agent 回合） */
+export type TaskPrecheckFn = (
+  task: ScheduledTask,
+) => Promise<string | undefined>;
 
 const TICK_MS = 60_000;
 const META_KEY = "scheduledTasks";
@@ -237,17 +247,20 @@ export class Scheduler {
   private persist: () => void;
   private broadcast: (tasks: ScheduledTask[]) => void;
   private trigger: TaskTriggerFn;
+  private precheck: TaskPrecheckFn | undefined;
 
   constructor(
     store: Store,
     persist: () => void,
     broadcast: (tasks: ScheduledTask[]) => void,
     trigger: TaskTriggerFn,
+    precheck?: TaskPrecheckFn,
   ) {
     this.store = store;
     this.persist = persist;
     this.broadcast = broadcast;
     this.trigger = trigger;
+    this.precheck = precheck;
     this.load(store);
     this.loadLogs(store);
   }
@@ -325,8 +338,14 @@ export class Scheduler {
       if (task.nextRunAt > now) continue;
       let success = true;
       let error: string | null = null;
+      let skipped: string | undefined;
       try {
-        await this.trigger(task);
+        // 免 AI 预检：仅预设检查放行才开 agent 回合；跳过记 skipped 标记（不烧 turn）
+        skipped =
+          task.precheckCheckId !== undefined && this.precheck
+            ? await this.precheck(task)
+            : undefined;
+        if (skipped === undefined) await this.trigger(task);
       } catch (err) {
         success = false;
         error = err instanceof Error ? err.message : String(err);
@@ -343,6 +362,7 @@ export class Scheduler {
         at: now,
         success,
         error,
+        ...(skipped !== undefined ? { skipped } : {}),
       });
       // 一次性任务执行后自动禁用
       if (task.schedule.mode === "simple" && task.schedule.kind === "once") {

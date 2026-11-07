@@ -7,7 +7,7 @@ import { MissionManager, type MissionSnapshot } from "./mission.js";
 import { missionTemplateFrom, runMissionTask, type MissionTaskDeps } from "./mission-schedule.js";
 import { RoomManager } from "./room.js";
 import { Store } from "./store.js";
-import { parseSchedule, type ScheduledTask } from "./scheduler.js";
+import { parseSchedule, Scheduler, type ScheduledTask } from "./scheduler.js";
 
 const cleanupStores: Store[] = [];
 const cleanupDirs: string[] = [];
@@ -204,5 +204,73 @@ describe("mission schedule", () => {
       parseSchedule({ mode: "cron", expr: "*/5 * * * *" }),
       { mode: "cron", expr: "*/5 * * * *" },
     );
+  });
+});
+
+describe("precheckCheckId 免 AI 预检", () => {
+  const mk = (precheck?: (t: ScheduledTask) => Promise<string | undefined>) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sched-precheck-"));
+    const store = new Store(dir);
+    cleanupDirs.push(dir);
+    cleanupStores.push(store);
+    const triggered: string[] = [];
+    const sched = new Scheduler(
+      store,
+      () => sched.persistTo(store),
+      () => {},
+      async (t) => { triggered.push(t.id); },
+      precheck,
+    );
+    return { sched, triggered };
+  };
+  const due = (sched: Scheduler, over: Partial<ScheduledTask> = {}) => {
+    const t = sched.create({
+      name: "n", targetType: "room", targetId: "r1", targetName: "r",
+      message: "m", schedule: { mode: "simple", kind: "interval", intervalMinutes: 5 },
+      enabled: true, ...over,
+    });
+    t.nextRunAt = Date.now() - 1;
+    return t;
+  };
+  const tickNow = (sched: Scheduler) =>
+    (sched as unknown as { tick(): Promise<void> }).tick();
+
+  it("预检返回原因 → 不触发不开回合，日志记 skipped，游标照常推进", async () => {
+    const { sched, triggered } = mk(async () => "precheck exited_nonzero exit=1");
+    const t = due(sched, { precheckCheckId: "repo-clean" });
+    await tickNow(sched);
+    assert.equal(triggered.length, 0, "预检拦截不得触发");
+    const log = sched.listLogs(1)[0]!;
+    assert.equal(log.skipped, "precheck exited_nonzero exit=1");
+    assert.equal(log.success, true);
+    assert.equal(log.error, null);
+    assert.ok(t.lastRunAt !== null && t.nextRunAt !== null && t.nextRunAt > Date.now() - 1, "跳过不丢时间表游标");
+  });
+
+  it("预检放行（undefined）→ 正常触发，无 skipped 标记", async () => {
+    const { sched, triggered } = mk(async () => undefined);
+    due(sched, { precheckCheckId: "repo-clean" });
+    await tickNow(sched);
+    assert.equal(triggered.length, 1);
+    assert.equal(sched.listLogs(1)[0]!.skipped, undefined);
+  });
+
+  it("无 precheckCheckId → 不咨询预检直接触发", async () => {
+    let consulted = 0;
+    const { sched, triggered } = mk(async () => { consulted++; return "nope"; });
+    due(sched);
+    await tickNow(sched);
+    assert.equal(consulted, 0);
+    assert.equal(triggered.length, 1);
+  });
+
+  it("预检自身抛错 → 按失败记录不吞", async () => {
+    const { sched, triggered } = mk(async () => { throw new Error("runner boom"); });
+    due(sched, { precheckCheckId: "x" });
+    await tickNow(sched);
+    assert.equal(triggered.length, 0);
+    const log = sched.listLogs(1)[0]!;
+    assert.equal(log.success, false);
+    assert.ok(log.error?.includes("runner boom"));
   });
 });
