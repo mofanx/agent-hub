@@ -1326,8 +1326,7 @@ export class AcpAgent {
   /** 返回 configOptions（含模型/思考强度/模式列表等），优先 session 级 */
   getConfigOptions(sessionId?: string): unknown[] | null {
     if (sessionId) {
-      const sessionOpts = this.sessionConfigOptions.get(sessionId);
-      if (sessionOpts) return sessionOpts;
+      return this.sessionConfigOptions.get(sessionId) ?? null;
     }
     return this.cachedConfigOptions;
   }

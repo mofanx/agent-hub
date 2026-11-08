@@ -27,7 +27,7 @@ import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { startPerfMonitor } from "./monitor.js";
 import { AGENT_DEFS, spawnAgentProcess } from "./agent-defs.js";
-import { ModelManager, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
+import { ModelManager, modelConfigOption, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import {
   getDevinQuota,
   validateQuotaReport,
@@ -86,7 +86,8 @@ function setSessionModel(
   sessionId: string,
   model: string,
 ): Promise<void> {
-  return agent.setConfigOption(sessionId, "model", model);
+  const configId = String(modelConfigOption(agent.getConfigOptions(sessionId))?.id ?? "model");
+  return agent.setConfigOption(sessionId, configId, model);
 }
 
 const DEVIN_DEFAULT_CONFIG: Record<string, string> = { mode: "bypass" };
@@ -2041,11 +2042,10 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         throw new Error("value must be string or boolean");
       }
       const agent = ownerOf(sessionId);
-      await agent.setConfigOption(sessionId, configId, String(value));
-      if (configId === "model") {
-        await modelManager.setForSession(String(value), sessionId)
-          .catch((err) => logWarn("session.config", `persist model pref failed: ${String(err)}`));
+      if (configId === "model" || configId === modelConfigOption(agent.getConfigOptions(sessionId))?.id) {
+        await modelManager.setForSession(String(value), sessionId, agent, memberBackendType(sessionId));
       } else {
+        await agent.setConfigOption(sessionId, configId, String(value));
         modelManager.setSessionConfigForSession(sessionId, configId, String(value));
       }
       return { set: true, configOptions: agent.getConfigOptions(sessionId) ?? [] };
@@ -2580,7 +2580,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const members = room.members.map((m) => {
         const meta = sessionMetas.get(m.sessionId);
         const backend = (meta?.agent ?? "devin") as ModelBackend;
-        const current = modelManager.current(backend, m.sessionId);
+        const current = modelManager.current(backend, m.sessionId, agentForSession(m.sessionId)?.getConfigOptions(m.sessionId));
         return {
           sessionId: m.sessionId,
           name: m.name,
@@ -3402,26 +3402,21 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       logWarn("config", `permission bypass set to ${enabled}`);
       return { bypass: enabled };
     }
-    case "model.list": {
-      const backend = String(req.params?.backend ?? "") as ModelBackend;
+    case "model.list":
+    case "model.refresh": {
       const sessionId = String(req.params?.sessionId ?? "").trim() || undefined;
-      const models = await modelManager.list();
-      const filtered = backend ? models.filter(m => m.backend === backend) : models;
-      const current = modelManager.current(backend || "devin", sessionId);
+      const backend = sessionId ? memberBackendType(sessionId) : String(req.params?.backend ?? "") as ModelBackend;
+      if (req.method === "model.refresh") await modelManager.refresh();
+      const options = sessionId ? agentForSession(sessionId)?.getConfigOptions(sessionId) : undefined;
+      const filtered = backend ? await modelManager.listForSession(backend, options) : await modelManager.list();
+      const current = modelManager.current(backend || "devin", sessionId, options);
       return { current: current.uid, models: filtered };
     }
     case "model.current": {
       const backend = String(req.params?.backend ?? "devin") as ModelBackend;
       const sessionId = String(req.params?.sessionId ?? "").trim() || undefined;
-      return modelManager.current(backend, sessionId);
-    }
-    case "model.refresh": {
-      const backend = String(req.params?.backend ?? "") as ModelBackend;
-      const sessionId = String(req.params?.sessionId ?? "").trim() || undefined;
-      const models = await modelManager.refresh();
-      const filtered = backend ? models.filter(m => m.backend === backend) : models;
-      const current = modelManager.current(backend || "devin", sessionId);
-      return { current: current.uid, models: filtered };
+      return modelManager.current(sessionId ? memberBackendType(sessionId) : backend, sessionId,
+        sessionId ? agentForSession(sessionId)?.getConfigOptions(sessionId) : undefined);
     }
     case "model.set": {
       const name = String(req.params?.model ?? "").trim();
@@ -3430,26 +3425,16 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
 
       // 指定 sessionId：只切该 session（per-session 模型）
       if (targetSessionId) {
-        const model = await modelManager.setForSession(name, targetSessionId);
-        const connectionId = owners.get(targetSessionId);
-        const agent = connectionId ? agents.get(connectionId) : undefined;
-        if (!agent) {
-          return { set: true, model, syncErrors: [], sessionScoped: true };
-        }
-        const syncErrors: { sessionId: string; error: string }[] = [];
-        try {
-          await setSessionModel(agent, model.backend, targetSessionId, model.uid);
-          console.log(`[model] session ${targetSessionId} switched to ${model.uid}`);
-        } catch (err) {
-          const msg = String(err);
-          logWarn("model.set", `sync to ${targetSessionId} failed: ${msg}`);
-          syncErrors.push({ sessionId: targetSessionId, error: msg });
-        }
-        return { set: true, model, syncErrors, sessionScoped: true };
+        const agent = ownerOf(targetSessionId);
+        const model = await modelManager.setForSession(name, targetSessionId, agent, memberBackendType(targetSessionId));
+        console.log(`[model] session ${targetSessionId} switched to ${model.uid}`);
+        return { set: true, model, syncErrors: [], sessionScoped: true };
       }
 
       // 未指定 sessionId：保持原有批量行为（后端级全局切换）
-      const model = await modelManager.set(name);
+      await modelManager.list();
+      const model = modelManager.find(name);
+      if (!model) throw new Error(`unknown model: ${name}`);
       const syncErrors: { sessionId: string; error: string }[] = [];
       const syncTasks: Promise<void>[] = [];
       for (const [sessionId, connectionId] of owners.entries()) {
@@ -3458,7 +3443,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         const agent = agents.get(connectionId);
         if (!agent) continue;
         syncTasks.push(
-          setSessionModel(agent, model.backend, sessionId, model.uid).catch((err) => {
+          modelManager.setForSession(model.uid, sessionId, agent, model.backend).then(() => {}).catch((err) => {
             const msg = String(err);
             logWarn("model.set", `sync to ${sessionId} failed: ${msg}`);
             syncErrors.push({ sessionId, error: msg });
@@ -3466,8 +3451,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         );
       }
       await Promise.all(syncTasks);
-
-      return { set: true, model, syncErrors };
+      if (!syncErrors.length) await modelManager.set(model.uid);
+      return { set: syncErrors.length === 0, model, syncErrors };
     }
     case "model.usage": {
       const backend = String(req.params?.backend ?? "devin");

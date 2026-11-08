@@ -10,7 +10,7 @@ import path from "node:path";
 import { Store } from "./store.js";
 
 const requireDesktop = createRequire(new URL("../../desktop/package.json", import.meta.url));
-const esbuild = requireDesktop("esbuild");
+const esbuild = createRequire(createRequire(import.meta.url).resolve("tsx/package.json"))("esbuild");
 const directory = fileURLToPath(new URL("../../desktop/src/hub/", import.meta.url));
 const bundles = new Map<string, Promise<string>>();
 type Obj = Record<string, any>;
@@ -174,6 +174,37 @@ async function environment(t: { after: (fn: () => void) => void }, name = "store
     },
   };
 }
+
+test("model switch sync errors preserve selection and never announce success", async (t) => {
+  const e = await environment(t);
+  await e.connect();
+  const model = { uid: "gemini-4-argon-high", label: "Gemini", backend: "devin" };
+  e.set({ currentSession: session, modelCurrent: "swe-2-high", showModelPicker: true, chatItems: [],
+    roomMemberModels: { s1: { name: "Worker", backend: "devin", model: "swe-2-high" } } });
+  e.route(req => req.method === "model.set"
+    ? { set: true, model, syncErrors: [{ sessionId: "s1", error: "Invalid params" }] } : e.base(req));
+  await e.get().switchModel(model);
+  assert.equal(e.get().modelCurrent, "swe-2-high");
+  assert.equal(e.get().showModelPicker, true);
+  assert.match(e.get().connectError, /Invalid params/);
+  assert.equal(e.get().chatItems.length, 0);
+  await e.get().switchModelForMember("s1", model);
+  assert.equal(e.get().roomMemberModels.s1.model, "swe-2-high");
+  assert.equal(e.get().chatItems.length, 0);
+});
+
+test("single-chat model slash command targets only its session", async (t) => {
+  const e = await environment(t);
+  await e.connect();
+  e.set({ currentSession: session, currentRoom: null, chatItems: [] });
+  e.route(req => req.method === "model.set"
+    ? { set: true, model: { uid: "swe-2-high", label: "SWE-2" }, syncErrors: [] } : e.base(req));
+  assert.equal(e.get().handleSlashCommand("/model swe-2-high"), true);
+  await until(() => e.get().modelCurrent === "swe-2-high");
+  const request = e.calls.find(req => req.method === "model.set");
+  assert.equal(request?.params.sessionId, "s1");
+  assert.equal(e.get().chatItems.filter((item: Obj) => item.kind === "system").length, 1);
+});
 
 test("first recovery failure never enables automatic delivery", async (t) => {
   const e = await environment(t);

@@ -1170,6 +1170,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
     assert.equal(setConfigCalls[0]!.sessionId, "s1");
     assert.equal(optOf("s1"), "max");
     assert.equal(optOf("s2"), "high");
+    assert.equal(hub.getConfigOptions("unknown-session"), null);
     hub.close();
     agentConn.close();
   });

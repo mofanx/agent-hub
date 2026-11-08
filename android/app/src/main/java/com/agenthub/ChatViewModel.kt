@@ -1514,6 +1514,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private suspend fun requestModelSwitch(params: JsonObject): JsonObject {
+        val result = hub.call("model.set", params)
+        val errors = result["syncErrors"]?.jsonArray.orEmpty()
+        if (result["set"]?.jsonPrimitive?.booleanOrNull != true || errors.isNotEmpty()) {
+            error(errors.joinToString("; ") { it.jsonObject["error"]?.jsonPrimitive?.content.orEmpty() })
+        }
+        return result
+    }
+
     private fun handleModelSlash(arg: String?) {
         viewModelScope.launch {
             val S = stringsFor(lang)
@@ -1536,7 +1545,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             chatItems.add(ChatItem.Error(++itemSeq, S.memberNotFoundFmt.format(memberName)))
                             return@launch
                         }
-                        val result = hub.call("model.set", buildJsonObject {
+                        val result = requestModelSwitch(buildJsonObject {
                             put("model", modelName)
                             put("sessionId", member.first)
                         })
@@ -1552,7 +1561,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         // 单聊模式
                         val sid = currentSession?.sessionId
-                        val result = hub.call("model.set", buildJsonObject {
+                        val result = requestModelSwitch(buildJsonObject {
                             put("model", arg)
                             if (!sid.isNullOrBlank()) put("sessionId", sid)
                         })
@@ -1569,7 +1578,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, S.modelListError.format(e.message ?: "")))
+                chatItems.add(ChatItem.Error(++itemSeq, S.modelSwitchError.format(e.message ?: "")))
             }
         }
     }
@@ -1699,7 +1708,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val selectedMember = selectedMemberSession
                 if (room != null && selectedMember != null) {
                     // 群聊模式：切指定成员的模型
-                    val result = hub.call("model.set", buildJsonObject {
+                    val result = requestModelSwitch(buildJsonObject {
                         put("model", model.uid)
                         put("sessionId", selectedMember)
                     })
@@ -1710,10 +1719,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     modelCurrent = uid
                     modelList.forEachIndexed { i, item -> modelList[i] = item.copy(isCurrent = item.uid == uid) }
                     chatItems.add(ChatItem.System(++itemSeq, stringsFor(lang).modelSwitchedForFmt.format(memberName, model.label.ifBlank { model.uid })))
+                    loadSessionConfigOptions(selectedMember)
                 } else {
                     // 单聊模式
                     val sid = currentSession?.sessionId
-                    val result = hub.call("model.set", buildJsonObject {
+                    val result = requestModelSwitch(buildJsonObject {
                         put("model", model.uid)
                         if (!sid.isNullOrBlank()) put("sessionId", sid)
                     })
@@ -1724,12 +1734,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         val cost = formatModelCost(S, m)
                         chatItems.add(ChatItem.System(++itemSeq, S.modelSwitched.format(uid, "$label $cost").trim()))
                         refreshCurrentModel()
+                        if (sid != null) loadSessionConfigOptions(sid)
                     }
                 }
                 showModelPicker = false
                 modelFilter = ""
             } catch (e: Exception) {
-                chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "model switch failed"))
+                chatItems.add(ChatItem.Error(++itemSeq, S.modelSwitchError.format(e.message ?: "")))
             }
         }
     }
@@ -1737,8 +1748,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshModelList() {
         viewModelScope.launch {
             try {
-                val backend = currentSession?.agent ?: "devin"
-                val sid = currentSession?.sessionId
+                val sid = if (currentRoom != null) selectedMemberSession else currentSession?.sessionId
+                val backend = sid?.let { roomMemberModels[it]?.second } ?: currentSession?.agent ?: "devin"
                 val result = hub.call("model.refresh", buildJsonObject {
                     put("backend", backend)
                     if (!sid.isNullOrBlank()) put("sessionId", sid)

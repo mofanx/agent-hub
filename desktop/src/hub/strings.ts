@@ -54,6 +54,7 @@ export interface Strings {
   modelSwitched: string;
   modelUnknown: string;
   modelListError: string;
+  modelSwitchError: string;
   copy: string;
   selectText: string;
   quoting: string;
@@ -786,6 +787,7 @@ const zh: Strings = {
   modelSwitched: "已切换到 %s（%s）",
   modelUnknown: "未知模型: %s",
   modelListError: "获取模型列表失败: %s",
+  modelSwitchError: "模型切换未完成，请刷新当前模型后重试：%s",
   copy: "复制",
   selectText: "选取文字",
   quoting: "引用",
@@ -1516,6 +1518,7 @@ const en: Strings = {
   modelSwitched: "Switched to %s (%s)",
   modelUnknown: "Unknown model: %s",
   modelListError: "Failed to load model list: %s",
+  modelSwitchError: "Model switch incomplete. Refresh the current model and retry: %s",
   copy: "Copy",
   selectText: "Select text",
   quoting: "Quote",

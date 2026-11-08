@@ -233,6 +233,7 @@ interface Strings {
     val modelSwitched: String
     val modelUnknown: String
     val modelListError: String
+    val modelSwitchError: String
     val costTierFree: String
     val costTierLow: String
     val costTierMed: String
@@ -916,6 +917,7 @@ object ZhStrings : Strings {
     override val modelSwitched = "已切换到 %s（%s）"
     override val modelUnknown = "未知模型：%s"
     override val modelListError = "获取模型列表失败：%s"
+    override val modelSwitchError = "模型切换未完成，请刷新当前模型后重试：%s"
     override val costTierFree = "免费"
     override val costTierLow = "低成本"
     override val costTierMed = "中等成本"
@@ -1607,6 +1609,7 @@ object EnStrings : Strings {
     override val modelSwitched = "Switched to %s (%s)"
     override val modelUnknown = "Unknown model: %s"
     override val modelListError = "Failed to load models: %s"
+    override val modelSwitchError = "Model switch incomplete. Refresh the current model and retry: %s"
     override val costTierFree = "Free"
     override val costTierLow = "Low cost"
     override val costTierMed = "Medium cost"

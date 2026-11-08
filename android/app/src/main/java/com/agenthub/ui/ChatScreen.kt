@@ -1511,8 +1511,7 @@ pendingClarification?.let { clarFlow ->
                             onDismissRequest = { },
                             properties = PopupProperties(focusable = false),
                         ) {
-                            LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                                item { Column {
+                            Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
                                 if (localMatches.isNotEmpty()) {
                                     Text(
                                         S.eventCommand,
@@ -1588,9 +1587,8 @@ pendingClarification?.let { clarFlow ->
                                         )
                                     }
                                 }
-                                    } }
-                                }
                             }
+                        }
                     }
                     if (fileRefQuery != null) {
                         val filter = fileRefQuery.substringAfterLast("/")

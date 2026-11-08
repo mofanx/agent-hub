@@ -34,6 +34,16 @@ const HUB_BACKENDS_PATH = path.join(HUB_CONFIG_DIR, "backends.json");
 const ACP_MODEL_PATH = path.join(homedir(), ".config/devin/acp-model.json");
 const CONFIG_PATH = path.join(homedir(), ".config/devin/config.json");
 
+type ModelSession = {
+  getConfigOptions(sessionId: string): unknown[] | null;
+  setConfigOption(sessionId: string, configId: string, value: string): Promise<void>;
+};
+
+export function modelConfigOption(options: unknown[] | null | undefined): Record<string, unknown> | undefined {
+  return options?.find((o): o is Record<string, unknown> =>
+    !!o && typeof o === "object" && ("id" in o && o.id === "model" || "category" in o && o.category === "model"));
+}
+
 export class ModelManager {
   private all: ModelInfo[] | null = null;
   private backends: BackendConfig[] = [];
@@ -114,7 +124,9 @@ export class ModelManager {
    * @param sessionId 可选，指定 session 时优先读 session 级偏好
    * 优先级：session 偏好 > 后端偏好 > acp-model.json（devin 兼容旧版） > config.json（devin） > 默认
    */
-  current(backend: ModelBackend = "devin", sessionId?: string): { uid: string; label?: string } {
+  current(backend: ModelBackend = "devin", sessionId?: string, options?: unknown[] | null): { uid: string; label?: string } {
+    const live = modelConfigOption(options)?.currentValue;
+    if (typeof live === "string" && live) return { uid: live };
     const prefs = this.loadModelPreferences();
     const sessionPrefs = this.loadSessionPreferences();
     if (sessionId && sessionPrefs[sessionId]) return { uid: sessionPrefs[sessionId] };
@@ -151,11 +163,29 @@ export class ModelManager {
     return match;
   }
 
+  async listForSession(backend: ModelBackend, options?: unknown[] | null): Promise<ModelInfo[]> {
+    const catalog = (await this.list()).filter(m => m.backend === backend);
+    if (!modelConfigOption(options)) return catalog;
+    return parseConfigOptionsModels(options ?? [], backend).map(m => {
+      const known = catalog.find(c => c.uid === m.uid);
+      return known ? { ...known, label: m.label } : m;
+    });
+  }
+
   /** 按 session 切换模型，只影响该 session，不影响同后端其他 session */
-  async setForSession(name: string, sessionId: string): Promise<ModelInfo> {
-    await this.list();
-    const match = this.find(name);
+  async setForSession(name: string, sessionId: string, agent: ModelSession, backend: ModelBackend = "devin"): Promise<ModelInfo> {
+    const options = agent.getConfigOptions(sessionId);
+    const models = await this.listForSession(backend, options);
+    const q = name.trim().toLowerCase();
+    const match = models.find(m => m.uid.toLowerCase() === q)
+      ?? models.find(m => m.slug.toLowerCase() === q || m.aliases.some(a => a.toLowerCase() === q));
     if (!match) throw new Error(`unknown model: ${name}`);
+    const configId = String(modelConfigOption(options)?.id ?? "model");
+    await agent.setConfigOption(sessionId, configId, match.uid);
+    const actual = modelConfigOption(agent.getConfigOptions(sessionId))?.currentValue;
+    if (typeof actual === "string" && actual !== match.uid) {
+      throw new Error(`model switch not applied: requested ${match.uid}, current ${actual}`);
+    }
     this.writeSessionPreference(sessionId, match.uid);
     return match;
   }

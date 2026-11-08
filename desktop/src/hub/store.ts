@@ -2167,6 +2167,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
     name: String(o.name ?? ""),
   });
 
+  const requestModelSwitch = async (params: Record<string, unknown>) => {
+    try {
+      const result = await getOrCall<{ set?: boolean; model?: Record<string, unknown>; syncErrors?: { error: string }[] }>("model.set", params);
+      if (result.set !== true || result.syncErrors?.length) {
+        throw new Error(result.syncErrors?.map(e => e.error).join("; ") || "");
+      }
+      return result;
+    } catch (e) {
+      throw new Error(stringsFor(get().lang).modelSwitchError.replace("%s", e instanceof Error ? e.message : String(e)));
+    }
+  };
+
   const parseModelInfo = (o: Record<string, unknown>): ModelInfo => ({
     uid: String(o.uid ?? ""),
     label: String(o.label ?? ""),
@@ -3977,7 +3989,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
               set({ chatItems: [...get().chatItems, { kind: "error", text: S.memberNotFoundFmt.replace("%s", memberName), author: "" }] });
               return true;
             }
-            void getOrCall("model.set", { model: modelName, sessionId: member[0] })
+            void requestModelSwitch({ model: modelName, sessionId: member[0] })
               .then((res) => {
                 const model = (res as Record<string, unknown>).model as Record<string, unknown> | undefined;
                 if (model) {
@@ -3990,11 +4002,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
                 }
               })
               .catch((e) => {
-                set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelListError.replace("%s", String(e.message ?? e)), author: "" }] });
+                set({ chatItems: [...get().chatItems, { kind: "error", text: String(e.message ?? e), author: "" }] });
               });
           } else if (arg) {
             // 单聊模式：直接切
-            void getOrCall("model.set", { model: arg })
+            void requestModelSwitch({ model: arg, ...(get().currentSession ? { sessionId: get().currentSession!.sessionId } : {}) })
               .then((res) => {
                 const model = (res as Record<string, unknown>).model as Record<string, unknown> | undefined;
                 if (model) {
@@ -4012,7 +4024,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
                 }
               })
               .catch((e) => {
-                set({ chatItems: [...get().chatItems, { kind: "error", text: S.modelListError.replace("%s", String(e.message ?? e)), author: "" }] });
+                set({ chatItems: [...get().chatItems, { kind: "error", text: String(e.message ?? e), author: "" }] });
               });
           } else {
             void get().showModelPickerDialog();
@@ -4430,14 +4442,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
     switchModel: async (model: ModelInfo) => {
       try {
         const sessionId = get().currentSession?.sessionId;
-        await getOrCall("model.set", { model: model.uid, ...(sessionId ? { sessionId } : {}) });
+        const result = await requestModelSwitch({ model: model.uid, ...(sessionId ? { sessionId } : {}) });
+        const uid = String(result.model?.uid ?? model.uid);
         set({
           showModelPicker: false,
-          modelCurrent: model.uid,
-          modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === model.uid })),
+          modelCurrent: uid,
+          modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === uid })),
         });
         const S = stringsFor(get().lang);
         set({ chatItems: [...get().chatItems, { kind: "system", text: S.modelSwitched.replace("%s", model.label).replace("%s", model.uid), author: "" }] });
+        if (sessionId) await get().refreshSessionConfigOptions(sessionId);
       } catch (e) {
         set({ connectError: String(e) });
       }
@@ -4445,16 +4459,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     switchModelForMember: async (sessionId: string, model: ModelInfo) => {
       try {
-        await getOrCall("model.set", { model: model.uid, sessionId });
+        const result = await requestModelSwitch({ model: model.uid, sessionId });
+        const uid = String(result.model?.uid ?? model.uid);
         const info = get().roomMemberModels[sessionId];
         const memberName = info?.name ?? sessionId;
         // 更新成员模型信息
         set({
-          roomMemberModels: { ...get().roomMemberModels, [sessionId]: { ...info!, model: model.uid } },
-          modelCurrent: model.uid,
-          modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === model.uid })),
+          roomMemberModels: { ...get().roomMemberModels, [sessionId]: { ...info!, model: uid } },
+          modelCurrent: uid,
+          modelList: get().modelList.map((m) => ({ ...m, isCurrent: m.uid === uid })),
         });
         set({ chatItems: [...get().chatItems, { kind: "system", text: stringsFor(get().lang).modelSwitchedForFmt.replace("%s", memberName).replace("%s", model.label || model.uid), author: "" }] });
+        await get().refreshSessionConfigOptions(sessionId);
       } catch (e) {
         set({ connectError: String(e) });
       }
