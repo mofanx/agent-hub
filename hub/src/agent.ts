@@ -1499,17 +1499,19 @@ export class AcpAgent {
             ? `agent ${this.name} went silent for ${Math.round(idle / 1000)}s mid-turn — treating as stalled`
             : `agent ${this.name} produced no output within ${ackTimeoutMs / 1000}s — request may have been rejected at transport level`,
         );
-        this.emit({
-          method: "prompt.error",
-          params: { sessionId, message: String(err) },
-        });
         const waiter = this.promptOnceWaiters.get(sessionId);
         if (waiter) {
           this.promptOnceWaiters.delete(sessionId);
           waiter.reject(err);
         }
-        // 尽力取消僵尸回合（内部清 busy/stoppable、换代、onTurnEnd 收尾），避免重派叠 prompt
-        this.cancel(sessionId).catch(() => {});
+        // 先回收僵尸回合再广播 prompt.error：error 会同步触发兜底重派（如 auto 决策失败→self），
+        // 若先 error 后 cancel，cancel 会把刚起的兜底回合一并中断
+        this.cancel(sessionId).catch(() => {}).finally(() => {
+          this.emit({
+            method: "prompt.error",
+            params: { sessionId, message: String(err) },
+          });
+        });
       }, ms);
       entry.watchdog.unref?.();
     };

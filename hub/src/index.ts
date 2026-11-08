@@ -21,7 +21,7 @@ import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
 import { SessionLedger } from "./session-ledger.js";
 import { extractTaskResult, parseIsolatedChecks, runIsolatedCheck } from "./conductor.js";
-import { ModeDecider } from "./decide.js";
+import { ModeDecider, resolveDecideConfig } from "./decide.js";
 import { sanitizeInline } from "./sanitize.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
@@ -725,9 +725,9 @@ const roomModeManager = new RoomModeManager(
   },
   undefined,
   isolatedChecks,
-  // auto 决策回合 ACK 预算：只兜"无输出卡死"，默认 30s 超时走 fail-open self 兜底
+  // auto 决策回合 ACK 预算：只兜"无输出卡死"，默认 20s 超时走 fail-open self 兜底
   (() => {
-    const v = Number(process.env.HUB_AUTO_DECIDE_TIMEOUT_MS ?? 30_000);
+    const v = Number(process.env.HUB_AUTO_DECIDE_TIMEOUT_MS ?? 20_000);
     return Number.isFinite(v) && v > 0 ? v : 0;
   })(),
 );
@@ -879,12 +879,14 @@ roomModeManager.setRelevanceFilter(async (room, text, note) => {
 // HUB_DECIDE_MODE=enforce 时无参高置信模式可直执行，其余 fail-open 走主持人 LLM 现行路径。
 // 日志落 decisions.ndjson（stateHash 不落原文），供 decide-eval 回放攒标注
 {
+  const dc = resolveDecideConfig(process.env);
   const decider = new ModeDecider({
-    model: process.env.HUB_DECIDE_MODEL || undefined,
-    baseUrl: process.env.HUB_DECIDE_BASE_URL || undefined,
-    apiKey: process.env.HUB_DECIDE_API_KEY || undefined,
+    model: dc.model,
+    baseUrl: dc.baseUrl,
+    apiKey: dc.apiKey,
     timeoutMs: Number(process.env.HUB_DECIDE_TIMEOUT_MS ?? 5000) || undefined,
-    enforce: /^enforce$/i.test(process.env.HUB_DECIDE_MODE ?? ""),
+    enforce: dc.enforce,
+    fastPath: !/^(0|false|off)$/i.test(process.env.HUB_AUTO_FASTPATH ?? ""),
     log: (rec) => {
       try {
         fs.mkdirSync(store.dir, { recursive: true });

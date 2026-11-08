@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ModeDecider, DIRECT_MODES, DECIDE_CONFIDENCE_MIN } from "./decide.js";
+import { ModeDecider, DIRECT_MODES, DECIDE_CONFIDENCE_MIN, resolveDecideConfig } from "./decide.js";
 
 const input = {
   roomId: "r1",
@@ -80,5 +80,42 @@ describe("ModeDecider", () => {
     assert.equal(h1, h2);
     assert.equal(h1.length, 16);
     assert.ok(!h1.includes(input.text));
+  });
+});
+
+describe("resolveDecideConfig", () => {
+  it("provider:model 预设取 baseUrl/apiKey，配置模型默认 enforce", () => {
+    const c = resolveDecideConfig({ HUB_DECIDE_MODEL: "deepseek:deepseek-chat", DEEPSEEK_API_KEY: "k" });
+    assert.deepEqual(c, { model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1", apiKey: "k", enforce: true });
+  });
+  it("显式 BASE_URL 优先；shadow 退回只记录；未配置不 enforce", () => {
+    const c = resolveDecideConfig({ HUB_DECIDE_MODEL: "openai:m", HUB_DECIDE_BASE_URL: "http://x/v1", HUB_DECIDE_MODE: "shadow" });
+    assert.equal(c.baseUrl, "http://x/v1");
+    assert.equal(c.enforce, false);
+    assert.equal(resolveDecideConfig({}).enforce, false);
+  });
+  it("explicitMention 仅规则命中", () => {
+    const d = new ModeDecider();
+    assert.equal(d.explicitMention(input)?.mode, "mention");
+    assert.equal(d.explicitMention({ ...input, text: "帮我看看这个报错" }), undefined);
+  });
+});
+
+describe("fastRoute", () => {
+  const m4 = [1, 2, 3, 4].map((i) => ({ sessionId: `s${i}`, name: `w${i}` }));
+  const d = new ModeDecider();
+  it("无多成员信号的短消息直出 self", () => {
+    assert.equal(d.fastRoute({ roomId: "r", text: "这个函数为什么返回 undefined？", members: m4 }, false)?.mode, "self");
+  });
+  it("有信号/过长/过短/待答/关闭 → 交回主持人", () => {
+    const f = (text: string, aw = false) => d.fastRoute({ roomId: "r", text, members: m4 }, aw);
+    assert.equal(f("大家分别给个方案"), undefined);
+    assert.equal(f("x".repeat(200)), undefined);
+    assert.equal(f("好"), undefined);
+    assert.equal(f("这个函数为什么返回 undefined？", true), undefined);
+    assert.equal(new ModeDecider({ fastPath: false }).fastRoute({ roomId: "r", text: "你好呀今天", members: m4 }, false), undefined);
+  });
+  it("仅主持人+1 成员恒 self", () => {
+    assert.equal(d.fastRoute({ roomId: "r", text: "大家分别给个方案", members: m4.slice(0, 2) }, false)?.mode, "self");
   });
 });

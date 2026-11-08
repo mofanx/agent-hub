@@ -1344,7 +1344,7 @@ export class RoomModeManager {
       this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (room) {
-        this.notice({ roomId: room.roomId, message: "🎛️ 主持人决策失败，已兜底为回答" });
+        this.notice({ roomId: room.roomId, message: `🎛️ 主持人决策失败（${message.slice(0, 80)}），已兜底为回答` });
         this.setSubMode(room.roomId, "self", room.conductorId, undefined);
         void this.executeMode(room, "self", autoCtx.text, {
           note: autoCtx.note,
@@ -1352,6 +1352,11 @@ export class RoomModeManager {
           content: autoCtx.content,
           sessionNote: autoCtx.sessionNote,
           artifactContext: autoCtx.artifactContext,
+        }).catch((err) => {
+          logError("room-modes auto fallback", err);
+          this.clearSubMode(room.roomId);
+          this.emitFlowUpdate(room.roomId);
+          this.notice({ roomId: room.roomId, message: `兜底回答启动失败：${err instanceof Error ? err.message : String(err)}` });
         });
       }
       this.emitFlowUpdate(autoCtx.roomId);
@@ -2184,6 +2189,20 @@ export class RoomModeManager {
       text,
       members: room.members.map((m) => ({ sessionId: m.sessionId, name: m.name })),
     };
+    const explicit = this.modeDecider?.explicitMention(decideInput);
+    if (explicit?.mode !== undefined) {
+      logWarn("room-modes auto", `explicit fast-path: ${explicit.reason}`);
+      this.setSubMode(room.roomId, explicit.mode as RuntimeMode, undefined, undefined);
+      return this.executeMode(room, explicit.mode as RuntimeMode, text, options);
+    }
+    const awaiting =
+      this.conductor.pendingClarification(room.roomId) !== undefined ||
+      this.getFlow(room.roomId)?.waitingFor === "user";
+    const fast = this.modeDecider?.fastRoute(decideInput, awaiting);
+    if (fast?.mode !== undefined) {
+      logWarn("room-modes auto", `fast-path: ${fast.reason}`);
+      return this.executeMode(room, fast.mode as RuntimeMode, text, options);
+    }
     if (this.modeDecider?.enforced) {
       const dv = await this.modeDecider.decide(decideInput);
       if (dv.action === "direct" && dv.mode !== undefined) {

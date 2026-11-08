@@ -34,6 +34,39 @@ export type DecideInput = {
   members: { sessionId: string; name: string }[];
 };
 
+const MULTI_SIGNAL = new RegExp(
+  "大家|各位|所有人|每个人|多人|多位|分别|并行|同时|拆分|拆解|分工|派工|分头|流水线|依次|逐个|轮流|辩论|正反|多个方案|对比|评审|互相|协作|投票|集思广益|" +
+  "conductor|parallel|pipeline|debate|round.?robin|brainstorm|everyone|all of you|each of you|in parallel|split|divide|delegate|compare|vote",
+  "i",
+);
+const FAST_MAX_LEN = 120;
+
+const PROVIDERS: Record<string, { baseUrl: string; keyEnv: string }> = {
+  deepseek: { baseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY" },
+  openai: { baseUrl: "https://api.openai.com/v1", keyEnv: "OPENAI_API_KEY" },
+  gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", keyEnv: "GEMINI_API_KEY" },
+  xai: { baseUrl: "https://api.x.ai/v1", keyEnv: "XAI_API_KEY" },
+  aliyun: { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyEnv: "ALIYUN_API_KEY" },
+};
+
+/** HUB_DECIDE_MODEL 支持 `provider:model` 预设（自动取 baseUrl/apiKey）；显式 BASE_URL/API_KEY 优先；配置了模型默认 enforce，HUB_DECIDE_MODE=shadow 可退回只记录 */
+export function resolveDecideConfig(env: NodeJS.ProcessEnv): {
+  model?: string | undefined; baseUrl?: string | undefined; apiKey?: string | undefined; enforce: boolean;
+} {
+  let model = env.HUB_DECIDE_MODEL || undefined;
+  let baseUrl = env.HUB_DECIDE_BASE_URL || undefined;
+  let apiKey = env.HUB_DECIDE_API_KEY || undefined;
+  const i = model?.indexOf(":") ?? -1;
+  const preset = model && i > 0 ? PROVIDERS[model.slice(0, i).toLowerCase()] : undefined;
+  if (model && preset) {
+    model = model.slice(i + 1);
+    baseUrl ??= preset.baseUrl;
+    apiKey ??= env[preset.keyEnv] || undefined;
+  }
+  const mode = (env.HUB_DECIDE_MODE ?? "").toLowerCase();
+  return { model, baseUrl, apiKey, enforce: mode === "enforce" || (!!model && mode !== "shadow") };
+}
+
 type DecideLogRec = Record<string, unknown>;
 
 export class ModeDecider {
@@ -45,6 +78,7 @@ export class ModeDecider {
       timeoutMs?: number | undefined;
       /** enforce=true 才允许直执行；默认 false（shadow 纯记录） */
       enforce?: boolean | undefined;
+      fastPath?: boolean | undefined;
       fetchImpl?: typeof fetch | undefined;
       /** 决策日志 sink（ndjson 追加），由调用方注入落盘策略 */
       log?: ((rec: DecideLogRec) => void) | undefined;
@@ -71,6 +105,25 @@ export class ModeDecider {
   }
 
   /** 规则层：@成员 → explicit mention；明显闲聊/超短 → ignore（不值得起模型） */
+  /** 快速通道：无任何多成员协作信号的短消息，主持人决策几乎必为 self——本地直出，省一整轮 agent 往返；待答/长文/有信号一律交回主持人 */
+  fastRoute(input: DecideInput, awaiting: boolean): DecideVerdict | undefined {
+    if (this.opts.fastPath === false || awaiting) return undefined;
+    const text = input.text.trim();
+    const solo = input.members.length <= 2;
+    if (!solo && (text.length > FAST_MAX_LEN || text.length < 4 || MULTI_SIGNAL.test(text))) return undefined;
+    const v: DecideVerdict = {
+      tier: "explicit", mode: "self", confidence: 1, action: "direct", via: "rule",
+      reason: solo ? "fast:solo" : "fast:no-multi-signal", ms: 0,
+    };
+    this.opts.log?.({ kind: "fast", ...inputSummary(input), verdict: v });
+    return v;
+  }
+
+  explicitMention(input: DecideInput): DecideVerdict | undefined {
+    const v = this.ruleTier(input);
+    return v?.tier === "explicit" ? v : undefined;
+  }
+
   private ruleTier(input: DecideInput): DecideVerdict | undefined {
     const text = input.text.trim();
     for (const m of input.members) {
