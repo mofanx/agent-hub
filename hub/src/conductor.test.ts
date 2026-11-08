@@ -1823,6 +1823,84 @@ describe("conductor", () => {
     }
   });
 
+  it("import 恢复：tool_call-only 途中回合（无房史）判有外发，不落 pending 误重派", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "resume-toolonly",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "w1", name: "w1" },
+        { sessionId: "w2", name: "w2" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-toolact-"));
+    const store = new Store(dir);
+    const prompts: { sessionId: string; content: string }[] = [];
+    const mk = () => {
+      const o = new ConductorOrchestrator(
+        {
+          prompt: async (sessionId, content) => {
+            prompts.push({ sessionId, content: String(content) });
+          },
+          isBusy: () => false,
+        },
+        rooms,
+        () => {},
+      );
+      o.setStore(store);
+      return o;
+    };
+    try {
+      const o1 = mk();
+      await o1.start(r, "任务");
+      await o1.onPromptDone(
+        "conductor",
+        '```json\n{"tasks":[{"id":"t1","to":"w1","task":"A"},{"id":"t2","to":"w2","task":"B"}]}\n```',
+      );
+      for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+      const w2Before = prompts.filter((p) => p.sessionId === "w2").length;
+      assert.equal(w2Before, 1, "t2 已派发");
+
+      // 模拟 t1 途中执行过 tool_call（edit）但无文本外发：仅 tool_actions 有迹，房史零条目
+      const t1dispatchedAt = (
+        o1.getFlow(r.roomId) as {
+          tasks: { id: string; dispatchedAt?: number }[];
+        }
+      ).tasks.find((t) => t.id === "t1")!.dispatchedAt!;
+      store.addToolAction("w1", {
+        at: t1dispatchedAt + 1,
+        kind: "edit",
+        title: "edit file",
+        status: "in_progress",
+      });
+
+      const o2 = mk();
+      await o2.import(o1.export());
+      for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+      const tasks = (
+        o2.getFlow(r.roomId) as {
+          tasks: { id: string; status: string }[];
+        }
+      ).tasks;
+      const t1 = tasks.find((t) => t.id === "t1")!;
+      const t2 = tasks.find((t) => t.id === "t2")!;
+      assert.equal(t1.status, "failed", "tool_call 迹在 ⇒ 判有外发，停 failed 不自动重派");
+      // 有 failed 任务的 flow 进 awaiting-retry 相位门控：无迹 t2 也不补派，等用户裁决
+      assert.equal(t2.status, "pending", "无迹任务不被误重派，随相位门控等用户");
+      const w2Prompts = prompts.filter((p) => p.sessionId === "w2");
+      assert.equal(w2Prompts.length, w2Before, "awaiting-retry 期间不得补派");
+      assert.equal(
+        prompts.filter((p) => p.sessionId === "w1").length,
+        1,
+        "t1 不得重复派发（防重复副作用）",
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("import 恢复：recoveryNote 派发失败保留，补派仍携带提示且成功后才消费", async () => {
     const rooms = new RoomManager();
     const r = rooms.create(
@@ -3183,6 +3261,50 @@ describe("conductor", () => {
     orchestrator.resumeFlows();
     for (let i = 0; i < 20 && prompts.length === 0; i++) await new Promise((r) => setTimeout(r, 1));
     assert.ok(prompts.some((p) => p.sessionId === "worker1"), "agent 连接恢复后 resumeFlows 应补派");
+  });
+
+  it("worker 因单聊/他房 busy 被跳过：回合结束时立即唤醒派发，无需等 5s 轮询", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    let workerBusy = true;
+    const dispatched: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId) => {
+          dispatched.push(sessionId);
+        },
+        isBusy: (sid) => sid === "worker1" && workerBusy,
+      },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    await orchestrator.start(room, "任务");
+    const plan = `\`\`\`json\n{"tasks":[{"id":"t1","to":"worker1","task":"做子任务"}]}\n\`\`\``;
+    await orchestrator.onPromptDone("conductor", plan);
+    assert.deepEqual(
+      dispatched,
+      ["conductor"],
+      "worker1 busy 时子任务留 pending 跳过",
+    );
+
+    // worker1 在房外（单聊）完成其回合 → 变 idle + 收到 onPromptDone
+    workerBusy = false;
+    await orchestrator.onPromptDone("worker1", "单聊回复");
+    assert.deepEqual(
+      dispatched,
+      ["conductor", "worker1"],
+      "房外回合结束应立即唤醒等待该会话的 pending 任务，不等 5000ms 轮询",
+    );
   });
 
 });

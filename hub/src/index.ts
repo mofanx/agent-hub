@@ -707,6 +707,11 @@ const agentOps: AgentOps = {
   runIsolatedCheck,
 };
 const isolatedChecks = parseIsolatedChecks(process.env.HUB_ISOLATED_CHECKS);
+// 定时任务预检专属预算（due 循环串行执行，默认 10s 封顶；常规 isolatedChecks 仍走 30s）
+const PRECHECK_TIMEOUT_MS = (() => {
+  const v = Number(process.env.HUB_PRECHECK_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 10_000;
+})();
 const roomModeManager = new RoomModeManager(
   agentOps,
   rooms,
@@ -984,7 +989,8 @@ const scheduler = new Scheduler(
     const sid = task.targetType === "session" ? task.targetId : (room?.conductorId ?? room?.members[0]?.sessionId);
     const cwd = sid ? sessionMetas.get(sid)?.cwd : undefined;
     if (!cwd) return "precheck skipped: no cwd for target";
-    const r = await runIsolatedCheck(cwd, command);
+    // 预检在 due 循环内串行 await：用更短专属预算封顶单次检查耗时，防慢检查拖住后续 due 任务
+    const r = await runIsolatedCheck(cwd, command, PRECHECK_TIMEOUT_MS);
     return r.status === "exited_zero"
       ? undefined
       : `precheck ${r.status}${r.exitCode !== undefined ? ` exit=${r.exitCode}` : ""}`;
@@ -1574,12 +1580,35 @@ function onAgentEvent(event: HubEvent): void {
       author: "",
       text: event.params.message,
     });
+  } else if (event.method === "session.notice" && sessionId) {
+    // 单聊侧提示（如 busy 排队）：落 session 史为 system 条目，
+    // 客户端经历史同步可见；kind=system 不影响 turn 游标
+    store.append("session", sessionId, {
+      at: Date.now(),
+      kind: "system",
+      author: "",
+      text: event.params.message,
+    });
   } else if (event.method === "session.update" && sessionId) {
     const update = (event.params as Record<string, unknown> | undefined)?.update;
     if (update !== undefined && !turnEnds.has(sessionId)) {
       markTurnStart(sessionId);
       turnProcess.record(sessionId, update as Record<string, unknown>, displayNameFor(sessionId));
       roomModeManager.observeToolUpdate(sessionId, update);
+      // L2 盲区根治：tool_call 到达即落 tool_actions——途中回合的外发迹在 SIGKILL/重启后仍可证
+      const u = update as Record<string, unknown>;
+      if (u.sessionUpdate === "tool_call") {
+        try {
+          store.addToolAction(sessionId, {
+            at: Date.now(),
+            kind: typeof u.kind === "string" ? u.kind : undefined,
+            title: typeof u.title === "string" ? u.title : undefined,
+            status: typeof u.status === "string" ? u.status : undefined,
+          });
+        } catch (err) {
+          logWarn("store.toolAction", `write failed: ${String(err)}`);
+        }
+      }
     }
   }
   if (!skipBroadcast) broadcast(toPublicHubEvent(event));

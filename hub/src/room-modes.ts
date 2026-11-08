@@ -541,6 +541,20 @@ export class RoomModeManager {
   }
 
   /**
+   * 游标豁免：被流程吸收/被过滤丢弃的用户条目不改变在途回合的输入，
+   * 把该房间各在途回合的游标推进到最新，免触发 handleStaleTurn 作废重跑。
+   */
+  private excuseRoomTurns(roomId: string): void {
+    if (!this.store) return;
+    const cursor = this.store.lastUserEntryId("room", roomId);
+    for (const guard of this.turnGuards.values()) {
+      if (guard.roomId === roomId && guard.cursor !== cursor) {
+        guard.cursor = cursor;
+      }
+    }
+  }
+
+  /**
    * onTurnEnd 用：该 turn 的房史游标已被新用户消息推进（上下文过期），
    * 房间侧不落库（输出随后会被作废并按原 prompt 重跑一次）。
    * 已重跑过一次的 turn 强制接受，避免死循环。
@@ -1037,6 +1051,9 @@ export class RoomModeManager {
       }
       const absorbed = this.absorbActiveMessage(room, text, options);
       if (absorbed) {
+        // 消息已被流程吸收（supplement/extras/答复/决策上下文），在途回合
+        // 输入未变——推进 stale 游标豁免作废重跑，避免同 prompt 白跑一轮
+        this.excuseRoomTurns(room.roomId);
         this.emitFlowUpdate(room.roomId);
         return { sent: absorbed, mentioned: [], skipped: [] };
       }
@@ -1090,6 +1107,8 @@ export class RoomModeManager {
           }
         }
         if (!relevant) {
+          // 闲聊被丢弃、无任何派发：在途回合输入不受影响，豁免作废重跑
+          this.excuseRoomTurns(room.roomId);
           this.rooms.addEvent(room.roomId, {
             author: "hub",
             action: "filter",

@@ -360,6 +360,27 @@ test("clientMsgBegin：满容量不挤有效记录；仅过期项被清理", (t)
   assert.equal(store.clientMsgReceipt("k:0"), undefined, "过期回执被清理");
 });
 
+test("clientMsgBegin：常态写入惰性清理（不每次扫表 DELETE），lastEntry 只取末条", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-idem-lazy-"));
+  const store = new Store(dir);
+  t.after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  // 预插一条过期回执（总容量远未满）
+  (store as any).db.prepare("INSERT INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
+    .run("k:old", JSON.stringify({ v: 1, fingerprint: "f", historyId: 1, state: "accepted", result: {} }), Date.now() - 49 * 3600_000);
+  // 首次常态写入：不应触发无索引 DELETE 全表扫，k:old 仍在（直到周期或容量阈值才清）
+  store.clientMsgBegin("k:1", "f", "session", "s1", { at: 10, kind: "user", author: "我", text: "first" });
+  assert.notEqual(
+    store.clientMsgReceipt("k:old"),
+    undefined,
+    "常态单次写入不做全表 DELETE 扫描",
+  );
+  store.append("session", "s1", { at: 20, kind: "assistant", author: "bot", text: "reply" });
+  const last = store.lastEntry("session", "s1");
+  assert.equal(last?.kind, "assistant");
+  assert.equal(last?.text, "reply");
+  assert.equal(store.lastEntry("session", "nonexistent"), undefined);
+});
+
 test("room.sync knownCardIds：原位卡片校准（含 updateEntry 新内容/不漏跨房普通行）", (t) => {
   const store = makeStore(t);
   const a = store.append("room", "r1", { at: 1, kind: "flow", author: "", text: "flow-v1" });

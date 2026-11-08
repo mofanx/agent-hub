@@ -130,7 +130,7 @@ t2 结论：hub = ACP 多 agent WS 网关（7 种群聊编排 + conductor 工单
 | transcript 防伪 escapeNotes | **采纳** | 原文注入=多 agent 注入直达通道，净化成本极小 | **已实施**（`c1e5e60`；独立 `sanitize.ts`，buildPrompt 全字段+prompts.ts 全模板；行分隔符含 U+2028/29/85/`\v`/`\f`；a.path/roomName/persona/displayName 同净化） |
 | safety-floor | **采纳** | bypass=1 生产在用，缺"无条件下限" | **已实施**（`d2cc3e5`；`safety-floor.ts` 词法黑名单，bypass/grant 自动放行前挂钩+交互卡兜底） |
 | steer-queue（队列+合并） | **采纳** | busy 丢消息是最痛 UX；steer 暂缓（ACP 无统一语义） | **已实施**（`d2cc3e5`+修复轮：房侧队列、外发才登记 turnGuard、队列持久化+重启 drain）。**已收口**：error/cancel 路径补 drain（onSessionCancelled/onPromptError+agent 层 catch/cancel）；双队列收口——编排路径 `queueIfBusy:false` 竞态变忙转房侧带 guard 队列（conductor 经 `setEnqueueFollowUp`），agent 层仅服务 session 直发；`:1357` 重复行已删；conductor busy 去早退改入队 |
-| 重启对账 outward() | **采纳** | 现成信号可分"可证无外发→自动续跑"，免人工捞单 | **已实施**（保守兜底达标）。**已修边角**：author 匹配改 sessionId→三形态解析（裸名/`name (origin)`/`name·agent·origin` 前缀），消飞行中改名假阴性+带 store 负向 fixture；残余：SIGKILL 纯 tool 副作用物理盲区（dsh recovery note 已补第二道防线） |
+| 重启对账 outward() | **采纳** | 现成信号可分"可证无外发→自动续跑"，免人工捞单 | **已实施**（保守兜底达标）。**已修边角**：author 匹配改 sessionId→三形态解析（裸名/`name (origin)`/`name·agent·origin` 前缀），消飞行中改名假阴性+带 store 负向 fixture；残余：SIGKILL 纯 tool 副作用物理盲区（dsh recovery note 已补第二道防线）；tool_call-only 回合重启后无持久迹，outward() 会判"可证无外发"而重派（L2 物理盲区，recovery note 为补偿层） |
 | decision-model | **采纳（两期）** | auto 每消息省一个完整回合；须日志+标注集先行 | **一期已实施**（`decide.ts`：explicit/inferred/ignore 三档+enforce 闸门+DIRECT_MODES 白名单，默认 shadow 零行为变化；`decisions.ndjson` stateHash 不落原文；`decide-eval.ts` 回放骨架；`HUB_DECIDE_*` 环境变量） |
 | routines 免 AI 预检 | **采纳精简版** | precheckCheckId 复用隔离检查白名单即够用 | **已实施**（`ScheduledTask.precheckCheckId`+tick 先跑 `HUB_ISOLATED_CHECKS` 预设 bubblewrap runner，非 exited_zero 跳过记 skipped 不开回合；task.create/update 校验预设存在） |
 | MEMORY.md 层 | **不采纳** | per-agent 记忆归 agent 工作区；仅补近重复去重 | 不采纳；微项近重复去重**已实施+修正**（80% 公共前缀+分叉尾 ≤25 防脚手架误并；`memoryExtends` 命中存较长新文本不再吞修正） |
@@ -177,3 +177,13 @@ decision-model 二期依赖一期日志积累。
 仅 ACP 无 SDK/webhook、单用户 token、hub 无原生 TLS/E2E、LIKE 检索（可升 FTS5，
 better-sqlite3 已在依赖中）、无 Web 端、推送仅 ntfy、观测与 CI 门禁薄、客户端零测试。
 这些与 OMB 机制无直接对应，建议另行立项评估。
+
+**已实施项已知限制（2026-11-08 演练实证）**：
+
+- outward()：纯 tool_call 途中回合现由 `tool_actions` 表判定（已修 L2）；剩余盲区=
+  无任何工具调用的纯思考回合（无迹可循，属物理下限，recovery note 兜底）。
+- steer-queue/followUps：房侧队列持久化+重启 drain 已落地；但"不外发会话"（无
+  prompt.done 事件的会话）队列 drain 依赖会话重连/agent 上线事件触发——消息延迟
+  而非丢失（演练 C 项实证：session.resume 后队列投递）。
+- recovery note：auto-resumed 任务重派 prompt 注入恢复提示，发送成功才消费；
+  用户"重试"指令驱动的重派不带 note（人工确认即授权）。

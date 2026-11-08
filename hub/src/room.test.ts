@@ -479,6 +479,39 @@ describe("room", () => {
     assert.ok(prompt.includes("未找到文件或文件夹"));
   });
 
+  it("buildPrompt 多成员共享 #path 引用时短期缓存命中，不重复读盘", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+      { sessionId: "s3", name: "a3" },
+    ]);
+    const rel = `hub/src/file-ref-cache-${Date.now()}.txt`;
+    const full = path.join(PROJECT_ROOT, rel);
+    fs.writeFileSync(full, "cached content");
+    let reads = 0;
+    const origRead = fs.readFileSync;
+    (fs as unknown as { readFileSync: typeof fs.readFileSync }).readFileSync = ((
+      p: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (String(p).includes("file-ref-cache-")) reads++;
+      return (origRead as (...args: unknown[]) => unknown)(p, ...rest);
+    }) as typeof fs.readFileSync;
+    try {
+      const p1 = rooms.buildPrompt(room.roomId, `对比 #${rel}`, "s1");
+      const p2 = rooms.buildPrompt(room.roomId, `对比 #${rel}`, "s2");
+      const p3 = rooms.buildPrompt(room.roomId, `对比 #${rel}`, "s3");
+      assert.ok(p1.includes("cached content"));
+      assert.ok(p2.includes("cached content"));
+      assert.ok(p3.includes("cached content"));
+      assert.equal(reads, 1, "同轮多成员构造 prompt 应复用缓存，只读盘 1 次");
+    } finally {
+      (fs as unknown as { readFileSync: typeof fs.readFileSync }).readFileSync = origRead;
+      fs.rmSync(full, { force: true });
+    }
+  });
+
   it("getBlackboard 与 recordOutput", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);

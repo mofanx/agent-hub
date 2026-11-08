@@ -35,7 +35,7 @@ export interface AgentOps {
   cwd?(sessionId: string): string | undefined;
   /** 会话显示名（`name (origin)` 形态）：历史条目 author 归属判定用 */
   displayName?(sessionId: string): string | undefined;
-  runIsolatedCheck?(cwd: string, command: string): Promise<IsolatedCheckResult>;
+  runIsolatedCheck?(cwd: string, command: string, timeoutMs?: number): Promise<IsolatedCheckResult>;
 }
 
 type TaskArtifact = {
@@ -1537,6 +1537,16 @@ export class ConductorOrchestrator {
           await this.scheduleTasks(flow, room);
           return flow.roomId;
         }
+        // 会话空闲化信号：名下有因 busy 跳过的 pending 任务时立即补派，
+        // 不等 BUSY_RETRY_MS 轮询——busy 可能来自单聊/他房回合，回合结束同样走到这里
+        if (
+          [...flow.tasks.values()].some(
+            (t) => t.sessionId === sessionId && t.status === "pending",
+          )
+        ) {
+          await this.scheduleTasks(flow, room);
+          return flow.roomId;
+        }
       }
       if (flow.phase === "awaiting-retry") {
         // 交还用户期间同批回传只收录不派发：不重开 working 轮、不改相位（waitingFor=user 保持）
@@ -2994,6 +3004,10 @@ export class ConductorOrchestrator {
           if (flow.results.has(t.id)) return true;
           if ((t.backendRuns?.length ?? 0) > 0) return true;
           if ((t.verifications?.length ?? 0) > 0) return true;
+          // tool_call 外发迹：到达即落库，sessionId 精确归属，覆盖 tool_call-only 途中回合（L2）
+          if (t.dispatchedAt !== undefined && this.store?.hasToolAction(t.sessionId, t.dispatchedAt)) {
+            return true;
+          }
           if (t.dispatchedAt === undefined) return true;
           const bases = authorBases(t);
           if (bases.length === 0) return true;
@@ -3625,6 +3639,7 @@ function readSnapshotFile(src: string): Buffer {
 export async function runIsolatedCheck(
   cwd: string,
   command: string,
+  timeoutMs = ISO_TIMEOUT_MS,
 ): Promise<IsolatedCheckResult> {
   const startedAt = Date.now();
   const commandHash = sha256Hex(typeof command === "string" ? command.trim() : "");
@@ -3788,7 +3803,7 @@ export async function runIsolatedCheck(
             process.kill(-child.pid!, "SIGKILL");
           } catch {}
         }, 800).unref();
-      }, ISO_TIMEOUT_MS);
+      }, timeoutMs);
       child.on("error", (err) => {
         clearTimeout(killTimer);
         resolve({

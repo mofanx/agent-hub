@@ -129,6 +129,7 @@ export type HubEvent =
       };
     }
   | { method: "room.notice"; params: { roomId: string; message: string } }
+  | { method: "session.notice"; params: { sessionId: string; message: string } }
   | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string } } }
   | { method: "room.artifact"; params: { roomId: string; artifact?: unknown } }
   | { method: "session.artifact"; params: { sessionId: string } }
@@ -211,6 +212,8 @@ type SessionEntry = {
   turnText: string;
   loading?: boolean;
   turnGotUpdate?: boolean;
+  /** 回合内最后一次活跃时点（update/agent→hub 请求），静默看门狗据此计时 */
+  lastActivityAt?: number;
   watchdog?: ReturnType<typeof setTimeout> | undefined;
   /**
    * prompt.done 宽限窗内待执行的定稿：ACP 响应已到但尾包 session/update
@@ -247,6 +250,12 @@ let promptAckTimeoutMs = Number(process.env.HUB_PROMPT_ACK_TIMEOUT_MS ?? 180_000
 
 export function setPromptAckTimeoutMs(v: number): void {
   promptAckTimeoutMs = v;
+}
+/** mid-turn 静默看门狗预算（ms）：回合收到过输出后连续静默超此时长判 stalled；<=0 关闭；env HUB_TURN_STALL_MS 覆盖 */
+let turnStallTimeoutMs = Number(process.env.HUB_TURN_STALL_MS ?? 180_000);
+
+export function setTurnStallTimeoutMs(v: number): void {
+  turnStallTimeoutMs = v;
 }
 /** prompt.done 定稿宽限窗（ms）：<=0 关闭；env HUB_TURN_SETTLE_GRACE_MS 覆盖 */
 let turnSettleGraceMs = Number(process.env.HUB_TURN_SETTLE_GRACE_MS ?? 100);
@@ -484,11 +493,11 @@ export class AcpAgent {
   }
   private pendingPermissions = new Map<
     string,
-    { optionIds: Set<string>; respond: (optionId: string, outcome?: "answered" | "expired" | "revoked") => void }
+    { sessionId: string; optionIds: Set<string>; respond: (optionId: string, outcome?: "answered" | "expired" | "revoked") => void }
   >();
   private pendingElicitations = new Map<
     string,
-    (resp: acp.CreateElicitationResponse, outcome?: "answered" | "expired" | "revoked") => void
+    { sessionId: string; respond: (resp: acp.CreateElicitationResponse, outcome?: "answered" | "expired" | "revoked") => void }
   >();
   /** 决策卡授权登记：sessionId → grantKey → scope（always 持久，task 随回合结束清除） */
   private permissionGrants = new Map<string, Map<string, PermissionGrantScope>>();
@@ -750,8 +759,8 @@ export class AcpAgent {
     }
     this.promptOnceWaiters.clear();
     this.followUps.clear();
-    for (const resolve of this.pendingElicitations.values()) {
-      resolve({ action: "cancel" }, "revoked");
+    for (const pending of this.pendingElicitations.values()) {
+      pending.respond({ action: "cancel" }, "revoked");
     }
     this.pendingElicitations.clear();
     for (const pending of this.pendingPermissions.values()) {
@@ -785,7 +794,10 @@ export class AcpAgent {
     // usage/config_option 属会话级更新，不受回合约束放行。
     // 已知边界：新回合已启动后旧回合迟到的 update 无法区分——ACP session/update 不携带回合标识。
     if (!entry.busy && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) return;
-    if (entry.busy) entry.turnGotUpdate = true;
+    if (entry.busy) {
+      entry.turnGotUpdate = true;
+      entry.lastActivityAt = Date.now();
+    }
     if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
       this.recordConfigOptions(params.sessionId, u.configOptions);
     }
@@ -883,7 +895,10 @@ export class AcpAgent {
   /** agent→hub 请求同样证明存活：permission/elicitation/fs 期间不得误判为无输出 */
   private markTurnAlive(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
-    if (entry) entry.turnGotUpdate = true;
+    if (entry) {
+      entry.turnGotUpdate = true;
+      entry.lastActivityAt = Date.now();
+    }
   }
 
   private handlePermission(
@@ -1017,6 +1032,7 @@ export class AcpAgent {
         }
       }, permissionTimeoutMs);
       this.pendingPermissions.set(requestId, {
+        sessionId: params.sessionId,
         optionIds: new Set(params.options.map((o) => o.optionId)),
         respond: (optionId, outcome = "answered") => {
           clearTimeout(timer);
@@ -1138,14 +1154,17 @@ export class AcpAgent {
         logWarn("agent", `elicitation ${requestId} timed out in session ${sessionId} -> cancel`);
         resolve({ action: "cancel" });
       }, ELICITATION_TIMEOUT_MS);
-      this.pendingElicitations.set(requestId, (resp, outcome = "answered") => {
-        clearTimeout(timer);
-        this.pendingElicitations.delete(requestId);
-        this.emit({
-          method: "decision.resolve",
-          params: { requestId, outcome, action: resp.action },
-        });
-        resolve(resp);
+      this.pendingElicitations.set(requestId, {
+        sessionId,
+        respond: (resp, outcome = "answered") => {
+          clearTimeout(timer);
+          this.pendingElicitations.delete(requestId);
+          this.emit({
+            method: "decision.resolve",
+            params: { requestId, outcome, action: resp.action },
+          });
+          resolve(resp);
+        },
       });
     });
   }
@@ -1155,21 +1174,21 @@ export class AcpAgent {
     action: "accept" | "decline" | "cancel",
     content?: Record<string, ElicitationValue>,
   ): boolean {
-    const resolve = this.pendingElicitations.get(requestId);
-    if (!resolve) return false;
+    const pending = this.pendingElicitations.get(requestId);
+    if (!pending) return false;
     if (action === "accept") {
-      resolve({ action: "accept", content: content ?? {} });
+      pending.respond({ action: "accept", content: content ?? {} });
     } else {
-      resolve({ action });
+      pending.respond({ action });
     }
     return true;
   }
 
   /** decision.revoke：终止挂起的 elicitation（cancel 语义收尾） */
   revokeElicitation(requestId: string): boolean {
-    const resolve = this.pendingElicitations.get(requestId);
-    if (!resolve) return false;
-    resolve({ action: "cancel" }, "revoked");
+    const pending = this.pendingElicitations.get(requestId);
+    if (!pending) return false;
+    pending.respond({ action: "cancel" }, "revoked");
     return true;
   }
 
@@ -1401,8 +1420,22 @@ export class AcpAgent {
         q.push(prompt);
         this.followUps.set(sessionId, q);
         logWarn("followUp", `queued #${q.length} for busy session ${entry.name}`);
+        this.emit({
+          method: "session.notice",
+          params: {
+            sessionId,
+            message: `成员忙碌，消息已排队（队列 ${q.length}/${this.followUpLimit}）`,
+          },
+        });
       } else {
         logWarn("followUp", `queue full (${this.followUpLimit}), dropping prompt for ${entry.name}`);
+        this.emit({
+          method: "session.notice",
+          params: {
+            sessionId,
+            message: `成员忙碌队列已满（${this.followUpLimit} 条），该消息已丢弃`,
+          },
+        });
       }
       return;
     }
@@ -1410,6 +1443,7 @@ export class AcpAgent {
     entry.stoppable = true;
     entry.turnText = "";
     entry.turnGotUpdate = false;
+    entry.lastActivityAt = Date.now();
     const epoch = (entry.turnEpoch ?? 0) + 1;
     entry.turnEpoch = epoch;
     const isCurrentTurn = () =>
@@ -1422,29 +1456,69 @@ export class AcpAgent {
       params: { sessionId, stoppable: true },
     });
     clearTimeout(entry.watchdog);
-    // ACK 看门狗预算可 per-call 覆盖（如 auto 决策回合短超时），只兜"无输出卡死"
+    // ACK 看门狗预算可 per-call 覆盖（如 auto 决策回合短超时），只兜"无输出卡死"；
+    // 收到首个输出后转 mid-turn 静默预算（turnStallTimeoutMs）——
+    // agent 流出一段内容后挂死同样会被回收，不再永久 busy 吞掉后续排队消息。
+    // 挂起的 permission/elicitation 属"等待用户答复"活跃态，轮询续命不误判。
     const ackTimeoutMs = opts?.ackTimeoutMs ?? promptAckTimeoutMs;
-    entry.watchdog = setTimeout(() => {
-      if (!isCurrentTurn()) return;
-      entry.watchdog = undefined;
-      if (!entry.busy || entry.turnGotUpdate) return;
-      // 先以超时语义广播+拒 waiter，再做取消清理——cancel 会以 cancelled 语义收尾剩余 waiter
-      const err = new Error(
-        `agent ${this.name} produced no output within ${ackTimeoutMs / 1000}s — request may have been rejected at transport level`,
-      );
-      this.emit({
-        method: "prompt.error",
-        params: { sessionId, message: String(err) },
-      });
-      const waiter = this.promptOnceWaiters.get(sessionId);
-      if (waiter) {
-        this.promptOnceWaiters.delete(sessionId);
-        waiter.reject(err);
-      }
-      // 尽力取消僵尸回合（内部清 busy/stoppable、换代、onTurnEnd 收尾），避免重派叠 prompt
-      this.cancel(sessionId).catch(() => {});
-    }, ackTimeoutMs);
-    entry.watchdog.unref?.();
+    const armWatchdog = (ms: number) => {
+      clearTimeout(entry.watchdog);
+      entry.watchdog = setTimeout(() => {
+        entry.watchdog = undefined;
+        if (!isCurrentTurn() || !entry.busy) return;
+        const interactive =
+          [...this.pendingPermissions.values()].some(
+            (p) => p.sessionId === sessionId,
+          ) ||
+          [...this.pendingElicitations.values()].some(
+            (p) => p.sessionId === sessionId,
+          );
+        if (interactive) {
+          // 等待用户答复期间续命：以当前阶段预算为轮询间隔
+          const poll = entry.turnGotUpdate ? turnStallTimeoutMs : ackTimeoutMs;
+          if (poll > 0) armWatchdog(poll);
+          return;
+        }
+        const idle = Date.now() - (entry.lastActivityAt ?? 0);
+        if (!entry.turnGotUpdate) {
+          // ACK 阶段：<=0 与旧语义一致立即判超时
+          if (ackTimeoutMs > 0 && idle < ackTimeoutMs) {
+            armWatchdog(ackTimeoutMs - idle);
+            return;
+          }
+        } else {
+          // stall 阶段：<=0 关闭
+          if (turnStallTimeoutMs <= 0) return;
+          if (idle < turnStallTimeoutMs) {
+            armWatchdog(turnStallTimeoutMs - idle);
+            return;
+          }
+        }
+        const err = new Error(
+          entry.turnGotUpdate
+            ? `agent ${this.name} went silent for ${Math.round(idle / 1000)}s mid-turn — treating as stalled`
+            : `agent ${this.name} produced no output within ${ackTimeoutMs / 1000}s — request may have been rejected at transport level`,
+        );
+        this.emit({
+          method: "prompt.error",
+          params: { sessionId, message: String(err) },
+        });
+        const waiter = this.promptOnceWaiters.get(sessionId);
+        if (waiter) {
+          this.promptOnceWaiters.delete(sessionId);
+          waiter.reject(err);
+        }
+        // 尽力取消僵尸回合（内部清 busy/stoppable、换代、onTurnEnd 收尾），避免重派叠 prompt
+        this.cancel(sessionId).catch(() => {});
+      }, ms);
+      entry.watchdog.unref?.();
+    };
+    // 首次检查点取两阶段预算的较小者（stall<=0 视为不参战），ack<=0 立即判超时
+    const firstBudget = Math.min(
+      ackTimeoutMs,
+      turnStallTimeoutMs > 0 ? turnStallTimeoutMs : Number.MAX_SAFE_INTEGER,
+    );
+    if (Number.isFinite(firstBudget)) armWatchdog(Math.max(firstBudget, 0));
     this.ctx!.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt,

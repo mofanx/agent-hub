@@ -275,6 +275,8 @@ const EVENT_LIMIT = 200;
 const FILE_REF_LIMIT = 5;
 const FILE_REF_CHAR_LIMIT = 10000;
 const FILE_REF_TOTAL_LIMIT = 50000;
+/** #path 引用解析短期缓存 TTL：覆盖同一轮多成员 buildPrompt 的重复读盘窗口 */
+const FILE_REF_CACHE_TTL_MS = 2000;
 /** findFileByRelPath 全盘 BFS 的遍历节点上限，防 workspace 过大时事件循环被长时间阻塞 */
 const FIND_FILE_SCAN_LIMIT = 20000;
 
@@ -369,6 +371,11 @@ function shouldSkipFile(name: string): boolean {
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private aliasSeqs = new Map<string, number>();
+  /** #path 引用解析短期缓存：key=roomId+ref，同轮多成员 prompt 共享，避免重复读盘 */
+  private fileRefCache = new Map<
+    string,
+    { at: number; result: { name: string; text?: string; error?: string } }
+  >();
   private getPersona?: (roleId: string) => string | undefined;
   private getCwd?: (sessionId: string) => string | undefined;
   private memberChannel?: (sessionId: string) => MemberChannel | undefined;
@@ -1612,6 +1619,19 @@ export class RoomManager {
   }
 
   private readFileRef(
+    roomId: string,
+    ref: string,
+  ): { name: string; text?: string; error?: string } {
+    const key = `${roomId}\n${ref}`;
+    const hit = this.fileRefCache.get(key);
+    if (hit && Date.now() - hit.at < FILE_REF_CACHE_TTL_MS) return hit.result;
+    const result = this.readFileRefUncached(roomId, ref);
+    if (this.fileRefCache.size >= 500) this.fileRefCache.clear();
+    this.fileRefCache.set(key, { at: Date.now(), result });
+    return result;
+  }
+
+  private readFileRefUncached(
     roomId: string,
     ref: string,
   ): { name: string; text?: string; error?: string } {

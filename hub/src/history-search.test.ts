@@ -46,3 +46,26 @@ test("search：无匹配/草稿排除", () => {
   assert.equal(store.searchHistory("room", "r1", { query: "不存在的词" }).length, 0);
   assert.equal(store.searchHistory("room", "rx", {}).length, 0); // 隔离
 });
+
+test("search：FTS5 英文词命中 + CJK 无 token 回退 LIKE", () => {
+  const { store } = mk();
+  // FTS 可用时英文词走 MATCH（大小写折叠）；不可用时 LIKE 兜底——两路结果一致
+  assert.equal(store.searchHistory("room", "r1", { query: "BUG" }).length, 2);
+  // CJK 串 unicode61 不拆 token → MATCH 零命中 → 回退 LIKE
+  assert.equal(store.searchHistory("room", "r1", { query: "登录" }).length, 2);
+  assert.equal(store.searchHistory("room", "r1", { query: "登录", author: "我" }).length, 1);
+  // 混合短语：FTS 短语不命中 → LIKE 连续子串命中
+  assert.equal(store.searchHistory("room", "r1", { query: "登录 bug" }).length, 1);
+});
+
+test("search：store.search / searchByScope / searchGroups FTS+回退一致", () => {
+  const { store } = mk();
+  assert.equal(store.search("超时", 10).length, 1); // CJK 回退 LIKE
+  assert.equal(store.search("BUG", 10).length, 2);
+  assert.equal(store.searchByScope("登录", "room", "r1", 10).length, 2);
+  assert.equal(store.searchByScope("超时", "room", "rx", 10).length, 0); // scope 隔离
+  const groups = store.searchGroups("bug", 10, 1);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.scopeId, "r1");
+  assert.equal(groups[0]!.count, 2);
+});

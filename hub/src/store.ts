@@ -139,18 +139,29 @@ const INTERRUPTED_REPLY_MARKER = "[回复中断；以上为已保存片段，未
 export class Store {
   readonly dir: string;
   private db: Database.Database;
+  /** 热路径语句缓存：better-sqlite3 每次 prepare 都重新编译，固定 SQL 复用同一 Statement */
+  private stmtCache = new Map<string, Database.Statement>();
+
+  private prep(sql: string): Database.Statement {
+    let s = this.stmtCache.get(sql);
+    if (!s) {
+      // 上限防动态拼接 SQL（如 UPDATE connections SET ...）无界堆积
+      if (this.stmtCache.size >= 500) this.stmtCache.clear();
+      s = this.db.prepare(sql);
+      this.stmtCache.set(sql, s);
+    }
+    return s;
+  }
 
   appendRoomEvent(
     roomId: string,
     type: string,
     payload: Record<string, unknown>,
   ): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(MAX(seq), 0) AS m FROM room_events WHERE room_id = ?")
+    const row = this.prep("SELECT COALESCE(MAX(seq), 0) AS m FROM room_events WHERE room_id = ?")
       .get(roomId) as { m: number };
     const seq = (row?.m ?? 0) + 1;
-    this.db
-      .prepare(
+    this.prep(
         "INSERT INTO room_events(room_id, seq, at, type, payload) VALUES (?, ?, ?, ?, ?)",
       )
       .run(roomId, seq, Date.now(), type, JSON.stringify(payload));
@@ -161,8 +172,7 @@ export class Store {
     roomId: string,
     since = 0,
   ): { seq: number; at: number; type: string; payload: Record<string, unknown> }[] {
-    const rows = this.db
-      .prepare(
+    const rows = this.prep(
         "SELECT seq, at, type, payload FROM room_events WHERE room_id = ? AND seq > ? ORDER BY seq",
       )
       .all(roomId, since) as { seq: number; at: number; type: string; payload: string }[];
@@ -170,23 +180,20 @@ export class Store {
   }
 
   saveFlowSnapshot(roomId: string, seq: number, snapshot: Record<string, unknown>): void {
-    this.db
-      .prepare(
+    this.prep(
         "INSERT INTO flow_snapshots(room_id, seq, at, snapshot) VALUES (?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET seq = excluded.seq, at = excluded.at, snapshot = excluded.snapshot",
       )
       .run(roomId, seq, Date.now(), JSON.stringify(snapshot));
   }
 
   getMaxRoomSeq(roomId: string): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(MAX(seq), 0) AS m FROM room_events WHERE room_id = ?")
+    const row = this.prep("SELECT COALESCE(MAX(seq), 0) AS m FROM room_events WHERE room_id = ?")
       .get(roomId) as { m: number } | undefined;
     return row?.m ?? 0;
   }
 
   loadFlowSnapshot(roomId: string): { seq: number; snapshot: Record<string, unknown> } | undefined {
-    const row = this.db
-      .prepare("SELECT seq, snapshot FROM flow_snapshots WHERE room_id = ?")
+    const row = this.prep("SELECT seq, snapshot FROM flow_snapshots WHERE room_id = ?")
       .get(roomId) as { seq: number; snapshot: string } | undefined;
     return row ? { seq: row.seq, snapshot: JSON.parse(row.snapshot) as Record<string, unknown> } : undefined;
   }
@@ -276,7 +283,42 @@ export class Store {
         expires_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_memory_room ON memory(room_id, at);
+      -- tool_call 外发迹：到达即落库（不依赖回合定稿），供重启对账 hadOutward 判定
+      CREATE TABLE IF NOT EXISTS tool_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        session_id TEXT NOT NULL,
+        kind TEXT,
+        title TEXT,
+        status TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_actions_sid_at
+        ON tool_actions(session_id, at);
     `);
+    // 历史检索 FTS5：外部内容表+触发器同步，search 系方法 MATCH 加速；
+    // CJK 等无 token 词命中为空时调用侧回退 LIKE 保语义。FTS5 不可用则静默降级
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(text, content='history', content_rowid='id');
+        CREATE TRIGGER IF NOT EXISTS history_fts_ai AFTER INSERT ON history BEGIN
+          INSERT INTO history_fts(rowid, text) VALUES (new.id, new.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS history_fts_ad AFTER DELETE ON history BEGIN
+          INSERT INTO history_fts(history_fts, rowid, text) VALUES ('delete', old.id, old.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS history_fts_au AFTER UPDATE OF text ON history BEGIN
+          INSERT INTO history_fts(history_fts, rowid, text) VALUES ('delete', old.id, old.text);
+          INSERT INTO history_fts(rowid, text) VALUES (new.id, new.text);
+        END;
+      `);
+      // 增量回填：只补 fts 缺失的尾部行（幂等，老库升级可用）
+      this.db.exec(
+        "INSERT INTO history_fts(rowid, text) SELECT id, text FROM history WHERE id > COALESCE((SELECT MAX(rowid) FROM history_fts), 0)",
+      );
+      this.hasFts = true;
+    } catch {
+      this.hasFts = false;
+    }
     this.migrateSchema();
     this.seedRoles();
     this.migrateLegacy();
@@ -287,8 +329,7 @@ export class Store {
   private prune(): void {
     try {
       this.db.transaction(() => {
-        const h = this.db
-          .prepare(
+        const h = this.prep(
             `DELETE FROM history WHERE id IN (
               SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (PARTITION BY scope, scope_id ORDER BY id DESC) AS rn
@@ -296,8 +337,7 @@ export class Store {
               ) WHERE rn > ?)`,
           )
           .run(HISTORY_PRUNE_KEEP);
-        const e = this.db
-          .prepare(
+        const e = this.prep(
             `DELETE FROM room_events WHERE id IN (
               SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (PARTITION BY room_id ORDER BY id DESC) AS rn
@@ -343,11 +383,9 @@ export class Store {
   /** 旧版 JSONL/state.json 数据迁移（只在数据库为空时执行一次） */
   private migrateLegacy(): void {
     try {
-      const count = this.db
-        .prepare("SELECT COUNT(*) AS c FROM history")
+      const count = this.prep("SELECT COUNT(*) AS c FROM history")
         .get() as { c: number };
-      const hasState = this.db
-        .prepare("SELECT value FROM meta WHERE key = 'state'")
+      const hasState = this.prep("SELECT value FROM meta WHERE key = 'state'")
         .get();
       if (count.c > 0 || hasState) return;
 
@@ -360,7 +398,7 @@ export class Store {
 
       const historyDir = path.join(this.dir, "history");
       if (!fs.existsSync(historyDir)) return;
-      const insert = this.db.prepare(
+      const insert = this.prep(
         "INSERT INTO history(scope, scope_id, at, kind, author, text) VALUES (?, ?, ?, ?, ?, ?)",
       );
       let imported = 0;
@@ -391,9 +429,9 @@ export class Store {
   }
 
   private seedRoles(): void {
-    const count = this.db.prepare("SELECT COUNT(*) AS c FROM roles").get() as { c: number };
+    const count = this.prep("SELECT COUNT(*) AS c FROM roles").get() as { c: number };
     if (count.c > 0) return;
-    const insert = this.db.prepare(
+    const insert = this.prep(
       "INSERT INTO roles(id, name, agent, address, connectionId, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     for (const r of BUILTIN_ROLES) {
@@ -403,8 +441,7 @@ export class Store {
   }
 
   listConnections(): Connection[] {
-    const rows = this.db
-      .prepare("SELECT id, name, agent, token, address, cwd, local, lastSeen FROM connections ORDER BY rowid")
+    const rows = this.prep("SELECT id, name, agent, token, address, cwd, local, lastSeen FROM connections ORDER BY rowid")
       .all() as { id: string; name: string; agent: string; token: string; address: string | null; cwd: string | null; local: number; lastSeen: number | null }[];
     return rows.map((r) => ({
       id: r.id,
@@ -419,8 +456,7 @@ export class Store {
   }
 
   addConnection(c: Connection): void {
-    this.db
-      .prepare("INSERT INTO connections(id, name, agent, token, address, cwd, local) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    this.prep("INSERT INTO connections(id, name, agent, token, address, cwd, local) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(c.id, c.name, c.agent, c.token, c.address ?? null, c.cwd ?? null, c.local ? 1 : 0);
   }
 
@@ -436,17 +472,16 @@ export class Store {
     if (patch.lastSeen !== undefined) { sets.push("lastSeen = ?"); vals.push(patch.lastSeen ?? null); }
     if (sets.length === 0) return;
     vals.push(id);
-    this.db.prepare(`UPDATE connections SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+    this.prep(`UPDATE connections SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
   }
 
   deleteConnection(id: string): boolean {
-    const res = this.db.prepare("DELETE FROM connections WHERE id = ?").run(id);
+    const res = this.prep("DELETE FROM connections WHERE id = ?").run(id);
     return res.changes > 0;
   }
 
   listRoles(): Role[] {
-    const rows = this.db
-      .prepare("SELECT id, name, agent, address, connectionId, cwd, persona, builtin FROM roles ORDER BY builtin DESC, rowid")
+    const rows = this.prep("SELECT id, name, agent, address, connectionId, cwd, persona, builtin FROM roles ORDER BY builtin DESC, rowid")
       .all() as { id: string; name: string; agent: string | null; address: string | null; connectionId: string | null; cwd: string | null; persona: string; builtin: number }[];
     return rows.map((r) => ({
       id: r.id,
@@ -461,21 +496,19 @@ export class Store {
   }
 
   addRole(role: Role): void {
-    this.db
-      .prepare("INSERT INTO roles(id, name, agent, address, connectionId, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, ?, ?, 0)")
+    this.prep("INSERT INTO roles(id, name, agent, address, connectionId, cwd, persona, builtin) VALUES (?, ?, ?, ?, ?, ?, ?, 0)")
       .run(role.id, role.name, role.agent ?? null, role.address ?? null, role.connectionId ?? null, role.cwd ?? null, role.persona);
   }
 
   /** 只能删除非内置角色 */
   deleteRole(id: string): boolean {
-    const res = this.db.prepare("DELETE FROM roles WHERE id = ? AND builtin = 0").run(id);
+    const res = this.prep("DELETE FROM roles WHERE id = ? AND builtin = 0").run(id);
     return res.changes > 0;
   }
 
   getMeta(key: string): string | undefined {
     try {
-      const row = this.db
-        .prepare("SELECT value FROM meta WHERE key = ?")
+      const row = this.prep("SELECT value FROM meta WHERE key = ?")
         .get(key) as { value: string } | undefined;
       return row?.value;
     } catch {
@@ -484,8 +517,7 @@ export class Store {
   }
 
   setMeta(key: string, value: string): void {
-    this.db
-      .prepare(
+    this.prep(
         "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       )
       .run(key, value);
@@ -496,8 +528,7 @@ export class Store {
 
   load(): State {
     try {
-      const rows = this.db
-        .prepare("SELECT key, value FROM meta WHERE key LIKE 'state:%'")
+      const rows = this.prep("SELECT key, value FROM meta WHERE key LIKE 'state:%'")
         .all() as { key: string; value: string }[];
       if (rows.length > 0) {
         const state: State = { sessions: [], rooms: [] };
@@ -513,8 +544,7 @@ export class Store {
         }
         return state;
       }
-      const row = this.db
-        .prepare("SELECT value FROM meta WHERE key = 'state'")
+      const row = this.prep("SELECT value FROM meta WHERE key = 'state'")
         .get() as { value: string } | undefined;
       if (!row) return { sessions: [], rooms: [] };
       const obj = JSON.parse(row.value);
@@ -551,11 +581,11 @@ export class Store {
       if (!wanted.has(k)) stale.push(k);
     }
     this.db.transaction(() => {
-      const up = this.db.prepare(
+      const up = this.prep(
         "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       );
       for (const [k, v] of changed) up.run(k, v);
-      const del = this.db.prepare("DELETE FROM meta WHERE key = ?");
+      const del = this.prep("DELETE FROM meta WHERE key = ?");
       for (const k of stale) del.run(k);
       del.run("state");
     })();
@@ -567,8 +597,7 @@ export class Store {
 
   append(scope: "session" | "room", id: string, entry: HistoryEntry): number {
     try {
-      const r = this.db
-        .prepare(
+      const r = this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(scope, id, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
@@ -581,8 +610,7 @@ export class Store {
 
   beginReplyDraft(scope: "session" | "room", id: string, entry: HistoryEntry): number {
     try {
-      const r = this.db
-        .prepare(
+      const r = this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, draft) VALUES (?, ?, ?, ?, ?, ?, 1)",
         )
         .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
@@ -595,8 +623,7 @@ export class Store {
 
   updateReplyDraft(rowId: number, text: string): void {
     try {
-      this.db
-        .prepare("UPDATE history SET text = ? WHERE id = ? AND draft = 1")
+      this.prep("UPDATE history SET text = ? WHERE id = ? AND draft = 1")
         .run(text, rowId);
     } catch (err) {
       logWarn("store", `updateReplyDraft failed: ${String(err)}`);
@@ -605,8 +632,7 @@ export class Store {
 
   completeReplyDraft(rowId: number, text: string): void {
     try {
-      this.db
-        .prepare("UPDATE history SET text = ?, draft = 0, at = ? WHERE id = ? AND draft = 1")
+      this.prep("UPDATE history SET text = ?, draft = 0, at = ? WHERE id = ? AND draft = 1")
         .run(text, Date.now(), rowId);
     } catch (err) {
       logWarn("store", `completeReplyDraft failed: ${String(err)}`);
@@ -615,8 +641,7 @@ export class Store {
 
   interruptReplyDraft(rowId: number): void {
     try {
-      this.db
-        .prepare(
+      this.prep(
           "UPDATE history SET text = CASE WHEN trim(text) = '' THEN ? ELSE text || ? END, draft = 0, at = ? WHERE id = ? AND draft = 1",
         )
         .run(INTERRUPTED_REPLY_MARKER, `\n\n${INTERRUPTED_REPLY_MARKER}`, Date.now(), rowId);
@@ -628,10 +653,9 @@ export class Store {
   interruptReplyDrafts(): { scope: "session" | "room"; id: string }[] {
     try {
       return this.db.transaction(() => {
-        const rows = this.db
-          .prepare("SELECT id, scope, scope_id AS scopeId, text FROM history WHERE draft = 1")
+        const rows = this.prep("SELECT id, scope, scope_id AS scopeId, text FROM history WHERE draft = 1")
           .all() as { id: number; scope: "session" | "room"; scopeId: string; text: string }[];
-        const finalize = this.db.prepare(
+        const finalize = this.prep(
           "UPDATE history SET text = ?, draft = 0, at = ? WHERE id = ? AND draft = 1",
         );
         const affected = new Map<string, { scope: "session" | "room"; id: string }>();
@@ -656,8 +680,7 @@ export class Store {
   /** 非终态编排卡条目（phase 非 done/cancelled），供启动时的孤儿卡收尾；只扫最近若干条避免全表加载 */
   findUnfinishedFlowCards(): { id: number; scopeId: string; at: number; text: string }[] {
     try {
-      const rows = this.db
-        .prepare(
+      const rows = this.prep(
           "SELECT id, scope_id AS scopeId, at, text FROM history WHERE scope = 'room' AND kind = 'flow' ORDER BY id DESC LIMIT ?",
         )
         .all(ORPHAN_CARD_SCAN_LIMIT) as { id: number; scopeId: string; at: number; text: string }[];
@@ -678,8 +701,7 @@ export class Store {
   /** 未决决策卡条目（kind='decision' 且 meta.status='pending'），供启动时的过期收尾；只扫最近若干条避免全表加载 */
   findPendingDecisionCards(): { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[] {
     try {
-      const rows = this.db
-        .prepare(
+      const rows = this.prep(
           "SELECT id, scope, scope_id AS scopeId, at, text FROM history WHERE kind = 'decision' ORDER BY id DESC LIMIT ?",
         )
         .all(ORPHAN_CARD_SCAN_LIMIT) as { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[];
@@ -699,7 +721,7 @@ export class Store {
   /** 原位覆写已有历史条目（编排卡等长期存活条目）：只改 text，不动 at/id/draft */
   updateEntry(rowId: number, text: string): void {
     try {
-      this.db.prepare("UPDATE history SET text = ? WHERE id = ?").run(text, rowId);
+      this.prep("UPDATE history SET text = ? WHERE id = ?").run(text, rowId);
     } catch (err) {
       logWarn("store", `updateEntry failed: ${String(err)}`);
     }
@@ -707,8 +729,7 @@ export class Store {
 
   copyHistory(scope: "session" | "room", sourceId: string, targetId: string): void {
     try {
-      this.db
-        .prepare(
+      this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) SELECT scope, ?, at, kind, author, text, client_message_id, mission_id FROM history WHERE scope = ? AND scope_id = ? ORDER BY id",
         )
         .run(targetId, scope, sourceId);
@@ -723,26 +744,99 @@ export class Store {
     id: string,
     opts: { query?: string | undefined; author?: string | undefined; missionId?: string | undefined; fromAt?: number | undefined; toAt?: number | undefined; limit?: number | undefined; beforeId?: number | undefined } = {},
   ): HistoryItem[] {
-    const conds = ["scope = ?", "scope_id = ?", "draft = 0"];
+    const conds = ["h.scope = ?", "h.scope_id = ?", "h.draft = 0"];
     const args: unknown[] = [scope, id];
-    if (opts.query) { conds.push("LOWER(text) LIKE ?"); args.push(`%${opts.query.toLowerCase()}%`); }
-    if (opts.author) { conds.push("author = ?"); args.push(opts.author); }
-    if (opts.missionId) { conds.push("mission_id = ?"); args.push(opts.missionId); }
-    if (opts.fromAt !== undefined) { conds.push("at >= ?"); args.push(opts.fromAt); }
-    if (opts.toAt !== undefined) { conds.push("at <= ?"); args.push(opts.toAt); }
-    if (opts.beforeId !== undefined) { conds.push("id < ?"); args.push(opts.beforeId); }
+    if (opts.author) { conds.push("h.author = ?"); args.push(opts.author); }
+    if (opts.missionId) { conds.push("h.mission_id = ?"); args.push(opts.missionId); }
+    if (opts.fromAt !== undefined) { conds.push("h.at >= ?"); args.push(opts.fromAt); }
+    if (opts.toAt !== undefined) { conds.push("h.at <= ?"); args.push(opts.toAt); }
+    if (opts.beforeId !== undefined) { conds.push("h.id < ?"); args.push(opts.beforeId); }
     const limit = Math.max(1, Math.min(opts.limit ?? 20, 50));
-    return normalizeItems(this.db
-      .prepare(
-        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
-         WHERE ${conds.join(" AND ")} ORDER BY at DESC, id DESC LIMIT ?`,
+    if (opts.query && this.hasFts) {
+      const expr = this.ftsExpr(opts.query);
+      if (expr) {
+        const rows = this.prep(
+            `SELECT h.id, h.at, h.kind, h.author, h.text, h.draft,
+                    h.client_message_id AS clientMessageId, h.mission_id AS missionId
+             FROM history_fts JOIN history h ON h.id = history_fts.rowid
+             WHERE history_fts MATCH ? AND ${conds.join(" AND ")}
+             ORDER BY h.at DESC, h.id DESC LIMIT ?`,
+          )
+          .all(expr, ...args, limit) as HistoryItem[];
+        if (rows.length) return normalizeItems(rows);
+      }
+    }
+    if (opts.query) { conds.push("LOWER(h.text) LIKE ?"); args.push(`%${opts.query.toLowerCase()}%`); }
+    return normalizeItems(this.prep(
+        `SELECT h.id, h.at, h.kind, h.author, h.text, h.draft, h.client_message_id AS clientMessageId, h.mission_id AS missionId FROM history h
+         WHERE ${conds.join(" AND ")} ORDER BY h.at DESC, h.id DESC LIMIT ?`,
       )
       .all(...args, limit) as HistoryItem[]);
   }
 
+  private toolActionWrites = 0;
+  private hasFts = false;
+  /** client_msgs 过期回执周期清扫时点（构造即起算，首次写入在 1h 内不触发全表 DELETE） */
+  private clientMsgSweepAt = Date.now();
+
+  /** FTS5 MATCH 表达式：空白拆词逐词加引号组短语（与 LIKE 连续子串语义对齐）；不可拆词返回 null */
+  private ftsExpr(query: string): string | null {
+    const toks = query
+      .trim()
+      .split(/\s+/)
+      .map((t) => t.replace(/"/g, ""))
+      .filter(Boolean);
+    return toks.length ? toks.map((t) => `"${t}"`).join(" ") : null;
+  }
+
+  /** FTS 快路径：MATCH 命中返回排序结果；零命中（CJK/非常规子串无 token）返回 null 由调用侧回退 LIKE */
+  private ftsRows(
+    query: string,
+    condSql: string,
+    condArgs: unknown[],
+    limit: number,
+  ): (HistoryItem & { scope: string; scopeId: string })[] | null {
+    if (!this.hasFts) return null;
+    const expr = this.ftsExpr(query);
+    if (!expr) return null;
+    const rows = this.prep(
+        `SELECT h.id, h.scope, h.scope_id AS scopeId, h.at, h.kind, h.author, h.text
+         FROM history_fts JOIN history h ON h.id = history_fts.rowid
+         WHERE history_fts MATCH ? ${condSql}
+         ORDER BY h.at DESC, h.id DESC LIMIT ?`,
+      )
+      .all(expr, ...condArgs, limit) as (HistoryItem & { scope: string; scopeId: string })[];
+    return rows.length ? rows : null;
+  }
+
+  /** tool_call 外发迹落库：at 为到达时刻（恒 >= 任务 dispatchedAt），供重启 hadOutward 精确按 sessionId 判定 */
+  addToolAction(
+    sessionId: string,
+    a: { at: number; kind?: string | undefined; title?: string | undefined; status?: string | undefined },
+  ): void {
+    this.prep(
+        "INSERT INTO tool_actions (at, session_id, kind, title, status) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(a.at, sessionId, a.kind ?? null, a.title ?? null, a.status ?? null);
+    // 惰性清理：约每 200 次写入删 14 天前旧行（外发迹只需覆盖一次重启对账窗口）
+    if (++this.toolActionWrites % 200 === 0) {
+      this.prep("DELETE FROM tool_actions WHERE at < ?")
+        .run(Date.now() - 14 * 86_400_000);
+    }
+  }
+
+  /** sessionId 在 sinceAt 之后是否存在 tool_call 外发迹（重启对账信号，精确归属不依赖 author 形态） */
+  hasToolAction(sessionId: string, sinceAt: number): boolean {
+    return (
+      this.prep(
+          "SELECT 1 AS x FROM tool_actions WHERE session_id = ? AND at >= ? LIMIT 1",
+        )
+        .get(sessionId, sinceAt) !== undefined
+    );
+  }
+
   read(scope: "session" | "room", id: string, limit = HISTORY_LIMIT): HistoryItem[] {
-    const rows = normalizeItems(this.db
-      .prepare(
+    const rows = normalizeItems(this.prep(
         `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ?
          ORDER BY at DESC, id DESC LIMIT ?`,
@@ -757,15 +851,13 @@ export class Store {
     at: number,
     limit = 50,
   ): HistoryItem[] {
-    const before = normalizeItems(this.db
-      .prepare(
+    const before = normalizeItems(this.prep(
         `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND at <= ?
          ORDER BY at DESC, id DESC LIMIT ?`,
       )
       .all(scope, id, at, limit) as HistoryItem[]);
-    const after = normalizeItems(this.db
-      .prepare(
+    const after = normalizeItems(this.prep(
         `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND at >= ?
          ORDER BY at ASC, id ASC LIMIT ?`,
@@ -792,8 +884,7 @@ export class Store {
     limit = 50,
     beforeId?: number,
   ): HistoryItem[] {
-    const rows = normalizeItems(this.db
-      .prepare(
+    const rows = normalizeItems(this.prep(
         `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND (at < ? OR (at = ? AND id < ?))
          ORDER BY at DESC, id DESC LIMIT ?`,
@@ -808,8 +899,7 @@ export class Store {
     at: number,
     limit = 200,
   ): HistoryItem[] {
-    return normalizeItems(this.db
-      .prepare(
+    return normalizeItems(this.prep(
         `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND at >= ?
          ORDER BY at ASC, id ASC LIMIT ?`,
@@ -827,14 +917,12 @@ export class Store {
     afterId: number,
     limit = 200,
   ): { entries: HistoryItem[]; truncated: boolean } {
-    const exists = this.db
-      .prepare(
+    const exists = this.prep(
         "SELECT 1 FROM history WHERE scope = ? AND scope_id = ? AND id = ? LIMIT 1",
       )
       .get(scope, id, afterId);
     if (afterId !== 0 && !exists) return { entries: [], truncated: true };
-    const entries = normalizeItems(this.db
-      .prepare(
+    const entries = normalizeItems(this.prep(
         `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
          WHERE scope = ? AND scope_id = ? AND id > ?
          ORDER BY id ASC LIMIT ?`,
@@ -846,8 +934,7 @@ export class Store {
   clientMsgReceipt(key: string):
     | { state: "dispatching" | "accepted" | "uncertain"; fingerprint?: string; historyId?: number; result?: unknown; legacy?: boolean }
     | undefined {
-    const row = this.db
-      .prepare("SELECT result FROM client_msgs WHERE key = ?")
+    const row = this.prep("SELECT result FROM client_msgs WHERE key = ?")
       .get(key) as { result: string } | undefined;
     if (!row) return undefined;
     try {
@@ -890,13 +977,21 @@ export class Store {
         }
         return { created: false, state: existing.state, ...(existing.historyId !== undefined ? { historyId: existing.historyId } : {}) };
       }
-      this.db
-        .prepare("DELETE FROM client_msgs WHERE at < ?")
-        .run(Date.now() - 48 * 3600_000);
-      const count = (this.db.prepare("SELECT COUNT(*) AS c FROM client_msgs").get() as { c: number }).c;
-      if (count >= 10000) throw new Error("client_message_capacity");
-      const r = this.db
-        .prepare(
+      const now = Date.now();
+      const cap = 10000;
+      let count = (this.prep("SELECT COUNT(*) AS c FROM client_msgs").get() as { c: number }).c;
+      // 惰性清理：仅容量阈值或周期（1h）到点才扫过期回执，常态写入不做全表 DELETE
+      const sweepDue = now - this.clientMsgSweepAt >= 3600_000;
+      if (count >= cap || sweepDue) {
+        this.clientMsgSweepAt = now;
+        this.prep("DELETE FROM client_msgs WHERE at < ?")
+          .run(now - 48 * 3600_000);
+        if (count >= cap) {
+          count = (this.prep("SELECT COUNT(*) AS c FROM client_msgs").get() as { c: number }).c;
+          if (count >= cap) throw new Error("client_message_capacity");
+        }
+      }
+      const r = this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(scope, scopeId, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
@@ -905,8 +1000,7 @@ export class Store {
       const receipt = {
         v: 1, fingerprint, historyId, state: "dispatching",
       };
-      this.db
-        .prepare("INSERT INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
+      this.prep("INSERT INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
         .run(key, JSON.stringify(receipt), Date.now());
       return { created: true, state: "dispatching" as const, historyId };
     })() as
@@ -925,8 +1019,7 @@ export class Store {
         state,
         ...(state === "accepted" && result !== undefined ? { result } : {}),
       };
-      this.db
-        .prepare("UPDATE client_msgs SET result = ? WHERE key = ?")
+      this.prep("UPDATE client_msgs SET result = ? WHERE key = ?")
         .run(JSON.stringify(receipt), key);
     })();
   }
@@ -934,7 +1027,7 @@ export class Store {
   readEntries(scope: "room" | "session", scopeId: string, ids: number[]): HistoryItem[] {
     if (!ids.length) return [];
     const marks = ids.map(() => "?").join(",");
-    return normalizeItems(this.db.prepare(
+    return normalizeItems(this.prep(
       `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
        WHERE scope = ? AND scope_id = ? AND id IN (${marks}) ORDER BY id ASC`,
     ).all(scope, scopeId, ...ids) as HistoryItem[]);
@@ -943,8 +1036,7 @@ export class Store {
   readRoomCards(roomId: string, ids: number[]): HistoryItem[] {
     if (!ids.length) return [];
     const marks = ids.map(() => "?").join(",");
-    return this.db
-      .prepare(
+    return this.prep(
         `SELECT id, at, kind, author, text, draft FROM history
          WHERE scope = 'room' AND scope_id = ? AND draft = 0
            AND kind IN ('flow', 'decision') AND id IN (${marks})
@@ -955,8 +1047,7 @@ export class Store {
 
   /** 客户端消息幂等记录：重复提交返回缓存的原结果 */
   clientMsgGet(key: string): unknown | undefined {
-    const row = this.db
-      .prepare("SELECT result FROM client_msgs WHERE key = ?")
+    const row = this.prep("SELECT result FROM client_msgs WHERE key = ?")
       .get(key) as { result: string } | undefined;
     if (!row) return undefined;
     try {
@@ -967,21 +1058,29 @@ export class Store {
   }
 
   clientMsgSet(key: string, result: unknown, cap = 5000): void {
-    this.db
-      .prepare("INSERT OR REPLACE INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
+    this.prep("INSERT OR REPLACE INTO client_msgs (key, result, at) VALUES (?, ?, ?)")
       .run(key, JSON.stringify(result), Date.now());
-    this.db
-      .prepare(
+    this.prep(
         `DELETE FROM client_msgs WHERE key NOT IN (
            SELECT key FROM client_msgs ORDER BY at DESC, rowid DESC LIMIT ?)`,
       )
       .run(cap);
   }
 
+  /** scope 内最后一条已提交（非草稿）历史条目；不存在返回 undefined */
+  lastEntry(scope: "session" | "room", id: string): HistoryItem | undefined {
+    const row = this.prep(
+        `SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history
+         WHERE scope = ? AND scope_id = ? AND draft = 0
+         ORDER BY at DESC, id DESC LIMIT 1`,
+      )
+      .get(scope, id) as HistoryItem | undefined;
+    return row ? normalizeItems([row])[0] : undefined;
+  }
+
   /** 最后一条已提交（非草稿）用户条目 id；不存在返回 0。turn 游标校验用 */
   lastUserEntryId(scope: "session" | "room", id: string): number {
-    const row = this.db
-      .prepare(
+    const row = this.prep(
         `SELECT id FROM history
          WHERE scope = ? AND scope_id = ? AND kind = 'user' AND draft = 0
          ORDER BY id DESC LIMIT 1`,
@@ -991,8 +1090,7 @@ export class Store {
   }
 
   hasMoreBefore(scope: "session" | "room", id: string, at: number, beforeId?: number): boolean {
-    const row = this.db
-      .prepare(
+    const row = this.prep(
         `SELECT 1 FROM history
          WHERE scope = ? AND scope_id = ? AND (at < ? OR (at = ? AND id < ?))
          LIMIT 1`,
@@ -1002,54 +1100,46 @@ export class Store {
   }
 
   deleteRoomEvents(roomId: string): void {
-    this.db.prepare("DELETE FROM room_events WHERE room_id = ?").run(roomId);
+    this.prep("DELETE FROM room_events WHERE room_id = ?").run(roomId);
   }
 
   memoryAdd(roomId: string, kind: string, text: string, source: string, at: number, expiresAt: number | null): void {
     // 同 room+kind+text 蒸馏重复写入 → 原位刷新时间戳而非堆积副本
-    const dup = this.db
-      .prepare("SELECT id FROM memory WHERE room_id = ? AND kind = ? AND text = ? LIMIT 1")
+    const dup = this.prep("SELECT id FROM memory WHERE room_id = ? AND kind = ? AND text = ? LIMIT 1")
       .get(roomId, kind, text) as { id: number } | undefined;
     if (dup) {
-      this.db
-        .prepare("UPDATE memory SET at = ?, expires_at = ?, source = ? WHERE id = ?")
+      this.prep("UPDATE memory SET at = ?, expires_at = ?, source = ? WHERE id = ?")
         .run(at, expiresAt, source, dup.id);
       return;
     }
-    this.db
-      .prepare(
+    this.prep(
         "INSERT INTO memory(room_id, kind, text, source, at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .run(roomId, kind, text, source, at, expiresAt);
-    this.db
-      .prepare("DELETE FROM memory WHERE room_id = ? AND expires_at IS NOT NULL AND expires_at <= ?")
+    this.prep("DELETE FROM memory WHERE room_id = ? AND expires_at IS NOT NULL AND expires_at <= ?")
       .run(roomId, at);
-    const over = this.db
-      .prepare("SELECT id FROM memory WHERE room_id = ? ORDER BY at DESC, id DESC LIMIT -1 OFFSET ?")
+    const over = this.prep("SELECT id FROM memory WHERE room_id = ? ORDER BY at DESC, id DESC LIMIT -1 OFFSET ?")
       .all(roomId, MEMORY_LIMIT) as { id: number }[];
     if (over.length > 0) {
-      this.db
-        .prepare(`DELETE FROM memory WHERE id IN (${over.map(() => "?").join(",")})`)
+      this.prep(`DELETE FROM memory WHERE id IN (${over.map(() => "?").join(",")})`)
         .run(...over.map((r) => r.id));
     }
   }
 
   memoryList(roomId: string, now: number, limit = MEMORY_LIMIT): MemoryEntry[] {
-    return this.db
-      .prepare(
+    return this.prep(
         "SELECT id, room_id AS roomId, kind, text, source, at, expires_at AS expiresAt FROM memory WHERE room_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY at DESC, id DESC LIMIT ?",
       )
       .all(roomId, now, limit) as MemoryEntry[];
   }
 
   deleteMemory(roomId: string): void {
-    this.db.prepare("DELETE FROM memory WHERE room_id = ?").run(roomId);
+    this.prep("DELETE FROM memory WHERE room_id = ?").run(roomId);
   }
 
   /** IFC：房级 sensitivity 标签 + 跨房白名单（默认 shared 兼容） */
   ifcGet(roomId: string): { sensitivity: string; allow: string[] } {
-    const row = this.db
-      .prepare("SELECT sensitivity, allow FROM room_ifc WHERE room_id = ?")
+    const row = this.prep("SELECT sensitivity, allow FROM room_ifc WHERE room_id = ?")
       .get(roomId) as { sensitivity: string; allow: string } | undefined;
     if (!row) return { sensitivity: "shared", allow: [] };
     let allow: string[] = [];
@@ -1061,8 +1151,7 @@ export class Store {
   }
 
   ifcSet(roomId: string, sensitivity: string): void {
-    this.db
-      .prepare(
+    this.prep(
         "INSERT INTO room_ifc(room_id, sensitivity, allow) VALUES (?, ?, '[]') ON CONFLICT(room_id) DO UPDATE SET sensitivity = excluded.sensitivity",
       )
       .run(roomId, sensitivity);
@@ -1073,8 +1162,7 @@ export class Store {
     const set = new Set(cur.allow);
     if (allowed) set.add(allowRoomId);
     else set.delete(allowRoomId);
-    this.db
-      .prepare(
+    this.prep(
         "INSERT INTO room_ifc(room_id, sensitivity, allow) VALUES (?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET allow = excluded.allow",
       )
       .run(roomId, cur.sensitivity, JSON.stringify([...set]));
@@ -1083,18 +1171,17 @@ export class Store {
   /** 单条删除（房作用域限定，防跨房误删） */
   memoryRemove(roomId: string, id: number): boolean {
     return (
-      this.db.prepare("DELETE FROM memory WHERE room_id = ? AND id = ?").run(roomId, id)
+      this.prep("DELETE FROM memory WHERE room_id = ? AND id = ?").run(roomId, id)
         .changes > 0
     );
   }
 
   deleteHistory(scope: "session" | "room", id: string): void {
-    this.db.prepare("DELETE FROM history WHERE scope = ? AND scope_id = ?").run(scope, id);
+    this.prep("DELETE FROM history WHERE scope = ? AND scope_id = ?").run(scope, id);
   }
 
   renameHistory(scope: "session" | "room", oldId: string, newId: string): void {
-    this.db
-      .prepare("UPDATE history SET scope_id = ? WHERE scope = ? AND scope_id = ?")
+    this.prep("UPDATE history SET scope_id = ? WHERE scope = ? AND scope_id = ?")
       .run(newId, scope, oldId);
   }
 
@@ -1102,9 +1189,10 @@ export class Store {
     query: string,
     limit = 50,
   ): (HistoryItem & { scope: string; scopeId: string })[] {
+    const fts = this.ftsRows(query, "", [], limit);
+    if (fts) return fts;
     const escaped = query.replace(/[%_\\]/g, (c) => `\\${c}`);
-    return this.db
-      .prepare(
+    return this.prep(
         `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
          WHERE text LIKE ? ESCAPE '\\'
          ORDER BY at DESC, id DESC LIMIT ?`,
@@ -1121,9 +1209,10 @@ export class Store {
     scopeId: string,
     limit = 200,
   ): (HistoryItem & { scope: string; scopeId: string })[] {
+    const fts = this.ftsRows(query, "AND h.scope = ? AND h.scope_id = ?", [scope, scopeId], limit);
+    if (fts) return fts;
     const escaped = query.replace(/[%_\\]/g, (c) => `\\${c}`);
-    return this.db
-      .prepare(
+    return this.prep(
         `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
          WHERE scope = ? AND scope_id = ? AND text LIKE ? ESCAPE '\\'
          ORDER BY at DESC, id DESC LIMIT ?`,
@@ -1145,33 +1234,52 @@ export class Store {
     previews: (HistoryItem & { scope: string; scopeId: string })[];
   }[] {
     const escaped = query.replace(/[%_\\]/g, (c) => `\\${c}`);
-    const groups = this.db
-      .prepare(
-        `SELECT scope, scope_id AS scopeId, COUNT(*) AS count, MAX(at) AS latestAt
-         FROM history
-         WHERE text LIKE ? ESCAPE '\\'
-         GROUP BY scope, scope_id
-         ORDER BY latestAt DESC
-         LIMIT ?`,
-      )
-      .all(`%${escaped}%`, groupLimit) as {
-      scope: "session" | "room";
-      scopeId: string;
-      count: number;
-      latestAt: number;
-    }[];
-    return groups.map((g) => {
-      const previews = this.db
-        .prepare(
-          `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
-           WHERE scope = ? AND scope_id = ? AND text LIKE ? ESCAPE '\\'
-           ORDER BY at DESC, id DESC
+    const expr = this.hasFts ? this.ftsExpr(query) : null;
+    let groups = expr
+      ? (this.prep(
+            `SELECT h.scope, h.scope_id AS scopeId, COUNT(*) AS count, MAX(h.at) AS latestAt
+             FROM history_fts JOIN history h ON h.id = history_fts.rowid
+             WHERE history_fts MATCH ?
+             GROUP BY h.scope, h.scope_id
+             ORDER BY latestAt DESC
+             LIMIT ?`,
+          )
+          .all(expr, groupLimit) as {
+          scope: "session" | "room";
+          scopeId: string;
+          count: number;
+          latestAt: number;
+        }[])
+      : [];
+    if (!groups.length) {
+      groups = this.prep(
+          `SELECT scope, scope_id AS scopeId, COUNT(*) AS count, MAX(at) AS latestAt
+           FROM history
+           WHERE text LIKE ? ESCAPE '\\'
+           GROUP BY scope, scope_id
+           ORDER BY latestAt DESC
            LIMIT ?`,
         )
-        .all(g.scope, g.scopeId, `%${escaped}%`, previewLimit) as (HistoryItem & {
-        scope: string;
+        .all(`%${escaped}%`, groupLimit) as {
+        scope: "session" | "room";
         scopeId: string;
-      })[];
+        count: number;
+        latestAt: number;
+      }[];
+    }
+    return groups.map((g) => {
+      const previews =
+        this.ftsRows(query, "AND h.scope = ? AND h.scope_id = ?", [g.scope, g.scopeId], previewLimit) ??
+        (this.prep(
+            `SELECT id, scope, scope_id AS scopeId, at, kind, author, text FROM history
+             WHERE scope = ? AND scope_id = ? AND text LIKE ? ESCAPE '\\'
+             ORDER BY at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(g.scope, g.scopeId, `%${escaped}%`, previewLimit) as (HistoryItem & {
+          scope: string;
+          scopeId: string;
+        })[]);
       return { scope: g.scope, scopeId: g.scopeId, count: g.count, previews };
     });
   }

@@ -8,6 +8,7 @@ import {
   setPermissionBypass,
   setPromptAckTimeoutMs,
   setTurnSettleGraceMs,
+  setTurnStallTimeoutMs,
   sliceTextFile,
   type HubEvent,
 } from "./agent.js";
@@ -475,6 +476,118 @@ describe("AcpAgent integration (in-memory stream)", () => {
       await rej2;
     } finally {
       setPromptAckTimeoutMs(180_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("mid-turn 静默触发 stall 看门狗：释放 busy 并 drain 排队 prompt", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const { hub, agentConn, events, prompts } = setup({
+      promptHandler: () =>
+        new Promise<acp.PromptResponse>((r) => {
+          resolvers.push(r);
+        }),
+    });
+    setTurnStallTimeoutMs(80);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      assert.equal(hub.isBusy("s1"), true);
+      // agent 流出一个 chunk 后陷入静默——ACK 看门狗不再生效
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "partial" },
+        },
+      });
+      // busy 时第二条消息进入 agent 层队列
+      await hub.prompt("s1", "second");
+      assert.equal(prompts.length, 1, "second 被排队未发出");
+
+      const errEv = await waitFor(() =>
+        events.find(
+          (e) =>
+            e.method === "prompt.error" &&
+            /silent|stall/i.test(
+              String((e.params as { message?: unknown }).message),
+            ),
+        ),
+      );
+      assert.ok(errEv, "stall 看门狗应发出 prompt.error");
+      // error+cancel 收尾后 drain：排队的 second 应被送出（随即开启新回合）
+      await waitFor(() => (prompts.length >= 2 ? true : undefined));
+      // 新回合正常完成：会话自愈不残留僵尸 busy
+      resolvers[1]!({ stopReason: "end_turn" });
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      assert.equal(hub.isBusy("s1"), false);
+    } finally {
+      setTurnStallTimeoutMs(180_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("busy 排队时发出 session.notice 提示事件", async () => {
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      events.length = 0;
+      await hub.prompt("s1", "second");
+      const ev = events.find((e) => e.method === "session.notice");
+      assert.ok(ev, "排队时应发出 session.notice 提示");
+      assert.match(
+        String((ev!.params as { message?: unknown }).message),
+        /排队/,
+      );
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("permission 待答复期间不触发 stall 看门狗", async () => {
+    const prevBypass = getPermissionBypass();
+    setPermissionBypass(false);
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    setTurnStallTimeoutMs(60);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "task");
+      const respPromise = agentConn.client.request(
+        acp.methods.client.session.requestPermission,
+        {
+          sessionId: "s1",
+          toolCall: { toolCallId: "tc-stall", title: "bash" },
+          options: [
+            { optionId: "a", name: "允许", kind: "allow_once" },
+            { optionId: "r", name: "拒绝", kind: "reject_once" },
+          ],
+        },
+      );
+      const reqEv = await waitFor(() =>
+        events.find((e) => e.method === "permission.request"),
+      );
+      // 挂起等待远超 stall 预算：回合等待用户答复属活跃，不得判静默
+      await new Promise((r) => setTimeout(r, 180));
+      assert.equal(
+        events.some((e) => e.method === "prompt.error"),
+        false,
+        "permission 挂起期间不得误报 stall",
+      );
+      assert.equal(hub.isBusy("s1"), true);
+      const requestId = (reqEv!.params as { requestId: string }).requestId;
+      assert.equal(hub.respondPermission(requestId, "a"), true);
+      await respPromise;
+    } finally {
+      setTurnStallTimeoutMs(180_000);
+      setPermissionBypass(prevBypass);
       hub.close();
       agentConn.close();
     }

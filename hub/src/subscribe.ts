@@ -67,6 +67,7 @@ const GLOBAL_METHODS = new Set<string>([
   "agent.status",
   "prompt.error",
   "session.status",
+  "session.notice",
   "room.artifact",
   "member.status",
   "room.notice",

@@ -93,6 +93,68 @@ describe("turn 提交不变量（stale check）", () => {
     appendUser(store, room.roomId, "再补充");
     assert.equal(manager.isStaleTurnCommit("s1", room.roomId), false);
   });
+
+  it("被吸收进流程的补充不作废在途回合", async () => {
+    const { store, room, prompts, manager } = setup();
+    room.mode = "parallel";
+    appendUser(store, room.roomId, "各自回答");
+    await manager.handle(room, "各自回答", {});
+    assert.equal(prompts.length, 2, "parallel 派发两个成员");
+
+    // 回合进行中补充消息：被 absorb 进 parallel extras，不应触发在途回合作废
+    appendUser(store, room.roomId, "补充一点背景");
+    const absorbed = await manager.handle(room, "补充一点背景", {});
+    assert.deepEqual(absorbed.sent, []);
+    assert.equal(prompts.length, 2, "补充被吸收，无新 prompt");
+
+    await manager.onPromptDone("s1", "s1 的回答");
+    assert.equal(
+      prompts.filter((p) => p.sessionId === "s1").length,
+      1,
+      "在途回合正常消费，不作废重跑",
+    );
+    assert.equal(
+      manager.isStaleTurnCommit("s1", room.roomId),
+      false,
+      "游标已豁免，提交不判 stale",
+    );
+  });
+
+  it("被相关性过滤丢弃的闲聊不作废在途回合", async () => {
+    const { store, room, prompts, manager } = setup();
+    room.mode = "mention";
+    manager.setRelevanceFilter(async () => false);
+    appendUser(store, room.roomId, "@coder 问题");
+    await manager.handle(room, "@coder 问题", {});
+    assert.equal(prompts.length, 1);
+
+    // 无 @ 的闲聊被过滤：不产生派发，也不应作废在途回合
+    appendUser(store, room.roomId, "嗯");
+    const r2 = await manager.handle(room, "嗯", {});
+    assert.deepEqual(r2.sent, []);
+    assert.equal(prompts.length, 1, "闲聊被过滤，无派发");
+
+    const r = await manager.onPromptDone("s1", "回答");
+    assert.equal(r, false, "在途回合正常消费");
+    assert.equal(prompts.length, 1, "不重跑");
+  });
+
+  it("派发到其他成员的新用户消息仍触发作废重跑", async () => {
+    const { store, room, prompts, manager } = setup();
+    appendUser(store, room.roomId, "@coder 问题一");
+    await manager.handle(room, "@coder 问题一", {});
+    assert.equal(prompts.length, 1);
+
+    // 新的实质消息派发给 tester（非吸收非过滤）→ 游标推进 →
+    // coder 在途回合作废重跑不变量保留
+    appendUser(store, room.roomId, "@tester 问题二");
+    await manager.handle(room, "@tester 问题二", {});
+    assert.equal(prompts.length, 2);
+    const r = await manager.onPromptDone("s1", "旧上下文回答");
+    assert.equal(r, true, "stale 作废路径保留");
+    assert.equal(prompts.length, 3, "coder 重跑一次");
+    assert.equal(prompts[2]!.sessionId, "s1");
+  });
 });
 
 describe("Operation ledger 副作用去重", () => {
