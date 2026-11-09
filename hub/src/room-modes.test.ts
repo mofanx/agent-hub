@@ -969,4 +969,103 @@ describe("openTopics 编排注入与归档", () => {
     );
     assert.ok(ev && /规则/.test(String(ev.params.message)), "通知应标注规则来源");
   });
+  it("编排活性+接续词：禁 fastPath 直出 self，交主持人决策", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-cont",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "w1", name: "w1" },
+        { sessionId: "w2", name: "w2" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const prompts: { sessionId: string }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId) => {
+          prompts.push({ sessionId });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    manager.setModeDecider(new ModeDecider({}));
+    // 模拟上轮 parallel 编排刚跑过
+    (manager as unknown as { autoHistory: Map<string, { at: number; mode: string; reason: string }[]> })
+      .autoHistory.set(autoRoom.roomId, [{ at: Date.now(), mode: "parallel", reason: "x" }]);
+    await manager.handle(autoRoom, "好的，按照你们的建议推进");
+    // 应走 deciding（发决策 prompt 给 host），而非直出 self 应答
+    const sent = prompts.at(-1)?.sessionId;
+    assert.equal(sent, "host");
+    assert.equal(manager.subModeFor(autoRoom.roomId)?.mode, "deciding");
+  });
+
+  it("规则直出 parallel 后记 autoHistory：接续词命中活性闸门不吞 self", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-rule-hist",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "w1", name: "w1" },
+        { sessionId: "w2", name: "w2" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const prompts: { sessionId: string }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId) => {
+          prompts.push({ sessionId });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    manager.setModeDecider(new ModeDecider({}));
+    // 规则直出 parallel（不走 LLM 决策路径）——修复前此路径不记 autoHistory
+    await manager.handle(autoRoom, "帮我讨论一下这个问题");
+    const hist = (manager as unknown as { autoHistory: Map<string, { mode: string }[]> })
+      .autoHistory.get(autoRoom.roomId);
+    assert.equal(hist?.at(-1)?.mode, "parallel", "规则直出路径必须记 autoHistory");
+    // 接续词应命中活性闸门：修复前规则直出不记账→orchestrationAlive 恒 false
+    const alive = (manager as unknown as { orchestrationAlive(r: unknown): boolean })
+      .orchestrationAlive(autoRoom);
+    assert.equal(alive, true, "规则直出 parallel 后活性必须为真");
+  });
+
+  it("无编排活性时接续词仍走 fastPath self", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-nocont",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "w1", name: "w1" },
+        { sessionId: "w2", name: "w2" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const prompts: { sessionId: string; content: unknown }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    manager.setModeDecider(new ModeDecider({}));
+    await manager.handle(autoRoom, "好的，继续");
+    assert.equal(manager.subModeFor(autoRoom.roomId)?.mode, "self");
+  });
 });

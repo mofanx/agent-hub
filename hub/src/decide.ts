@@ -35,14 +35,23 @@ export type DecideInput = {
 };
 
 const MULTI_SIGNAL = new RegExp(
-  "大家|各位|所有人|每个人|多人|多位|分别|并行|同时|拆分|拆解|分工|派工|分头|流水线|依次|逐个|轮流|辩论|正反|多个方案|对比|评审|互相|协作|投票|集思广益|" +
+  "大家|各位|所有人|每个人|多人|多位|分别|并行|同时|拆分|拆解|分工|派工|分头|流水线|依次|逐个|轮流|辩论|正反|多个方案|对比|评审|复核|互相|协作|投票|集思广益|" +
   "conductor|parallel|pipeline|debate|round.?robin|brainstorm|everyone|all of you|each of you|in parallel|split|divide|delegate|compare|vote",
   "i",
 );
 const FAST_MAX_LEN = 120;
+// 快通道只接真平凡短输入（<10字）：中长度无信号文本一律交 LLM——词表只负责确定性扇出，不再承担防误吞兜底（三次词表漏词实证教训）
+const FAST_TRIVIAL_MAX_LEN = 10;
 // 显式拉群讨论：群词（群友/大家/全员/所有人/拉上/一起/群策）+ 讨论类动词，或含「群友」即算；
 // auto 房用户说"讨论"即拉群讨论（用户已多次实证此期望），裸「讨论」也算
-const DISCUSSION_INTENT = /讨论|群友|拉上.{0,8}(商量|评估)|大家.{0,8}(商量|一起|分别|分头|各)|各位.{0,8}(分别|分头|各)|全员.{0,8}(商量|评估|分别|分头)|所有人.{0,8}(商量|分别)|一起.{0,6}商量|群策群力|开个会/i;
+const DISCUSSION_INTENT = /讨论|复核|审议|评审|审查|交叉.{0,4}(验|审|查|核)|review|群友|拉上.{0,8}(商量|评估)|大家.{0,8}(商量|一起|分别|分头|各)|各位.{0,8}(分别|分头|各)|全员.{0,8}(商量|评估|分别|分头)|所有人.{0,8}(商量|分别)|一起.{0,6}商量|群策群力|开个会/i;
+
+// 全模式意图表（explicit 层直出，不过 LLM）：越具体的模式优先级越高
+// conductor>pipeline>debate>roundrobin>parallel——编排词命中即胜讨论词
+const CONDUCTOR_INTENT = /拆[成分解出]?[^。]{0,10}(任务|子任务|模块)|拆解|分工|派工|工单|编排|子任务|分步实施|分阶段|任务分解/i;
+const PIPELINE_INTENT = /流水线|依次|逐个|按顺序|串行|先.{0,12}(再|然后|后).{0,12}(审查|检查|验证|测试|复核|交给)/i;
+const DEBATE_INTENT = /辩论|正反|对垒|交锋|红蓝|pros?\s*and\s*cons?/i;
+const ROUNDROBIN_INTENT = /轮流|每人.{0,4}(说|答|一句|一段|一评)|圆桌|接力/i;
 
 const PROVIDERS: Record<string, { baseUrl: string; keyEnv: string }> = {
   deepseek: { baseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY" },
@@ -113,7 +122,7 @@ export class ModeDecider {
     if (this.opts.fastPath === false || awaiting) return undefined;
     const text = input.text.trim();
     const solo = input.members.length <= 2;
-    if (!solo && (text.length > FAST_MAX_LEN || text.length < 4 || MULTI_SIGNAL.test(text))) return undefined;
+    if (!solo && (text.length > FAST_MAX_LEN || text.length < 4 || text.length >= FAST_TRIVIAL_MAX_LEN || MULTI_SIGNAL.test(text))) return undefined;
     const v: DecideVerdict = {
       tier: "explicit", mode: "self", confidence: 1, action: "direct", via: "rule",
       reason: solo ? "fast:solo" : "fast:no-multi-signal", ms: 0,
@@ -139,11 +148,35 @@ export class ModeDecider {
       }
     }
     // 明确群聊讨论意图 → 直接扇出，不交主持人（prompt 硬约束可被模型违背，代码规则兜底）
+    if (CONDUCTOR_INTENT.test(text)) {
+      return {
+        tier: "explicit", mode: "conductor", confidence: 1,
+        action: "direct", via: "rule", reason: "intent:conductor", ms: 0,
+      };
+    }
+    if (PIPELINE_INTENT.test(text)) {
+      return {
+        tier: "explicit", mode: "pipeline", confidence: 1,
+        action: "direct", via: "rule", reason: "intent:pipeline", ms: 0,
+      };
+    }
+    if (DEBATE_INTENT.test(text)) {
+      return {
+        tier: "explicit", mode: "debate", confidence: 1,
+        action: "direct", via: "rule", reason: "intent:debate", ms: 0,
+      };
+    }
+    if (ROUNDROBIN_INTENT.test(text)) {
+      return {
+        tier: "explicit", mode: "roundrobin", confidence: 1,
+        action: "direct", via: "rule", reason: "intent:roundrobin", ms: 0,
+      };
+    }
     if (DISCUSSION_INTENT.test(text)) {
       const mode = input.members.length > 2 ? "parallel" : "mention";
       return {
         tier: "explicit", mode, confidence: 1,
-        action: "direct", via: "rule", reason: "discussion-intent", ms: 0,
+        action: "direct", via: "rule", reason: "intent:parallel", ms: 0,
       };
     }
     if (text.length < 4) {

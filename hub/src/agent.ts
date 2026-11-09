@@ -1495,17 +1495,26 @@ export class AcpAgent {
         const idle = Date.now() - (entry.lastActivityAt ?? 0);
         // 静默进度提示：超阈值先吐一条 session.stall（每回合一次，不杀回合），
         // 用户不再从 180s 超时报错才反推发生过静默
-        if (stallNoticeMs > 0 && !entry.stallNotified && idle >= stallNoticeMs) {
-          entry.stallNotified = true;
-          this.emit({
-            method: "session.stall",
-            params: { sessionId, idleMs: idle },
-          });
-          const budget = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
-          const remain = budget - idle;
-          if (remain > 0) {
-            armWatchdog(remain);
-            return;
+        const killBudget = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
+        if (stallNoticeMs > 0 && !entry.stallNotified) {
+          // tick 早于阈值（定时器抖动）：若杀预算比提示先到则放行走 kill 分支，否则按差额重臂——不得饿死短预算回合
+          if (idle < stallNoticeMs) {
+            const wait = stallNoticeMs - idle;
+            if (killBudget - idle > wait) {
+              armWatchdog(wait);
+              return;
+            }
+          } else {
+            entry.stallNotified = true;
+            this.emit({
+              method: "session.stall",
+              params: { sessionId, idleMs: idle },
+            });
+            const remain = killBudget - idle;
+            if (remain > 0) {
+              armWatchdog(remain);
+              return;
+            }
           }
         }
         if (!entry.turnGotUpdate) {

@@ -344,12 +344,34 @@ export class RoomModeManager {
     this.modeDecider = d;
   }
 
+  /** auto 模式史记账：规则直出/模型裁决/LLM 三路径统一写——orchestrationAlive 活性判定依赖此 */
+  private recordAutoMode(roomId: string, mode: string, reason: string): void {
+    const at = Date.now();
+    const list = this.autoHistory.get(roomId) ?? [];
+    list.push({ at, mode, reason });
+    if (list.length > 50) list.shift();
+    this.autoHistory.set(roomId, list);
+    this.lastAuto.set(roomId, { at });
+  }
+
   /** 黑板上最后发言的非主持人成员：兜底派发/短答回退共用 */
   private lastMemberSpeaker(room: Room): string | undefined {
     return [...(room.blackboard ?? [])]
       .reverse()
       .map((e) => e.from)
       .find((f) => room.members.some((m) => m.sessionId === f) && f !== room.conductorId);
+  }
+
+  /**
+   * 编排活性（布尔，非时间窗）：房间是否处于多成员编排延续期——
+   * 活性中收到接续词时禁 fastPath 直出 self，交主持人带上下文决策
+   */
+  private orchestrationAlive(room: Room): boolean {
+    const flow = this.getFlow(room.roomId) as { done?: boolean; waitingFor?: string } | undefined;
+    if (flow && (flow.waitingFor !== undefined || flow.done !== true)) return true;
+    if (this.conductor.pendingClarification(room.roomId) !== undefined) return true;
+    const last = this.autoHistory.get(room.roomId)?.at(-1);
+    return last !== undefined && ["parallel", "conductor", "pipeline", "debate", "roundrobin", "mention"].includes(last.mode);
   }
 
   exportRuntime(): Record<string, unknown> {
@@ -1170,12 +1192,7 @@ export class RoomModeManager {
           this.modeDecider?.recordHostOutcome(autoCtx.decideInput, autoCtx.shadow, decision.mode);
         } catch {}
       }
-      const at = Date.now();
-      const list = this.autoHistory.get(room.roomId) ?? [];
-      list.push({ at, mode: decision.mode, reason: decision.reason });
-      if (list.length > 50) list.shift();
-      this.autoHistory.set(room.roomId, list);
-      this.lastAuto.set(room.roomId, { at });
+      this.recordAutoMode(room.roomId, decision.mode, decision.reason);
       // 退化检测：conductor 全部任务指向同一成员时，编排开销无意义，降级执行
       let mode = decision.mode;
       let params = decision.params;
@@ -1358,7 +1375,10 @@ export class RoomModeManager {
       if (room) {
         // 决策失败兜底不静默吞 self：有房史最后发言成员则派给它保扇出语义
         const lastSpeaker = this.lastMemberSpeaker(room);
-        const fbMode = lastSpeaker ? "mention" : "self";
+        const lastMode = this.autoHistory.get(room.roomId)?.at(-1)?.mode;
+        // 活性内决策失败沿用上轮可直派模式（parallel），失败也保编排语义
+        const fbMode =
+          lastMode === "parallel" ? "parallel" : lastSpeaker ? "mention" : "self";
         const fbTarget = lastSpeaker ? this.nameFor(room.roomId, lastSpeaker) : undefined;
         this.notice({
           roomId: room.roomId,
@@ -2216,14 +2236,19 @@ export class RoomModeManager {
     if (explicit?.mode !== undefined) {
       logWarn("room-modes auto", `explicit fast-path: ${explicit.reason}`);
       this.setSubMode(room.roomId, explicit.mode as RuntimeMode, undefined, undefined);
+      this.recordAutoMode(room.roomId, explicit.mode, `规则:${explicit.reason}`);
       return this.executeMode(room, explicit.mode as RuntimeMode, text, { ...options, decisionVia: `规则:${explicit.reason}` });
     }
     const awaiting =
       this.conductor.pendingClarification(room.roomId) !== undefined ||
       this.getFlow(room.roomId)?.waitingFor === "user";
-    const fast = this.modeDecider?.fastRoute(decideInput, awaiting);
+    const continuation =
+      this.orchestrationAlive(room) &&
+      /^(好|好的|嗯|行|可以|ok|继续|推进|落地|验证|复核|完成|按|照|接着)/i.test(text.trim());
+    const fast = this.modeDecider?.fastRoute(decideInput, awaiting || continuation);
     if (fast?.mode !== undefined) {
       logWarn("room-modes auto", `fast-path: ${fast.reason}`);
+      this.recordAutoMode(room.roomId, fast.mode, `规则:${fast.reason}`);
       return this.executeMode(room, fast.mode as RuntimeMode, text, { ...options, decisionVia: `规则:${fast.reason}` });
     }
     if (this.modeDecider?.enforced) {
@@ -2233,6 +2258,7 @@ export class RoomModeManager {
           "room-modes auto",
           `decision-model direct: mode=${dv.mode} conf=${dv.confidence} via=${dv.via}`,
         );
+        this.recordAutoMode(room.roomId, dv.mode, `模型:${dv.via}`);
         return this.executeMode(room, dv.mode as RuntimeMode, text, { ...options, decisionVia: `模型:${dv.via}` });
       }
     } else if (this.modeDecider) {

@@ -110,24 +110,76 @@ describe("resolveDecideConfig", () => {
     assert.equal(d.explicitMention({ roomId: "r", text: "帮我看看这个报错", members: m4 }), undefined);
     // 群词+非讨论动词也算扇出：『大家分头评估』『各位分别看下』
     assert.equal(d.explicitMention({ roomId: "r", text: "大家分头评估一下这个方案", members: m4 })?.mode, "parallel");
+    // 『交叉复核/互相复核』显式扇出（词在句中也命中；词表含裸『复核』）
+    assert.equal(d.explicitMention({ roomId: "r", text: "建议交叉复核一下这批改动", members: m4 })?.mode, "parallel");
+    assert.equal(d.explicitMention({ roomId: "r", text: "帮我复核下这个函数", members: m4 })?.mode, "parallel");
   });
 });
 
 describe("fastRoute", () => {
   const m4 = [1, 2, 3, 4].map((i) => ({ sessionId: `s${i}`, name: `w${i}` }));
   const d = new ModeDecider();
-  it("无多成员信号的短消息直出 self", () => {
-    assert.equal(d.fastRoute({ roomId: "r", text: "这个函数为什么返回 undefined？", members: m4 }, false)?.mode, "self");
+  it("真平凡短消息直出 self；中长度无信号交 LLM", () => {
+    assert.equal(d.fastRoute({ roomId: "r", text: "早上好呀", members: m4 }, false)?.mode, "self");
+    // ≥10字无信号不再 fast:self——漏词降级为多走一次 LLM 而非独立作答
+    assert.equal(d.fastRoute({ roomId: "r", text: "这个函数为什么返回 undefined？", members: m4 }, false), undefined);
+    assert.equal(d.fastRoute({ roomId: "r", text: "帮我完成交叉复核", members: m4 }, false), undefined);
   });
   it("有信号/过长/过短/待答/关闭 → 交回主持人", () => {
     const f = (text: string, aw = false) => d.fastRoute({ roomId: "r", text, members: m4 }, aw);
     assert.equal(f("大家分别给个方案"), undefined);
     assert.equal(f("x".repeat(200)), undefined);
     assert.equal(f("好"), undefined);
-    assert.equal(f("这个函数为什么返回 undefined？", true), undefined);
+    assert.equal(f("早上好呀", true), undefined);
     assert.equal(new ModeDecider({ fastPath: false }).fastRoute({ roomId: "r", text: "你好呀今天", members: m4 }, false), undefined);
   });
   it("仅主持人+1 成员恒 self", () => {
     assert.equal(d.fastRoute({ roomId: "r", text: "大家分别给个方案", members: m4.slice(0, 2) }, false)?.mode, "self");
+  });
+});
+
+describe("explicit 全模式意图表", () => {
+  const d = new ModeDecider({});
+  const members = [
+    { sessionId: "h", name: "host" },
+    { sessionId: "a", name: "a" },
+    { sessionId: "b", name: "b" },
+  ];
+  const cases: [string, string][] = [
+    ["拆成三个子任务分别派工", "conductor"],
+    ["按工单编排执行这个需求", "conductor"],
+    ["先让A写再交给B审查", "pipeline"],
+    ["依次逐个完成这三步", "pipeline"],
+    ["大家轮流发言说说看法", "roundrobin"],
+    ["正反方辩论一下这个方案", "debate"],
+    ["帮我讨论一下这个问题", "parallel"],
+  ];
+  for (const [text, want] of cases) {
+    it(`${text} → ${want}`, () => {
+      const v = d.explicitMention({ roomId: "r", text, members });
+      assert.equal(v?.mode, want, `via=${v?.reason}`);
+    });
+  }
+  it("不误伤：先想想再给你答复（裸给不算 pipeline）", () => {
+    const v = d.explicitMention({
+      roomId: "r",
+      text: "先等等再给你答复",
+      members,
+    });
+    assert.notEqual(v?.mode, "pipeline");
+  });
+  it("交叉复核/评审 → parallel", () => {
+    for (const text of ["帮我完成复核", "交叉复核一下这批改动", "评审这个方案"]) {
+      const v = d.explicitMention({ roomId: "r", text, members });
+      assert.equal(v?.mode, "parallel", `${text} via=${v?.reason}`);
+    }
+  });
+  it("冲突时 conductor 优先于 parallel（编排词+讨论词）", () => {
+    const v = d.explicitMention({
+      roomId: "r",
+      text: "把这个需求编排成工单讨论",
+      members,
+    });
+    assert.equal(v?.mode, "conductor");
   });
 });
