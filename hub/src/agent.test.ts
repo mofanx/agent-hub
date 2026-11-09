@@ -9,6 +9,7 @@ import {
   setPromptAckTimeoutMs,
   setTurnSettleGraceMs,
   setTurnStallTimeoutMs,
+  setTurnDeadGraceMs,
   setStallNoticeMs,
   sliceTextFile,
   type HubEvent,
@@ -491,6 +492,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
         }),
     });
     setTurnStallTimeoutMs(80);
+    setTurnDeadGraceMs(0);
     try {
       await hub.createSession("/tmp", "s");
       await hub.prompt("s1", "first");
@@ -524,7 +526,8 @@ describe("AcpAgent integration (in-memory stream)", () => {
       await waitFor(() => events.find((e) => e.method === "prompt.done"));
       assert.equal(hub.isBusy("s1"), false);
     } finally {
-      setTurnStallTimeoutMs(180_000);
+      setTurnStallTimeoutMs(300_000);
+      setTurnDeadGraceMs(60_000);
       hub.close();
       agentConn.close();
     }
@@ -571,6 +574,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
         }),
     });
     setTurnStallTimeoutMs(10_000);
+    setTurnDeadGraceMs(0);
     try {
       await hub.createSession("/tmp", "s");
       await hub.prompt("s1", "first", { stallMs: 60 });
@@ -591,8 +595,13 @@ describe("AcpAgent integration (in-memory stream)", () => {
         ),
       );
       assert.ok(errEv, "per-call stallMs 应按覆盖值触发");
+      // P1 结构化归因：stall 判死带 stage/idleMs，客户端可渲染失败阶段+建议动作
+      const p = errEv.params as { stage?: string; idleMs?: number };
+      assert.equal(p.stage, "stall");
+      assert.equal(typeof p.idleMs, "number");
     } finally {
-      setTurnStallTimeoutMs(180_000);
+      setTurnStallTimeoutMs(300_000);
+      setTurnDeadGraceMs(60_000);
       hub.close();
       agentConn.close();
     }
@@ -655,7 +664,8 @@ describe("AcpAgent integration (in-memory stream)", () => {
       assert.equal(hub.respondPermission(requestId, "a"), true);
       await respPromise;
     } finally {
-      setTurnStallTimeoutMs(180_000);
+      setTurnStallTimeoutMs(300_000);
+      setTurnDeadGraceMs(60_000);
       setPermissionBypass(prevBypass);
       hub.close();
       agentConn.close();

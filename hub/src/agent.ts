@@ -63,7 +63,16 @@ export type HubEvent =
       method: "prompt.done";
       params: PromptDoneParams;
     }
-  | { method: "prompt.error"; params: { sessionId: string; message: string } }
+  | {
+      method: "prompt.error";
+      params: {
+        sessionId: string;
+        message: string;
+        /** 失败阶段归因（客户端按 code 渲染建议动作）：ack=首输出前超时，stall=有输出后静默，transport=断连/传输，cancel=用户取消 */
+        stage?: "ack" | "stall" | "transport" | "cancel";
+        idleMs?: number;
+      };
+    }
   | {
       method: "elicitation.request";
       params: {
@@ -232,6 +241,8 @@ type SessionEntry = {
   turnEpoch?: number;
   /** 本回合是否已发过一次 session.stall 进度提示（每回合至多一条） */
   stallNotified?: boolean;
+  /** stall 判疑已告警并处于回收宽限期（宽限内再静默才杀） */
+  stallWarned?: boolean;
 };
 
 export function stripLoneSurrogates(s: string): string {
@@ -257,16 +268,21 @@ export function setPromptAckTimeoutMs(v: number): void {
   promptAckTimeoutMs = v;
 }
 /** mid-turn 静默看门狗预算（ms）：回合收到过输出后连续静默超此时长判 stalled；<=0 关闭；env HUB_TURN_STALL_MS 覆盖 */
-let turnStallTimeoutMs = Number(process.env.HUB_TURN_STALL_MS ?? 180_000);
+let turnStallTimeoutMs = Number(process.env.HUB_TURN_STALL_MS ?? 300_000);
 
 export function setTurnStallTimeoutMs(v: number): void {
   turnStallTimeoutMs = v;
 }
 /** 静默进度提示阈值（ms）：busy 无输出超此时长先吐一条 session.stall 预期管理提示（不杀回合）；<=0 关闭；env HUB_STALL_NOTICE_MS 覆盖 */
 let stallNoticeMs = Number(process.env.HUB_STALL_NOTICE_MS ?? 60_000);
-
 export function setStallNoticeMs(v: number): void {
   stallNoticeMs = v;
+}
+/** stall 判疑后回收宽限（ms）：超 stall 预算先发 session.stall 告警并宽限此时长，仍静默才真杀——防 gradle 构建等合法长静默被 180s 误杀；<=0 关闭宽限（旧行为直杀）；env HUB_TURN_DEAD_GRACE_MS 覆盖 */
+let turnDeadGraceMs = Number(process.env.HUB_TURN_DEAD_GRACE_MS ?? 300_000);
+
+export function setTurnDeadGraceMs(v: number): void {
+  turnDeadGraceMs = v;
 }
 /** prompt.done 定稿宽限窗（ms）：<=0 关闭；env HUB_TURN_SETTLE_GRACE_MS 覆盖 */
 let turnSettleGraceMs = Number(process.env.HUB_TURN_SETTLE_GRACE_MS ?? 100);
@@ -1455,6 +1471,7 @@ export class AcpAgent {
     entry.turnText = "";
     entry.turnGotUpdate = false;
     entry.stallNotified = false;
+    entry.stallWarned = false;
     entry.lastActivityAt = Date.now();
     const epoch = (entry.turnEpoch ?? 0) + 1;
     entry.turnEpoch = epoch;
@@ -1531,6 +1548,16 @@ export class AcpAgent {
             return;
           }
         }
+        // stall 判疑→宽限：已到 stall 预算但先发告警+宽限一轮，仍静默才真杀（ACK 阶段无此宽限）
+        if (entry.turnGotUpdate && turnDeadGraceMs > 0 && !entry.stallWarned) {
+          entry.stallWarned = true;
+          this.emit({
+            method: "session.stall",
+            params: { sessionId, idleMs: idle },
+          });
+          armWatchdog(turnDeadGraceMs);
+          return;
+        }
         const err = new Error(
           entry.turnGotUpdate
             ? `agent ${this.name} went silent for ${Math.round(idle / 1000)}s mid-turn — treating as stalled`
@@ -1546,7 +1573,12 @@ export class AcpAgent {
         this.cancel(sessionId).catch(() => {}).finally(() => {
           this.emit({
             method: "prompt.error",
-            params: { sessionId, message: String(err) },
+            params: {
+              sessionId,
+              message: String(err),
+              stage: entry.turnGotUpdate ? "stall" : "ack",
+              idleMs: idle,
+            },
           });
         });
       }, ms);
@@ -1600,7 +1632,11 @@ export class AcpAgent {
           });
           this.emit({
             method: "prompt.error",
-            params: { sessionId, message: String(err) },
+            params: {
+              sessionId,
+              message: String(err),
+              stage: "transport",
+            },
           });
         }
         // promptOnce 等待者在错误时也需要被 reject

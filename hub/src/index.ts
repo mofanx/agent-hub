@@ -1586,18 +1586,31 @@ function onAgentEvent(event: HubEvent): void {
       interruptTurnDrafts(sessionId);
       const message = String(event.params.message ?? "").trim() || "turn error";
       const author = displayNameFor(sessionId);
+      const stage =
+        typeof event.params.stage === "string" ? event.params.stage : undefined;
+      const idleMs =
+        typeof event.params.idleMs === "number" ? event.params.idleMs : undefined;
       store.append("session", sessionId, {
         at: Date.now(),
         kind: "error",
         author,
         text: message,
+        ...(stage ? { stage } : {}),
+        ...(idleMs != null ? { idleMs } : {}),
       });
       if (errorRoomId && !roomModeManager.isHiddenSession(sessionId)) {
+        // 失败条目带 flow/task 关联：客户端可把错误归到编排卡定位，而非孤立红点
+        const flowId = roomModeManager.flowIdForTurn(sessionId, errorRoomId);
+        const taskId = roomModeManager.taskIdForTurn(sessionId, errorRoomId);
         store.append("room", errorRoomId, {
           at: Date.now(),
           kind: "error",
           author,
           text: message,
+          ...(stage ? { stage } : {}),
+          ...(idleMs != null ? { idleMs } : {}),
+          ...(flowId ? { flowId } : {}),
+          ...(taskId ? { taskId } : {}),
         });
       }
       roomModeManager.onPromptError(sessionId, message);
