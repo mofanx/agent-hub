@@ -40,6 +40,9 @@ const MULTI_SIGNAL = new RegExp(
   "i",
 );
 const FAST_MAX_LEN = 120;
+// 显式拉群讨论：群词（群友/大家/全员/所有人/拉上/一起/群策）+ 讨论类动词，或含「群友」即算；
+// auto 房用户说"讨论"即拉群讨论（用户已多次实证此期望），裸「讨论」也算
+const DISCUSSION_INTENT = /讨论|群友|拉上.{0,8}(商量|评估)|大家.{0,8}(商量|一起|分别|分头|各)|各位.{0,8}(分别|分头|各)|全员.{0,8}(商量|评估|分别|分头)|所有人.{0,8}(商量|分别)|一起.{0,6}商量|群策群力|开个会/i;
 
 const PROVIDERS: Record<string, { baseUrl: string; keyEnv: string }> = {
   deepseek: { baseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY" },
@@ -134,6 +137,14 @@ export class ModeDecider {
           action: "direct", via: "rule", reason: `mention:@${m.name}`, ms: 0,
         };
       }
+    }
+    // 明确群聊讨论意图 → 直接扇出，不交主持人（prompt 硬约束可被模型违背，代码规则兜底）
+    if (DISCUSSION_INTENT.test(text)) {
+      const mode = input.members.length > 2 ? "parallel" : "mention";
+      return {
+        tier: "explicit", mode, confidence: 1,
+        action: "direct", via: "rule", reason: "discussion-intent", ms: 0,
+      };
     }
     if (text.length < 4) {
       return { tier: "ignore", confidence: 0, action: "host", via: "rule", reason: "too-short", ms: 0 };

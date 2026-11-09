@@ -730,6 +730,11 @@ const roomModeManager = new RoomModeManager(
     const v = Number(process.env.HUB_AUTO_DECIDE_TIMEOUT_MS ?? 20_000);
     return Number.isFinite(v) && v > 0 ? v : 0;
   })(),
+  // auto 决策回合 stall 预算：决策 prompt 生成慢于普通回合，默认放宽到 300s（env HUB_AUTO_DECIDE_STALL_MS 覆盖，<=0 沿用全局）
+  (() => {
+    const v = Number(process.env.HUB_AUTO_DECIDE_STALL_MS ?? 300_000);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  })(),
 );
 roomModeManager.setStore(store);
 
@@ -1582,6 +1587,19 @@ function onAgentEvent(event: HubEvent): void {
       author: "",
       text: event.params.message,
     });
+  } else if (event.method === "session.stall" && sessionId) {
+    // 成员静默进度提示：房回合→room.notice；单聊→session 史系统条
+    const idleMs = Number((event.params as { idleMs?: unknown }).idleMs ?? 0);
+    const stallRoomId = roomModeManager.roomIdForTurn(sessionId);
+    const stallMsg = `⏳ @${displayNameFor(sessionId)} 处理中已 ${Math.round(idleMs / 1000)}s…`;
+    if (stallRoomId) broadcastRoomNotice(stallRoomId, stallMsg);
+    else
+      store.append("session", sessionId, {
+        at: Date.now(),
+        kind: "system",
+        author: "",
+        text: stallMsg,
+      });
   } else if (event.method === "session.notice" && sessionId) {
     // 单聊侧提示（如 busy 排队）：落 session 史为 system 条目，
     // 客户端经历史同步可见；kind=system 不影响 turn 游标

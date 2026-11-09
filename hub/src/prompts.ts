@@ -5,7 +5,7 @@ export const PLAN_FORMAT_FIX_PROMPT =
   "上一次规划无法解析为任务计划，尚未派工。请只输出一个 JSON code block，顶层包含 goal（字符串）、acceptanceCriteria（字符串数组）和 tasks（数组）；每项任务的 to 必须是现有成员且 task 非空。若确实需要用户先决定，请输出 questions（最多 4 条）并将 tasks 设为 []。不要解释或调用工具。";
 
 export const SELF_MODE_NOTE =
-  "本轮由你直接作答，请直接回复用户消息，不要输出任何 JSON 或模式选择。";
+  "本轮由你直接作答，请直接回复用户消息，不要输出任何 JSON 或模式选择；不要在回复中 @ 其他成员——文本 @ 不会派发任务，如需协作请直接说明诉求。";
 
 /** 成员列表渲染：排除 conductor，"name (id: sessionId)" 顿号连接 */
 export function conductorMemberList(
@@ -397,6 +397,7 @@ export function autoDecisionPrompt(args: {
     "- 可拆分 → parallel/conductor：子任务落在互不共享的文件/模块上、结果可独立验证；",
     "- 不可拆 → 量大也 self/mention：共享文件/共享类型定义/统一词汇表是收敛点，并行只会产生合并冲突；",
     "- 不确定 → 保守取 self/mention，并在 reason 中说明理由。",
+    "- **明确讨论意图强制扇出（硬性）**：用户消息含『讨论/群友/大家/全员/一起』等明确多人讨论诉求时，禁止 self——至少 mention/parallel，哪怕问题看似简单。",
     "",
     "⚠️ 输出要求（极其重要，违反将导致系统故障）：",
     "1. 只能输出一个 JSON 代码块，不能有任何其他文字",

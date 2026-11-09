@@ -99,6 +99,18 @@ describe("resolveDecideConfig", () => {
     assert.equal(d.explicitMention(input)?.mode, "mention");
     assert.equal(d.explicitMention({ ...input, text: "帮我看看这个报错" }), undefined);
   });
+  it("明确群聊讨论意图直接扇出，不交主持人", () => {
+    const d = new ModeDecider();
+    const m4 = [1, 2, 3, 4].map((i) => ({ sessionId: `s${i}`, name: `w${i}` }));
+    assert.equal(d.explicitMention({ roomId: "r", text: "请拉上群友一起讨论一下这个方案", members: m4 })?.mode, "parallel");
+    assert.equal(d.explicitMention({ roomId: "r", text: "大家一起讨论下", members: m4 })?.mode, "parallel");
+    assert.equal(d.explicitMention({ roomId: "r", text: "有些问题请拉上群友讨论", members: m4.slice(0, 2) })?.mode, "mention");
+    // 裸「讨论」也算拉群讨论——auto 房用户语义即群讨论（用户已三次实证此期望）
+    assert.equal(d.explicitMention({ roomId: "r", text: "帮我讨论下这个报错", members: m4 })?.mode, "parallel");
+    assert.equal(d.explicitMention({ roomId: "r", text: "帮我看看这个报错", members: m4 }), undefined);
+    // 群词+非讨论动词也算扇出：『大家分头评估』『各位分别看下』
+    assert.equal(d.explicitMention({ roomId: "r", text: "大家分头评估一下这个方案", members: m4 })?.mode, "parallel");
+  });
 });
 
 describe("fastRoute", () => {

@@ -12,6 +12,8 @@ import { safetyFloorVerdict } from "./safety-floor.js";
 export type PromptOpts = {
   queueIfBusy?: boolean;
   ackTimeoutMs?: number;
+  /** mid-turn 静默预算 per-call 覆盖（如 auto 决策回合放宽）：未设走全局 turnStallTimeoutMs */
+  stallMs?: number;
 };
 
 export function isSessionBusyError(err: unknown): boolean {
@@ -130,6 +132,7 @@ export type HubEvent =
     }
   | { method: "room.notice"; params: { roomId: string; message: string } }
   | { method: "session.notice"; params: { sessionId: string; message: string } }
+  | { method: "session.stall"; params: { sessionId: string; idleMs: number } }
   | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string } } }
   | { method: "room.artifact"; params: { roomId: string; artifact?: unknown } }
   | { method: "session.artifact"; params: { sessionId: string } }
@@ -227,6 +230,8 @@ type SessionEntry = {
   } | undefined;
   /** 回合代际：每 prompt/cancel 递增，过期 settle 一律丢弃 */
   turnEpoch?: number;
+  /** 本回合是否已发过一次 session.stall 进度提示（每回合至多一条） */
+  stallNotified?: boolean;
 };
 
 export function stripLoneSurrogates(s: string): string {
@@ -256,6 +261,12 @@ let turnStallTimeoutMs = Number(process.env.HUB_TURN_STALL_MS ?? 180_000);
 
 export function setTurnStallTimeoutMs(v: number): void {
   turnStallTimeoutMs = v;
+}
+/** 静默进度提示阈值（ms）：busy 无输出超此时长先吐一条 session.stall 预期管理提示（不杀回合）；<=0 关闭；env HUB_STALL_NOTICE_MS 覆盖 */
+let stallNoticeMs = Number(process.env.HUB_STALL_NOTICE_MS ?? 60_000);
+
+export function setStallNoticeMs(v: number): void {
+  stallNoticeMs = v;
 }
 /** prompt.done 定稿宽限窗（ms）：<=0 关闭；env HUB_TURN_SETTLE_GRACE_MS 覆盖 */
 let turnSettleGraceMs = Number(process.env.HUB_TURN_SETTLE_GRACE_MS ?? 100);
@@ -1443,6 +1454,7 @@ export class AcpAgent {
     entry.stoppable = true;
     entry.turnText = "";
     entry.turnGotUpdate = false;
+    entry.stallNotified = false;
     entry.lastActivityAt = Date.now();
     const epoch = (entry.turnEpoch ?? 0) + 1;
     entry.turnEpoch = epoch;
@@ -1461,6 +1473,7 @@ export class AcpAgent {
     // agent 流出一段内容后挂死同样会被回收，不再永久 busy 吞掉后续排队消息。
     // 挂起的 permission/elicitation 属"等待用户答复"活跃态，轮询续命不误判。
     const ackTimeoutMs = opts?.ackTimeoutMs ?? promptAckTimeoutMs;
+    const stallMs = opts?.stallMs ?? turnStallTimeoutMs;
     const armWatchdog = (ms: number) => {
       clearTimeout(entry.watchdog);
       entry.watchdog = setTimeout(() => {
@@ -1475,11 +1488,26 @@ export class AcpAgent {
           );
         if (interactive) {
           // 等待用户答复期间续命：以当前阶段预算为轮询间隔
-          const poll = entry.turnGotUpdate ? turnStallTimeoutMs : ackTimeoutMs;
+          const poll = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
           if (poll > 0) armWatchdog(poll);
           return;
         }
         const idle = Date.now() - (entry.lastActivityAt ?? 0);
+        // 静默进度提示：超阈值先吐一条 session.stall（每回合一次，不杀回合），
+        // 用户不再从 180s 超时报错才反推发生过静默
+        if (stallNoticeMs > 0 && !entry.stallNotified && idle >= stallNoticeMs) {
+          entry.stallNotified = true;
+          this.emit({
+            method: "session.stall",
+            params: { sessionId, idleMs: idle },
+          });
+          const budget = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
+          const remain = budget - idle;
+          if (remain > 0) {
+            armWatchdog(remain);
+            return;
+          }
+        }
         if (!entry.turnGotUpdate) {
           // ACK 阶段：<=0 与旧语义一致立即判超时
           if (ackTimeoutMs > 0 && idle < ackTimeoutMs) {
@@ -1488,9 +1516,9 @@ export class AcpAgent {
           }
         } else {
           // stall 阶段：<=0 关闭
-          if (turnStallTimeoutMs <= 0) return;
-          if (idle < turnStallTimeoutMs) {
-            armWatchdog(turnStallTimeoutMs - idle);
+          if (stallMs <= 0) return;
+          if (idle < stallMs) {
+            armWatchdog(stallMs - idle);
             return;
           }
         }
@@ -1518,7 +1546,8 @@ export class AcpAgent {
     // 首次检查点取两阶段预算的较小者（stall<=0 视为不参战），ack<=0 立即判超时
     const firstBudget = Math.min(
       ackTimeoutMs,
-      turnStallTimeoutMs > 0 ? turnStallTimeoutMs : Number.MAX_SAFE_INTEGER,
+      stallMs > 0 ? stallMs : Number.MAX_SAFE_INTEGER,
+      stallNoticeMs > 0 ? stallNoticeMs : Number.MAX_SAFE_INTEGER,
     );
     if (Number.isFinite(firstBudget)) armWatchdog(Math.max(firstBudget, 0));
     this.ctx!.request(acp.methods.agent.session.prompt, {

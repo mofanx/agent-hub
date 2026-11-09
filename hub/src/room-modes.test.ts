@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseTaskCommand, RoomModeManager, type AgentOps } from "./room-modes.js";
+import { ModeDecider } from "./decide.js";
 import { createPromptDoneParams, promptDoneInternalOutput } from "./agent.js";
 import { resolveMemberByString } from "./conductor.js";
 import { RoomManager } from "./room.js";
@@ -872,5 +873,100 @@ describe("openTopics 编排注入与归档", () => {
     assert.equal(snapshot?.mode, "parallel");
     assert.equal(clientMessageFlowState(snapshot), "restart");
     await manager.cancelActive(room.roomId, "test cleanup");
+  });
+  it("auto 决策失败兜底：有最后发言成员时派给该成员而非 self", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-fb",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    (autoRoom.blackboard ??= []).push({
+      id: "b1",
+      from: "worker",
+      text: "上轮输出",
+      detail: "",
+      at: Date.now(),
+    });
+    const prompts: { sessionId: string }[] = [];
+    const events: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId) => {
+          prompts.push({ sessionId });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      (method, params) => events.push({ method, params }),
+    );
+    await manager.handle(autoRoom, "交给 worker 回答");
+    manager.onPromptError("host", "went silent mid-turn");
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.at(-1)?.sessionId, "worker");
+    const notice = events.find(
+      (e) => e.method === "room.notice" && /兜底/.test(String(e.params.message)),
+    );
+    assert.ok(notice, "决策失败应有兜底系统提示");
+  });
+
+  it("auto 决策失败兜底：无最后发言成员时仍回退 self", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-fb-solo",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const prompts: { sessionId: string }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId) => {
+          prompts.push({ sessionId });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+    );
+    await manager.handle(autoRoom, "交给 worker 回答");
+    manager.onPromptError("host", "went silent mid-turn");
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[1]?.sessionId, "host");
+  });
+
+  it("auto 规则快通道：self 应答通知标注决策来源", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-fast",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const events: { method: string; params: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(
+      { prompt: async () => {}, isBusy: () => false, cancel: async () => {} },
+      rooms,
+      (method, params) => events.push({ method, params }),
+    );
+    manager.setModeDecider(new ModeDecider({}));
+    await manager.handle(autoRoom, "帮我看下这段代码");
+    const ev = events.find(
+      (e) => e.method === "room.notice" && /独立作答/.test(String(e.params.message)),
+    );
+    assert.ok(ev && /规则/.test(String(ev.params.message)), "通知应标注规则来源");
   });
 });

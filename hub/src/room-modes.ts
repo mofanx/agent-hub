@@ -60,6 +60,8 @@ type PromptOptions = {
   bypassFilter?: boolean | undefined;
   /** 派发来源 mission id：由此创建的 flow 记录归属，mission 仅认领 missionId 匹配的 flow */
   missionId?: string | undefined;
+  /** 决策来源标注（规则:x/LLM/兜底）：随「自动选择」通知透出，便于定位哪层判的 */
+  decisionVia?: string | undefined;
 };
 
 export function parseTaskCommand(
@@ -153,6 +155,8 @@ type AutoDecision = {
   mode: AutoDecisionMode;
   reason: string;
   params?: Record<string, unknown>;
+  /** LLM 正常解析 / 解析失败兜底——通知与下发标注用 */
+  via?: "llm" | "fallback" | undefined;
 };
 
 type ParallelFlow = {
@@ -318,6 +322,7 @@ export class RoomModeManager {
     promptRetryMs?: number,
     isolatedChecks?: Readonly<Record<string, string>>,
     private readonly autoDecideTimeoutMs = 0,
+    private readonly autoDecideStallMs = 0,
   ) {
     this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs, isolatedChecks);
     this.conductor.setTurnGuard((sid, rid, content) => this.noteTurnGuard(sid, rid, content));
@@ -337,6 +342,14 @@ export class RoomModeManager {
   private modeDecider?: ModeDecider;
   setModeDecider(d: ModeDecider): void {
     this.modeDecider = d;
+  }
+
+  /** 黑板上最后发言的非主持人成员：兜底派发/短答回退共用 */
+  private lastMemberSpeaker(room: Room): string | undefined {
+    return [...(room.blackboard ?? [])]
+      .reverse()
+      .map((e) => e.from)
+      .find((f) => room.members.some((m) => m.sessionId === f) && f !== room.conductorId);
   }
 
   exportRuntime(): Record<string, unknown> {
@@ -1171,10 +1184,7 @@ export class RoomModeManager {
       if (mode === "self") {
         const SHORT_ANSWER = /^[\s\S]{1,10}$/;
         const AFFIRM = /好|嗯|可以|是的|行|对|不|继续|ok|yes|sure|no/i;
-        const lastSpeaker = [...(room.blackboard ?? [])]
-          .reverse()
-          .map((e) => e.from)
-          .find((f) => room.members.some((m) => m.sessionId === f) && f !== room.conductorId);
+        const lastSpeaker = this.lastMemberSpeaker(room);
         const awaiting =
           this.conductor.pendingClarification(room.roomId) !== undefined ||
           this.getFlow(room.roomId)?.waitingFor === "user";
@@ -1202,11 +1212,12 @@ export class RoomModeManager {
         }
       }
       const label = MODE_LABELS[mode] ?? mode;
+      const viaLabel = decision.via === "fallback" ? "兜底" : "LLM";
       logWarn("room-modes auto", `解析决策：mode=${mode}，reason=${decision.reason}`);
       this.setSubMode(room.roomId, mode, this.activeSpeakerFor(room, mode, params), decision.reason);
       this.notice({
         roomId: room.roomId,
-        message: `🎛️ 本轮自动选择：${label}${decision.reason ? ` —— ${decision.reason}` : ""}`,
+        message: `🎛️ 本轮自动选择：${label}（${viaLabel}）${decision.reason ? ` —— ${decision.reason}` : ""}`,
       });
       const result = await this.executeMode(room, mode, autoCtx.text, {
         note: autoCtx.note,
@@ -1216,6 +1227,7 @@ export class RoomModeManager {
         params,
         artifactContext: autoCtx.artifactContext,
         missionId: autoCtx.missionId,
+        decisionVia: viaLabel,
       });
       logWarn("room-modes auto", `executeMode 完成：sent=[${result.sent.join(", ")}]，skipped=[${result.skipped.join(", ")}]`);
       this.emitFlowUpdate(room.roomId);
@@ -1344,14 +1356,25 @@ export class RoomModeManager {
       this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (room) {
-        this.notice({ roomId: room.roomId, message: `🎛️ 主持人决策失败（${message.slice(0, 80)}），已兜底为回答` });
-        this.setSubMode(room.roomId, "self", room.conductorId, undefined);
-        void this.executeMode(room, "self", autoCtx.text, {
+        // 决策失败兜底不静默吞 self：有房史最后发言成员则派给它保扇出语义
+        const lastSpeaker = this.lastMemberSpeaker(room);
+        const fbMode = lastSpeaker ? "mention" : "self";
+        const fbTarget = lastSpeaker ? this.nameFor(room.roomId, lastSpeaker) : undefined;
+        this.notice({
+          roomId: room.roomId,
+          message: lastSpeaker
+            ? `🎛️ 主持人决策失败（${message.slice(0, 80)}），已兜底派给 @${fbTarget}`
+            : `🎛️ 主持人决策失败（${message.slice(0, 80)}），已兜底为回答`,
+        });
+        this.setSubMode(room.roomId, fbMode, lastSpeaker ?? room.conductorId, undefined);
+        void this.executeMode(room, fbMode, autoCtx.text, {
           note: autoCtx.note,
           quote: autoCtx.quote,
           content: autoCtx.content,
           sessionNote: autoCtx.sessionNote,
           artifactContext: autoCtx.artifactContext,
+          decisionVia: "兜底",
+          ...(lastSpeaker ? { params: { targets: [lastSpeaker] } } : {}),
         }).catch((err) => {
           logError("room-modes auto fallback", err);
           this.clearSubMode(room.roomId);
@@ -2142,7 +2165,7 @@ export class RoomModeManager {
     }
     const conductorBusy = this.agent.isBusy(room.conductorId);
     this.setSubMode(room.roomId, "self", room.conductorId, undefined);
-    this.notice({ roomId: room.roomId, message: `🎙️ 自动选择：主持人独立作答` });
+    this.notice({ roomId: room.roomId, message: `🎙️ 自动选择：主持人独立作答${options?.decisionVia ? `（${options.decisionVia}）` : ""}` });
     const selfNote = SELF_MODE_NOTE;
     const promptOptions: PromptOptions = {
       ...options,
@@ -2193,7 +2216,7 @@ export class RoomModeManager {
     if (explicit?.mode !== undefined) {
       logWarn("room-modes auto", `explicit fast-path: ${explicit.reason}`);
       this.setSubMode(room.roomId, explicit.mode as RuntimeMode, undefined, undefined);
-      return this.executeMode(room, explicit.mode as RuntimeMode, text, options);
+      return this.executeMode(room, explicit.mode as RuntimeMode, text, { ...options, decisionVia: `规则:${explicit.reason}` });
     }
     const awaiting =
       this.conductor.pendingClarification(room.roomId) !== undefined ||
@@ -2201,7 +2224,7 @@ export class RoomModeManager {
     const fast = this.modeDecider?.fastRoute(decideInput, awaiting);
     if (fast?.mode !== undefined) {
       logWarn("room-modes auto", `fast-path: ${fast.reason}`);
-      return this.executeMode(room, fast.mode as RuntimeMode, text, options);
+      return this.executeMode(room, fast.mode as RuntimeMode, text, { ...options, decisionVia: `规则:${fast.reason}` });
     }
     if (this.modeDecider?.enforced) {
       const dv = await this.modeDecider.decide(decideInput);
@@ -2210,7 +2233,7 @@ export class RoomModeManager {
           "room-modes auto",
           `decision-model direct: mode=${dv.mode} conf=${dv.confidence} via=${dv.via}`,
         );
-        return this.executeMode(room, dv.mode as RuntimeMode, text, options);
+        return this.executeMode(room, dv.mode as RuntimeMode, text, { ...options, decisionVia: `模型:${dv.via}` });
       }
     } else if (this.modeDecider) {
       void this.modeDecider
@@ -2226,7 +2249,14 @@ export class RoomModeManager {
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
     // 决策回合专属 ACK 预算：只兜"无输出卡死"，超时走 prompt.error→fail-open self 现行兜底
-    this.sendPrompt(room.roomId, conductorId, prompt, this.autoDecideTimeoutMs > 0 ? { ackTimeoutMs: this.autoDecideTimeoutMs } : undefined).catch((err) => {
+    const decideOpts =
+      this.autoDecideTimeoutMs > 0 || this.autoDecideStallMs > 0
+        ? {
+            ...(this.autoDecideTimeoutMs > 0 ? { ackTimeoutMs: this.autoDecideTimeoutMs } : {}),
+            ...(this.autoDecideStallMs > 0 ? { stallMs: this.autoDecideStallMs } : {}),
+          }
+        : undefined;
+    this.sendPrompt(room.roomId, conductorId, prompt, decideOpts).catch((err) => {
       logError("room-modes auto decision", err);
       // 发送失败不会有 prompt.done/error 兜底，清掉悬挂决策避免下次 done 误消费
       if (this.autoDecisions.get(conductorId) === autoCtx) {
@@ -2286,7 +2316,7 @@ export class RoomModeManager {
   }
 
   private parseAutoDecision(output: string): AutoDecision {
-    const fallback: AutoDecision = { mode: "self", reason: "决策输出无法解析，兜底为回答" };
+    const fallback: AutoDecision = { mode: "self", reason: "决策输出无法解析，兜底为回答", via: "fallback" };
     const text = output.trim();
     if (!text) {
       logWarn("room-modes auto", "决策输出为空");

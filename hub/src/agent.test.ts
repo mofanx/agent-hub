@@ -9,6 +9,7 @@ import {
   setPromptAckTimeoutMs,
   setTurnSettleGraceMs,
   setTurnStallTimeoutMs,
+  setStallNoticeMs,
   sliceTextFile,
   type HubEvent,
 } from "./agent.js";
@@ -522,6 +523,74 @@ describe("AcpAgent integration (in-memory stream)", () => {
       resolvers[1]!({ stopReason: "end_turn" });
       await waitFor(() => events.find((e) => e.method === "prompt.done"));
       assert.equal(hub.isBusy("s1"), false);
+    } finally {
+      setTurnStallTimeoutMs(180_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("无输出超阈值先发 session.stall 提示（每回合一次，不误杀）", async () => {
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    setStallNoticeMs(50);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      const ev = await waitFor(() =>
+        events.find((e) => e.method === "session.stall"),
+      );
+      assert.ok(ev, "应发出 session.stall 进度提示");
+      assert.equal(hub.isBusy("s1"), true, "stall 提示不误杀回合");
+      assert.equal(
+        events.filter((e) => e.method === "prompt.error").length,
+        0,
+        "stall 提示阶段不应判超时",
+      );
+      const stallCount = events.filter((e) => e.method === "session.stall").length;
+      await new Promise((r) => setTimeout(r, 120));
+      assert.equal(
+        events.filter((e) => e.method === "session.stall").length,
+        stallCount,
+        "每回合只提示一次",
+      );
+    } finally {
+      setStallNoticeMs(60_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("per-call stallMs 覆盖全局静默预算", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const { hub, agentConn, events } = setup({
+      promptHandler: () =>
+        new Promise<acp.PromptResponse>((r) => {
+          resolvers.push(r);
+        }),
+    });
+    setTurnStallTimeoutMs(10_000);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first", { stallMs: 60 });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "partial" },
+        },
+      });
+      const errEv = await waitFor(() =>
+        events.find(
+          (e) =>
+            e.method === "prompt.error" &&
+            /silent|stall/i.test(
+              String((e.params as { message?: unknown }).message),
+            ),
+        ),
+      );
+      assert.ok(errEv, "per-call stallMs 应按覆盖值触发");
     } finally {
       setTurnStallTimeoutMs(180_000);
       hub.close();
