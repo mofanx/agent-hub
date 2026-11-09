@@ -195,7 +195,14 @@ export class Store {
   loadFlowSnapshot(roomId: string): { seq: number; snapshot: Record<string, unknown> } | undefined {
     const row = this.prep("SELECT seq, snapshot FROM flow_snapshots WHERE room_id = ?")
       .get(roomId) as { seq: number; snapshot: string } | undefined;
-    return row ? { seq: row.seq, snapshot: JSON.parse(row.snapshot) as Record<string, unknown> } : undefined;
+    if (!row) return undefined;
+    try {
+      return { seq: row.seq, snapshot: JSON.parse(row.snapshot) as Record<string, unknown> };
+    } catch {
+      // 快照是可重放缓存：单房损坏丢弃该行即可重建，不走 quarantine 也不拖垮整体恢复
+      this.prep("DELETE FROM flow_snapshots WHERE room_id = ?").run(roomId);
+      return undefined;
+    }
   }
 
   close(): void {

@@ -559,3 +559,121 @@ describe("TDD-red：accept() 固化 finishedAt", () => {
     assert.ok(snap.finishedAt! > flowDoneAt!, "accept 应把 finishedAt 推进到验收时刻");
   });
 });
+
+describe("P0：reconcile 按归属重绑续跑", () => {
+  function restoredManager(h: Harness, flow: Record<string, unknown> | undefined, activeFlow: boolean) {
+    return new MissionManager({
+      store: h.store,
+      getRoom: (id) => h.rooms.get(id),
+      getFlow: () => flow,
+      hasActiveFlow: () => activeFlow,
+      isBusy: () => false,
+      isAvailable: () => true,
+      dispatch: async () => ({ sent: [], mentioned: [], skipped: [] }),
+      cancelActive: async () => {},
+      cancel: async () => {},
+      retryFailedTasks: () => false,
+      supplementActive: () => false,
+      broadcast: () => {},
+    });
+  }
+
+  it("bound 且 done 的 flow：走正常相位映射为 awaiting-acceptance，不误落 stopped", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    // 快照里 flow 已 done：hasActiveFlow=false 但归属匹配
+    const r = restoredManager(h, flowView("f1", "done", [{ id: "t1", status: "done" }], m.id), false);
+    r.reconcile();
+    const rec = r.get(m.id) as { status: string; reasonCode?: string } | undefined;
+    assert.equal(rec?.status, "awaiting-acceptance");
+    assert.notEqual(rec?.reasonCode, "interrupted-restart");
+  });
+
+  it("bound 且 done 带失败任务的 flow：映射为 failed/flow-tasks-failed", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    const r = restoredManager(h, flowView("f1", "done", [{ id: "t1", status: "failed" }], m.id), false);
+    r.reconcile();
+    const rec = r.get(m.id) as { status: string; reasonCode?: string } | undefined;
+    assert.equal(rec?.status, "failed");
+    assert.equal(rec?.reasonCode, "flow-tasks-failed");
+  });
+
+  it("bound 且 cancelled 的 flow：落 stopped/flow-cancelled 而非 interrupted-restart", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    const r = restoredManager(h, flowView("f1", "cancelled", [], m.id), false);
+    r.reconcile();
+    const rec = r.get(m.id) as { status: string; reasonCode?: string } | undefined;
+    assert.equal(rec?.status, "stopped");
+    assert.equal(rec?.reasonCode, "flow-cancelled");
+  });
+
+  it("重绑成功补 resumed 审计事件", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    const r = restoredManager(h, flowView("f1", "working", [{ id: "t1", sessionId: "s1", status: "running" }], m.id), true);
+    r.reconcile();
+    const rec = r.get(m.id) as { status: string; events?: { kind: string; text: string }[] } | undefined;
+    assert.equal(rec?.status, "running");
+    assert.ok(rec?.events?.some((e) => e.text.includes("resumed")), "重绑应记 resumed 审计事件");
+  });
+
+  it("flow_snapshots 单房损坏：不抛错、返回 undefined 并删除坏行", async () => {
+    const h = makeHarness();
+    h.store.saveFlowSnapshot("r1", 1, { flowId: "f1" });
+    (h.store as unknown as { db: { prepare(s: string): { run(...a: unknown[]): void } } })
+      .db.prepare("UPDATE flow_snapshots SET snapshot = ? WHERE room_id = ?")
+      .run("{corrupt-json", "r1");
+    assert.equal(h.store.loadFlowSnapshot("r1"), undefined);
+    // 坏行已删除：二次读取仍 undefined 而非再次抛错
+    assert.equal(h.store.loadFlowSnapshot("r1"), undefined);
+  });
+});
+
+describe("顺手批：supplement 重放 / m.error 保护 / 宽兜底观测", () => {
+  it("delivered:false 的补充在 flow 绑定时重放", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await h.manager.start(m.id); // 默认派发无 flow → 补充仅记录不投递
+    await h.manager.supplement(m.id, "extra constraint");
+    let rec = h.manager.get(m.id) as { supplements?: { delivered: boolean }[] } | undefined;
+    assert.equal(rec?.supplements?.[0]?.delivered, false);
+    // flow 归属出现并绑定（onTurnDone → syncFlow）触发重放
+    h.state.activeFlow = true;
+    h.state.flow = flowView("f1", "working", [{ id: "t1", sessionId: "s1", status: "running" }], m.id);
+    h.manager.onTurnDone("s1", h.room.roomId, "progress");
+    rec = h.manager.get(m.id) as { supplements?: { delivered: boolean }[] } | undefined;
+    assert.equal(rec?.supplements?.[0]?.delivered, true);
+  });
+
+  it("补充派发失败不覆写 m.error", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    await startWithFlow(h, m.id);
+    h.manager.onTurnDone("s1", h.room.roomId, "progress"); // 绑定 flow
+    h.deps.supplementActive = () => { throw new Error("send failed"); };
+    await h.manager.supplement(m.id, "boom");
+    const rec = h.manager.get(m.id) as { error?: string; events?: { kind: string; text: string }[] } | undefined;
+    assert.equal(rec?.error, undefined);
+    assert.ok(rec?.events?.some((e) => e.text.includes("supplement dispatch failed")));
+  });
+
+  it("dispatching 宽兜底命中记一条观测事件", async () => {
+    const h = makeHarness(undefined, "conductor");
+    const m = makeMission(h);
+    h.setDispatch(async () => {
+      // 派发窗口内 s2 回合完成到达：不在 sent/pending，走宽兜底归因
+      h.manager.onTurnDone("s2", h.room.roomId, "early output");
+      return { sent: ["s1"], mentioned: [], skipped: [] };
+    });
+    await h.manager.start(m.id);
+    const rec = h.manager.get(m.id) as { events?: { kind: string; text: string }[] } | undefined;
+    const hits = rec?.events?.filter((e) => e.text.includes("broad fallback")) ?? [];
+    assert.equal(hits.length, 1);
+  });
+});

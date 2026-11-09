@@ -776,25 +776,16 @@ const missionManager = new MissionManager({
         if (m.status === "accepted") notifyOffline(m.roomId, "task.done");
         // 系统原因失败/中断对用户可见（user-stopped/closed-for-rework 是用户自己点的）
         else if (m.status === "failed" || (m.reasonCode !== undefined && m.reasonCode !== "user-stopped" && m.reasonCode !== "closed-for-rework"))
-          notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode));
+          pushMissionAttention(m);
       } else if (m.status === "waiting-user") {
-        notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode));
+        pushMissionAttention(m);
+      } else if (m.id) {
+        lastMissionAttention.delete(m.id);
       }
       // awaiting-acceptance 提醒定时器：进入排一次，离开取消
       if (m.id) {
-        const key = m.id;
-        if (m.status === "awaiting-acceptance" && !aaReminders.has(key)) {
-          const t = setTimeout(() => {
-            aaReminders.delete(key);
-            if (missionManager.get(key)?.status === "awaiting-acceptance")
-              notifyOffline(m.roomId, "attention", reasonLabel("awaiting-acceptance"));
-          }, AWAITING_ACCEPTANCE_REMINDER_MS);
-          t.unref?.();
-          aaReminders.set(key, t);
-        } else if (m.status !== "awaiting-acceptance" && aaReminders.has(key)) {
-          clearTimeout(aaReminders.get(key));
-          aaReminders.delete(key);
-        }
+        if (m.status === "awaiting-acceptance") scheduleAaReminder(m.id, m.roomId);
+        else clearAaReminder(m.id);
       }
     }
   },
@@ -941,6 +932,10 @@ restoreRuntime
     try {
       missionManager.reconcile();
       persistState();
+      // aaReminders 为内存态：重启后对存量 awaiting-acceptance 单补排一次性提醒
+      for (const snap of missionManager.list()) {
+        if (snap.status === "awaiting-acceptance") scheduleAaReminder(snap.id, snap.roomId);
+      }
     } catch (err) {
       logError("post-restore reconcile", err);
     }
@@ -1047,6 +1042,35 @@ const reasonLabel = (code: string | undefined): string | undefined =>
 /** awaiting-acceptance 挂起提醒：进入时排一次性定时器（不自动过期），离开即取消 */
 const AWAITING_ACCEPTANCE_REMINDER_MS = 30 * 60 * 1000;
 const aaReminders = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** mission attention 推送签名去重：同 status+reasonCode 已推过则跳过，防 commit 重复打扰离线用户 */
+const lastMissionAttention = new Map<string, string>();
+
+function pushMissionAttention(m: { id?: string; roomId?: string; status?: string; reasonCode?: string }): void {
+  const sig = `${String(m.status)}:${m.reasonCode ?? ""}`;
+  if (m.id && lastMissionAttention.get(m.id) === sig) return;
+  if (m.id) lastMissionAttention.set(m.id, sig);
+  if (m.roomId) notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode));
+}
+
+function scheduleAaReminder(id: string, roomId: string): void {
+  if (aaReminders.has(id)) return;
+  const t = setTimeout(() => {
+    aaReminders.delete(id);
+    if (missionManager.get(id)?.status === "awaiting-acceptance")
+      notifyOffline(roomId, "attention", reasonLabel("awaiting-acceptance"));
+  }, AWAITING_ACCEPTANCE_REMINDER_MS);
+  t.unref?.();
+  aaReminders.set(id, t);
+}
+
+function clearAaReminder(id: string): void {
+  const t = aaReminders.get(id);
+  if (t !== undefined) {
+    clearTimeout(t);
+    aaReminders.delete(id);
+  }
+}
 
 /** 廉价决策层拦截计数（观测：被谓词省掉的唤醒次数，auto 路由复用同一 wakeGateAllows） */
 const wakeGateStats = new WakeGateStats();
@@ -1901,7 +1925,13 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
     const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     return { missions: missionManager.list(str(p.roomId), str(p.status)) };
   },
-  "mission.delete": (p) => missionManager.delete(missionIdOf(p), p.force === true),
+  "mission.delete": async (p) => {
+    const id = missionIdOf(p);
+    const result = await missionManager.delete(id, p.force === true);
+    clearAaReminder(id);
+    lastMissionAttention.delete(id);
+    return result;
+  },
   "mission.get": (p) => {
     const mission = missionManager.get(missionIdOf(p));
     if (!mission) throw new Error(`unknown mission: ${missionIdOf(p)}`);

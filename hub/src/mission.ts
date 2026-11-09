@@ -410,6 +410,7 @@ export function allMembersAvailable(room: Room, isAvailable: (sessionId: string)
 export class MissionManager {
   private missions = new Map<string, MissionRecord>();
   private retryScheduled = new Set<string>();
+  private broadAttrLogged = new Set<string>();
   private restoreDone = true;
 
   beginRestore(): void {
@@ -847,7 +848,24 @@ export class MissionManager {
     m.lastFlowSig = sig;
     m.flow = fv;
     this.applyFlowPhase(m, fv);
+    const room = this.deps.getRoom(roomId);
+    if (room && this.deps.hasActiveFlow(roomId)) this.replayPendingSupplements(m, room);
     this.commit(m);
+  }
+
+  /** flow 绑定/恢复时重放未送达的补充，delivered:false 不再是死端 */
+  private replayPendingSupplements(m: MissionRecord, room: Room): void {
+    for (const sup of m.supplements) {
+      if (sup.delivered) continue;
+      try {
+        if (this.deps.supplementActive(room, `User supplement to mission ${m.id}:\n${sup.text}`, m.id)) {
+          sup.delivered = true;
+          this.log(m, "supplement", `supplement ${sup.id} replayed to bound flow`);
+        }
+      } catch (e) {
+        this.log(m, "error", `supplement ${sup.id} replay failed: ${String(e)}`.slice(0, 300));
+      }
+    }
   }
 
   private applyFlowPhase(m: MissionRecord, flow: FlowView): void {
@@ -977,7 +995,14 @@ export class MissionManager {
       const tasks = m.flow?.tasks ?? [];
       if (tasks.some((t) => t.sessionId === sessionId)) return true;
     }
-    if (m.dispatching && this.isRoomMember(m, sessionId)) return true;
+    if (m.dispatching && this.isRoomMember(m, sessionId)) {
+      const key = `${m.id}:${sessionId}`;
+      if (!this.broadAttrLogged.has(key)) {
+        this.broadAttrLogged.add(key);
+        this.log(m, "flow", `turn attributed via dispatch-window broad fallback: ${sessionId}`);
+      }
+      return true;
+    }
     return false;
   }
 
@@ -1141,14 +1166,16 @@ export class MissionManager {
         try {
           const flow = this.flowOf(m.roomId);
           const flowId = flow?.flowId;
-          const active = this.deps.hasActiveFlow(m.roomId);
           // 认领依据：mission 显式持有的 flowId 匹配，或 flow 打标 missionId 归属
           // （派发窗口内崩溃导致 flowId 未落盘的场景可按归属恢复）；roomId 匹配不算数
           const bound = (!!m.flowId && flowId === m.flowId) || (!!flowId && flowOwnedBy(flow, m.id));
-          if (active && bound && flow) {
+          // 归属匹配的 flow 不论是否仍活跃都走 syncFlow 正常映射：done/cancelled
+          // 快照对应 awaiting-acceptance/failed/flow-cancelled，而非误落 interrupted-restart
+          if (bound && flow) {
             if (!m.flowId && flowId) m.flowId = flowId;
             m.lastFlowSig = "";
             m.lastPhase = "";
+            this.log(m, "flow", `resumed bound flow ${String(flowId)}`);
             this.syncFlow(m.roomId, flow);
             continue;
           }
@@ -1286,8 +1313,8 @@ export class MissionManager {
           sup.delivered = true;
         }
       } catch (e) {
-        m.error = `supplement dispatch failed: ${String(e)}`;
-        this.log(m, "error", m.error.slice(0, 300));
+        // 补充投递失败是操作级故障，不覆写 mission 级 m.error
+        this.log(m, "error", `supplement dispatch failed: ${String(e)}`.slice(0, 300));
       }
     }
     this.log(
