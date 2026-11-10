@@ -196,6 +196,32 @@ describe("room", () => {
     assert.ok(!prompt.includes("@s2"));
   });
 
+  it("buildPrompt 未绑工单的会话注入 mission auto 语义", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    const prompt = rooms.buildPrompt(room.roomId, "帮我把 X 做出来并验收", "s1");
+    assert.ok(prompt.includes("目标工单起草"));
+    assert.ok(prompt.includes('"auto": true'));
+    assert.ok(prompt.includes("mission.start 仍是客户端操作"));
+  });
+
+  it("buildPrompt 已绑活跃工单的会话跳过 auto 引导", () => {
+    const rooms = new RoomManager();
+    rooms.setMissionBoundChecker((sid) => sid === "s1");
+    const room = rooms.create("team", [
+      { sessionId: "s1", name: "a1" },
+      { sessionId: "s2", name: "a2" },
+    ]);
+    const bound = rooms.buildPrompt(room.roomId, "继续", "s1");
+    assert.ok(bound.includes("目标工单起草"));
+    assert.ok(!bound.includes('"auto": true'));
+    const free = rooms.buildPrompt(room.roomId, "继续", "s2");
+    assert.ok(free.includes('"auto": true'));
+    // 会话路径共用同一入口：绑定态决定 auto 子句有无
+    assert.ok(!rooms.missionDraftGuidanceFor("s1").includes('"auto": true'));
+    assert.ok(rooms.missionDraftGuidanceFor("s2").includes('"auto": true'));
+  });
+
   it("buildPrompt 按 dependsOn 只注入上游 task 的 artifact", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [

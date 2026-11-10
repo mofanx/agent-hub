@@ -368,6 +368,11 @@ function shouldSkipFile(name: string): boolean {
   return SKIP_NAMES.has(name);
 }
 
+const MISSION_DRAFT_GUIDE =
+  "目标工单起草：用户表达『想建目标工单/工作目标单/记个工单』类意图时，先引导其确认必填项方向——goal(目标，必填)、acceptanceCriteria(验收标准数组，必填，至少一条可检验项)、scope(范围说明)、constraints(约束数组)、owner(负责成员，可留空=自动)、maxAutoRetries(自动重试 0-3)；不强求一次给全，可多轮补齐。信息够时输出草稿块：```mission 包裹的 JSON（字段名同上，owner 用 sessionId 或成员名均可），客户端会渲染成可编辑确认卡，由用户点击创建——不要直接声称已创建。用户说『启动工单 X』时，提示其在工单卡/面板上点启动（mission.start 是客户端操作，成员无此工具）。";
+const MISSION_DRAFT_GUIDE_AUTO =
+  "当用户消息含明确可交付目标且验收语义清晰、你有把握直接成稿时，可在 mission 块 JSON 顶层加 \"auto\": true——它仅是给客户端的提示（草稿卡据此可一步创建并启动）；hub 不解析不执行该字段，mission.start 仍是客户端操作。仅在单会话上下文、确有把握时使用。";
+
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private aliasSeqs = new Map<string, number>();
@@ -380,9 +385,20 @@ export class RoomManager {
   private getCwd?: (sessionId: string) => string | undefined;
   private memberChannel?: (sessionId: string) => MemberChannel | undefined;
   private store?: Store;
+  /** 会话已绑活跃工单判定：命中时 prompt 不注入 mission auto 引导（防重复起草） */
+  private hasBoundMission?: (sessionId: string) => boolean;
+
+  /** mission 起草引导文案：已绑活跃工单的会话摘除 auto 子句。房路径与单会话路径共用 */
+  missionDraftGuidanceFor(sessionId: string): string {
+    return MISSION_DRAFT_GUIDE + (this.hasBoundMission?.(sessionId) ? "" : MISSION_DRAFT_GUIDE_AUTO);
+  }
 
   setRoleResolver(getPersona: (roleId: string) => string | undefined): void {
     this.getPersona = getPersona;
+  }
+
+  setMissionBoundChecker(fn: (sessionId: string) => boolean): void {
+    this.hasBoundMission = fn;
   }
 
   setCwdResolver(getCwd: (sessionId: string) => string | undefined): void {
@@ -1745,10 +1761,7 @@ export class RoomManager {
       "",
       "检索工具：需要更早的房史时调用 RPC `room.history.search`，参数 roomId(必填)、query(关键词≤100字)、author、fromAt/toAt(毫秒时间窗)、beforeId(分页游标)、limit(≤50)——返回 {entries, hasMore}，beforeId 取上一页最旧 entry.id 继续翻页。",
     );
-    lines.push(
-      "",
-      "目标工单起草：用户表达『想建目标工单/工作目标单/记个工单』类意图时，先引导其确认必填项方向——goal(目标，必填)、acceptanceCriteria(验收标准数组，必填，至少一条可检验项)、scope(范围说明)、constraints(约束数组)、owner(负责成员，可留空=自动)、maxAutoRetries(自动重试 0-3)；不强求一次给全，可多轮补齐。信息够时输出草稿块：```mission 包裹的 JSON（字段名同上，owner 用 sessionId 或成员名均可），客户端会渲染成可编辑确认卡，由用户点击创建——不要直接声称已创建。用户说『启动工单 X』时，提示其在工单卡/面板上点启动（mission.start 是客户端操作，成员无此工具）。",
-    );
+    lines.push("", this.missionDraftGuidanceFor(excludeSessionId));
     if (artifacts.length > 0) {
       lines.push("", "最近产物（文件）：");
       for (const a of artifacts) {

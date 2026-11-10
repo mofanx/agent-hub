@@ -529,13 +529,14 @@ test("index prompt.send/room.message 提取：同 key 改 payload 冲突/控制�
   assert.ok(stableFingerprint, "extract real stableFingerprint");
 
   const promptCalls: number[] = [];
+  const promptContents: Array<Array<Record<string, unknown>>> = [];
   const roomCalls: number[] = [];
   const flow = { flowId: "f1", missionId: "m1", phase: "working", clarificationId: "h1" };
   const sb = {
     store, runClientMessage, stableFingerprint,
     parseSlash: () => null, HUB_SLASH_COMMANDS: new Set(), handleSessionSlash: () => ({}), handleRoomSlash: () => ({}),
     sessionLostReplyNote: () => null, roomLostReplyNote: () => null,
-    agentOps: { prompt: async () => { promptCalls.push(1); } },
+    agentOps: { prompt: async (_sid: string, content: Array<Record<string, unknown>>) => { promptCalls.push(1); promptContents.push(content); } },
     roomModeManager: {
       getFlow: () => flow,
       hasAwaitingRetry: () => false,
@@ -545,6 +546,7 @@ test("index prompt.send/room.message 提取：同 key 改 payload 冲突/控制�
     rooms: {
       get: () => ({ roomId: "r1" }),
       route: (_id: string, _text: string) => ({ targets: [], mentioned: [] }),
+      missionDraftGuidanceFor: () => "GUIDE_MARK",
     },
     persistState() {}, broadcast() {},
     memberStatusOf: () => "online" as const,
@@ -558,6 +560,9 @@ test("index prompt.send/room.message 提取：同 key 改 payload 冲突/控制�
   const r1 = await runPrompt({ ...base }) as Record<string, unknown>;
   assert.equal(r1.deliveryStatus, "accepted");
   assert.equal(promptCalls.length, 1);
+  const sentText = String(promptContents[0]?.[0]?.text ?? "");
+  assert.ok(sentText.includes("GUIDE_MARK"), "会话路径应注入 mission 起草引导");
+  assert.ok(sentText.endsWith("hi"), "引导作为前缀注入，原文保留在尾部");
   await assert.rejects(runPrompt({ ...base, intent: "supplement" }), /client_message_conflict/);
   assert.equal(promptCalls.length, 1);
   await assert.rejects(runPrompt({ ...base, clientMessageId: "cm2", content: [{ type: "text", text: "取消" }] }), /client_message_control/);

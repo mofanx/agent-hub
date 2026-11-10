@@ -791,6 +791,8 @@ const missionManager = new MissionManager({
   },
 });
 missionManager.beginRestore();
+// 已绑活跃工单的会话不再注入 mission auto 引导——防同会话重复起草
+rooms.setMissionBoundChecker((sid) => missionManager.findBoundActive(sid) !== undefined);
 
 // 编排卡：flowUpdate 离散点同步房史 kind:"flow" 条目（append → hash 脏检查覆写 → 终态定稿），
 // 广播复用 room.process 信封，客户端按 historyId/flowId 配对原位更新
@@ -3402,12 +3404,13 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       }
 
       const dispatchBody = async () => {
-        if (note) {
+        const prefix = [note, rooms.missionDraftGuidanceFor(sessionId)].filter(Boolean).join("\n\n");
+        if (prefix) {
           const first = promptContent[0];
           if (first?.type === "text") {
-            (first as Record<string, unknown>).text = `${note}\n\n${String(first.text ?? "")}`;
+            (first as Record<string, unknown>).text = `${prefix}\n\n${String(first.text ?? "")}`;
           } else {
-            promptContent.unshift({ type: "text", text: note });
+            promptContent.unshift({ type: "text", text: prefix });
           }
         }
         await agentOps.prompt(sessionId, promptContent);
