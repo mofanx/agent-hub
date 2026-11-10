@@ -3754,7 +3754,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { item ->
             val inFlight = historyIdOf(item) == null &&
                 (item is ChatItem.Assistant || item is ChatItem.Thought ||
-                    item is ChatItem.Tool || item is ChatItem.Plan)
+                    item is ChatItem.Tool || item is ChatItem.Plan) ||
+                // 乐观用户气泡：at=record.createdAt 是入队时刻，延迟/排队发送时滞后于实际送达——
+                // historyAt 仅落库合并时写入，未合并恒置尾键，防排队消息按入队时刻插到前面
+                (item is ChatItem.User && item.clientMessageId != null && item.historyAt == null)
             val at = if (inFlight) Long.MAX_VALUE
                 else if (item is ChatItem.Process && item.at <= 0)
                     item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
