@@ -6216,9 +6216,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (sessions.firstOrNull { it.sessionId == sid }?.let { it.backendType ?: it.agent } == "devin") {
                     refreshBackendQuota()
                 }
-                settlePromoteDraft(sid, chatItems.indexOfLast {
-                    it is ChatItem.Assistant && it.author == sessionName(sid)
-                }.let { idx -> idx >= 0 && (chatItems[idx] as ChatItem.Assistant).text.contains("```mission") })
+                // 本回合任一条 assistant 含 mission 块即算产出——成员可能先出草稿再追加说明，不能只看末条
+                val userTail = chatItems.indexOfLast { it is ChatItem.User }
+                settlePromoteDraft(sid, chatItems.drop(userTail + 1).any {
+                    it is ChatItem.Assistant && it.author == sessionName(sid) && it.text.contains("```mission")
+                })
                 refreshAll()
             }
             "prompt.error" -> {
