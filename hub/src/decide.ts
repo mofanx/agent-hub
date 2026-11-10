@@ -44,14 +44,14 @@ const FAST_MAX_LEN = 120;
 const FAST_TRIVIAL_MAX_LEN = 10;
 // 显式拉群讨论：群词（群友/大家/全员/所有人/拉上/一起/群策）+ 讨论类动词，或含「群友」即算；
 // auto 房用户说"讨论"即拉群讨论（用户已多次实证此期望），裸「讨论」也算
-const DISCUSSION_INTENT = /讨论|复核|审议|评审|审查|交叉.{0,4}(验|审|查|核)|review|群友|拉上.{0,8}(商量|评估)|大家.{0,8}(商量|一起|分别|分头|各)|各位.{0,8}(分别|分头|各)|全员.{0,8}(商量|评估|分别|分头)|所有人.{0,8}(商量|分别)|一起.{0,6}商量|群策群力|开个会/i;
+const DISCUSSION_INTENT = /parallel|讨论|复核|审议|评审|审查|交叉.{0,4}(验|审|查|核)|review|群友|拉上.{0,8}(商量|评估)|大家.{0,8}(商量|一起|分别|分头|各)|各位.{0,8}(分别|分头|各)|全员.{0,8}(商量|评估|分别|分头)|所有人.{0,8}(商量|分别)|一起.{0,6}商量|群策群力|开个会/i;
 
 // 全模式意图表（explicit 层直出，不过 LLM）：越具体的模式优先级越高
 // conductor>pipeline>debate>roundrobin>parallel——编排词命中即胜讨论词
-const CONDUCTOR_INTENT = /拆[成分解出]?[^。]{0,10}(任务|子任务|模块)|拆解|分工|派工|工单|编排|子任务|分步实施|分阶段|任务分解/i;
-const PIPELINE_INTENT = /流水线|依次|逐个|按顺序|串行|先.{0,12}(再|然后|后).{0,12}(审查|检查|验证|测试|复核|交给)/i;
-const DEBATE_INTENT = /辩论|正反|对垒|交锋|红蓝|pros?\s*and\s*cons?/i;
-const ROUNDROBIN_INTENT = /轮流|每人.{0,4}(说|答|一句|一段|一评)|圆桌|接力/i;
+const CONDUCTOR_INTENT = /conductor|指挥家|拆[成分解出]?[^。]{0,10}(任务|子任务|模块)|拆解|分工|派工|工单|编排|子任务|分步实施|分阶段|任务分解/i;
+const PIPELINE_INTENT = /pipeline|流水线|依次|逐个|按顺序|串行|先.{0,12}(再|然后|后).{0,12}(审查|检查|验证|测试|复核|交给)/i;
+const DEBATE_INTENT = /debate|辩论|正反|对垒|交锋|红蓝|pros?\s*and\s*cons?/i;
+const ROUNDROBIN_INTENT = /round[-\s]?robin|轮流|每人.{0,4}(说|答|一句|一段|一评)|圆桌|接力/i;
 
 const PROVIDERS: Record<string, { baseUrl: string; keyEnv: string }> = {
   deepseek: { baseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY" },

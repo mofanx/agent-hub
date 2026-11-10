@@ -182,4 +182,18 @@ describe("explicit 全模式意图表", () => {
     });
     assert.equal(v?.mode, "conductor");
   });
+  it("英文模式名显式指定 → 对应模式（不被讨论词截胡）", () => {
+    const cases: [string, string][] = [
+      ["用 conductor 模式推进一下", "conductor"],
+      ["请用 conductor 来讨论这个问题", "conductor"],
+      ["用 pipeline 模式执行", "pipeline"],
+      ["开一个 debate 辩一下方案", "debate"],
+      ["用 roundrobin 轮流发言", "roundrobin"],
+      ["用 parallel 模式大家一起看", "parallel"],
+    ];
+    for (const [text, want] of cases) {
+      const v = d.explicitMention({ roomId: "r", text, members });
+      assert.equal(v?.mode, want, `${text} via=${v?.reason}`);
+    }
+  });
 });
