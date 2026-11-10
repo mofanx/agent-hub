@@ -47,6 +47,28 @@ class DebugControl : BroadcastReceiver() {
                     }
                 }
             })
+            "sessions" -> log(buildJsonObject {
+                putJsonArray("sessions") {
+                    vm.sessions.forEach { s ->
+                        add(buildJsonObject { put("sessionId", s.sessionId); put("name", s.name); put("offline", s.offline) })
+                    }
+                }
+            })
+            "timeline" -> log(buildJsonObject {
+                val items = vm.chatItems.toList()
+                put("scope", vm.currentRoom?.let { "room:${it.roomId}" } ?: vm.currentSession?.let { "session:${it.sessionId}" } ?: "")
+                put("count", items.size)
+                putJsonArray("items") {
+                    items.drop(intent.getIntExtra("offset", 0).coerceAtLeast(0)).take(30).forEach { item ->
+                        add(buildJsonObject {
+                            put("id", item.id)
+                            put("at", item.at)
+                            put("kind", item.javaClass.simpleName)
+                            put("historyId", (item as? ChatItem.User)?.historyId ?: item.id.takeIf { it < 0 }?.let { -it } ?: 0)
+                        })
+                    }
+                }
+            })
             "missions" -> log(buildJsonObject {
                 putJsonArray("missions") {
                     vm.missions.forEach { m ->
@@ -79,8 +101,20 @@ class DebugControl : BroadcastReceiver() {
                 val rid = intent.getStringExtra("roomId") ?: ""
                 val room = vm.rooms.find { it.roomId == rid || it.name == rid }
                 if (room == null) { Log.w(TAG, """{"error":"room_not_found","roomId":"$rid"}"""); return }
-                vm.openRoom(room)
+                vm.openRoom(room, readOnly = intent.getBooleanExtra("readOnly", false))
                 log(buildJsonObject { put("opened", room.roomId) })
+            }
+            "open_session" -> {
+                val sid = intent.getStringExtra("sessionId") ?: ""
+                val session = vm.sessions.find { it.sessionId == sid || it.name == sid }
+                if (session == null) { Log.w(TAG, """{"error":"session_not_found"}"""); return }
+                vm.openChat(session, readOnly = true)
+                log(buildJsonObject { put("opened", session.sessionId) })
+            }
+            "find" -> {
+                vm.inChatSearchQuery = intent.getStringExtra("text") ?: ""
+                vm.chatSearchMatchIndex = 0
+                log(buildJsonObject { put("searching", true) })
             }
             "subscribe_task" -> {
                 val tid = intent.getStringExtra("taskId") ?: ""

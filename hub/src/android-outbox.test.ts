@@ -7,6 +7,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
+test("Android 任务产物标签换行并限制单行，避免窄标签撑出整屏空白", () => {
+  const ui = fs.readFileSync(path.join(root, "android/app/src/main/java/com/agenthub/ui/ChatScreen.kt"), "utf8");
+  const start = ui.indexOf("if (task.artifacts.isNotEmpty())", ui.indexOf("private fun FlowTaskRow("));
+  const artifacts = ui.slice(start, ui.indexOf("private fun ArtifactPanel(", start));
+  assert.match(artifacts, /FlowRow\(/);
+  assert.match(artifacts, /maxLines = 1/);
+  assert.match(artifacts, /overflow = TextOverflow\.Ellipsis/);
+});
+
 const cases = [
   "durability", "fifo", "uncertain_barrier", "identity_fences", "dismiss_and_bulk",
   "context_and_busy", "codec", "bounds_and_snapshot", "attachment_tombstone",
@@ -14,7 +23,7 @@ const cases = [
   "recovery_watermarks", "recovery_reset_and_draft", "recovery_fences",
   "viewmodel_context", "viewmodel_payload", "session_cards",
   "attention_identity", "attention_recovery", "attention_limits",
-  "viewmodel_anchor", "stream_scope",
+  "viewmodel_anchor", "stream_scope", "timeline",
 ];
 
 function cachedJar(group: string, name: string, version: string): string | undefined {
@@ -125,7 +134,35 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
     section("    private data class StreamRun(", "    private val streamRuns"),
     section("    private fun queueChunk(", "    private fun applyUpdate("),
   ].join("\n");
-  fs.writeFileSync(bridge, bridgeFixture.replace("__NATIVE_METHODS__", methods));
+  const timelineOrder = section("        val combined =", "        updateScopeItems(key, combined)");
+  const cacheProperty = vm.match(/private val chatListCache = .+/)?.[0];
+  const cacheKey = vm.match(/chatListCache\.getOrPut\(([^)]+)\)/)?.[1];
+  assert.ok(cacheProperty && cacheKey);
+  const timelineBridge = `
+data class ChatListItem(val at: Long)
+internal class TimelineBridge {
+    val chatItems = mutableListOf<ChatItem>()
+    var itemSeq = 5000L
+    fun scopeKey(): String? = "room:r1"
+    fun inScope(sid: String) = sid == "s1"
+    fun sessionName(sid: String) = "worker"
+    fun scopeItems(key: String): List<ChatItem> = chatItems.toList()
+    fun updateScopeItems(key: String, items: List<ChatItem>) { chatItems.clear(); chatItems.addAll(items) }
+    fun ensure(f: FlowInfo) = ensureFlowCard(f)
+    fun finish(output: String) = finalizeReply("s1", output)
+    ${section("    private fun ensureFlowCard(", "    private suspend fun refreshArtifacts(")}
+    ${cacheProperty}
+    ${section("    private fun historyIdOf(", "    private fun sameHistoryItem(")}
+    ${section("    private fun dedupeTail(", "    private fun loadHistory(")}
+    fun order(incoming: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
+        ${timelineOrder}
+        return combined
+    }
+    fun render(item: ChatItem): Long =
+        chatListCache.getOrPut(${cacheKey}) { listOf(ChatListItem(item.at)) }.single().at
+}
+`;
+  fs.writeFileSync(bridge, bridgeFixture.replace("__NATIVE_METHODS__", methods) + timelineBridge);
   fs.writeFileSync(strings, stringsStub);
   fs.writeFileSync(fixture, kotlinFixture);
   execFileSync(java, ["-Xmx512m", "-cp", jars.join(path.delimiter),
@@ -144,7 +181,7 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
     throw error;
   }
   assert.deepEqual(result.split(/\r?\n/).filter((line) => line.startsWith("PASS ")).map((line) => line.slice(5)), cases);
-  assert.match(result, /^RESULT cases=23$/m);
+  assert.match(result, /^RESULT cases=24$/m);
   t.diagnostic(result.trim());
 });
 
@@ -176,13 +213,27 @@ import java.io.File
 
 internal data class FlowTask(val waitingFor: String?, val waitingHelpId: String?)
 internal data class FlowInfo(val flowId: String, val missionId: String?, val mode: String, val phase: String,
-    val clarificationId: String?, val tasks: List<FlowTask>)
+    val clarificationId: String?, val tasks: List<FlowTask>, val startedAt: Long = 0)
 internal data class RoomInfo(val roomId: String, val members: List<Pair<String, String>> = listOf("s1" to "worker"))
 internal data class Attachment(val mimeType: String, val base64: String, val name: String, val localPath: String? = null)
 internal sealed class ChatItem {
     abstract val id: Long
-    data class Assistant(override val id: Long, val text: String, val author: String) : ChatItem()
-    data class Thought(override val id: Long, val text: String, val author: String) : ChatItem()
+    open val at: Long = 0
+    open val text: String = ""
+    open val author: String = ""
+    data class Assistant(override val id: Long, override val text: String, override val author: String,
+        override val at: Long = 0, val replyText: String? = null) : ChatItem()
+    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = 0) : ChatItem()
+    data class User(override val id: Long, override val at: Long = 0, val historyId: Long? = null,
+        val historyAt: Long? = null, val clientMessageId: String? = null, val sendStatus: String? = null) : ChatItem()
+    data class System(override val id: Long) : ChatItem()
+    data class Error(override val id: Long) : ChatItem()
+    data class Tool(override val id: Long, override val at: Long = 0, val toolCallId: String = "") : ChatItem()
+    data class Plan(override val id: Long, override val at: Long = 0, val entries: List<String> = emptyList()) : ChatItem()
+    data class Process(override val id: Long, override val at: Long = 0,
+        val turnStartAt: Long = 0, val turnEndAt: Long = 0, val processId: String = "") : ChatItem()
+    data class Flow(override val id: Long, val flowId: String, val snapshot: FlowInfo,
+        override val author: String = "", override val at: Long = 0) : ChatItem()
     data class Permission(override val id: Long, val requestId: String) : ChatItem()
     data class Decision(override val id: Long, val requestId: String) : ChatItem()
 }
@@ -216,6 +267,7 @@ internal class NativeBridge {
     fun sessionName(sid: String) = "worker"
     fun frame(body: () -> Unit) = withLiveItems(body)
     fun chunk(text: String) = queueChunk("s1", "m", text)
+    fun streaming(id: Long) { streamingTail = "s1" to id }
     fun flush() = flushStreamChunks()
     fun close() = viewModelScope.cancel()
     val hub = BridgeHub()
@@ -878,6 +930,7 @@ fun main() = runBlocking {
             b.chatItems.add(ChatItem.Permission(1, "request-1"))
             b.chatCache[b.liveScope] = listOf(ChatItem.Decision(-4, "request-1"), ChatItem.Assistant(7, "latest", "worker"))
             b.frame { b.chatItems.add(ChatItem.Assistant(8, "live", "worker")); b.historyHasMore = false }
+            b.streaming(8)
             check(b.chatItems.single() is ChatItem.Decision && b.chatItems.single().id == -4L)
             check(b.chatCache[b.liveScope]!!.map { it.id } == listOf(-4L, 7L, 8L))
             check(b.historyHasMore && b.anchorScopeKey == b.liveScope)
@@ -905,9 +958,37 @@ fun main() = runBlocking {
             check(b.chatItems.isEmpty())
             b.chunk("current"); b.flush()
             check((b.chatItems.single() as ChatItem.Assistant).text == "current")
+            b.chatItems.clear()
+            b.chatItems.add(ChatItem.Assistant(-100, "history", "worker"))
+            b.chunk("new"); b.flush()
+            check(b.chatItems.map { it.text } == listOf("history", "new"))
         } finally { b.close() }
     }
-    check(count == 23)
+    scenario("timeline") {
+        val b = TimelineBridge()
+        val ordered = b.order(listOf(ChatItem.Assistant(-200, "new", "worker", 1000)),
+            listOf(ChatItem.Assistant(-100, "old", "worker", 1000))).map { it.id } == listOf(-100L, -200L)
+        val item = ChatItem.Assistant(-300, "same text", "worker", 1000)
+        b.render(item)
+        val refreshed = b.render(item.copy(at = 2000)) == 2000L
+        check(ordered && refreshed) { "same-time order=$ordered, refreshed metadata=$refreshed" }
+        check(b.order(listOf(ChatItem.Process(-400, turnStartAt = 100, turnEndAt = 200)),
+            listOf(ChatItem.Assistant(1, "streaming", "worker", 50))).map { it.id } == listOf(-400L, 1L))
+        b.chatItems.addAll(listOf(ChatItem.User(-100, at = 1000), ChatItem.Assistant(-200, "summary", "worker", 3000)))
+        val f = FlowInfo("f1", null, "conductor", "working", null, emptyList(), 2000)
+        b.ensure(f)
+        check(b.chatItems.map { it.at } == listOf(1000L, 2000L, 3000L)) { "late flow appended after summary" }
+        b.chatItems.clear()
+        b.chatItems.addAll(listOf(ChatItem.Assistant(1, "first", "worker", 100), ChatItem.Assistant(2, "second", "worker", 110)))
+        b.finish("firstsecond")
+        val final = ChatItem.Assistant(-500, "firstsecond", "worker", 200)
+        check(b.order(listOf(final), b.chatItems) == listOf(final)) { "fragment suffix survived history reconciliation" }
+        b.chatItems.add(ChatItem.Assistant(3, "next", "worker", 210))
+        b.finish("next")
+        check((b.chatItems[0] as ChatItem.Assistant).replyText == "firstsecond")
+        check((b.chatItems[2] as ChatItem.Assistant).replyText == "next")
+    }
+    check(count == 24)
     println("RESULT cases=$count")
 }
 `;

@@ -150,7 +150,7 @@ sealed class ChatItem {
         override val author: String = "",
         override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem()
-    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = java.lang.System.currentTimeMillis()) : ChatItem()
+    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = java.lang.System.currentTimeMillis(), val replyText: String? = null) : ChatItem()
     data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = java.lang.System.currentTimeMillis()) : ChatItem()
     data class Tool(
         override val id: Long,
@@ -1094,7 +1094,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var filePreview by mutableStateOf<FilePreview?>(null)
     val chatItems = mutableStateListOf<ChatItem>()
     val chatListItems: State<List<ChatListItem>> = derivedStateOf { expandChatItems(chatItems) }
-    private val chatListCache = mutableMapOf<Pair<Long, String>, List<ChatListItem>>()
+    private val chatListCache = mutableMapOf<ChatItem, List<ChatListItem>>()
     val busyIds = mutableStateListOf<String>()
     /** member.status 事件维护的成员在线状态（sessionId → online/generating/offline） */
     val memberStatus = mutableStateMapOf<String, String>()
@@ -3598,6 +3598,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val key = scopeKey() ?: return
         val items = scopeItems(key).toMutableList()
         val flowId = f.flowId.ifEmpty { "__live" }
+        fun insert(item: ChatItem.Flow) {
+            val index = items.indexOfFirst {
+                (it.at > 0 && it.at > item.at) || (historyIdOf(it) == null &&
+                    (it is ChatItem.Assistant || it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan))
+            }
+            items.add(index.takeIf { it >= 0 } ?: items.size, item)
+        }
         val existing = items.indexOfLast { it is ChatItem.Flow && it.flowId == flowId }
         if (existing >= 0) {
             items[existing] = (items[existing] as ChatItem.Flow).copy(snapshot = f)
@@ -3608,18 +3615,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val liveIdx = items.indexOfLast { it is ChatItem.Flow && it.flowId == "__live" }
             if (liveIdx >= 0) {
                 val prev = items[liveIdx]
-                items[liveIdx] = ChatItem.Flow(
+                items.removeAt(liveIdx)
+                insert(ChatItem.Flow(
                     prev.id,
                     flowId,
                     f,
                     prev.author,
                     f.startedAt.takeIf { it > 0 } ?: prev.at,
-                )
+                ))
                 updateScopeItems(key, items)
                 return
             }
         }
-        items.add(
+        insert(
             ChatItem.Flow(
                 ++itemSeq,
                 flowId,
@@ -3830,7 +3838,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 过程卡 at<=0 时用 turnEndAt/turnStartAt 归位——否则晚到的执行过程排尾部而非汇总前
         // 在途条目（流式/刚完成未合并 historyId）at 是回合开始时刻而非完成时刻，
         // 按其 at 排序会把 at 更大的迟到落库卡钉在流式结论之后——在途条目恒置尾键
-        val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { item ->
+        val combined = (incoming + dedupeTail(incoming, tail)).sortedWith(compareBy<ChatItem> { item ->
             // 乐观用户气泡：at=record.createdAt 是入队时刻——deferred/离线排队件滞后于实际送达，
             // 恒置半尾键 MAX_VALUE-1（已落库 < 排队消息 < 在途卡）；即时件 createdAt 即真实到达序，
             // 按 at 排序才不会被自己触发的编排/过程卡反超（卡片 at 必晚于消息）
@@ -3844,7 +3852,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
                 else item.at
             if (at <= 0) Long.MAX_VALUE else at
-        }
+        }.thenBy { historyIdOf(it) ?: Long.MAX_VALUE })
         updateScopeItems(key, combined)
         deliveryRecords.filter {
             it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == key
@@ -4559,7 +4567,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 is ChatItem.Assistant ->
                     // 指纹级匹配不限 300s 窗口但带时间门控：同作者 + live 不晚于持久化 +
                     // 全文相等或互为前缀（含持久化截断为前缀）
-                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
+                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && earlierLive(it, t) && (it.text == (t.replyText ?: t.text) || it.text.startsWith(t.replyText ?: t.text) || (t.replyText ?: t.text).startsWith(it.text)) }
                 is ChatItem.Thought ->
                     hist.none { it is ChatItem.Thought && sameAuthor(it, t) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Tool ->
@@ -4575,6 +4583,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 else -> true
             }
         }
+    }
+
+    private fun finalizeReply(sid: String, output: String? = null) {
+        if (!inScope(sid)) return
+        val author = sessionName(sid)
+        val indices = chatItems.indices.filter {
+            val item = chatItems[it]
+            item is ChatItem.Assistant && item.id > 0 && item.author == author && item.replyText == null
+        }
+        val text = output?.takeIf { it.isNotBlank() } ?: indices.joinToString("") { chatItems[it].text }
+        indices.forEach { chatItems[it] = (chatItems[it] as ChatItem.Assistant).copy(replyText = text) }
     }
 
     private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null): Job {
@@ -6209,6 +6228,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "prompt.done" -> {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
+                finalizeReply(sid, p["output"]?.jsonPrimitive?.contentOrNull)
                 busyIds.remove(sid)
                 clearStreamingTailIfIdle(sid)
                 val usage = parseTokenUsage(p["usage"] as? JsonObject)
@@ -6232,6 +6252,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "prompt.error" -> {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
+                finalizeReply(sid)
                 busyIds.remove(sid)
                 clearStreamingTailIfIdle(sid)
                 settlePromoteDraft(sid, false)
@@ -6468,7 +6489,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (text.isEmpty()) continue
             val last = chatItems.lastOrNull()
             if (run.kind == "t") {
-                if (last is ChatItem.Thought && last.author == author) {
+                if (last is ChatItem.Thought && last.author == author && streamingTail?.second == last.id) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
                     streamingTail = run.sessionId to last.id
                 } else {
@@ -6477,7 +6498,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     streamingTail = run.sessionId to id
                 }
             } else {
-                if (last is ChatItem.Assistant && last.author == author) {
+                if (last is ChatItem.Assistant && last.author == author && streamingTail?.second == last.id && last.replyText == null) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
                     streamingTail = run.sessionId to last.id
                 } else {
@@ -6537,7 +6558,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun expandChatItems(items: List<ChatItem>): List<ChatListItem> {
-        val currentKeys = items.map { it.id to it.text }.toSet()
+        val currentKeys = items.toSet()
         chatListCache.keys.retainAll(currentKeys)
         val result = mutableListOf<ChatListItem>()
         var i = 0
@@ -6587,7 +6608,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     ),
                                 )
                             } else {
-                                chatListCache.getOrPut(item.id to item.text) { splitItemBlocks(item, isUser = false) }
+                                chatListCache.getOrPut(item) { splitItemBlocks(item, isUser = false) }
                             }
                         is ChatItem.Flow -> listOf(ChatListItem.FlowCard(item))
                         else -> listOf(ChatListItem.Other(item))

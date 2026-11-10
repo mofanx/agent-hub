@@ -3744,7 +3744,7 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
         </div>
         {expanded && (
           <div className="flow-task-detail">
-            <div className="flow-task-full">{task.task}</div>
+            <div className="flow-task-full">{task.task.trim()}</div>
             {task.failureMessage && (
               <div className="flow-task-error">{task.failureMessage}</div>
             )}
@@ -3765,8 +3765,8 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
             {task.dependsOn.length > 0 && (
               <div className="flow-task-meta">{S.dependsOnLabel}{task.dependsOn.join(", ")}</div>
             )}
-            {task.output && (
-              <div className="flow-task-output">{task.output}</div>
+            {task.output?.trim() && (
+              <div className="flow-task-output">{task.output.trim()}</div>
             )}
             {(task.baseline || task.diff || task.reproSteps || task.verifyCommand || task.verifyCheckId) && (
               <details className="flow-task-deliverable">

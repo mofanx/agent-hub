@@ -395,7 +395,7 @@ export type ChatItem =
   /** 工单派发产生的条目：气泡上展示归因标记 */
   missionId?: string }
   | { kind: "system"; at?: number; historyId?: number; text: string; author: string }
-  | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string; /** 流式进行中：渲染层用轻量纯文本，turn 结束后完整 markdown 重排 */ streaming?: boolean }
+  | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string; replyText?: string; /** 流式进行中：渲染层用轻量纯文本，turn 结束后完整 markdown 重排 */ streaming?: boolean }
   | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string; streaming?: boolean }
   | { kind: "tool"; at?: number; historyId?: number; toolCallId: string; title: string; status: string; author: string }
   | { kind: "plan"; at?: number; historyId?: number; entries: string[]; author: string }

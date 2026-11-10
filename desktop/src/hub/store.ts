@@ -536,7 +536,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           ...(typeof o.missionId === "string" ? { missionId: o.missionId } : {}) };
       }
       case "assistant":
-        return { kind: "assistant", at, historyId, id: 0, text, author, usage: usage ? parseTokenUsage(usage) : undefined };
+        return { kind: "assistant", at, historyId, id: 0, text, author, usage: usage ? parseTokenUsage(usage) : undefined, ...(o.draft === 1 ? { streaming: true } : {}) };
       case "system":
         return { kind: "system", at, historyId, text, author };
       case "error":
@@ -691,7 +691,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
             h.kind === "assistant" &&
             sameAuthor(h, it) &&
             (h.at == null || it.at == null || it.at <= h.at) &&
-            (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
+            (h.text === (it.replyText ?? it.text) || h.text.startsWith(it.replyText ?? it.text) || (it.replyText ?? it.text).startsWith(h.text)),
         );
       case "thought":
         return hist.some(
@@ -909,6 +909,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
       .catch(() => {});
   };
 
+  const timelineAt = (it: ChatItem): number => {
+    if ((it.kind === "assistant" || it.kind === "thought") && it.streaming) return Infinity;
+    if (it.historyId == null && (it.kind === "assistant" || it.kind === "thought" || it.kind === "tool" || it.kind === "plan")) return Infinity;
+    const at = it.kind === "process" && (it.at ?? 0) <= 0
+      ? (it.turnEndAt != null && it.turnEndAt > 0 ? it.turnEndAt : it.turnStartAt)
+      : it.kind === "flow" && (it.at ?? 0) <= 0 ? it.snapshot.startedAt : it.at;
+    return at != null && at > 0 ? at : Infinity;
+  };
+
+  const compareTimeline = (a: ChatItem, b: ChatItem): number =>
+    timelineAt(a) - timelineAt(b) || (a.historyId ?? Infinity) - (b.historyId ?? Infinity);
+
   const mergeHistoryItems = (a: ChatItem[], b: ChatItem[]): ChatItem[] => {
     const byId = new Map<number, ChatItem>();
     const live = new Map<string, ChatItem>();
@@ -931,7 +943,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           hist.some((h) => h.kind === "user" && h.clientMessageId === it.clientMessageId)) continue;
       if (!isCoveredByHistory(it, hist)) result.push(it);
     }
-    result.sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity));
+    result.sort(compareTimeline);
     return result;
   };
 
@@ -958,14 +970,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
         snapshot,
         author: "",
       };
-      set({ chatItems: next });
+      set({ chatItems: mergeHistoryItems(next, []) });
       return;
     }
     set({
-      chatItems: [
+      chatItems: mergeHistoryItems([
         ...items,
         { kind: "flow", at: flow.startedAt ?? Date.now(), flowId, snapshot, author: "" },
-      ],
+      ], []),
     });
   };
 
@@ -1072,7 +1084,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!text) continue;
       const kind = u.sessionUpdate === "agent_thought_chunk" ? "thought" : "assistant";
       const last = items[items.length - 1];
-      if (last?.kind === kind && last.author === author) {
+      if (last?.kind === kind && last.author === author && last.streaming) {
         items[items.length - 1] = { ...last, text: last.text + text, streaming: true };
       } else {
         items.push({ kind, at: Date.now(), id: ++seq, text, author, streaming: true });
@@ -1093,14 +1105,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   /** turn 终止时清除该作者的 streaming 标记，恢复完整 markdown 渲染 */
-  const clearStreaming = (author: string) => {
+  const clearStreaming = (author: string, output?: string) => {
     const items = get().chatItems;
     let changed = false;
     const next = items.map((it) => {
       if ((it.kind === "assistant" || it.kind === "thought") && it.streaming && it.author === author) {
         changed = true;
         const { streaming: _drop, ...rest } = it;
-        return rest as ChatItem;
+        return (it.kind === "assistant" && output ? { ...rest, replyText: output } : rest) as ChatItem;
       }
       return it;
     });
@@ -1144,7 +1156,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       case "prompt.done": {
         const sid = String(params.sessionId ?? "");
         applyStreamBatch(sid);
-        clearStreaming(get().sessionName(sid));
+        clearStreaming(get().sessionName(sid), typeof params.output === "string" ? params.output : undefined);
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
         {
@@ -1293,13 +1305,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (idx >= 0) items[idx] = { ...item, at: items[idx]!.at ?? item.at };
         else {
           // 迟到补写卡（过程卡/flow 卡）按 at 锚定插入，越过尾部 at 更大项与在途流式条目
-          const at = item.at ?? Number.MAX_SAFE_INTEGER;
           let insertAt = items.length;
           for (let i = items.length - 1; i >= 0; i--) {
             const t = items[i]!;
-            const inFlight = t.historyId == null && (t.at == null || t.at <= 0) &&
-              (t.kind === "assistant" || t.kind === "thought" || t.kind === "tool" || t.kind === "plan");
-            if ((t.at ?? Infinity) > at || inFlight) insertAt = i; else break;
+            if (compareTimeline(t, item) > 0) insertAt = i; else break;
           }
           items.splice(insertAt, 0, item);
         }
@@ -3788,13 +3797,14 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (updateType === "agent_message_chunk" || updateType === "agent_thought_chunk") {
         const text = String((u.content as Record<string, unknown> | undefined)?.text ?? "");
         if (!text) return;
+        for (const sid of streamQueue.keys()) if (sid !== sessionId) applyStreamBatch(sid);
         const q = streamQueue.get(sessionId) ?? [];
         if (q.length === 0) streamQueue.set(sessionId, q);
         q.push(u);
         scheduleStreamFlush();
         return;
       }
-      applyStreamBatch(sessionId);
+      flushAllStreams();
       const items = [...get().chatItems];
 
       switch (updateType) {

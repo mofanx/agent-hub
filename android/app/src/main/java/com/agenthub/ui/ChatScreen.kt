@@ -3455,6 +3455,7 @@ private fun FlowCardBlock(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: ChatViewModel, roomId: String, onRetry: () -> Unit) {
     var expanded by remember(task.id) { mutableStateOf(false) }
@@ -3579,7 +3580,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                 LazyColumn(Modifier.heightIn(max = 240.dp)) {
     item {
         Text(
-            task.task,
+            task.task.trim(),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
@@ -3592,7 +3593,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         Text(S.waitingDispatch, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                task.output?.takeIf { it.isNotBlank() }?.let {
+                task.output?.trim()?.takeIf { it.isNotBlank() }?.let {
                     Spacer(Modifier.height(2.dp))
                     LazyColumn(Modifier.heightIn(max = 240.dp)) {
     item {
@@ -3868,9 +3869,10 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
             }
         }
         if (task.artifacts.isNotEmpty()) {
-            Row(
+            FlowRow(
                 modifier = Modifier.padding(start = 20.dp, top = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 task.artifacts.forEach { artifact ->
                     val copyText = artifact.path ?: artifact.summary
@@ -3887,6 +3889,8 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                         Text(
                             "[${artifact.type}] ${artifact.path ?: ""} ${artifact.summary.take(60)}",
                             style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         )
                     }

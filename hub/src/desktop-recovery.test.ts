@@ -242,6 +242,101 @@ test("live persistent id 150 cannot replace complete cursor 100", async (t) => {
   assert.equal(e.calls.find((r) => r.method === "room.history" && r.params.afterId != null)?.params.afterId, 100);
 });
 
+for (const scope of ["session", "room"] as const) {
+  test(`${scope}: 同毫秒增量历史在恢复及重进后保持行 ID 顺序`, async (t) => {
+    const e = await environment(t);
+    e.rows.splice(0, e.rows.length, row(100, "first", { at: 1000 }));
+    e.route(req => req.method === `${scope}.history`
+      ? { entries: e.rows.filter(r => req.params.entryIds
+          ? req.params.entryIds.includes(r.id) : req.params.afterId == null || r.id > req.params.afterId), hasMore: false }
+      : e.base(req));
+    await e.connect();
+    e.set({ currentSession: scope === "session" ? session : null, currentRoom: scope === "room" ? room : null });
+    const id = scope === "room" ? "r1" : "s1";
+    await e.get().loadHistory(`${scope}.history`, `${scope}Id`, id);
+    e.rows.push(row(200, "second", { at: 1000 }));
+    await e.get().reconnectRecovery();
+    const ids = () => Array.from(e.get().chatItems.filter((it: Obj) => it.historyId), (it: Obj) => it.historyId);
+    assert.deepEqual(ids(), [100, 200]);
+    await e.get().loadHistory(`${scope}.history`, `${scope}Id`, id);
+    assert.deepEqual(ids(), [100, 200]);
+  });
+}
+
+test("迟到过程卡位于正在输出的结论之前且不拆断后续 chunk", async (t) => {
+  const e = await environment(t);
+  await e.connect();
+  await e.view();
+  e.get().applyUpdate("s1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "part" } });
+  await until(() => e.get().chatItems.some((it: Obj) => it.streaming));
+  const stream = e.get().chatItems.find((it: Obj) => it.streaming);
+  const card = row(200, JSON.stringify({
+    processId: "proc-1", sessionId: "s1", turnStartAt: stream.at - 1,
+    turnEndAt: stream.at + 1, steps: [], status: "done",
+  }), { kind: "process", at: stream.at + 1 });
+  e.sockets[0]!.emit({ method: "room.process", params: { roomId: "r1", entry: card } });
+  const items = e.get().chatItems;
+  assert.ok(items.findIndex((it: Obj) => it.processId === "proc-1") < items.findIndex((it: Obj) => it.streaming), JSON.stringify(items));
+  e.get().applyUpdate("s1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ial" } });
+  await until(() => e.get().chatItems.some((it: Obj) => it.text === "partial"));
+  assert.equal(e.get().chatItems.filter((it: Obj) => it.kind === "assistant" && !it.historyId).length, 1);
+});
+
+test("迟到 flow 快照按 startedAt 归位，原位状态更新不改变锚点", async (t) => {
+  const e = await environment(t);
+  e.rows.splice(0, e.rows.length, row(100, "question", { kind: "user", at: 1000 }), row(200, "summary", { at: 3000 }));
+  await e.connect();
+  await e.view();
+  e.sockets[0]!.emit({ method: "room.flowUpdate", params: { roomId: "r1", flow: { ...flow, startedAt: 2000 } } });
+  assert.deepEqual(Array.from(e.get().chatItems, (it: Obj) => it.kind), ["user", "flow", "assistant"]);
+  e.sockets[0]!.emit({ method: "room.process", params: {
+    roomId: "r1", entry: row(150, JSON.stringify({ ...flow, startedAt: 2000, phase: "done" }), { kind: "flow", at: 2000 }),
+  } });
+  assert.deepEqual(Array.from(e.get().chatItems, (it: Obj) => it.kind), ["user", "flow", "assistant"]);
+  assert.equal(e.get().chatItems[1].snapshot.phase, "done");
+});
+
+test("并行成员的 chunk 与工具事件按接收顺序落入时间线", async (t) => {
+  const e = await environment(t);
+  await e.connect();
+  e.set({ currentRoom: { ...room, members: [["s1", "Worker"], ["s2", "Other"]] }, currentSession: null, chatItems: [] });
+  const chunk = (id: string, text: string) =>
+    e.get().applyUpdate(id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  chunk("s1", "A1");
+  chunk("s2", "B1");
+  chunk("s1", "A2");
+  e.get().applyUpdate("s2", { sessionUpdate: "tool_call", toolCallId: "t1", title: "tool", status: "completed" });
+  await until(() => e.get().chatItems.filter((it: Obj) => it.kind === "assistant").length >= 3);
+  assert.deepEqual(Array.from(e.get().chatItems, (it: Obj) => it.text ?? it.title), ["A1", "B1", "A2", "tool"]);
+});
+
+test("工具前后分段回复在完成及重进后不会留下重复尾片段", async (t) => {
+  const e = await environment(t);
+  await e.connect();
+  await e.view();
+  const chunk = (text: string) =>
+    e.get().applyUpdate("s1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  chunk("first");
+  e.get().applyUpdate("s1", { sessionUpdate: "tool_call", toolCallId: "t1", title: "tool", status: "completed" });
+  chunk("second");
+  e.sockets[0]!.emit({ method: "prompt.done", params: { sessionId: "s1", output: "firstsecond" } });
+  e.rows.push(row(200, "firstsecond", { at: Date.now() + 10 }));
+  await e.get().loadHistory("room.history", "roomId", "r1");
+  assert.deepEqual(Array.from(e.get().chatItems.filter((it: Obj) => it.kind === "assistant"), (it: Obj) => it.text),
+    ["text-100", "firstsecond"]);
+});
+
+test("任务卡详情去除首尾空行但保留段落与正文", () => {
+  const ui = fs.readFileSync(path.join(directory, "../screens/ChatScreen.tsx"), "utf8");
+  for (const cls of ["flow-task-full", "flow-task-output"]) {
+    const expression = ui.match(new RegExp(`className="${cls}">\\{([^}]+)\\}`))?.[1];
+    assert.ok(expression);
+    const render = vm.runInNewContext(`(task) => ${expression}`);
+    const text = "\n\n  first\n\nsecond  \n";
+    assert.equal(render({ task: text, output: text }), "first\n\nsecond");
+  }
+});
+
 test("unknown raw history rows advance pagination beyond twenty pages", async (t) => {
   const e = await environment(t);
   await e.connect();
