@@ -113,6 +113,18 @@ describe("TurnProcessRecorder", () => {
     assert.equal(meta3.taskId, undefined);
   });
 
+  it("buildProcessMeta 透传 missionId/flowId 溯源字段", () => {
+    const rec = new TurnProcessRecorder();
+    rec.record("s1", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "分析" } }, "coder");
+    const buf = rec.take("s1");
+    const meta = buildProcessMeta("room1", "s1", buf, "t1", "done", "flow-9", "m-42");
+    assert.equal(meta.flowId, "flow-9");
+    assert.equal(meta.missionId, "m-42");
+    const bare = buildProcessMeta("room1", "s1", buf, "t1", "done");
+    assert.equal(bare.flowId, undefined);
+    assert.equal(bare.missionId, undefined);
+  });
+
   it("不同 session 的过程消息互相隔离", () => {
     const rec = new TurnProcessRecorder();
     rec.record("s1", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "a" } }, "bot");

@@ -187,6 +187,8 @@ type Flow = {
   cardRowId?: number;
   phase: FlowPhase;
   goal: string;
+  /** 展示用短目标（≤80 字）：mission 来源取 mission.goal，否则取原始需求截断；goal 全文仍供规划 prompt 使用 */
+  title?: string | undefined;
   acceptanceCriteria: string[];
   iteration: number;
   maxIterations: number;
@@ -254,6 +256,8 @@ export type FlowView = {
   phase?: string | undefined;
   waitingFor?: string | undefined;
   failureMessage?: string | undefined;
+  /** 展示用短目标（≤80 字）：mission 来源取 mission.goal，否则原始需求截断 */
+  title?: string | undefined;
   tasks: FlowTaskView[];
   [key: string]: unknown;
 };
@@ -273,6 +277,7 @@ export function asFlowView(raw: Record<string, unknown> | undefined): FlowView |
     phase: str(raw.phase),
     waitingFor: str(raw.waitingFor),
     failureMessage: str(raw.failureMessage),
+    title: str(raw.title),
   };
   const tasks = Array.isArray(raw.tasks)
     ? raw.tasks.filter((t): t is FlowTaskView => typeof t === "object" && t !== null)
@@ -283,6 +288,7 @@ export function asFlowView(raw: Record<string, unknown> | undefined): FlowView |
     scalars.phase === raw.phase &&
     scalars.waitingFor === raw.waitingFor &&
     scalars.failureMessage === raw.failureMessage &&
+    scalars.title === raw.title &&
     Array.isArray(raw.tasks) &&
     tasks.length === raw.tasks.length;
   if (clean) return raw as FlowView;
@@ -1107,6 +1113,7 @@ export class ConductorOrchestrator {
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
       ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
       ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
+      ...(flow.title !== undefined ? { title: flow.title } : {}),
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
@@ -1314,6 +1321,7 @@ export class ConductorOrchestrator {
     artifactContext?: { refs?: string[] },
     maxRounds?: number,
     missionId?: string,
+    titleGoal?: string,
   ): Flow {
     const startedAt = Date.now();
     return {
@@ -1323,6 +1331,7 @@ export class ConductorOrchestrator {
       ...(missionId !== undefined ? { missionId } : {}),
       phase: "planning",
       goal,
+      title: (titleGoal ?? goal).slice(0, 80),
       acceptanceCriteria: [...DEFAULT_ACCEPTANCE_CRITERIA],
       iteration: 1,
       maxIterations: MAX_ITERATIONS,
@@ -1403,19 +1412,20 @@ export class ConductorOrchestrator {
     initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[],
     artifactContext?: { refs?: string[] },
     missionId?: string,
+    titleGoal?: string,
   ): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
     this.planningInFlight.delete(room.roomId);
     if (initialTasks && initialTasks.length > 0) {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
-      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId));
+      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId, titleGoal));
       const flow = this.flows.get(room.roomId)!;
       this.emitFlow?.(room.roomId);
       await this.dispatchFromTasks(flow, room, initialTasks, text);
       return;
     }
     const promptText = this.buildPlanningPrompt(room, text, artifactContext);
-    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId);
+    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId, titleGoal);
     this.flows.set(room.roomId, flow);
     this.emitFlow?.(room.roomId);
     this.planningInFlight.add(room.roomId);
@@ -2663,6 +2673,7 @@ export class ConductorOrchestrator {
       ...(flow.cardRowId !== undefined ? { cardRowId: flow.cardRowId } : {}),
       phase: flow.phase,
       ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
+      ...(flow.title !== undefined ? { title: flow.title } : {}),
       goal: flow.goal,
       acceptanceCriteria: flow.acceptanceCriteria,
       iteration: flow.iteration,
@@ -2759,6 +2770,7 @@ export class ConductorOrchestrator {
           : {}),
         phase: (f.phase as Flow["phase"]) ?? "working",
         goal: typeof f.goal === "string" ? f.goal : "",
+        ...(typeof f.title === "string" && f.title ? { title: f.title } : {}),
         acceptanceCriteria: Array.isArray(f.acceptanceCriteria)
           ? f.acceptanceCriteria.map((s) => String(s)).filter(Boolean)
           : [...DEFAULT_ACCEPTANCE_CRITERIA],

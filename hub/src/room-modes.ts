@@ -60,6 +60,8 @@ type PromptOptions = {
   bypassFilter?: boolean | undefined;
   /** 派发来源 mission id：由此创建的 flow 记录归属，mission 仅认领 missionId 匹配的 flow */
   missionId?: string | undefined;
+  /** flow 展示目标（≤80 字）：mission 派发传 mission.goal，缺省由原始需求截断 */
+  goal?: string | undefined;
   /** 决策来源标注（规则:x/LLM/兜底）：随「自动选择」通知透出，便于定位哪层判的 */
   decisionVia?: string | undefined;
 };
@@ -1768,13 +1770,13 @@ export class RoomModeManager {
         if (m) sent.add(m.sessionId);
         else skipped.push(t.to);
       }
-      this.conductor.start(room, task, initialTasks, options?.artifactContext, options?.missionId).catch((err) => {
+      this.conductor.start(room, task, initialTasks, options?.artifactContext, options?.missionId, options?.goal).catch((err) => {
         logError("room-modes conductor start", err);
       });
       return { sent: [...sent], mentioned: [], skipped };
     }
 
-    this.conductor.start(room, task, undefined, options?.artifactContext, options?.missionId).catch((err) => {
+    this.conductor.start(room, task, undefined, options?.artifactContext, options?.missionId, options?.goal).catch((err) => {
       logError("room-modes conductor start", err);
     });
     return { sent: conductorBusy ? [] : [room.conductorId], mentioned: [], skipped: conductorBusy ? [room.conductorId] : [] };

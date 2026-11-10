@@ -1256,6 +1256,7 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
     taskId,
     status,
     roomModeManager.flowIdForTurn(sessionId, roomId),
+    missionManager.missionIdForTurn(sessionId, roomId),
   );
   if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return;
   // 卡锚定最后一条过程事件的时刻而非落库时刻：结论条目以完成时刻落库必然在其后；

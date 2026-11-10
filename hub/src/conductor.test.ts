@@ -1518,6 +1518,42 @@ describe("conductor", () => {
     );
   });
 
+  it("title 展示目标：mission 传 titleGoal 取 mission.goal，否则原文截 80 字；export/import 往返保留", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "title-flow",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const mk = () => new ConductorOrchestrator(
+      { prompt: async () => {}, isBusy: () => false },
+      rooms,
+      () => {},
+    );
+    const longText = "x".repeat(120);
+    const o1 = mk();
+    await o1.start(r, longText, [{ to: "worker", task: "做" }], undefined, "m-1", "精简目标G");
+    const f1 = o1.getFlow(r.roomId)! as { goal: string; title?: string };
+    assert.equal(f1.goal, longText, "goal 全文保留供规划使用");
+    assert.equal(f1.title, "精简目标G");
+
+    const o2 = mk();
+    await o2.start(r, longText, [{ to: "worker", task: "做" }]);
+    const f2 = o2.getFlow(r.roomId)! as { title?: string };
+    assert.equal(f2.title, longText.slice(0, 80), "无 titleGoal 时按原文截 80 字");
+
+    const state = o1.export();
+    const o3 = mk();
+    await o3.import(state);
+    const f3 = o3.getFlow(r.roomId)! as { title?: string; goal: string };
+    assert.equal(f3.title, "精简目标G");
+    assert.equal(f3.goal, longText);
+  });
+
   it("import summarizing flow 会重新发送汇总 prompt", async () => {
     const rooms = new RoomManager();
     const r = rooms.create(

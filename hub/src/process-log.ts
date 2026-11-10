@@ -12,6 +12,8 @@ export type ProcessCardMeta = {
   taskId?: string;
   /** 所属编排实例 id：客户端据此把过程卡归入对应 flow 卡 */
   flowId?: string;
+  /** 派工来源工单 id：mission 派发的 flow 过程卡可溯源到工单 */
+  missionId?: string;
   status: ProcessStatus;
   /** 结构化通知卡类型；type="dispatch" 时 count/tasks 承载派工清单 */
   type?: string;
@@ -30,6 +32,7 @@ export function buildProcessMeta(
   taskId: string | undefined,
   status: ProcessStatus,
   flowId?: string,
+  missionId?: string,
 ): ProcessCardMeta {
   const steps = buf.map((i) => {
     const step: ProcessStep = { kind: i.kind };
@@ -55,6 +58,7 @@ export function buildProcessMeta(
   };
   if (taskId) meta.taskId = taskId;
   if (flowId) meta.flowId = flowId;
+  if (missionId) meta.missionId = missionId;
   return meta;
 }
 

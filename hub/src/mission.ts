@@ -128,7 +128,7 @@ export type MissionDeps = {
   dispatch(
     room: Room,
     text: string,
-    options?: { note?: string; missionId?: string },
+    options?: { note?: string; missionId?: string; goal?: string },
   ): Promise<ModeResult>;
   cancelActive(roomId: string, reason?: string): Promise<void>;
   cancel(sessionId: string): Promise<void>;
@@ -727,7 +727,7 @@ export class MissionManager {
     this.commit(m);
     let result: ModeResult;
     try {
-      result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m), missionId: m.id });
+      result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m), missionId: m.id, goal: m.goal });
     } catch (e) {
       m.dispatching = false;
       if (m.stopRequested) {
