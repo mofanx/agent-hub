@@ -3457,8 +3457,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val toResume = latestRoom.members.mapNotNull { (sid, _) ->
                         sessions.find { it.sessionId == sid && it.offline }
                     }
-                    // 成员会话并发恢复：N×session/load 串行是进房慢的主因，sessionId 去重已在 hub 侧防重
-                    toResume.map { s -> async { resumeOne(s) } }.awaitAll()
+                    // 成员会话并发恢复：N×session/load 串行是进房慢的主因，sessionId 去重已在 hub 侧防重；
+                    // runCatching 防单成员失败经 awaitAll 取消兄弟协程拖垮整房恢复
+                    toResume.map { s -> async { runCatching { resumeOne(s) } } }.awaitAll()
                     if (seq != roomOpenSeq) return@launch
                     syncRefreshAll()
                 }
