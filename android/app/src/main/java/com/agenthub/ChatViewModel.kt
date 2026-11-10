@@ -231,6 +231,7 @@ sealed class ChatItem {
         val dispatchCount: Int = 0,
         val dispatchTasks: List<DispatchTask> = emptyList(),
         val flowId: String = "",
+        val missionId: String? = null,
         override val author: String,
         override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem() {
@@ -3830,13 +3831,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 在途条目（流式/刚完成未合并 historyId）at 是回合开始时刻而非完成时刻，
         // 按其 at 排序会把 at 更大的迟到落库卡钉在流式结论之后——在途条目恒置尾键
         val combined = (incoming + dedupeTail(incoming, tail)).sortedBy { item ->
+            // 乐观用户气泡：at=record.createdAt 是入队时刻——deferred/离线排队件滞后于实际送达，
+            // 恒置半尾键 MAX_VALUE-1（已落库 < 排队消息 < 在途卡）；即时件 createdAt 即真实到达序，
+            // 按 at 排序才不会被自己触发的编排/过程卡反超（卡片 at 必晚于消息）
+            val unmergedUser = item is ChatItem.User && item.clientMessageId != null && item.historyAt == null
             val inFlight = historyIdOf(item) == null &&
                 (item is ChatItem.Assistant || item is ChatItem.Thought ||
-                    item is ChatItem.Tool || item is ChatItem.Plan) ||
-                // 乐观用户气泡：at=record.createdAt 是入队时刻，延迟/排队发送时滞后于实际送达——
-                // historyAt 仅落库合并时写入，未合并恒置尾键，防排队消息按入队时刻插到前面
-                (item is ChatItem.User && item.clientMessageId != null && item.historyAt == null)
-            val at = if (inFlight) Long.MAX_VALUE
+                    item is ChatItem.Tool || item is ChatItem.Plan)
+            val at = if (unmergedUser && item.sendStatus == "deferred") Long.MAX_VALUE - 1
+                else if (inFlight) Long.MAX_VALUE
                 else if (item is ChatItem.Process && item.at <= 0)
                     item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
                 else item.at
@@ -4530,6 +4533,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } ?: emptyList(),
             dispatchCount = data["count"]?.jsonPrimitive?.intOrNull ?: 0,
             flowId = data["flowId"]?.jsonPrimitive?.contentOrNull ?: "",
+            missionId = data["missionId"]?.jsonPrimitive?.contentOrNull,
             author = author,
             at = at,
         )

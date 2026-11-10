@@ -536,6 +536,7 @@ interface Strings {
     val missionOwner: String
     val missionOwnerAuto: String
     val missionGoal: String
+    val missionView: String
     val missionCriteria: String
     val missionScope: String
     val missionConstraints: String
@@ -1231,6 +1232,7 @@ object ZhStrings : Strings {
     override val missionOwner = "负责人"
     override val missionOwnerAuto = "默认（指挥家/首成员）"
     override val missionGoal = "目标"
+    override val missionView = "查看工单"
     override val missionCriteria = "验收标准（每行一条）"
     override val missionScope = "范围"
     override val missionConstraints = "禁止事项（每行一条）"
@@ -1926,6 +1928,7 @@ object EnStrings : Strings {
     override val missionOwner = "Owner"
     override val missionOwnerAuto = "Default (conductor/first member)"
     override val missionGoal = "Goal"
+    override val missionView = "View mission"
     override val missionCriteria = "Acceptance criteria (one per line)"
     override val missionScope = "Scope"
     override val missionConstraints = "Constraints (one per line)"

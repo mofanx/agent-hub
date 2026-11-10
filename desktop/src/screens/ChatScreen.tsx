@@ -2210,6 +2210,17 @@ function ProcessCard({
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {label}
           {running && <span className="process-running">{S.processRunning}</span>}
         </button>
+        {(() => {
+          const goal = item.goal ??
+            (item.flowId && store.flow?.flowId === item.flowId ? store.flow.goal : undefined);
+          return goal ? <div className="flow-card-goal" title={goal}>{goal}</div> : null;
+        })()}
+        {item.missionId && (
+          <button className="mission-owner-btn" title={S.missionOpenTitle}
+            onClick={(e) => { e.stopPropagation(); store.openMission(item.missionId!); }}>
+            {S.missionDrivenTag}
+          </button>
+        )}
         {expanded &&
           (isDispatch ? (
             <div className="process-steps">

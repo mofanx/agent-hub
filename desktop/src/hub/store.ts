@@ -623,6 +623,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
           ? m.steps
           : 0,
       taskId: typeof m.taskId === "string" ? m.taskId : undefined,
+      flowId: typeof m.flowId === "string" ? m.flowId : undefined,
+      missionId: typeof m.missionId === "string" ? m.missionId : undefined,
+      goal: typeof m.goal === "string" ? m.goal : undefined,
       status: String(m.status ?? "done"),
       dispatchCount:
         m.type === "dispatch" || m.card === "dispatch" || typeof m.count === "number"

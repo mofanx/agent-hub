@@ -2272,6 +2272,11 @@ private fun ProcessCardBlock(
                         color = textColor,
                     )
                 }
+                item.missionId?.let { mid ->
+                    TextButton(onClick = { vm.openMission(mid) }) {
+                        Text(S.missionView, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
                 if (expanded && isDispatch) {
                     Spacer(Modifier.height(4.dp))
                     if (item.dispatchTasks.isEmpty()) {
@@ -2312,6 +2317,9 @@ private fun ProcessCardBlock(
                                 isCurrentMatch = false,
                                 isQuoted = false,
                                 onMatchKeywordY = keywordCallback,
+                                // 过程钻取区在外层滚动容器内：子项关 innerScroll，否则 Thought 展开
+                                // 的 LazyColumn(heightIn 360) 在无限高约束下撑满上限成中间空白
+                                innerScroll = false,
                             )
                         }
                         unavailable -> {
@@ -3223,6 +3231,16 @@ private fun FlowCardBlock(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+            flow.goal?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                )
             }
             if (flow.startedAt > 0 || progress.total > 0) {
                 Spacer(Modifier.height(4.dp))

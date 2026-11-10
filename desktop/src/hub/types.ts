@@ -416,6 +416,10 @@ export type ChatItem =
       /** 派发卡：已派发子任务数及列表（meta 内嵌，无需懒加载） */
       dispatchCount?: number;
       dispatchTasks?: { id?: string; to?: string; task?: string }[];
+      /** 所属编排/工单：goal 单行展示 + missionId 存在时提供工单跳转 */
+      flowId?: string;
+      missionId?: string;
+      goal?: string;
     }
   | {
       kind: "permission";

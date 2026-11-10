@@ -641,6 +641,7 @@ export interface Strings {
   missionReasonInterruptedRestart: string;
   missionReasonClosedForRework: string;
   missionDrivenTag: string;
+  missionOpenTitle: string;
   missionCriteriaShort: string;
   missionFilterAll: string;
   missionFilterActive: string;
@@ -1375,6 +1376,7 @@ const zh: Strings = {
   missionReasonInterruptedRestart: "被服务重启中断",
   missionReasonClosedForRework: "已关闭并转返工",
   missionDrivenTag: "工单驱动",
+  missionOpenTitle: "查看工单",
   missionCriteriaShort: "验收标准",
   missionFilterAll: "全部",
   missionFilterActive: "执行中",
@@ -2109,6 +2111,7 @@ const en: Strings = {
   missionReasonInterruptedRestart: "Interrupted by hub restart",
   missionReasonClosedForRework: "Closed for rework",
   missionDrivenTag: "Mission-driven",
+  missionOpenTitle: "Open mission",
   missionCriteriaShort: "Acceptance criteria",
   missionFilterAll: "All",
   missionFilterActive: "Active",
