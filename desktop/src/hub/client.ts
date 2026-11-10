@@ -174,9 +174,10 @@ export class HubClient {
   private _scheduleReconnect() {
     if (this.reconnecting || this.closed || !this.url) return;
     this.reconnecting = true;
+    // 退避封顶 5s+jitter：hub 重启恢复红线 <30s——旧默认 60s 封顶下单次睡眠即越线
     const delay = Math.min(
-      1000 * Math.pow(2, this.reconnectAttempt),
-      this.options.maxReconnectDelayMs ?? 60000,
+      1000 * Math.pow(2, this.reconnectAttempt) * (0.5 + Math.random() * 0.5),
+      this.options.maxReconnectDelayMs ?? 5000,
     );
     this.reconnectAttempt++;
     this.reconnectTimer = window.setTimeout(() => {

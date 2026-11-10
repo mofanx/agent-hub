@@ -85,7 +85,8 @@ class HubClient(
     private var lastNetworkId: Long? = null
     private var networkObserved = false
     private var reconnectDelayMs = 1000L
-    private val maxReconnectDelayMs = 30000L
+    // 退避封顶 5s：hub 重启恢复红线 <30s——30s 封顶下单次睡眠即越线（与 desktop client.ts 对齐）
+    private val maxReconnectDelayMs = 5000L
 
     private fun actor(block: suspend CoroutineScope.() -> Unit): Job =
         scope.launch(scope.coroutineContext.minusKey(Job), block = block)
