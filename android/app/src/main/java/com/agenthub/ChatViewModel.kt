@@ -2768,7 +2768,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Toast.makeText(getApplication(), stringsFor(lang).promoteBoundExisting, Toast.LENGTH_SHORT).show()
             return
         }
+        pendingPromoteDraftSid = s.sessionId
         sendPrompt(stringsFor(lang).promoteDraftPrompt)
+    }
+
+    /** 起草回合结算：无 ```mission 块产出（或回合失败）时注入空模板草稿块，
+     *  MissionDraftCard 渲染为可编辑空卡——不静默跳过确认、也不谎称已起草 */
+    private fun settlePromoteDraft(sid: String, produced: Boolean) {
+        if (pendingPromoteDraftSid != sid) return
+        pendingPromoteDraftSid = null
+        if (produced || !inScope(sid)) return
+        chatItems.add(ChatItem.Assistant(++itemSeq,
+            "```mission\n{\"goal\":\"\",\"acceptanceCriteria\":[]}\n```", sessionName(sid)))
     }
 
     fun promoteMission(
@@ -6205,6 +6216,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (sessions.firstOrNull { it.sessionId == sid }?.let { it.backendType ?: it.agent } == "devin") {
                     refreshBackendQuota()
                 }
+                settlePromoteDraft(sid, chatItems.indexOfLast {
+                    it is ChatItem.Assistant && it.author == sessionName(sid)
+                }.let { idx -> idx >= 0 && (chatItems[idx] as ChatItem.Assistant).text.contains("```mission") })
                 refreshAll()
             }
             "prompt.error" -> {
@@ -6212,6 +6226,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 busyIds.remove(sid)
                 clearStreamingTailIfIdle(sid)
+                settlePromoteDraft(sid, false)
                 if ((inScope(sid) || sid.isEmpty()) && shouldShowInRoom(sid)) {
                     chatItems.add(
                         ChatItem.Error(++itemSeq, p["message"]!!.jsonPrimitive.content, sessionName(sid))
@@ -6403,6 +6418,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 仍在接收流式 chunk 的尾部 item（sessionId to itemId）；busyIds 离组即自愈，无需显式清理 */
     private var streamingTail: Pair<String, Long>? = null
+    /** 会话升级工单起草挂起：prompt.done/error 时若无 mission 块产出，注入空模板草稿卡兜底 */
+    private var pendingPromoteDraftSid: String? = null
 
     /** UI 层判定：该 ChatItem id 是否为仍在流式增长的尾部 item（与 UI streaming 标记同语义） */
     fun isStreamingTail(id: Long): Boolean =
