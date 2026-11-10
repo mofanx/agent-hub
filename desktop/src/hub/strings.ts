@@ -642,6 +642,10 @@ export interface Strings {
   missionReasonClosedForRework: string;
   missionDrivenTag: string;
   missionOpenTitle: string;
+  missionAutoCard: string;
+  missionAutoCreating: string;
+  missionAutoStarted: string;
+  missionAutoFailed: string;
   missionCriteriaShort: string;
   missionFilterAll: string;
   missionFilterActive: string;
@@ -1377,6 +1381,10 @@ const zh: Strings = {
   missionReasonClosedForRework: "已关闭并转返工",
   missionDrivenTag: "工单驱动",
   missionOpenTitle: "查看工单",
+  missionAutoCard: "目标工单（自动创建）",
+  missionAutoCreating: "正在自动创建并启动…",
+  missionAutoStarted: "已创建并启动",
+  missionAutoFailed: "自动创建失败",
   missionCriteriaShort: "验收标准",
   missionFilterAll: "全部",
   missionFilterActive: "执行中",
@@ -2112,6 +2120,10 @@ const en: Strings = {
   missionReasonClosedForRework: "Closed for rework",
   missionDrivenTag: "Mission-driven",
   missionOpenTitle: "Open mission",
+  missionAutoCard: "Goal mission (auto)",
+  missionAutoCreating: "Creating and starting…",
+  missionAutoStarted: "Created and started",
+  missionAutoFailed: "Auto-create failed",
   missionCriteriaShort: "Acceptance criteria",
   missionFilterAll: "All",
   missionFilterActive: "Active",

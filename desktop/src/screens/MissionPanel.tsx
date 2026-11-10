@@ -644,6 +644,7 @@ function formatMissionTime(at: number): string {
 // ---- 聊天内工单草稿卡（```mission JSON 块 → 可编辑确认卡，Android 同款） ----
 
 interface MissionDraft {
+  auto?: unknown;
   goal?: unknown;
   acceptanceCriteria?: unknown;
   scope?: unknown;
@@ -696,6 +697,46 @@ function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; 
   const ownerSessionId = room?.members.find((m) => m[0] === ownerRaw || m[1] === ownerRaw)?.[0] ?? sessionId;
   const retries = typeof draft.maxAutoRetries === "number" ? Math.min(Math.max(draft.maxAutoRetries, 0), 3) : 0;
   const valid = goal.trim() !== "" && lines(criteria).length > 0;
+  // auto:true + 会话上下文 + 无重试 + 未绑活跃工单 → 自动创建并启动；其余降级为普通确认卡
+  const boundActive = sessionId != null && store.missions.some((m) =>
+    m.boundSessionId === sessionId && !["accepted", "stopped", "failed"].includes(m.status));
+  const autoMode = draft.auto === true && room == null && sessionId != null && retries === 0 && !boundActive && valid;
+  const [autoState, setAutoState] = useState<"idle" | "running" | "done" | "failed">("idle");
+  const [autoMission, setAutoMission] = useState<MissionInfo | null>(null);
+  React.useEffect(() => {
+    if (!autoMode || autoState !== "idle") return;
+    setAutoState("running");
+    void store.promoteMission({
+      sessionId: sessionId!, goal: goal.trim(), acceptanceCriteria: lines(criteria),
+      scope: scopeText.trim(), constraints: lines(constraints),
+      ownerSessionId, maxAutoRetries: retries,
+    }).then(async (m) => {
+      // 创建失败回落普通确认卡（idle 出 autoMode 分支），与 Android m==null→idle 同语义
+      if (!m) { setAutoState("idle"); return; }
+      setAutoMission(m);
+      // 幂等命中已运行工单时 status!=draft——跳过 start 直达结果卡，绕开 not-startable
+      if (m.status === "draft") await store.startMission(m.id);
+      setAutoState("done");
+    }).catch(() => setAutoState("idle"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoMode, autoState]);
+  if (autoMode && autoState !== "idle") {
+    return (
+      <div className="mission-draft-card">
+        <div className="nav-sub">{S.missionAutoCard}</div>
+        <div className="flow-card-goal">{goal}</div>
+        {autoState === "done" && autoMission ? (
+          <div className="mission-draft-actions">
+            <span className="nav-sub">{S.missionAutoStarted}</span>
+            <button className="secondary" onClick={() => store.openMission(autoMission.id)}>{S.missionOpenTitle}</button>
+            <button className="secondary" onClick={() => { if (confirm(S.missionStopConfirm)) void store.stopMission(autoMission.id); }}>{S.missionStop}</button>
+          </div>
+        ) : (
+          <div className="nav-sub">{S.missionAutoCreating}</div>
+        )}
+      </div>
+    );
+  }
   const submit = (start: boolean) => {
     if (!valid || busy) return;
     setBusy(true);

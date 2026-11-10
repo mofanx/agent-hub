@@ -16,6 +16,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +42,7 @@ import com.agenthub.Mission
 import com.agenthub.MissionReview
 import com.agenthub.RoomInfo
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -730,6 +733,68 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
         } else if (session != null) {
             vm.promoteMission(session.sessionId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, onDone)
         }
+    }
+    // auto:true 草稿仅会话内自动执行；retries>0 / 已绑活跃工单 / 草稿缺必填 / 房场景 → 降级普通确认卡
+    val autoRequested = runCatching { draft["auto"]?.jsonPrimitive?.booleanOrNull }.getOrNull() ?: false
+    val boundActive = session?.let { s ->
+        vm.missions.any { it.boundSessionId == s.sessionId && it.status !in setOf("accepted", "stopped", "failed") }
+    } ?: false
+    val autoRun = autoRequested && room == null && session != null && retries == 0 &&
+        !boundActive && goal.isNotBlank() && lines(criteria).isNotEmpty()
+    var autoState by rememberSaveable(key) { mutableStateOf(if (autoRun) "creating" else "idle") }
+    var autoMissionId by rememberSaveable(key) { mutableStateOf<String?>(null) }
+    var confirmAutoStop by rememberSaveable(key) { mutableStateOf(false) }
+    if (autoState == "creating" || autoState == "done") {
+        LaunchedEffect(Unit) {
+            if (autoState != "creating") return@LaunchedEffect
+            create { m ->
+                if (m != null) {
+                    autoMissionId = m.id
+                    autoState = "done"
+                    // 幂等命中已运行工单时 mission.start 会抛 not-startable——仅 draft 态才启动
+                    if (m.status == "draft") vm.startMission(m.id)
+                } else autoState = "idle" // 创建失败降级为普通卡，用户可手动编辑重试
+            }
+        }
+        Card(
+            Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)),
+        ) {
+            Column(Modifier.padding(10.dp)) {
+                Text(goal, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(6.dp))
+                if (autoState == "creating") {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.width(16.dp).height(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(S.missionAutoCreating, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    Text("✓ ${S.missionAutoStarted}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                    Row {
+                        autoMissionId?.let { mid ->
+                            TextButton(onClick = { vm.openMission(mid) }) { Text(S.missionView) }
+                            TextButton(onClick = { confirmAutoStop = true }) { Text(S.missionStop) }
+                        }
+                    }
+                }
+            }
+        }
+        if (confirmAutoStop) {
+            AlertDialog(
+                onDismissRequest = { confirmAutoStop = false },
+                title = { Text(S.missionStop) },
+                text = { Text("${S.missionStopConfirm}\n\n$goal") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmAutoStop = false
+                        autoMissionId?.let { vm.stopMission(it) }
+                    }) { Text(S.missionStop) }
+                },
+                dismissButton = { TextButton(onClick = { confirmAutoStop = false }) { Text(S.cancel) } },
+            )
+        }
+        return
     }
     Card(
         Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
