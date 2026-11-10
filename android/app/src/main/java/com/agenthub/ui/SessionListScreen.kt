@@ -262,7 +262,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             inBatchMode -> S.selectedCount.format(selectedCount)
                             vm.selectedSearchGroup != null -> searchScopeName
                             vm.searchQuery.isNotBlank() -> S.searchConversations
-                            else -> S.appName
+                            else -> vm.connLabel() ?: S.appName
                         }
                     )
                 },
@@ -2004,14 +2004,6 @@ private fun RoomCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
-                    vm.connTag()?.let {
-                        Text(
-                            " " + S.connTag.format(it),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                        )
-                    }
                 }
                 Text(
                     r.members.joinToString("、") { it.second },

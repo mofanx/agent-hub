@@ -926,9 +926,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var ntfyUrl by mutableStateOf("https://ntfy.sh")
     var currentProfile by mutableStateOf<ConnProfile?>(null)
 
-    /** 多连接标识：>1 个保存 profile 时返回展示连接名（空名回退地址主机段，>20 字符截断），否则 null */
-    fun connTag(): String? {
-        if (profiles.size <= 1) return null
+    /** 当前连接展示名（空名回退地址主机段，>20 字符截断），无 profile 时 null */
+    fun connLabel(): String? {
         val p = currentProfile ?: return null
         val label = p.name.ifBlank {
             p.address.removePrefix("wss://").removePrefix("ws://")
@@ -937,6 +936,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         return if (label.length <= 20) label else label.take(19) + "…"
     }
+
+    /** 多连接标识：>1 个保存 profile 时返回展示连接名，否则 null */
+    fun connTag(): String? = if (profiles.size <= 1) null else connLabel()
 
     val sessions = mutableStateListOf<SessionInfo>()
     val rooms = mutableStateListOf<RoomInfo>()
@@ -1351,7 +1353,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sessionOrigin(s: SessionInfo): String {
         if (s.connectionId != null) {
-            connections.find { it.id == s.connectionId }?.let { return it.name }
+            connections.find { it.id == s.connectionId }?.let {
+                return if (it.local) stringsFor(lang).localConnection else it.name
+            }
         }
         return s.address
     }
