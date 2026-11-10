@@ -429,6 +429,7 @@ data class Mission(
     val acceptanceNote: String? = null,
     val supplements: List<MissionSupplement> = emptyList(),
     val parentMissionId: String? = null,
+    val boundSessionId: String? = null,
     val reworkReason: String? = null,
     val maxAutoRetries: Int = 0,
     val autoRetryCount: Int = 0,
@@ -2758,6 +2759,65 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 会话升级工单入口：已绑活跃工单→提示去重；否则向会话发起起草 prompt，
+     *  成员输出 ```mission 块 → MissionDraftCard 确认时走 promoteMission（hub 幂等兜底） */
+    fun promoteToMission() {
+        val s = currentSession ?: return
+        if (missions.any { it.boundSessionId == s.sessionId &&
+                it.status !in setOf("accepted", "stopped", "failed") }) {
+            Toast.makeText(getApplication(), stringsFor(lang).promoteBoundExisting, Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendPrompt(stringsFor(lang).promoteDraftPrompt)
+    }
+
+    fun promoteMission(
+        sessionId: String,
+        goal: String,
+        acceptanceCriteria: List<String>,
+        scope: String,
+        constraints: List<String>,
+        ownerSessionId: String?,
+        maxAutoRetries: Int = 0,
+        onDone: (Mission?) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val result = hub.call("mission.promote", buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("goal", goal)
+                    put("acceptanceCriteria", JsonArray(acceptanceCriteria.map { JsonPrimitive(it) }))
+                    put("scope", scope)
+                    put("constraints", JsonArray(constraints.map { JsonPrimitive(it) }))
+                    put("maxAutoRetries", maxAutoRetries)
+                    ownerSessionId?.let { put("ownerSessionId", it) }
+                })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+                // promote 新建的 solo 房补进本地列表
+                (result["roomId"] as? JsonPrimitive)?.contentOrNull?.let { rid ->
+                    if (rooms.none { it.roomId == rid }) {
+                        runCatching {
+                            val rl = hub.call("room.list")
+                            rl["rooms"]?.jsonArray?.forEach { r ->
+                                val parsed = parseRoom(r.jsonObject)
+                                if (rooms.none { it.roomId == parsed.roomId }) rooms.add(parsed)
+                            }
+                        }
+                    }
+                }
+                onDone(parseMission(result["mission"]!!.jsonObject))
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) {
+                    missionError = e.message ?: e.toString()
+                    onDone(null)
+                }
+            }
+        }
+    }
+
     fun startMission(id: String, onDone: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
@@ -2871,6 +2931,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
             } ?: emptyList(),
             parentMissionId = str("parentMissionId"),
+            boundSessionId = str("boundSessionId"),
             reworkReason = str("reworkReason"),
             maxAutoRetries = (o["maxAutoRetries"] as? JsonPrimitive)?.intOrNull ?: 0,
             autoRetryCount = (o["autoRetryCount"] as? JsonPrimitive)?.intOrNull ?: 0,

@@ -719,6 +719,11 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             Text(S.fileLabel, style = MaterialTheme.typography.labelMedium)
                         }
                     }
+                    if (!isRoom && vm.currentSession != null && vm.missionSupported) {
+                        IconButton(onClick = { vm.promoteToMission() }) {
+                            Text(S.promoteToMission, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
                     if (isRoom) {
                         // 顶栏 ⋯ 溢出菜单：房间设置 + 发送记录管理（原 MainActivity banner 入口下沉至此），
                         // 有待发送/失败/待定记录时图标挂徽标

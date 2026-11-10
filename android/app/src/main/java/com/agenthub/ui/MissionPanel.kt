@@ -696,7 +696,9 @@ fun MissionDraftCards(text: String, vm: ChatViewModel) {
 
 @Composable
 private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: ChatViewModel, S: Strings, key: Int) {
-    val room = vm.currentRoom ?: return
+    val room = vm.currentRoom
+    val session = vm.currentSession
+    if (room == null && session == null) return
     var dismissed by rememberSaveable(key) { mutableStateOf(false) }
     var created by rememberSaveable(key) { mutableStateOf(false) }
     if (dismissed) return
@@ -716,9 +718,19 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
     var constraints by rememberSaveable(key) { mutableStateOf(arrOrStr(draft["constraints"])) }
     val retries = (prim(draft["maxAutoRetries"])?.toIntOrNull() ?: 0).coerceIn(0, 3)
     val ownerRaw = prim(draft["owner"])?.trim().orEmpty()
-    val ownerId = room.members.find { it.first == ownerRaw || it.second == ownerRaw }?.first
+    // 会话场景（room==null）：owner 恒为当前会话；房场景按成员名匹配
+    val ownerId = room?.members?.find { it.first == ownerRaw || it.second == ownerRaw }?.first
+        ?: session?.sessionId
     var busy by remember(key) { mutableStateOf(false) }
     val lines = { v: String -> v.split("\n").map { it.trim() }.filter { it.isNotEmpty() } }
+    // 房→mission.create(roomId)，会话→mission.promote(sessionId 建房+绑定，hub 幂等去重)
+    val create = { onDone: (Mission?) -> Unit ->
+        if (room != null) {
+            vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, onDone)
+        } else if (session != null) {
+            vm.promoteMission(session.sessionId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, onDone)
+        }
+    }
     Card(
         Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)),
@@ -740,7 +752,7 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
                     enabled = !busy && goal.isNotBlank() && lines(criteria).isNotEmpty(),
                     onClick = {
                         busy = true
-                        vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries) { m ->
+                        create { m ->
                             busy = false
                             if (m != null) created = true
                         }
@@ -750,7 +762,7 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
                     enabled = !busy && goal.isNotBlank() && lines(criteria).isNotEmpty(),
                     onClick = {
                         busy = true
-                        vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries) { m ->
+                        create { m ->
                             busy = false
                             if (m != null) {
                                 created = true

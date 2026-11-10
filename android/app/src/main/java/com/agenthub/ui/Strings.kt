@@ -580,6 +580,9 @@ interface Strings {
     val missionFilterClosed: String
     val missionNew: String
     val missionDraftCard: String
+    val promoteToMission: String
+    val promoteDraftPrompt: String
+    val promoteBoundExisting: String
     val missionCreateConfirm: String
     val missionCreateAndStart: String
     val missionDismissDraft: String
@@ -1272,6 +1275,9 @@ object ZhStrings : Strings {
     override val missionFilterClosed = "已结束"
     override val missionNew = "新建目标"
     override val missionDraftCard = "工单草稿（可编辑后确认）"
+    override val promoteToMission = "升级为目标"
+    override val promoteDraftPrompt = "请回顾当前会话内容，将其中的目标整理为目标工单草稿。只输出一个 ```mission JSON 代码块，字段：goal（一句话目标）、acceptanceCriteria（可检验的验收标准数组，至少一条）、scope（范围说明）、constraints（约束数组）、maxAutoRetries（0-3）。"
+    override val promoteBoundExisting = "该会话已绑定进行中的目标工单"
     override val missionCreateConfirm = "创建"
     override val missionCreateAndStart = "创建并启动"
     override val missionDismissDraft = "忽略"
@@ -1964,6 +1970,9 @@ object EnStrings : Strings {
     override val missionFilterClosed = "Closed"
     override val missionNew = "New mission"
     override val missionDraftCard = "Mission draft (edit, then confirm)"
+    override val promoteToMission = "Promote to goal"
+    override val promoteDraftPrompt = "Review our conversation and distill the goal into a mission draft. Output exactly one ```mission JSON block with fields: goal (one line), acceptanceCriteria (verifiable array, at least one), scope, constraints (array), maxAutoRetries (0-3)."
+    override val promoteBoundExisting = "This session already has an active mission"
     override val missionCreateConfirm = "Create"
     override val missionCreateAndStart = "Create & start"
     override val missionDismissDraft = "Dismiss"
