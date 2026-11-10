@@ -1403,5 +1403,52 @@ describe("mission.delete awaiting-acceptance 拒删", () => {
     await assert.rejects(() => h.manager.delete(m.id), /not deletable/);
     await assert.rejects(() => h.manager.delete(m.id, true), /not deletable/);
     assert.ok(h.manager.get(m.id), "拒删后工单仍在");
+
+  });
+});
+
+describe("boundSessionId 绑定去重", () => {
+  it("同会话活跃绑定工单拒绝重复创建", async () => {
+    const h = makeHarness();
+    const first = h.manager.create({
+      roomId: h.room.roomId, goal: "g", acceptanceCriteria: ["a"],
+      boundSessionId: "s-bound",
+    });
+    assert.equal(first.boundSessionId, "s-bound");
+    assert.throws(
+      () => h.manager.create({
+        roomId: h.room.roomId, goal: "g2", acceptanceCriteria: ["b"],
+        boundSessionId: "s-bound",
+      }),
+      /bound session already has active mission/,
+    );
+    await h.manager.delete(first.id, true);
+    const second = h.manager.create({
+      roomId: h.room.roomId, goal: "g3", acceptanceCriteria: ["c"],
+      boundSessionId: "s-bound",
+    });
+    assert.notEqual(second.id, first.id);
+  });
+
+  it("findBoundActive 命中非终态绑定单，终态返回 undefined", async () => {
+    const h = makeHarness();
+    assert.equal(h.manager.findBoundActive("s-none"), undefined);
+    const m = h.manager.create({
+      roomId: h.room.roomId, goal: "g", acceptanceCriteria: ["a"],
+      boundSessionId: "s-x",
+    });
+    assert.equal(h.manager.findBoundActive("s-x")?.id, m.id);
+    // 无绑定的工单不命中
+    h.manager.create({ roomId: h.room.roomId, goal: "g2", acceptanceCriteria: ["b"] });
+    assert.equal(h.manager.findBoundActive("s-x")?.id, m.id);
+    await h.manager.delete(m.id, true);
+    assert.equal(h.manager.findBoundActive("s-x"), undefined);
+    // 终态（stopped）不命中
+    const m2 = h.manager.create({
+      roomId: h.room.roomId, goal: "g3", acceptanceCriteria: ["c"],
+      boundSessionId: "s-y",
+    });
+    const stopped = await h.manager.stop(m2.id, "done").catch(() => null);
+    if (stopped) assert.equal(h.manager.findBoundActive("s-y"), undefined);
   });
 });

@@ -1932,6 +1932,7 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
       roomId: p.roomId, goal: p.goal, acceptanceCriteria: p.acceptanceCriteria,
       scope: p.scope, constraints: p.constraints,
       ownerSessionId: p.ownerSessionId, maxAutoRetries: p.maxAutoRetries,
+      boundSessionId: p.boundSessionId,
     }),
   }),
   "mission.list": (p) => {
@@ -1966,6 +1967,43 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
   }),
   "mission.supplement": (p) => missionManager.supplement(missionIdOf(p), p.text).then((mission) => ({ mission })),
   "mission.retry": (p) => ({ mission: missionManager.retry(missionIdOf(p)) }),
+  // 会话升级为目标：会话→单人房(mention)+绑定工单——manager 对 boundSessionId 已有非终态去重，
+  // 幂等命中直接返回既有工单不建房
+  "mission.promote": (p) => {
+    const sessionId = String(p.sessionId ?? "");
+    if (!sessionId) throw new Error("sessionId required");
+    const meta = sessionMetas.get(sessionId);
+    if (!meta) throw new Error(`unknown session: ${sessionId}`);
+    const existing = missionManager.findBoundActive(sessionId);
+    if (existing) {
+      return { mission: existing, roomId: existing.roomId, alreadyExists: true };
+    }
+    const members = [{ sessionId, name: meta.name }];
+    const room = rooms.create(
+      dedupeRoomName(`目标·${meta.name}`),
+      members,
+      "mention",
+      {},
+    );
+    try {
+      const mission = missionManager.create({
+        roomId: room.roomId,
+        goal: p.goal,
+        acceptanceCriteria: p.acceptanceCriteria,
+        scope: p.scope,
+        constraints: p.constraints,
+        ownerSessionId: p.ownerSessionId ?? sessionId,
+        maxAutoRetries: p.maxAutoRetries,
+        boundSessionId: sessionId,
+      });
+      return { mission, roomId: room.roomId };
+    } catch (e) {
+      try {
+        rooms.delete(room.roomId);
+      } catch { /* 回滚失败静默——孤儿房比吞错可接受 */ }
+      throw e;
+    }
+  },
 };
 const MISSION_RPC_READONLY: ReadonlySet<string> = new Set(["mission.list", "mission.get"]);
 

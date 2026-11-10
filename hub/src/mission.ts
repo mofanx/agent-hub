@@ -74,6 +74,8 @@ export type Mission = {
   scope: string;
   constraints: string[];
   ownerSessionId: string;
+  /** 会话 promote 绑定：由哪个会话升级而来；同会话有活跃绑定工单时再 promote 应提示查看而非重复创建 */
+  boundSessionId?: string | undefined;
   status: MissionStatus;
   createdAt: number;
   updatedAt: number;
@@ -333,6 +335,7 @@ function validateRecord(raw: unknown): MissionRecord {
   if (str(m.error) !== undefined) inner.error = str(m.error);
   if (acceptance) inner.acceptance = acceptance;
   if (str(m.parentMissionId) !== undefined) inner.parentMissionId = str(m.parentMissionId);
+  if (str(m.boundSessionId) !== undefined) inner.boundSessionId = str(m.boundSessionId);
   if (str(m.baselineFlowId) !== undefined) inner.baselineFlowId = str(m.baselineFlowId);
   if (str(m.reasonCode) !== undefined) inner.reasonCode = str(m.reasonCode);
   return inner;
@@ -371,6 +374,7 @@ function snapshot(m: MissionRecord): MissionSnapshot {
   if (m.parentMissionId !== undefined) s.parentMissionId = m.parentMissionId;
   if (m.reworkReason !== undefined) s.reworkReason = m.reworkReason;
   if (m.reasonCode !== undefined) s.reasonCode = m.reasonCode;
+  if (m.boundSessionId !== undefined) s.boundSessionId = m.boundSessionId;
   return s;
 }
 
@@ -585,6 +589,7 @@ export class MissionManager {
     maxAutoRetries?: unknown;
     parentMissionId?: unknown;
     reworkReason?: unknown;
+    boundSessionId?: unknown;
   }): MissionSnapshot {
     const roomId = optString(input.roomId, "roomId");
     if (!roomId) throw new Error("roomId required");
@@ -625,6 +630,15 @@ export class MissionManager {
     if (parentMissionId) m.parentMissionId = parentMissionId;
     const reworkReason = optString(input.reworkReason, "reworkReason");
     if (reworkReason) m.reworkReason = reworkReason;
+    const boundSessionId = optString(input.boundSessionId, "boundSessionId");
+    if (boundSessionId) {
+      // promote 去重：同会话已有非终态绑定工单时拒绝重复创建，客户端据 missionId 提供"查看"入口
+      const dup = [...this.missions.values()].find(
+        (x) => x.boundSessionId === boundSessionId && !TERMINAL.has(x.status),
+      );
+      if (dup) throw new Error(`bound session already has active mission: ${dup.id}`);
+      m.boundSessionId = boundSessionId;
+    }
     this.log(m, "lifecycle", "draft created");
     this.missions.set(m.id, m);
     return this.commit(m);
@@ -655,6 +669,14 @@ export class MissionManager {
     m.reviews = defaultReviews(c.acceptanceCriteria);
     this.log(m, "lifecycle", "contract updated");
     return this.commit(m);
+  }
+
+  /** 会话升级工单幂等查找：boundSessionId 命中的最早非终态工单（draft 也算，避免重复建房） */
+  findBoundActive(boundSessionId: string): MissionSnapshot | undefined {
+    return [...this.missions.values()]
+      .filter((m) => m.boundSessionId === boundSessionId && !TERMINAL.has(m.status))
+      .map((m) => snapshot(m))
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))[0];
   }
 
   list(roomId?: string, status?: string): MissionSnapshot[] {
