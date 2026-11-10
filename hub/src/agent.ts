@@ -821,7 +821,7 @@ export class AcpAgent {
     // usage/config_option 属会话级更新，不受回合约束放行。
     // 已知边界：新回合已启动后旧回合迟到的 update 无法区分——ACP session/update 不携带回合标识。
     if (!entry.busy && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) return;
-    if (entry.busy) {
+    if (entry.busy && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) {
       entry.turnGotUpdate = true;
       entry.lastActivityAt = Date.now();
     }
@@ -1558,8 +1558,9 @@ export class AcpAgent {
           armWatchdog(turnDeadGraceMs);
           return;
         }
+        const stage = entry.turnGotUpdate ? "stall" : "ack";
         const err = new Error(
-          entry.turnGotUpdate
+          stage === "stall"
             ? `agent ${this.name} went silent for ${Math.round(idle / 1000)}s mid-turn — treating as stalled`
             : `agent ${this.name} produced no output within ${ackTimeoutMs / 1000}s — request may have been rejected at transport level`,
         );
@@ -1570,16 +1571,17 @@ export class AcpAgent {
         }
         // 先回收僵尸回合再广播 prompt.error：error 会同步触发兜底重派（如 auto 决策失败→self），
         // 若先 error 后 cancel，cancel 会把刚起的兜底回合一并中断
-        this.cancel(sessionId).catch(() => {}).finally(() => {
+        this.cancelTurn(sessionId, false).catch(() => {}).finally(() => {
           this.emit({
             method: "prompt.error",
             params: {
               sessionId,
               message: String(err),
-              stage: entry.turnGotUpdate ? "stall" : "ack",
+              stage,
               idleMs: idle,
             },
           });
+          this.drainFollowUps(sessionId);
         });
       }, ms);
       entry.watchdog.unref?.();
@@ -1694,6 +1696,10 @@ export class AcpAgent {
   }
 
   async cancel(sessionId: string): Promise<void> {
+    await this.cancelTurn(sessionId);
+  }
+
+  private async cancelTurn(sessionId: string, drain = true): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
     if (!this.ctx) throw new Error("agent not started");
@@ -1723,7 +1729,7 @@ export class AcpAgent {
         params: { sessionId, stoppable: false },
       });
       // cancel 收尾后补 drain：busy 已清，排队消息应继续而不是滞留
-      this.drainFollowUps(sessionId);
+      if (drain) this.drainFollowUps(sessionId);
     }
   }
 

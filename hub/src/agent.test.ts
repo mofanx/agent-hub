@@ -459,6 +459,41 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+  for (const update of [
+    { sessionUpdate: "usage_update" as const, used: 1, size: 100 },
+    { sessionUpdate: "config_option_update" as const, configOptions: [] },
+    { sessionUpdate: "current_mode_update" as const, currentModeId: "plan" },
+  ]) {
+    it(`${update.sessionUpdate} 不算首输出且连续状态更新不能延长 ACK 超时`, async () => {
+      const { hub, agentConn, events } = setup();
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      try {
+        await hub.createSession("/tmp", "s");
+        await hub.prompt("s1", "first", { ackTimeoutMs: 100, stallMs: 1000 });
+        await agentConn.client.notify("session/update", { sessionId: "s1", update });
+        heartbeat = setInterval(() => {
+          void agentConn.client.notify("session/update", { sessionId: "s1", update });
+        }, 15);
+        const error = await waitFor(() => events.find((e) => e.method === "prompt.error"), 600);
+        assert.equal(error.method, "prompt.error");
+        if (error.method === "prompt.error") {
+          assert.equal(error.params.stage, "ack");
+          assert.match(error.params.message, /no output/);
+          assert.ok(error.params.idleMs! >= 100);
+        }
+        assert.equal(hub.isBusy("s1"), false);
+        assert.ok(events.some((e) => e.method === "session.update"));
+        if (update.sessionUpdate === "usage_update") {
+          assert.deepEqual(hub.getContextUsage("s1"), { used: 1, size: 100, cost: null });
+        }
+      } finally {
+        clearInterval(heartbeat);
+        hub.close();
+        agentConn.close();
+      }
+    });
+  }
+
   it("watchdog 与 cancel 的 promptOnce 拒因可区分（timeout vs cancelled）", async () => {
     const { hub, agentConn, events } = setup({
       promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
@@ -519,8 +554,13 @@ describe("AcpAgent integration (in-memory stream)", () => {
         ),
       );
       assert.ok(errEv, "stall 看门狗应发出 prompt.error");
+      if (errEv.method === "prompt.error") assert.equal(errEv.params.stage, "stall");
       // error+cancel 收尾后 drain：排队的 second 应被送出（随即开启新回合）
       await waitFor(() => (prompts.length >= 2 ? true : undefined));
+      const resumed = events.filter(
+        (e) => e.method === "session.generating" && e.params.stoppable,
+      ).at(-1)!;
+      assert.ok(events.indexOf(errEv) < events.indexOf(resumed), "旧回合错误必须先于新回合开始事件");
       // 新回合正常完成：会话自愈不残留僵尸 busy
       resolvers[1]!({ stopReason: "end_turn" });
       await waitFor(() => events.find((e) => e.method === "prompt.done"));
@@ -528,6 +568,61 @@ describe("AcpAgent integration (in-memory stream)", () => {
     } finally {
       setTurnStallTimeoutMs(300_000);
       setTurnDeadGraceMs(60_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("已有输出后的 usage 心跳不能掩盖 stall 超时", async () => {
+    const { hub, agentConn, events } = setup();
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    setTurnDeadGraceMs(0);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first", { stallMs: 100 });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } },
+      });
+      heartbeat = setInterval(() => {
+        void agentConn.client.notify("session/update", {
+          sessionId: "s1",
+          update: { sessionUpdate: "usage_update", used: 1, size: 100 },
+        });
+      }, 15);
+      const error = await waitFor(() => events.find((e) => e.method === "prompt.error"), 600);
+      if (error.method === "prompt.error") assert.equal(error.params.stage, "stall");
+      assert.equal(hub.isBusy("s1"), false);
+    } finally {
+      clearInterval(heartbeat);
+      setTurnDeadGraceMs(300_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("持续真实输出可超过 ACK 预算并正常完成", async () => {
+    let resolve!: (r: acp.PromptResponse) => void;
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => { resolve = r; }),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first", { ackTimeoutMs: 60, stallMs: 150 });
+      for (let i = 0; i < 8; i++) {
+        await agentConn.client.notify("session/update", {
+          sessionId: "s1",
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "x" } },
+        });
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(hub.isBusy("s1"), true);
+      assert.equal(events.some((e) => e.method === "prompt.error"), false);
+      resolve({ stopReason: "end_turn" });
+      const done = await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      if (done.method === "prompt.done") assert.equal(done.params.output, "xxxxxxxx");
+      assert.equal(hub.isBusy("s1"), false);
+    } finally {
       hub.close();
       agentConn.close();
     }
