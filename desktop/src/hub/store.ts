@@ -344,6 +344,9 @@ interface Actions {
 
   refreshMissions(retry?: boolean): Promise<void>;
   createMission(input: MissionCreateInput): Promise<MissionInfo | null>;
+  promoteMission(input: { sessionId: string } & Omit<MissionCreateInput, "roomId">): Promise<MissionInfo | null>;
+  /** 会话升级为目标：已绑活跃工单提示去重；否则挂起起草标记并发起草 prompt */
+  promoteToMission(): void;
   startMission(id: string): Promise<void>;
   stopMission(id: string): Promise<void>;
   deleteMission(id: string, force?: boolean): Promise<boolean>;
@@ -461,6 +464,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const granted = await isNotificationPermissionGranted();
       if (!granted) await requestNotificationPermission();
     } catch {}
+  };
+
+  /** 会话升级工单起草挂起：prompt.done/error 时若无 mission 块产出，注入空模板草稿卡兜底 */
+  let pendingPromoteDraftSid: string | null = null;
+  let pendingPromoteDraftAt = 0;
+  const settlePromoteDraft = (sid: string, produced: boolean) => {
+    if (pendingPromoteDraftSid !== sid) return;
+    pendingPromoteDraftSid = null;
+    pendingPromoteDraftAt = 0;
+    if (produced || !get().inScope(sid)) return;
+    const item: ChatItem = {
+      kind: "assistant", at: Date.now(), id: 0,
+      text: '```mission\n{"goal":"","acceptanceCriteria":[]}\n```',
+      author: get().sessionName(sid),
+    };
+    set({ chatItems: [...get().chatItems, item] });
   };
 
   const updateTray = () => {
@@ -1125,6 +1144,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
         clearStreaming(get().sessionName(sid));
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
+        {
+          // 本回合 assistant 任一条含 mission 块即算产出——时间戳界桩免疫历史 promote 卡残留
+          const author = get().sessionName(sid);
+          const produced = get().chatItems.some(
+            (it) => it.kind === "assistant" && (it.at ?? 0) >= pendingPromoteDraftAt &&
+              it.author === author && it.text.includes("```mission"),
+          );
+          settlePromoteDraft(sid, produced);
+        }
         const sess = get().sessions.find((s) => s.sessionId === sid);
         if ((sess?.backendType ?? sess?.agent) === "devin") {
           void get().refreshBackendQuota();
@@ -1163,6 +1191,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         applyStreamBatch(sid);
         clearStreaming(get().sessionName(sid));
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
+        settlePromoteDraft(sid, false);
         if ((get().inScope(sid) || !sid) && get().shouldShowInRoom(sid)) {
           const msg = String(params.message ?? "error");
           const author = get().sessionName(sid);
@@ -2033,6 +2062,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       scope: typeof o.scope === "string" ? o.scope : "",
       constraints: strList(o.constraints),
       ownerSessionId: String(o.ownerSessionId ?? ""),
+      ...(typeof o.boundSessionId === "string" ? { boundSessionId: o.boundSessionId } : {}),
       status: (typeof o.status === "string" ? o.status : "draft") as MissionStatus,
       createdAt: typeof o.createdAt === "number" ? o.createdAt : 0,
       updatedAt: typeof o.updatedAt === "number" ? o.updatedAt : 0,
@@ -4669,6 +4699,52 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (get().client === client) set({ missionError: String(e) });
         return null;
       }
+    },
+
+    promoteMission: async (input) => {
+      const client = get().client;
+      if (!client || !client.isConnected) return null;
+      try {
+        const resp = await client.call("mission.promote", {
+          sessionId: input.sessionId,
+          goal: input.goal,
+          acceptanceCriteria: input.acceptanceCriteria,
+          scope: input.scope,
+          constraints: input.constraints,
+          maxAutoRetries: input.maxAutoRetries,
+          ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
+        });
+        if (get().client !== client) return null;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+        // promote 建了绑定房——补拉 room.list，避免新房要等下一次全量刷新
+        void client.call("room.list", {}, 30000).then((rl) => {
+          if (get().client !== client) return;
+          const list = (((rl as Record<string, unknown>).rooms as unknown[]) ?? []).map((it) =>
+            parseRoom(it as Record<string, unknown>),
+          );
+          const cur = get().currentRoom;
+          set({ rooms: list, ...(cur ? { currentRoom: list.find((r) => r.roomId === cur.roomId) ?? cur } : {}) });
+        }).catch(() => {});
+        return mission;
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+        return null;
+      }
+    },
+
+    promoteToMission: () => {
+      const sess = get().currentSession;
+      if (!sess) return;
+      const S = stringsFor(get().lang);
+      if (get().missions.some((m) => m.boundSessionId === sess.sessionId &&
+          !["accepted", "stopped", "failed"].includes(m.status))) {
+        set({ chatItems: [...get().chatItems, { kind: "system", at: Date.now(), text: S.promoteBoundExisting, author: "" }] });
+        return;
+      }
+      pendingPromoteDraftSid = sess.sessionId;
+      pendingPromoteDraftAt = Date.now();
+      get().sendPrompt(S.promoteDraftPrompt);
     },
 
     startMission: async (id: string) => {

@@ -672,14 +672,15 @@ export function MissionDraftCards({ text }: { text: string }) {
   const store = useHubStore();
   const S = stringsFor(store.lang);
   const room = store.currentRoom;
+  const session = store.currentSession;
   const drafts = useMemo(() => draftsFrom(text), [text]);
-  if (drafts.length === 0 || !room) return null;
-  return <>{drafts.map((d, i) => <MissionDraftCard key={i} draft={d} room={room} S={S} />)}</>;
+  if (drafts.length === 0 || (!room && !session)) return null;
+  return <>{drafts.map((d, i) => <MissionDraftCard key={i} draft={d} room={room ?? undefined} sessionId={session?.sessionId} S={S} />)}</>;
 }
 
-function MissionDraftCard({ draft, room, S }: { draft: MissionDraft; room: { roomId: string; members: [string, string][] }; S: Strings }) {
+function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; room?: { roomId: string; members: [string, string][] }; sessionId?: string; S: Strings }) {
   const store = useHubStore();
-  const roomId = room.roomId;
+  const roomId = room?.roomId;
   const [goal, setGoal] = useState(typeof draft.goal === "string" ? draft.goal : "");
   const [criteria, setCriteria] = useState(listField(draft.acceptanceCriteria));
   const [scopeText, setScopeText] = useState(typeof draft.scope === "string" ? draft.scope : "");
@@ -691,17 +692,27 @@ function MissionDraftCard({ draft, room, S }: { draft: MissionDraft; room: { roo
   if (created) return <div className="mission-draft-card"><span className="nav-sub">✓ {S.missionCreatedOk}</span></div>;
   const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
   const ownerRaw = typeof draft.owner === "string" ? draft.owner.trim() : "";
-  const ownerSessionId = room.members.find((m) => m[0] === ownerRaw || m[1] === ownerRaw)?.[0];
+  // 会话场景（room 缺省）：owner 恒为当前会话；房场景按成员名匹配
+  const ownerSessionId = room?.members.find((m) => m[0] === ownerRaw || m[1] === ownerRaw)?.[0] ?? sessionId;
   const retries = typeof draft.maxAutoRetries === "number" ? Math.min(Math.max(draft.maxAutoRetries, 0), 3) : 0;
   const valid = goal.trim() !== "" && lines(criteria).length > 0;
   const submit = (start: boolean) => {
     if (!valid || busy) return;
     setBusy(true);
-    void store.createMission({
-      roomId, goal: goal.trim(), acceptanceCriteria: lines(criteria),
-      scope: scopeText.trim(), constraints: lines(constraints),
-      ownerSessionId, maxAutoRetries: retries,
-    }).then((m) => {
+    void (roomId
+      ? store.createMission({
+          roomId, goal: goal.trim(), acceptanceCriteria: lines(criteria),
+          scope: scopeText.trim(), constraints: lines(constraints),
+          ownerSessionId, maxAutoRetries: retries,
+        })
+      : sessionId
+        ? store.promoteMission({
+            sessionId, goal: goal.trim(), acceptanceCriteria: lines(criteria),
+            scope: scopeText.trim(), constraints: lines(constraints),
+            ownerSessionId, maxAutoRetries: retries,
+          })
+        : Promise.resolve(null)
+    ).then((m) => {
       setBusy(false);
       if (m) {
         if (start) void store.startMission(m.id);

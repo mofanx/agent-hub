@@ -28,6 +28,7 @@ import {
   Search,
   ShieldAlert,
   SlashSquare,
+  Target,
   Square,
   Trash2,
   Wrench,
@@ -1565,6 +1566,11 @@ export function ChatScreen() {
               )}
 
               <div className="compose-toolbar">
+                {!isRoom && store.missionSupported && (
+                  <button className="icon-btn" onClick={() => store.promoteToMission()} title={S.promoteToMission}>
+                    <Target size={14} />
+                  </button>
+                )}
                 <button className={`icon-btn ${cmdOpen ? "active" : ""}`} onClick={() => setCmdOpen(!cmdOpen)} title={S.quickCommandsTitle}>
                   <SlashSquare size={14} />
                 </button>

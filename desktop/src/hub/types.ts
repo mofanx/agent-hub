@@ -619,6 +619,8 @@ export interface MissionInfo {
   scope: string;
   constraints: string[];
   ownerSessionId: string;
+  /** 会话 promote 绑定：由哪个会话升级而来 */
+  boundSessionId?: string;
   status: MissionStatus;
   createdAt: number;
   updatedAt: number;

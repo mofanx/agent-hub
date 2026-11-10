@@ -650,6 +650,9 @@ export interface Strings {
   missionFilterClosed: string;
   missionNew: string;
   missionDraftCard: string;
+  promoteToMission: string;
+  promoteDraftPrompt: string;
+  promoteBoundExisting: string;
   missionCreateConfirm: string;
   missionCreateAndStart: string;
   missionDismissDraft: string;
@@ -1381,6 +1384,9 @@ const zh: Strings = {
   missionFilterClosed: "已结束",
   missionNew: "新建目标",
   missionDraftCard: "工单草稿（可编辑后确认）",
+  promoteToMission: "升级为目标",
+  promoteDraftPrompt: "请回顾当前会话内容，将其中的目标整理为目标工单草稿。只输出一个 ```mission JSON 代码块，字段：goal（一句话目标）、acceptanceCriteria（可检验的验收标准数组，至少一条）、scope（范围说明）、constraints（约束数组）、maxAutoRetries（0-3）。",
+  promoteBoundExisting: "该会话已绑定进行中的目标工单",
   missionCreateConfirm: "创建",
   missionCreateAndStart: "创建并启动",
   missionDismissDraft: "忽略",
@@ -2112,6 +2118,9 @@ const en: Strings = {
   missionFilterClosed: "Closed",
   missionNew: "New mission",
   missionDraftCard: "Mission draft (edit, then confirm)",
+  promoteToMission: "Promote to goal",
+  promoteDraftPrompt: "Review our conversation and distill the goal into a mission draft. Output exactly one ```mission JSON block with fields: goal (one line), acceptanceCriteria (verifiable array, at least one), scope, constraints (array), maxAutoRetries (0-3).",
+  promoteBoundExisting: "This session already has an active mission",
   missionCreateConfirm: "Create",
   missionCreateAndStart: "Create & start",
   missionDismissDraft: "Dismiss",
