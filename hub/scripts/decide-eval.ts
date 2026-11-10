@@ -56,6 +56,21 @@ const paired = outcomes.filter((r) => r.shadow != null && r.shadow !== null);
 const agree = paired.filter((r) => r.agree === true).length;
 console.log(`shadow↔host pairs=${paired.length} agree=${agree} (${paired.length ? ((agree / paired.length) * 100).toFixed(1) : "n/a"}%)`);
 
+// 观测雷达：host 端最终模式分布（self 率>70% 告警——词表漏词/规则失效早期信号）+ 规则命中率
+const hostTally = new Map<string, number>();
+for (const r of outcomes) {
+  const k = String(r.hostMode ?? "");
+  if (k) hostTally.set(k, (hostTally.get(k) ?? 0) + 1);
+}
+print("hostMode", hostTally);
+const selfRate = outcomes.length === 0 ? 0 : (hostTally.get("self") ?? 0) / outcomes.length;
+const ruleHits = decides.filter((r) => String((r.verdict as Record<string, unknown>)?.via ?? "").startsWith("rule")).length;
+const ruleRate = decides.length === 0 ? 0 : ruleHits / decides.length;
+console.log(`self rate: ${(selfRate * 100).toFixed(1)}%  rule-hit rate: ${(ruleRate * 100).toFixed(1)}%`);
+if (outcomes.length >= 10 && selfRate > 0.7) {
+  console.log("WARN: self rate >70% over outcomes — 检查词表漏词/规则失效/模型不可达");
+}
+
 // labels.jsonl 评测（可选）
 const labelsPath = process.argv[3];
 if (labelsPath) {

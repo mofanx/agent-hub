@@ -2769,6 +2769,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         pendingPromoteDraftSid = s.sessionId
+        pendingPromoteDraftFromSeq = itemSeq
         sendPrompt(stringsFor(lang).promoteDraftPrompt)
     }
 
@@ -2777,6 +2778,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun settlePromoteDraft(sid: String, produced: Boolean) {
         if (pendingPromoteDraftSid != sid) return
         pendingPromoteDraftSid = null
+        pendingPromoteDraftFromSeq = -1
         if (produced || !inScope(sid)) return
         chatItems.add(ChatItem.Assistant(++itemSeq,
             "```mission\n{\"goal\":\"\",\"acceptanceCriteria\":[]}\n```", sessionName(sid)))
@@ -6216,10 +6218,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (sessions.firstOrNull { it.sessionId == sid }?.let { it.backendType ?: it.agent } == "devin") {
                     refreshBackendQuota()
                 }
-                // 本回合任一条 assistant 含 mission 块即算产出——成员可能先出草稿再追加说明，不能只看末条
-                val userTail = chatItems.indexOfLast { it is ChatItem.User }
-                settlePromoteDraft(sid, chatItems.drop(userTail + 1).any {
-                    it is ChatItem.Assistant && it.author == sessionName(sid) && it.text.contains("```mission")
+                // 本回合任一条 assistant 含 mission 块即算产出——界桩序号界定，免疫历史 promote 卡残留
+                settlePromoteDraft(sid, chatItems.any {
+                    it is ChatItem.Assistant && it.id > pendingPromoteDraftFromSeq &&
+                        it.author == sessionName(sid) && it.text.contains("```mission")
                 })
                 refreshAll()
             }
@@ -6422,6 +6424,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var streamingTail: Pair<String, Long>? = null
     /** 会话升级工单起草挂起：prompt.done/error 时若无 mission 块产出，注入空模板草稿卡兜底 */
     private var pendingPromoteDraftSid: String? = null
+    private var pendingPromoteDraftFromSeq: Long = -1
 
     /** UI 层判定：该 ChatItem id 是否为仍在流式增长的尾部 item（与 UI streaming 标记同语义） */
     fun isStreamingTail(id: Long): Boolean =
