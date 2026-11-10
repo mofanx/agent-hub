@@ -1836,17 +1836,14 @@ private fun SessionCard(
                     }
                     Text(
                         s.name,
+                        modifier = Modifier.weight(1f, fill = false),
                         style = MaterialTheme.typography.titleSmall,
                         color = if (s.archived) MaterialTheme.colorScheme.onSurfaceVariant
                             else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    if (!inBatchMode && s.offline) {
-                        Text(
-                            "  ${S.offline}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    } else if (!inBatchMode && (s.busy || vm.busyIds.contains(s.sessionId))) {
+                    if (!inBatchMode && (s.busy || vm.busyIds.contains(s.sessionId))) {
                         Text(
                             "  ${S.busyTag}",
                             style = MaterialTheme.typography.bodySmall,
