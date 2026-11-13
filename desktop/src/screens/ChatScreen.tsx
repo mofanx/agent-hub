@@ -1531,6 +1531,11 @@ export function ChatScreen() {
 
               {cmdOpen && (
                 <div className="dropdown-menu">
+                  {!isRoom && store.missionSupported && (
+                    <div className="dropdown-item" onClick={() => { store.promoteToMission(); setCmdOpen(false); }}>
+                      <Target size={12} style={{ color: "var(--muted)" }} /> {S.promoteToMission}
+                    </div>
+                  )}
                   {store.defaultCommands.map((c) => (
                     <div key={c} className="dropdown-item" onClick={() => insertCommand(c)}>
                       {c}
@@ -1566,11 +1571,6 @@ export function ChatScreen() {
               )}
 
               <div className="compose-toolbar">
-                {!isRoom && store.missionSupported && (
-                  <button className="icon-btn" onClick={() => store.promoteToMission()} title={S.promoteToMission}>
-                    <Target size={14} />
-                  </button>
-                )}
                 <button className={`icon-btn ${cmdOpen ? "active" : ""}`} onClick={() => setCmdOpen(!cmdOpen)} title={S.quickCommandsTitle}>
                   <SlashSquare size={14} />
                 </button>
@@ -1969,7 +1969,7 @@ const ChatMessage = memo(function ChatMessage({
             ) : (
               <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
             )}
-            <MissionDraftCards text={item.text} />
+            <MissionDraftCards text={item.text} sourceId={item.historyId ? `history:${item.historyId}` : undefined} />
             {usageText}
           </div>
           {menuEl}

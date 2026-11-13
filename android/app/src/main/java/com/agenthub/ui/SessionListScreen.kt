@@ -218,7 +218,8 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
             selectedSessionIds.clear()
             selectedRoomIds.clear()
             selectedSessionIds.addAll(vm.sessions.map { it.sessionId })
-            selectedRoomIds.addAll(vm.rooms.map { it.roomId })
+            // internal 房不显示也不进批量操作——防误归档/删除工单绑定房
+            selectedRoomIds.addAll(vm.rooms.filter { !it.internal }.map { it.roomId })
         }
         Unit
     }
@@ -242,7 +243,7 @@ fun SessionListScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
 
     val invertSelection = {
         val allSessionIds = vm.sessions.map { it.sessionId }
-        val allRoomIds = vm.rooms.map { it.roomId }
+        val allRoomIds = vm.rooms.filter { !it.internal }.map { it.roomId }
         val oldSession = selectedSessionIds.toSet()
         val oldRoom = selectedRoomIds.toSet()
         selectedSessionIds.clear()

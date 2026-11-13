@@ -371,6 +371,8 @@ data class RoomInfo(
     val debateJudge: String? = null,
     val debateRounds: Int? = null,
     val sensitivity: String = "shared",
+    /** 内部房（如工单绑定房）：room.list 下发但默认不出现在群聊列表/搜索 */
+    val internal: Boolean = false,
 )
 
 data class FlowArtifact(
@@ -405,6 +407,7 @@ data class MissionSupplement(
     val at: Long,
     val text: String,
     val delivered: Boolean,
+    val delivery: String? = null,
 )
 
 data class Mission(
@@ -431,6 +434,8 @@ data class Mission(
     val supplements: List<MissionSupplement> = emptyList(),
     val parentMissionId: String? = null,
     val boundSessionId: String? = null,
+    val sourceId: String? = null,
+    val execution: JsonObject? = null,
     val reworkReason: String? = null,
     val maxAutoRetries: Int = 0,
     val autoRetryCount: Int = 0,
@@ -1408,6 +1413,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val q = filter.query.trim().lowercase()
         val archivedCount = rooms.count { it.archived }
         val filtered = rooms.filter { r ->
+            if (r.internal) return@filter false
             if (r.archived && !filter.showArchived) return@filter false
             if (filter.modes.isNotEmpty() && r.mode !in filter.modes) return@filter false
             if (q.isNotEmpty()) {
@@ -2733,12 +2739,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         constraints: List<String>,
         ownerSessionId: String?,
         maxAutoRetries: Int = 0,
+        sourceId: String? = null,
+        start: Boolean = false,
         onDone: (Mission?) -> Unit = {},
     ) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
                 val result = hub.call("mission.create", buildJsonObject {
+                    sourceId?.let { put("sourceId", it) }
+                    put("start", start)
                     put("roomId", roomId)
                     put("goal", goal)
                     put("acceptanceCriteria", JsonArray(acceptanceCriteria.map { JsonPrimitive(it) }))
@@ -2793,12 +2803,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         constraints: List<String>,
         ownerSessionId: String?,
         maxAutoRetries: Int = 0,
+        sourceId: String? = null,
+        start: Boolean = false,
         onDone: (Mission?) -> Unit = {},
     ) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
                 val result = hub.call("mission.promote", buildJsonObject {
+                    sourceId?.let { put("sourceId", it) }
+                    put("start", start)
                     put("sessionId", sessionId)
                     put("goal", goal)
                     put("acceptanceCriteria", JsonArray(acceptanceCriteria.map { JsonPrimitive(it) }))
@@ -2886,6 +2900,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun controlMissionGoal(id: String, action: String, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            val gen = missionConnectionGeneration
+            try {
+                val method = when (action) {
+                    "review" -> "mission.submitForReview"
+                    "stop" -> "mission.stop"
+                    else -> "mission.goalControl"
+                }
+                val result = hub.call(method, buildJsonObject { put("id", id); put("action", action) })
+                if (gen != missionConnectionGeneration) return@launch
+                upsertMission(parseMission(result["mission"]!!.jsonObject))
+                missionError = null
+            } catch (e: Exception) {
+                if (gen == missionConnectionGeneration) missionError = e.message ?: e.toString()
+            } finally {
+                if (gen == missionConnectionGeneration) onDone()
+            }
+        }
+    }
+
     private fun parseMission(o: JsonObject): Mission {
         val str = { key: String -> (o[key] as? JsonPrimitive)?.contentOrNull }
         val strList = { key: String ->
@@ -2900,6 +2935,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             scope = str("scope") ?: "",
             constraints = strList("constraints"),
             ownerSessionId = str("ownerSessionId") ?: "",
+            sourceId = str("sourceId"),
+            execution = o["execution"] as? JsonObject,
             status = str("status") ?: "draft",
             createdAt = str("createdAt")?.toLongOrNull() ?: 0,
             updatedAt = str("updatedAt")?.toLongOrNull() ?: 0,
@@ -2942,6 +2979,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     at = (sp["at"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 0,
                     text = (sp["text"] as? JsonPrimitive)?.contentOrNull ?: "",
                     delivered = (sp["delivered"] as? JsonPrimitive)?.contentOrNull?.toBoolean() ?: false,
+                    delivery = (sp["delivery"] as? JsonPrimitive)?.contentOrNull,
                 )
             } ?: emptyList(),
             parentMissionId = str("parentMissionId"),
@@ -3471,6 +3509,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             debateJudge = o["debateJudge"]?.jsonPrimitive?.content,
             debateRounds = o["debateRounds"]?.jsonPrimitive?.intOrNull,
             sensitivity = o["sensitivity"]?.jsonPrimitive?.contentOrNull ?: "shared",
+            internal = o["internal"]?.jsonPrimitive?.booleanOrNull ?: false,
         )
     }
 
@@ -5013,7 +5052,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val query = q.trim().lowercase()
         if (query.isEmpty()) return emptyList()
         return rooms.filter { r ->
-            if (r.archived) return@filter false
+            if (r.archived || r.internal) return@filter false
             val members = r.members.joinToString(" ") { it.second }.lowercase()
             val hay = "${r.name} ${r.mode} $members".lowercase()
             hay.contains(query)

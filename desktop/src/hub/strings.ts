@@ -606,6 +606,10 @@ export interface Strings {
   missionOwner: string;
   missionOwnerAuto: string;
   missionGoal: string;
+  missionExecutionModes: Record<string, string>;
+  missionNativeStatuses: Record<string, string>;
+  missionNativeActions: Record<string, string>;
+  missionNativeReasons: Record<string, string>;
   missionCriteria: string;
   missionScope: string;
   missionConstraints: string;
@@ -709,6 +713,7 @@ export interface Strings {
   missionSnapshotStale: string;
   missionDelivered: string;
   missionRecordedOnly: string;
+  missionQueued: string;
   missionEventLifecycle: string;
   missionEventFlow: string;
   missionEventOutput: string;
@@ -1345,6 +1350,10 @@ const zh: Strings = {
   missionOwner: "负责人",
   missionOwnerAuto: "默认（指挥家/首成员）",
   missionGoal: "目标",
+  missionExecutionModes: { "native-goal": "后端原生目标", prompt: "普通提示词执行（后端未提供原生目标）", hub: "Hub 跨成员协作", unknown: "执行方式未记录" },
+  missionNativeStatuses: { active: "目标活跃", paused: "已暂停", blocked: "等待协助", limited: "达到限额", complete: "后端已完成，仍需人工验收", cleared: "后端目标已清除", unknown: "等待状态同步", stopping: "后端停止尚未确认" },
+  missionNativeActions: { pause: "暂停目标", resume: "恢复目标", clear: "清除后端目标", review: "提交人工验收", stop: "重试停止" },
+  missionNativeReasons: { "native-goal-reconnect": "等待重连同步目标状态", "native-goal-replaced": "后端目标已被其他操作替换", "native-goal-cleared": "后端目标已清除，请确认执行结果", "native-goal-paused": "后端目标已暂停", "native-goal-blocked": "后端目标需要协助", "native-goal-limited": "后端目标已达到限额", "native-goal-error": "后端执行异常，需要处理", "native-goal-start-failed": "原生目标启动失败，未降级重跑" },
   missionCriteria: "验收标准（每行一条）",
   missionScope: "范围",
   missionConstraints: "禁止事项（每行一条）",
@@ -1448,6 +1457,7 @@ const zh: Strings = {
   missionSnapshotStale: "快照已过期（工作区已被修改）",
   missionDelivered: "已投递",
   missionRecordedOnly: "仅记录",
+  missionQueued: "已排队，尚未确认送达",
   missionEventLifecycle: "生命周期",
   missionEventFlow: "编排",
   missionEventOutput: "输出",
@@ -2084,6 +2094,10 @@ const en: Strings = {
   missionOwner: "Owner",
   missionOwnerAuto: "Default (conductor/first member)",
   missionGoal: "Goal",
+  missionExecutionModes: { "native-goal": "Backend native goal", prompt: "Ordinary prompt (native goals unavailable)", hub: "Hub multi-member coordination", unknown: "Execution mode not recorded" },
+  missionNativeStatuses: { active: "Goal active", paused: "Paused", blocked: "Needs assistance", limited: "Budget limit reached", complete: "Backend complete; human acceptance still required", cleared: "Backend goal cleared", unknown: "Awaiting state synchronization", stopping: "Backend stop not confirmed" },
+  missionNativeActions: { pause: "Pause goal", resume: "Resume goal", clear: "Clear backend goal", review: "Submit for human review", stop: "Retry stop" },
+  missionNativeReasons: { "native-goal-reconnect": "Awaiting goal state after reconnect", "native-goal-replaced": "The backend goal was replaced outside this mission", "native-goal-cleared": "Backend goal cleared; confirm the execution outcome", "native-goal-paused": "Backend goal paused", "native-goal-blocked": "Backend goal needs assistance", "native-goal-limited": "Backend goal reached its budget limit", "native-goal-error": "Backend execution needs attention", "native-goal-start-failed": "Native goal start failed; no prompt fallback was launched" },
   missionCriteria: "Acceptance criteria (one per line)",
   missionScope: "Scope",
   missionConstraints: "Constraints (one per line)",
@@ -2187,6 +2201,7 @@ const en: Strings = {
   missionSnapshotStale: "Snapshot stale (workspace changed since)",
   missionDelivered: "Delivered",
   missionRecordedOnly: "Recorded only",
+  missionQueued: "Queued; delivery not yet confirmed",
   missionEventLifecycle: "Lifecycle",
   missionEventFlow: "Flow",
   missionEventOutput: "Output",
@@ -2247,8 +2262,20 @@ export function missionReasonLabel(S: Strings, code: string): string {
     case "flow-cancelled": return S.missionReasonFlowCancelled;
     case "interrupted-restart": return S.missionReasonInterruptedRestart;
     case "closed-for-rework": return S.missionReasonClosedForRework;
-    default: return code;
+    default: return S.missionNativeReasons[code] ?? code;
   }
+}
+
+export function missionNativeActions(status: string, execution?: {
+  mode: string; actions: string[]; goal?: { status: string } | null; stopConfirmed?: boolean;
+}): string[] {
+  if (execution?.mode !== "native-goal" || !Array.isArray(execution.actions)) return [];
+  if (status === "stopped" || status === "failed") return execution.stopConfirmed === false && execution.actions.includes("clear") ? ["stop"] : [];
+  if (status === "awaiting-acceptance") return execution.goal && execution.actions.includes("clear") ? ["clear"] : [];
+  if (status !== "running" && status !== "waiting-user") return [];
+  if (execution.goal === null) return status === "waiting-user" ? ["review"] : [];
+  if (execution.goal?.status === "active") return execution.actions.includes("pause") ? ["pause"] : [];
+  return ["paused", "blocked", "limited"].includes(execution.goal?.status ?? "") && execution.actions.includes("resume") ? ["resume"] : [];
 }
 
 export function missionTaskStatusLabel(S: Strings, status: string): string {

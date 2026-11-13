@@ -168,6 +168,7 @@ export function Sidebar() {
     const q = roomFilter.query.trim().toLowerCase();
     const list = store.rooms
       .filter((r) => {
+        if (r.internal === true) return false;
         if (r.archived && !roomFilter.showArchived) return false;
         if (roomFilter.modes.size && !roomFilter.modes.has(r.mode)) return false;
         if (q) {
@@ -221,7 +222,7 @@ export function Sidebar() {
 
   const selectAll = () => {
     const allS = store.sessions.map((s) => s.sessionId);
-    const allR = store.rooms.map((r) => r.roomId);
+    const allR = store.rooms.map((r) => r.roomId).filter((id) => !store.rooms.find((r) => r.roomId === id)?.internal);
     const allSelected =
       store.selectedIds.sessions.length === allS.length &&
       store.selectedIds.rooms.length === allR.length;
@@ -234,7 +235,7 @@ export function Sidebar() {
 
   const invertSelection = () => {
     const nextS = store.sessions.map((s) => s.sessionId).filter((id) => !store.selectedIds.sessions.includes(id));
-    const nextR = store.rooms.map((r) => r.roomId).filter((id) => !store.selectedIds.rooms.includes(id));
+    const nextR = store.rooms.map((r) => r.roomId).filter((id) => !store.selectedIds.rooms.includes(id) && !store.rooms.find((r) => r.roomId === id)?.internal);
     store.clearSelection();
     nextS.forEach((id) => store.selectSession(id));
     nextR.forEach((id) => store.selectRoom(id));

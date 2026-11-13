@@ -536,6 +536,10 @@ interface Strings {
     val missionOwner: String
     val missionOwnerAuto: String
     val missionGoal: String
+    val missionExecutionModes: Map<String, String>
+    val missionNativeStatuses: Map<String, String>
+    val missionNativeActions: Map<String, String>
+    val missionNativeReasons: Map<String, String>
     val missionView: String
     val missionCriteria: String
     val missionScope: String
@@ -590,6 +594,7 @@ interface Strings {
     val missionCreatedOk: String
     val missionAutoCreating: String
     val missionAutoStarted: String
+    val missionExpand: String
     val missionDelete: String
     val missionDeleteConfirm: String
     val missionDeleteActiveHint: String
@@ -644,6 +649,7 @@ interface Strings {
     val missionSnapshotStale: String
     val missionDelivered: String
     val missionRecordedOnly: String
+    val missionQueued: String
     val missionEventsDetail: String
     val missionOwnerLabel: String
     val backToMission: String
@@ -1234,6 +1240,10 @@ object ZhStrings : Strings {
     override val missionOwner = "负责人"
     override val missionOwnerAuto = "默认（指挥家/首成员）"
     override val missionGoal = "目标"
+    override val missionExecutionModes = mapOf("native-goal" to "后端原生目标", "prompt" to "普通提示词执行（后端未提供原生目标）", "hub" to "Hub 跨成员协作", "unknown" to "执行方式未记录")
+    override val missionNativeStatuses = mapOf("active" to "目标活跃", "paused" to "已暂停", "blocked" to "等待协助", "limited" to "达到限额", "complete" to "后端已完成，仍需人工验收", "cleared" to "后端目标已清除", "unknown" to "等待状态同步", "stopping" to "后端停止尚未确认")
+    override val missionNativeActions = mapOf("pause" to "暂停目标", "resume" to "恢复目标", "clear" to "清除后端目标", "review" to "提交人工验收", "stop" to "重试停止")
+    override val missionNativeReasons = mapOf("native-goal-reconnect" to "等待重连同步目标状态", "native-goal-replaced" to "后端目标已被其他操作替换", "native-goal-cleared" to "后端目标已清除，请确认执行结果", "native-goal-paused" to "后端目标已暂停", "native-goal-blocked" to "后端目标需要协助", "native-goal-limited" to "后端目标已达到限额", "native-goal-error" to "后端执行异常，需要处理", "native-goal-start-failed" to "原生目标启动失败，未降级重跑")
     override val missionView = "查看工单"
     override val missionCriteria = "验收标准（每行一条）"
     override val missionScope = "范围"
@@ -1288,6 +1298,7 @@ object ZhStrings : Strings {
     override val missionCreatedOk = "工单已创建"
     override val missionAutoCreating = "正在自动创建并启动工单…"
     override val missionAutoStarted = "工单已自动创建并启动"
+    override val missionExpand = "展开"
     override val missionDelete = "删除"
     override val missionDeleteConfirm = "确认删除该目标工单？验收记录与轨迹将一并清除，不可恢复。"
     override val missionDeleteActiveHint = "该工单仍在执行中，删除将先停止在途任务。"
@@ -1342,6 +1353,7 @@ object ZhStrings : Strings {
     override val missionSnapshotStale = "快照已过期（工作区已被修改）"
     override val missionDelivered = "已投递"
     override val missionRecordedOnly = "仅记录"
+    override val missionQueued = "已排队，尚未确认送达"
     override val missionEventsDetail = "技术详情"
     override val missionOwnerLabel = "所属工单"
     override val backToMission = "返回工单"
@@ -1932,6 +1944,10 @@ object EnStrings : Strings {
     override val missionOwner = "Owner"
     override val missionOwnerAuto = "Default (conductor/first member)"
     override val missionGoal = "Goal"
+    override val missionExecutionModes = mapOf("native-goal" to "Backend native goal", "prompt" to "Ordinary prompt (native goals unavailable)", "hub" to "Hub multi-member coordination", "unknown" to "Execution mode not recorded")
+    override val missionNativeStatuses = mapOf("active" to "Goal active", "paused" to "Paused", "blocked" to "Needs assistance", "limited" to "Budget limit reached", "complete" to "Backend complete; human acceptance still required", "cleared" to "Backend goal cleared", "unknown" to "Awaiting state synchronization", "stopping" to "Backend stop not confirmed")
+    override val missionNativeActions = mapOf("pause" to "Pause goal", "resume" to "Resume goal", "clear" to "Clear backend goal", "review" to "Submit for human review", "stop" to "Retry stop")
+    override val missionNativeReasons = mapOf("native-goal-reconnect" to "Awaiting goal state after reconnect", "native-goal-replaced" to "The backend goal was replaced outside this mission", "native-goal-cleared" to "Backend goal cleared; confirm the execution outcome", "native-goal-paused" to "Backend goal paused", "native-goal-blocked" to "Backend goal needs assistance", "native-goal-limited" to "Backend goal reached its budget limit", "native-goal-error" to "Backend execution needs attention", "native-goal-start-failed" to "Native goal start failed; no prompt fallback was launched")
     override val missionView = "View mission"
     override val missionCriteria = "Acceptance criteria (one per line)"
     override val missionScope = "Scope"
@@ -1986,6 +2002,7 @@ object EnStrings : Strings {
     override val missionCreatedOk = "Mission created"
     override val missionAutoCreating = "Auto-creating and starting mission…"
     override val missionAutoStarted = "Mission auto-created and started"
+    override val missionExpand = "Expand"
     override val missionDelete = "Delete"
     override val missionDeleteConfirm = "Delete this mission? Acceptance records and history will be removed and cannot be recovered."
     override val missionDeleteActiveHint = "This mission is still running — deleting will stop in-flight work first."
@@ -2040,6 +2057,7 @@ object EnStrings : Strings {
     override val missionSnapshotStale = "Snapshot stale (workspace changed since)"
     override val missionDelivered = "Delivered"
     override val missionRecordedOnly = "Recorded only"
+    override val missionQueued = "Queued; delivery not yet confirmed"
     override val missionEventsDetail = "Technical details"
     override val missionOwnerLabel = "Mission"
     override val backToMission = "Back to mission"
@@ -2104,7 +2122,7 @@ fun missionReasonLabel(S: Strings, code: String): String = when (code) {
     "flow-cancelled" -> S.missionReasonFlowCancelled
     "interrupted-restart" -> S.missionReasonInterruptedRestart
     "closed-for-rework" -> S.missionReasonClosedForRework
-    else -> code
+    else -> S.missionNativeReasons[code] ?: code
 }
 
 private val PLAN_STATUS_RE = Regex("^\\[(pending|in_progress|completed|failed|cancelled)\\]\\s*")

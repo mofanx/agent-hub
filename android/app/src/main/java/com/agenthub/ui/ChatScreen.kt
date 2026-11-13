@@ -720,8 +720,17 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                         }
                     }
                     if (!isRoom && vm.currentSession != null && vm.missionSupported) {
-                        IconButton(onClick = { vm.promoteToMission() }) {
-                            Text(S.promoteToMission, style = MaterialTheme.typography.labelMedium)
+                        var sessionMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { sessionMenu = true }) {
+                                Icon(Icons.Filled.MoreHoriz, contentDescription = S.more)
+                            }
+                            DropdownMenu(expanded = sessionMenu, onDismissRequest = { sessionMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text(S.promoteToMission) },
+                                    onClick = { vm.promoteToMission(); sessionMenu = false },
+                                )
+                            }
                         }
                     }
                     if (isRoom) {
@@ -2167,7 +2176,7 @@ private fun MessageBlock(
                     )
                 }
             }
-            MissionDraftCards(item.text, vm)
+            MissionDraftCards(item.text, vm, item.originalId.takeIf { it < 0 }?.let { "history:${-it}" })
             if (item.isLast && item.usage != null) {
                 Text(
                     item.usage.format(S),

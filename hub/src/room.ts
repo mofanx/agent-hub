@@ -126,6 +126,8 @@ export type Room = {
   /** nano 相关性过滤开关：undefined 走全局默认，true/false 显式覆盖 */
   relevanceFilter?: boolean | undefined;
   archived?: boolean | undefined;
+  /** 内部房（如工单绑定房）：room.list 下发但客户端默认不显示在群聊列表 */
+  internal?: boolean | undefined;
   /** 房间共享黑板 */
   blackboard?: BlackboardEntry[] | undefined;
   /** 房间文件产物登记处 */
@@ -147,6 +149,7 @@ export type RoomModeConfig = {
   memberRoles?: Record<string, string | PersonaCard> | undefined;
   aliases?: Record<string, string[]> | undefined;
   relevanceFilter?: boolean | undefined;
+  internal?: boolean | undefined;
 };
 
 export type BlackboardEntry = {
@@ -204,6 +207,7 @@ export function remapRoomModeConfig(
     debateRounds: source.debateRounds,
     maxRounds: source.maxRounds,
     relevanceFilter: source.relevanceFilter,
+    internal: source.internal,
     memberRoles: source.memberRoles
       ? Object.fromEntries(
           Object.entries(source.memberRoles)
@@ -465,6 +469,7 @@ export class RoomManager {
       debateRounds: config?.debateRounds,
       maxRounds: config?.maxRounds,
       relevanceFilter: config?.relevanceFilter,
+      internal: config?.internal,
       blackboard: [],
       artifacts: [],
       events: [],

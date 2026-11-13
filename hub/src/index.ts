@@ -684,6 +684,7 @@ async function resumeSessionById(sessionId: string) {
   return { resumed: true };
 }
 
+let missionReservesSession = (_sessionId: string): boolean => false;
 const agentOps: AgentOps = {
   prompt: async (sessionId, content, opts) => {
     // async 包装：ownerOf 的同步 throw（agent 未连接）转为 rejected promise，
@@ -695,7 +696,7 @@ const agentOps: AgentOps = {
   },
   isBusy: (sessionId) => {
     try {
-      return ownerOf(sessionId).isBusy(sessionId);
+      return ownerOf(sessionId).isBusy(sessionId) || missionReservesSession(sessionId);
     } catch {
       return false; // 会话已被删除或 owner 未连接：视为不忙
     }
@@ -744,7 +745,7 @@ const missionManager = new MissionManager({
   getRoom: (roomId) => rooms.get(roomId),
   getFlow: (roomId) => roomModeManager.getFlow(roomId),
   hasActiveFlow: (roomId) => roomModeManager.hasActiveFlow(roomId),
-  isBusy: (sessionId) => agentOps.isBusy(sessionId),
+  isBusy: (sessionId) => agentForSession(sessionId)?.isBusy(sessionId) ?? false,
   isAvailable: (sessionId) =>
     agentForSession(sessionId)?.listSessions().some((s) => s.sessionId === sessionId) ?? false,
   roomIdForTurn: (sessionId) => roomModeManager.roomIdForTurn(sessionId),
@@ -765,6 +766,16 @@ const missionManager = new MissionManager({
   cancel: (sessionId) => agentOps.cancel(sessionId),
   retryFailedTasks: (roomId, taskIds) => roomModeManager.retryFailedTasks(roomId, taskIds),
   supplementActive: (room, text, missionId) => roomModeManager.supplementActive(room, text, missionId),
+  goalInfo: (sessionId) => {
+    const agent = agentForSession(sessionId);
+    const capabilities = agent?.getGoalCapabilities();
+    return capabilities ? { capabilities, goal: agent!.getNativeGoal(sessionId) } : undefined;
+  },
+  bindNativeGoal: (sessionId, executionId, objective) => ownerOf(sessionId).bindNativeGoal(sessionId, executionId, objective),
+  nativeGoalOwner: (sessionId) => agentForSession(sessionId)?.nativeGoalOwner(sessionId),
+  releaseNativeGoal: (sessionId, executionId) => agentForSession(sessionId)?.releaseNativeGoal(sessionId, executionId),
+  controlNativeGoal: (sessionId, action, objective) => ownerOf(sessionId).controlGoal(sessionId, action, objective),
+  supplementNativeGoal: (sessionId, text) => ownerOf(sessionId).supplementNativeGoal(sessionId, text),
   broadcast: (method, params) => {
     broadcast({ method, params } as HubEvent);
     // mission 进入终态 → "task.done" 事件唤醒（roomId 取自 mission 快照）
@@ -791,6 +802,11 @@ const missionManager = new MissionManager({
   },
 });
 missionManager.beginRestore();
+missionReservesSession = (sessionId) => missionManager.reservesSession(sessionId);
+
+function roomIdForSessionTurn(sessionId: string): string | undefined {
+  return roomModeManager.roomIdForTurn(sessionId) ?? missionManager.nativeMissionForSession(sessionId)?.roomId;
+}
 // 已绑活跃工单的会话不再注入 mission auto 引导——防同会话重复起草
 rooms.setMissionBoundChecker((sid) => missionManager.findBoundActive(sid) !== undefined);
 
@@ -1235,7 +1251,7 @@ const markTurnStart = (sessionId: string): void => {
 function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interrupted" = "done"): void {
   const buf = turnProcess.take(sessionId);
   if (buf.length === 0) return;
-  const roomId = roomModeManager.roomIdForTurn(sessionId);
+  const roomId = roomIdForSessionTurn(sessionId);
   for (const item of buf) {
     store.append("session", sessionId, {
       at: item.at,
@@ -1295,7 +1311,7 @@ function writeTurnDraft(sessionId: string, draft: TurnDraft): void {
   } else {
     store.updateReplyDraft(draft.sessionDraftId, text);
   }
-  const roomId = roomModeManager.roomIdForTurn(sessionId);
+  const roomId = roomIdForSessionTurn(sessionId);
   if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
     if (draft.roomDraftId === undefined) {
       const id = store.beginReplyDraft("room", roomId, {
@@ -1396,7 +1412,7 @@ function onTurnEnd(
       });
     }
     // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
-    const roomId = roomModeManager.roomIdForTurn(sessionId);
+    const roomId = roomIdForSessionTurn(sessionId);
     if (roomId && !roomModeManager.isHiddenTurn(sessionId, roomId)) {
       // turn 提交不变量：游标推进的过期回复不落房史（将被作废重跑）
       if (roomModeManager.isStaleTurnCommit(sessionId, roomId)) {
@@ -1441,7 +1457,7 @@ function onFileWrite(sessionId: string, relPath: string, existed: boolean, conte
 
   // 只有群聊回合才同步产物/事件到 room，单聊操作不泄漏到群聊
   // 房间侧 author 统一为成员展示名（成员名·agentType·origin），查不到成员回退 meta.name
-  const roomId = roomModeManager.roomIdForTurn(sessionId);
+  const roomId = roomIdForSessionTurn(sessionId);
   if (roomId) {
     const roomAuthor = rooms.displayNameForId(roomId, sessionId, author);
     rooms.addFile?.(roomId, { author: roomAuthor, summary, path: relPath, content });
@@ -1477,7 +1493,7 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
     sessionLedger.addEvent(sessionId, { author: meta.name, action, summary, path: relPath });
 
     // 只有群聊回合才同步事件到 room，单聊操作不泄漏到群聊
-    const roomId = roomModeManager.roomIdForTurn(sessionId);
+  const roomId = roomIdForSessionTurn(sessionId);
     if (roomId) {
       rooms.addEvent?.(roomId, { author: rooms.displayNameForId(roomId, sessionId, meta.name), action, summary, path: relPath });
     }
@@ -1485,7 +1501,7 @@ function onToolCall(sessionId: string, kind: string, title: string, paths: strin
 
   persistState();
   broadcast({ method: "session.artifact", params: { sessionId } } as HubEvent);
-  const artifactRoomId = roomModeManager.roomIdForTurn(sessionId);
+  const artifactRoomId = roomIdForSessionTurn(sessionId);
   if (artifactRoomId) {
     broadcast({ method: "room.artifact", params: { roomId: artifactRoomId } } as HubEvent);
   }
@@ -1499,13 +1515,21 @@ function onAgentEvent(event: HubEvent): void {
     event.method !== "permission.request" &&
     event.method !== "elicitation.request";
   if (event.method === "session.generating" && sessionId) {
+    if (event.params.stoppable) turnEnds.delete(sessionId);
     // presence：busy 起止 → generating / online 状态迁移（房间作用域同步广播）
     emitMemberStatus(sessionId, event.params.stoppable ? "generating" : "online");
+  }
+  if (event.method === "session.goal") {
+    missionManager.onNativeGoal(event.params.sessionId, event.params.goal);
+    persistState();
+  } else if (event.method === "session.goal.error") {
+    missionManager.onNativeGoalError(event.params.sessionId, event.params.executionId, event.params.message);
+    persistState();
   }
   if (event.method === "decision.request" && sessionId) {
     // 决策卡叠加层：房间回合写房间历史，否则写会话历史；旧客户端不认识 decision.* 即丢弃
     const p = event.params as DecisionRequestParams;
-    const roomId = roomModeManager.roomIdForTurn(sessionId) ?? rooms.roomsFor(sessionId)[0]?.roomId;
+    const roomId = roomIdForSessionTurn(sessionId) ?? rooms.roomsFor(sessionId)[0]?.roomId;
     const missionId = roomId ? missionManager.missionIdForTurn(sessionId, roomId) : undefined;
     decisionCenter.open(p, {
       scope: roomId ? "room" : "session",
@@ -1558,7 +1582,7 @@ function onAgentEvent(event: HubEvent): void {
     const baseName = meta?.name ?? sessionId!;
     const origin = originFor(meta);
     const displayName = origin ? `${baseName} (${origin})` : baseName;
-    const turnRoomId = roomModeManager.roomIdForTurn(sessionId!);
+    const turnRoomId = roomIdForSessionTurn(sessionId!);
     if (!roomModeManager.isHiddenSession(sessionId!) && turnRoomId) {
       if (rooms.recordOutput(turnRoomId, sessionId!, displayName, output)) {
         broadcast({
@@ -1571,7 +1595,11 @@ function onAgentEvent(event: HubEvent): void {
       sessionLedger.captureOutput(sessionId!, extractTaskResult(internalOutput).artifacts);
       broadcast({ method: "session.artifact", params: { sessionId: sessionId! } });
     }
-    void roomModeManager
+    if (missionManager.nativeMissionForSession(sessionId!)) {
+      missionManager.onTurnDone(sessionId!, turnRoomId, internalOutput);
+      fireEventTasks(turnRoomId, "prompt.done");
+      persistState();
+    } else void roomModeManager
       .onPromptDone(sessionId!, internalOutput)
       .then(() => {
         missionManager.onTurnDone(sessionId!, turnRoomId, internalOutput);
@@ -1584,7 +1612,7 @@ function onAgentEvent(event: HubEvent): void {
   } else if (event.method === "prompt.error") {
     if (sessionId) {
       flushTurnProcess(sessionId, "failed");
-      const errorRoomId = roomModeManager.roomIdForTurn(sessionId);
+      const errorRoomId = roomIdForSessionTurn(sessionId);
       const turnContext = missionManager.captureTurnContext(sessionId, errorRoomId);
       interruptTurnDrafts(sessionId);
       const message = String(event.params.message ?? "").trim() || "turn error";
@@ -1616,7 +1644,7 @@ function onAgentEvent(event: HubEvent): void {
           ...(taskId ? { taskId } : {}),
         });
       }
-      roomModeManager.onPromptError(sessionId, message);
+      if (!missionManager.nativeMissionForSession(sessionId)) roomModeManager.onPromptError(sessionId, message);
       missionManager.onTurnError(sessionId, errorRoomId, message, turnContext);
       persistState();
     }
@@ -1630,7 +1658,7 @@ function onAgentEvent(event: HubEvent): void {
   } else if (event.method === "session.stall" && sessionId) {
     // 成员静默进度提示：房回合→room.notice；单聊→session 史系统条
     const idleMs = Number((event.params as { idleMs?: unknown }).idleMs ?? 0);
-    const stallRoomId = roomModeManager.roomIdForTurn(sessionId);
+    const stallRoomId = roomIdForSessionTurn(sessionId);
     const stallMsg = `⏳ @${displayNameFor(sessionId)} 处理中已 ${Math.round(idleMs / 1000)}s…`;
     if (stallRoomId) broadcastRoomNotice(stallRoomId, stallMsg);
     else
@@ -1930,14 +1958,16 @@ type RequestMessage = {
 // mission.* RPC 表格化：参数提取收口到表内，id/missionId 双键统一，persistState 由分发器尾统一执行
 const missionIdOf = (p: Record<string, unknown>) => String(p.id ?? p.missionId ?? "");
 const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Promise<unknown>> = {
-  "mission.create": (p) => ({
-    mission: missionManager.create({
+  "mission.create": async (p) => {
+    const mission = missionManager.create({
       roomId: p.roomId, goal: p.goal, acceptanceCriteria: p.acceptanceCriteria,
       scope: p.scope, constraints: p.constraints,
       ownerSessionId: p.ownerSessionId, maxAutoRetries: p.maxAutoRetries,
       boundSessionId: p.boundSessionId,
-    }),
-  }),
+      sourceId: p.sourceId,
+    });
+    return { mission: p.start === true && mission.status === "draft" ? await missionManager.start(mission.id) : mission };
+  },
   "mission.list": (p) => {
     const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     return { missions: missionManager.list(str(p.roomId), str(p.status)) };
@@ -1955,6 +1985,8 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
     return { mission };
   },
   "mission.start": (p) => missionManager.start(missionIdOf(p)).then((mission) => ({ mission })),
+  "mission.goalControl": (p) => missionManager.goalControl(missionIdOf(p), p.action).then((mission) => ({ mission })),
+  "mission.submitForReview": (p) => ({ mission: missionManager.submitForReview(missionIdOf(p)) }),
   "mission.stop": (p) =>
     missionManager.stop(missionIdOf(p), typeof p.reason === "string" ? p.reason : undefined).then((mission) => ({ mission })),
   "mission.review": (p) => ({
@@ -1972,11 +2004,17 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
   "mission.retry": (p) => ({ mission: missionManager.retry(missionIdOf(p)) }),
   // 会话升级为目标：会话→单人房(mention)+绑定工单——manager 对 boundSessionId 已有非终态去重，
   // 幂等命中直接返回既有工单不建房
-  "mission.promote": (p) => {
+  "mission.promote": async (p) => {
     const sessionId = String(p.sessionId ?? "");
     if (!sessionId) throw new Error("sessionId required");
     const meta = sessionMetas.get(sessionId);
     if (!meta) throw new Error(`unknown session: ${sessionId}`);
+    const sourced = missionManager.findBySource(p.sourceId);
+    if (sourced) {
+      if (sourced.boundSessionId !== sessionId) throw new Error("sourceId belongs to another session");
+      const mission = p.start === true && sourced.status === "draft" ? await missionManager.start(sourced.id) : sourced;
+      return { mission, roomId: mission.roomId, alreadyExists: true };
+    }
     const existing = missionManager.findBoundActive(sessionId);
     if (existing) {
       return { mission: existing, roomId: existing.roomId, alreadyExists: true };
@@ -1986,10 +2024,11 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
       dedupeRoomName(`目标·${meta.name}`),
       members,
       "mention",
-      {},
+      { internal: true },
     );
+    let mission;
     try {
-      const mission = missionManager.create({
+      mission = missionManager.create({
         roomId: room.roomId,
         goal: p.goal,
         acceptanceCriteria: p.acceptanceCriteria,
@@ -1998,14 +2037,15 @@ const MISSION_RPC: Record<string, (p: Record<string, unknown>) => unknown | Prom
         ownerSessionId: p.ownerSessionId ?? sessionId,
         maxAutoRetries: p.maxAutoRetries,
         boundSessionId: sessionId,
+        sourceId: p.sourceId,
       });
-      return { mission, roomId: room.roomId };
     } catch (e) {
       try {
         rooms.delete(room.roomId);
       } catch { /* 回滚失败静默——孤儿房比吞错可接受 */ }
       throw e;
     }
+    return { mission: p.start === true ? await missionManager.start(mission.id) : mission, roomId: room.roomId };
   },
 };
 const MISSION_RPC_READONLY: ReadonlySet<string> = new Set(["mission.list", "mission.get"]);
@@ -2258,7 +2298,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       if (!sessionMetas.has(sessionId) && !owners.has(sessionId)) {
         throw new Error(`unknown session: ${sessionId}`);
       }
-      if (owners.has(sessionId) && agentOps.isBusy(sessionId)) {
+      if (missionManager.reservesSession(sessionId) || (owners.has(sessionId) && agentOps.isBusy(sessionId))) {
         throw new Error("session busy, cancel first");
       }
       const ownerConnectionId = owners.get(sessionId);
@@ -2289,7 +2329,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         if (!sessionMetas.has(sessionId) && !owners.has(sessionId)) {
           throw new Error(`unknown session: ${sessionId}`);
         }
-        if (owners.has(sessionId) && agentOps.isBusy(sessionId)) {
+        if (missionManager.reservesSession(sessionId) || (owners.has(sessionId) && agentOps.isBusy(sessionId))) {
           throw new Error(`session busy, cancel first: ${sessionId}`);
         }
       }

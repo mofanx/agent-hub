@@ -7,6 +7,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { logWarn } from "./logger.js";
 import { safetyFloorVerdict } from "./safety-floor.js";
+import { goalCapabilities, goalUpdate, type GoalAction, type GoalCapabilities, type GoalSnapshot } from "./native-goal.js";
 
 /** prompt 发送可选参数：busy 时是否允许入 agent 层队列、ACK 看门狗预算覆盖 */
 export type PromptOpts = {
@@ -56,6 +57,8 @@ export type ElicitationField = {
 };
 
 export type HubEvent =
+  | { method: "session.goal"; params: { sessionId: string; goal: GoalSnapshot | null } }
+  | { method: "session.goal.error"; params: { sessionId: string; executionId: string; message: string } }
   | { method: "session.update"; params: { sessionId: string; update: unknown } }
   | { method: "session.generating"; params: { sessionId: string; stoppable: boolean } }
   | { method: "session.usage"; params: { sessionId: string; usage: ContextUsage } }
@@ -222,6 +225,7 @@ type SessionEntry = {
   busy: boolean;
   stoppable: boolean;
   turnText: string;
+  nativeGoalTurn?: boolean;
   loading?: boolean;
   turnGotUpdate?: boolean;
   /** 回合内最后一次活跃时点（update/agent→hub 请求），静默看门狗据此计时 */
@@ -513,6 +517,220 @@ export class AcpAgent {
   private ctx: acp.ClientContext | null = null;
   private sessions = new Map<string, SessionEntry>();
   private readonly contextUsage = new Map<string, ContextUsage>();
+  private nativeGoalCapabilities: GoalCapabilities | undefined;
+  private supportsSteering = false;
+  private nativeGoals = new Map<string, GoalSnapshot | null>();
+  private nativeGoalOwners = new Map<string, {
+    id: string; objective: string; enabled: boolean; revision: number; firstOutput: boolean;
+    initialWatchdog?: ReturnType<typeof setTimeout> | undefined;
+    pendingTurnRevision?: number | undefined;
+  }>();
+  private nativeGoalWaiters = new Map<string, Set<() => void>>();
+
+  getGoalCapabilities(): GoalCapabilities | undefined {
+    const c = this.nativeGoalCapabilities;
+    return this.ready && c ? { ...c, actions: [...c.actions] } : undefined;
+  }
+
+  getNativeGoal(sessionId: string): GoalSnapshot | null | undefined {
+    const goal = this.nativeGoals.get(sessionId);
+    return this.ready && goal ? { ...goal } : this.ready ? goal : undefined;
+  }
+
+  nativeGoalOwner(sessionId: string): string | undefined {
+    return this.nativeGoalOwners.get(sessionId)?.id;
+  }
+
+  bindNativeGoal(sessionId: string, executionId: string, objective: string): void {
+    if (!this.sessions.has(sessionId)) throw new Error(`unknown session: ${sessionId}`);
+    if (!this.getGoalCapabilities()) throw new Error("native goal unsupported");
+    const goal = this.getNativeGoal(sessionId);
+    if (goal === undefined) throw new Error("native goal state is not synchronized");
+    if (goal && goal.objective !== objective) throw new Error("another native goal already exists");
+    const owner = this.nativeGoalOwners.get(sessionId);
+    if (owner && owner.id !== executionId) throw new Error("another native goal execution owns this session");
+    if (!objective.trim()) throw new Error("native goal objective required");
+    this.nativeGoalOwners.set(sessionId, owner ?? { id: executionId, objective, enabled: true, revision: 0, firstOutput: false });
+    if (!owner && goal?.status === "active") this.armNativeGoalInitialWatchdog(sessionId);
+  }
+
+  releaseNativeGoal(sessionId: string, executionId: string): void {
+    if (this.nativeGoalOwner(sessionId) === executionId) {
+      clearTimeout(this.nativeGoalOwners.get(sessionId)?.initialWatchdog);
+      this.nativeGoalOwners.delete(sessionId);
+    }
+  }
+
+  async supplementNativeGoal(sessionId: string, text: string): Promise<"recorded" | "queued" | "delivered"> {
+    const owner = this.nativeGoalOwners.get(sessionId);
+    const goal = this.getNativeGoal(sessionId);
+    const entry = this.sessions.get(sessionId);
+    if (!owner?.enabled || !entry || goal?.objective !== owner.objective || goal.status !== "active") return "recorded";
+    if (this.supportsSteering) {
+      const response = await this.ctx!.request<{ outcome?: string }>("_session/steering", {
+        sessionId, prompt: [{ type: "text", text }],
+        _meta: { steering: { idleBehavior: "promptRequired" } },
+      });
+      if (response.outcome === "injected") return "delivered";
+      if (response.outcome !== "promptRequired") return "recorded";
+      if (entry.nativeGoalTurn) {
+        clearTimeout(entry.watchdog);
+        entry.watchdog = undefined;
+        entry.nativeGoalTurn = false;
+        this.finishTurn(sessionId, "end_turn");
+      }
+      this.flushPendingSettle(sessionId, entry);
+    }
+    if (entry.busy) return "recorded";
+    await this.prompt(sessionId, text, { queueIfBusy: false });
+    return "queued";
+  }
+
+  async controlGoal(sessionId: string, action: GoalAction, objective?: string): Promise<void> {
+    const capabilities = this.getGoalCapabilities();
+    if (!capabilities?.actions.includes(action)) throw new Error(`native goal action unsupported: ${action}`);
+    const owner = this.nativeGoalOwners.get(sessionId);
+    if (!owner) throw new Error("native goal execution is not bound");
+    const before = this.getNativeGoal(sessionId);
+    if (before === undefined || (before && before.objective !== owner.objective))
+      throw new Error("another native goal exists or state is not synchronized");
+    if (action === "set" && (objective !== owner.objective || before !== null))
+      throw new Error("native goal already exists or objective does not match the approved execution");
+    if ((action === "pause" || action === "resume") && !before) throw new Error("native goal has been cleared");
+    const revision = ++owner.revision;
+    if (action === "set" || action === "resume") owner.pendingTurnRevision = revision;
+    clearTimeout(owner.initialWatchdog);
+    if (action === "set" || action === "resume") owner.firstOutput = false;
+    if (action === "clear" || action === "pause") owner.enabled = false;
+    else owner.enabled = true;
+    let acknowledged = false;
+    let resolve!: () => void, reject!: (err: unknown) => void;
+    const ack = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    const waiters = this.nativeGoalWaiters.get(sessionId) ?? new Set<() => void>();
+    this.nativeGoalWaiters.set(sessionId, waiters);
+    const observe = () => {
+      const goal = this.getNativeGoal(sessionId);
+      const matches = action === "clear" ? goal === null : goal?.objective === owner.objective &&
+        (action === "set" || goal.status === (action === "pause" ? "paused" : "active") || goal.status === "complete");
+      if (matches) { acknowledged = true; resolve(); }
+    };
+    waiters.add(observe);
+    const timer = setTimeout(() => reject(new Error(`native goal ${action} acknowledgement timed out`)), 15000);
+    const request = this.ctx!.request(capabilities.controlMethod, {
+      sessionId, action, ...(action === "set" ? { objective } : {}),
+    });
+    void request.then(() => {
+      if (this.nativeGoalOwners.get(sessionId) !== owner || owner.revision !== revision) { resolve(); return; }
+      if (!acknowledged) {
+        const current = this.getNativeGoal(sessionId);
+        this.recordNativeGoal(sessionId, action === "clear" ? null :
+          action === "set" ? { objective: owner.objective, status: "active" } :
+          { ...(current ?? before!), status: action === "pause" ? "paused" : "active" });
+      }
+      acknowledged = true;
+      resolve();
+    }, (err: unknown) => {
+      if (!acknowledged) reject(err);
+      else if (this.ready && owner.revision === revision && this.nativeGoalOwners.get(sessionId) === owner) {
+        this.emit({ method: "session.goal.error", params: { sessionId, executionId: owner.id, message: String(err) } });
+      }
+    }).finally(() => {
+      if (owner.pendingTurnRevision !== revision) return;
+      owner.pendingTurnRevision = undefined;
+      const goal = this.nativeGoals.get(sessionId);
+      if (this.ready && this.nativeGoalOwners.get(sessionId) === owner && goal !== undefined)
+        this.recordNativeGoal(sessionId, goal, goal?.status !== "active");
+    });
+    try {
+      await ack;
+      if ((action === "set" || action === "resume") && this.nativeGoalOwners.get(sessionId) === owner &&
+          owner.revision === revision && !owner.firstOutput) this.armNativeGoalInitialWatchdog(sessionId);
+      if (action === "clear" || action === "pause") {
+        const entry = this.sessions.get(sessionId);
+        if (entry?.stoppable) await this.cancelTurn(sessionId, false);
+        else await this.ctx!.notify(acp.methods.agent.session.cancel, { sessionId });
+      }
+    } finally {
+      clearTimeout(timer);
+      waiters.delete(observe);
+      if (!waiters.size) this.nativeGoalWaiters.delete(sessionId);
+    }
+  }
+
+  private recordNativeGoal(sessionId: string, goal: GoalSnapshot | null, force = false): void {
+    const previous = this.nativeGoals.get(sessionId);
+    if (goal && previous && goal.objective === previous.objective &&
+        goal.updatedAt !== undefined && previous.updatedAt !== undefined && goal.updatedAt < previous.updatedAt) return;
+    this.nativeGoals.set(sessionId, goal);
+    for (const observer of this.nativeGoalWaiters.get(sessionId) ?? []) observer();
+    const entry = this.sessions.get(sessionId);
+    const owner = this.nativeGoalOwners.get(sessionId);
+    if (owner && (goal?.status !== "active" || goal.objective !== owner.objective)) clearTimeout(owner.initialWatchdog);
+    if (entry?.nativeGoalTurn && owner?.enabled && owner.pendingTurnRevision === undefined &&
+        (goal?.status !== "active" || goal.objective !== owner.objective)) {
+      clearTimeout(entry.watchdog);
+      entry.watchdog = undefined;
+      entry.nativeGoalTurn = false;
+      this.finishTurn(sessionId, "end_turn");
+    }
+    if (force || JSON.stringify(previous) !== JSON.stringify(goal))
+      this.emit({ method: "session.goal", params: { sessionId, goal } });
+  }
+
+  private beginNativeGoalTurn(sessionId: string, entry: SessionEntry): void {
+    entry.nativeGoalTurn = true;
+    entry.turnEpoch = (entry.turnEpoch ?? 0) + 1;
+    entry.busy = true;
+    entry.stoppable = true;
+    entry.turnText = "";
+    entry.lastActivityAt = Date.now();
+    this.emit({ method: "session.generating", params: { sessionId, stoppable: true } });
+    const poll = () => {
+      if (!entry.nativeGoalTurn || !entry.busy) return;
+      const interactive = [...this.pendingPermissions.values(), ...this.pendingElicitations.values()]
+        .some((p) => p.sessionId === sessionId);
+      const remaining = turnStallTimeoutMs - (Date.now() - (entry.lastActivityAt ?? 0));
+      if (interactive || remaining > 0) {
+        entry.watchdog = setTimeout(poll, interactive ? turnStallTimeoutMs : remaining);
+        entry.watchdog.unref?.();
+        return;
+      }
+      this.stopStalledNativeGoal(sessionId, "native goal stalled; user intervention required");
+    };
+    if (turnStallTimeoutMs > 0) {
+      entry.watchdog = setTimeout(poll, turnStallTimeoutMs);
+      entry.watchdog.unref?.();
+    }
+  }
+
+  private armNativeGoalInitialWatchdog(sessionId: string): void {
+    const owner = this.nativeGoalOwners.get(sessionId);
+    if (!owner) return;
+    clearTimeout(owner.initialWatchdog);
+    const check = () => {
+      if (this.nativeGoalOwners.get(sessionId) !== owner || !owner.enabled || owner.firstOutput ||
+          this.getNativeGoal(sessionId)?.status !== "active") return;
+      if ([...this.pendingPermissions.values(), ...this.pendingElicitations.values()].some((p) => p.sessionId === sessionId)) {
+        owner.initialWatchdog = setTimeout(check, Math.max(100, promptAckTimeoutMs));
+        owner.initialWatchdog.unref?.();
+        return;
+      }
+      this.stopStalledNativeGoal(sessionId, "native goal produced no output; user intervention required");
+    };
+    owner.initialWatchdog = setTimeout(check, Math.max(0, promptAckTimeoutMs));
+    owner.initialWatchdog.unref?.();
+  }
+
+  private stopStalledNativeGoal(sessionId: string, message: string): void {
+    const owner = this.nativeGoalOwners.get(sessionId);
+    if (!owner) return;
+    void this.controlGoal(sessionId, this.nativeGoalCapabilities?.actions.includes("pause") ? "pause" : "clear")
+      .catch((err) => logWarn("native-goal", `stall recovery: ${String(err)}`))
+      .finally(() => {
+        if (this.ready && this.nativeGoalOwners.get(sessionId) === owner)
+          this.emit({ method: "session.goal.error", params: { sessionId, executionId: owner.id, message } });
+      });
+  }
 
   getContextUsage(sessionId: string): ContextUsage | undefined {
     const usage = this.contextUsage.get(sessionId);
@@ -636,11 +854,14 @@ export class AcpAgent {
         },
         session: { configOptions: { boolean: {} } },
         elicitation: { form: {} },
+        _meta: { jetbrains: { air: { version: 1, capabilities: [] } } },
       },
       clientInfo: { name: "agent-hub", version: "0.9.0" },
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
     this.supportsSessionFork = init.agentCapabilities?.sessionCapabilities?.fork != null;
+    this.nativeGoalCapabilities = goalCapabilities(init);
+    this.supportsSteering = (init._meta?.steering as { supported?: unknown } | undefined)?.supported === true;
     this.authMethods = init.authMethods ?? [];
 
     this.ready = true;
@@ -785,6 +1006,13 @@ export class AcpAgent {
       waiter.reject(new Error(`agent ${this.name} disconnected`));
     }
     this.promptOnceWaiters.clear();
+    for (const [sessionId, owner] of this.nativeGoalOwners) {
+      clearTimeout(owner.initialWatchdog);
+      this.emit({ method: "session.goal.error", params: {
+        sessionId, executionId: owner.id, message: `agent ${this.name} disconnected; native goal state needs synchronization`,
+      } });
+    }
+    this.nativeGoalOwners.clear();
     this.followUps.clear();
     for (const pending of this.pendingElicitations.values()) {
       pending.respond({ action: "cancel" }, "revoked");
@@ -807,6 +1035,8 @@ export class AcpAgent {
   }
 
   private routeUpdate(params: { sessionId: string; update: unknown }): void {
+    const nativeGoal = this.nativeGoalCapabilities ? goalUpdate(params.update) : undefined;
+    if (nativeGoal !== undefined) this.recordNativeGoal(params.sessionId, nativeGoal);
     const entry = this.sessions.get(params.sessionId);
     if (!entry || entry.loading) return;
     const u = params.update as {
@@ -820,6 +1050,15 @@ export class AcpAgent {
     // 非在途时的内容型 update 视为僵尸流量丢弃（cancel/watchdog 后迟到的回合残片）；
     // usage/config_option 属会话级更新，不受回合约束放行。
     // 已知边界：新回合已启动后旧回合迟到的 update 无法区分——ACP session/update 不携带回合标识。
+    const owner = this.nativeGoalOwners.get(params.sessionId);
+    const goal = this.nativeGoals.get(params.sessionId);
+    if (owner && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) {
+      owner.firstOutput = true;
+      clearTimeout(owner.initialWatchdog);
+    }
+    if (!entry.busy && owner?.enabled && goal?.objective === owner.objective &&
+        (goal.status === "active" || (goal.status === "complete" && owner.pendingTurnRevision !== undefined)) &&
+        u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) this.beginNativeGoalTurn(params.sessionId, entry);
     if (!entry.busy && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) return;
     if (entry.busy && u.sessionUpdate && TURN_UPDATE_KINDS.has(u.sessionUpdate)) {
       entry.turnGotUpdate = true;
@@ -922,6 +1161,13 @@ export class AcpAgent {
   /** agent→hub 请求同样证明存活：permission/elicitation/fs 期间不得误判为无输出 */
   private markTurnAlive(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
+    const owner = this.nativeGoalOwners.get(sessionId);
+    if (owner) {
+      owner.firstOutput = true;
+      clearTimeout(owner.initialWatchdog);
+      if (entry && !entry.busy && owner.enabled && this.nativeGoals.get(sessionId)?.status === "active")
+        this.beginNativeGoalTurn(sessionId, entry);
+    }
     if (entry) {
       entry.turnGotUpdate = true;
       entry.lastActivityAt = Date.now();
@@ -1333,6 +1579,7 @@ export class AcpAgent {
       }),
     );
     this.recordConfigOptions(resp.sessionId, resp.configOptions);
+    if (this.nativeGoalCapabilities && !this.nativeGoals.has(resp.sessionId)) this.nativeGoals.set(resp.sessionId, null);
     const sessionName = name?.trim() || resp.sessionId;
     this.sessions.set(resp.sessionId, {
       cwd,
@@ -1709,6 +1956,7 @@ export class AcpAgent {
     // 本地收尾：已流出的部分文本与过程缓冲照常落库（watchdog 场景 buf 为空，无过程卡）
     entry.stoppable = false;
     entry.busy = false;
+    entry.nativeGoalTurn = false;
     this.clearTaskGrants(sessionId);
     this.onTurnEnd?.(sessionId, entry.turnText, "interrupted");
     entry.turnText = "";
@@ -1752,8 +2000,9 @@ export class AcpAgent {
 
   isBusy(sessionId: string): boolean {
     const entry = this.sessions.get(sessionId);
+    const owner = this.nativeGoalOwners.get(sessionId);
     // 宽限窗内的会话可立即接受新回合（promptContent 会先定稿旧回合）
-    return (entry?.busy && !entry.pendingSettle) ?? false;
+    return !!(entry?.busy && !entry.pendingSettle) || !!(owner?.enabled && owner.pendingTurnRevision !== undefined);
   }
 
   isStoppable(sessionId: string): boolean {

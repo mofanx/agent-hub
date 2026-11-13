@@ -10,6 +10,19 @@ import {
 import type { Room } from "./room.js";
 import type { ModeResult } from "./room-modes.js";
 import type { Store } from "./store.js";
+import { goalSnapshot, type GoalAction, type GoalCapabilities, type GoalSnapshot } from "./native-goal.js";
+
+export type MissionExecution = {
+  id: string;
+  mode: "native-goal" | "prompt" | "hub";
+  sessionId: string;
+  actions: GoalAction[];
+  objective?: string | undefined;
+  goal?: GoalSnapshot | null | undefined;
+  reason?: string | undefined;
+  stopConfirmed?: boolean | undefined;
+  desiredState?: "running" | "stopped" | undefined;
+};
 
 export type MissionStatus =
   | "draft"
@@ -64,6 +77,7 @@ export type MissionSupplement = {
   at: number;
   text: string;
   delivered: boolean;
+  delivery?: "recorded" | "queued" | "delivered";
 };
 
 export type Mission = {
@@ -76,6 +90,8 @@ export type Mission = {
   ownerSessionId: string;
   /** 会话 promote 绑定：由哪个会话升级而来；同会话有活跃绑定工单时再 promote 应提示查看而非重复创建 */
   boundSessionId?: string | undefined;
+  sourceId?: string | undefined;
+  execution?: MissionExecution | undefined;
   status: MissionStatus;
   createdAt: number;
   updatedAt: number;
@@ -135,9 +151,16 @@ export type MissionDeps = {
   retryFailedTasks(roomId: string, taskIds?: string[]): boolean;
   supplementActive(room: Room, text: string, missionId?: string): boolean;
   broadcast(method: string, params: Record<string, unknown>): void;
+  goalInfo?(sessionId: string): { capabilities: GoalCapabilities; goal: GoalSnapshot | null | undefined } | undefined;
+  bindNativeGoal?(sessionId: string, executionId: string, objective: string): void;
+  nativeGoalOwner?(sessionId: string): string | undefined;
+  releaseNativeGoal?(sessionId: string, executionId: string): void;
+  controlNativeGoal?(sessionId: string, action: GoalAction, objective?: string): Promise<void>;
+  supplementNativeGoal?(sessionId: string, text: string): Promise<boolean | "recorded" | "queued" | "delivered">;
 };
 
 const META_KEY = "missions.v1";
+const SOURCES_KEY = "missions.sources.v1";
 /** 损坏数据隔离键：blob 级写原文、记录级写坏条目 JSON 数组 */
 const CORRUPT_KEY = "missions.v1.corrupt";
 const OUTPUT_CAP = 4000;
@@ -196,6 +219,13 @@ function missionPrompt(m: Mission): string {
 function optString(v: unknown, field: string): string {
   if (v === undefined || v === null) return "";
   if (typeof v !== "string") throw new Error(`${field} must be a string`);
+  return v.trim();
+}
+
+function missionSourceId(v: unknown): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || !v.trim() || v.length > 512 || /[\u0000-\u001f\u007f]/.test(v))
+    throw new Error("sourceId must be a non-empty string of at most 512 characters without control characters");
   return v.trim();
 }
 
@@ -290,6 +320,7 @@ function validateRecord(raw: unknown): MissionRecord {
           at: typeof sp.at === "number" ? sp.at : 0,
           text: sp.text,
           delivered: sp.delivered === true,
+          ...(["recorded", "queued", "delivered"].includes(String(sp.delivery)) ? { delivery: sp.delivery as NonNullable<MissionSupplement["delivery"]> } : {}),
         };
       })
     : [];
@@ -336,8 +367,29 @@ function validateRecord(raw: unknown): MissionRecord {
   if (acceptance) inner.acceptance = acceptance;
   if (str(m.parentMissionId) !== undefined) inner.parentMissionId = str(m.parentMissionId);
   if (str(m.boundSessionId) !== undefined) inner.boundSessionId = str(m.boundSessionId);
+  if (m.sourceId !== undefined) inner.sourceId = missionSourceId(m.sourceId);
   if (str(m.baselineFlowId) !== undefined) inner.baselineFlowId = str(m.baselineFlowId);
   if (str(m.reasonCode) !== undefined) inner.reasonCode = str(m.reasonCode);
+  if (m.execution !== undefined) {
+    const e = m.execution as MissionExecution;
+    if (!e || typeof e.id !== "string" || !e.id || typeof e.sessionId !== "string" || !e.sessionId ||
+        !["native-goal", "prompt", "hub"].includes(e.mode) || !Array.isArray(e.actions) ||
+        e.actions.some((a) => !["set", "pause", "resume", "clear"].includes(a)) ||
+        (e.mode === "native-goal" && (typeof e.objective !== "string" || !e.objective.trim())))
+      throw new Error("mission record: invalid execution");
+    const goal = e.goal === null ? null : goalSnapshot(e.goal);
+    if (e.goal !== undefined && goal === undefined) throw new Error("mission record: invalid native goal snapshot");
+    inner.execution = {
+      id: e.id, mode: e.mode, sessionId: e.sessionId, actions: [...e.actions],
+      ...(typeof e.objective === "string" ? { objective: e.objective } : {}),
+      ...(goal !== undefined ? { goal } : {}),
+      ...(typeof e.reason === "string" ? { reason: e.reason } : {}),
+      ...(typeof e.stopConfirmed === "boolean" ? { stopConfirmed: e.stopConfirmed } : {}),
+      ...(e.desiredState === "running" || e.desiredState === "stopped" ? { desiredState: e.desiredState } : {}),
+    };
+    if (e.mode === "native-goal" && (e.desiredState === "stopped" ||
+        (!e.stopConfirmed && (inner.status === "stopped" || inner.status === "failed")))) inner.stopRequested = true;
+  }
   return inner;
 }
 
@@ -375,6 +427,8 @@ function snapshot(m: MissionRecord): MissionSnapshot {
   if (m.reworkReason !== undefined) s.reworkReason = m.reworkReason;
   if (m.reasonCode !== undefined) s.reasonCode = m.reasonCode;
   if (m.boundSessionId !== undefined) s.boundSessionId = m.boundSessionId;
+  if (m.sourceId !== undefined) s.sourceId = m.sourceId;
+  if (m.execution) s.execution = { ...m.execution, actions: [...m.execution.actions], ...(m.execution.goal ? { goal: { ...m.execution.goal } } : {}) };
   return s;
 }
 
@@ -413,6 +467,10 @@ export function allMembersAvailable(room: Room, isAvailable: (sessionId: string)
 
 export class MissionManager {
   private missions = new Map<string, MissionRecord>();
+  private sources = new Map<string, string>();
+  private sourcesDirty = false;
+  private sourcesCorrupt = false;
+  private stoppingGoals = new Set<string>();
   private retryScheduled = new Set<string>();
   private broadAttrLogged = new Set<string>();
   private restoreDone = true;
@@ -422,6 +480,22 @@ export class MissionManager {
   }
 
   constructor(private deps: MissionDeps) {
+    const sources = deps.store.getMeta(SOURCES_KEY);
+    if (sources !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(sources);
+        if (!Array.isArray(parsed) || parsed.length > 10000) throw new Error("invalid mission source ledger");
+        for (const pair of parsed) {
+          if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[1] !== "string" || !pair[1])
+            throw new Error("invalid mission source receipt");
+          const sourceId = missionSourceId(pair[0]);
+          if (!sourceId || this.sources.has(sourceId)) throw new Error("duplicate mission source receipt");
+          this.sources.set(sourceId, pair[1]);
+        }
+      } catch {
+        this.sourcesCorrupt = true;
+      }
+    }
     const raw = deps.store.getMeta(META_KEY);
     if (raw === undefined) return;
     let parsed: unknown;
@@ -443,6 +517,10 @@ export class MissionManager {
       try {
         const rec = validateRecord(item);
         this.missions.set(rec.id, rec);
+        if (rec.sourceId && !this.sources.has(rec.sourceId)) {
+          this.sources.set(rec.sourceId, rec.id);
+          this.sourcesDirty = true;
+        }
       } catch {
         // 记录级损坏：单条隔离，其余记录照常恢复
         corrupt.push(item);
@@ -458,7 +536,8 @@ export class MissionManager {
    * 且任何超过 TERMINAL_TTL_MS 的终态一律清除（events/reviews 等负载随 Map 释放）。
    * 只碰 TERMINAL 状态，activeFor/reconcile 等非终态消费路径不受影响 */
   private sweepTerminal(now: number): void {
-    const terminal = [...this.missions.values()].filter((m) => TERMINAL.has(m.status));
+    const terminal = [...this.missions.values()].filter((m) => TERMINAL.has(m.status) &&
+      (m.execution?.mode !== "native-goal" || m.execution.stopConfirmed === true));
     terminal.sort((a, b) => (b.finishedAt ?? b.updatedAt) - (a.finishedAt ?? a.updatedAt));
     for (const [i, m] of terminal.entries()) {
       const at = m.finishedAt ?? m.updatedAt;
@@ -476,6 +555,10 @@ export class MissionManager {
   private persist(): void {
     const t0 = performance.now();
     this.sweepTerminal(Date.now());
+    if (this.sourcesDirty && !this.sourcesCorrupt) {
+      this.deps.store.setMeta(SOURCES_KEY, JSON.stringify([...this.sources]));
+      this.sourcesDirty = false;
+    }
     // 只落公共快照字段：sent/pending/dispatching 等 in-flight 簿记是内存态，
     // 重启经 reconcile 重建或终止，持久化它们只会产生半真半假的恢复输入
     this.deps.store.setMeta(
@@ -590,11 +673,21 @@ export class MissionManager {
     parentMissionId?: unknown;
     reworkReason?: unknown;
     boundSessionId?: unknown;
+    sourceId?: unknown;
   }): MissionSnapshot {
     const roomId = optString(input.roomId, "roomId");
     if (!roomId) throw new Error("roomId required");
     const room = this.deps.getRoom(roomId);
     if (!room) throw new Error(`unknown room: ${roomId}`);
+    const sourceId = missionSourceId(input.sourceId);
+    if (sourceId) {
+      const previous = this.findBySource(sourceId);
+      if (previous) {
+        if (previous.roomId !== roomId) throw new Error("sourceId belongs to another room");
+        return previous;
+      }
+      if (this.sources.size >= 10000) throw new Error("mission source ledger is full");
+    }
     const c = this.validateContract(input, room);
     const maxAutoRetries = optMaxRetries(input.maxAutoRetries);
     const now = Date.now();
@@ -641,7 +734,23 @@ export class MissionManager {
     }
     this.log(m, "lifecycle", "draft created");
     this.missions.set(m.id, m);
+    if (sourceId) {
+      m.sourceId = sourceId;
+      this.sources.set(sourceId, m.id);
+      this.sourcesDirty = true;
+    }
     return this.commit(m);
+  }
+
+  findBySource(source: unknown): MissionSnapshot | undefined {
+    const sourceId = missionSourceId(source);
+    if (!sourceId) return undefined;
+    if (this.sourcesCorrupt) throw new Error("mission source ledger is corrupt; source cannot be safely consumed");
+    const id = this.sources.get(sourceId);
+    if (!id) return undefined;
+    const mission = this.missions.get(id);
+    if (!mission) throw new Error("mission source already consumed");
+    return snapshot(mission);
   }
 
   updateContract(id: string, input: {
@@ -695,7 +804,7 @@ export class MissionManager {
   async start(id: string): Promise<MissionSnapshot> {
     const m = this.missions.get(id);
     if (!m) throw new Error(`unknown mission: ${id}`);
-    if (m.status !== "draft") throw new Error(`mission not startable: ${m.status}`);
+    if (m.status !== "draft" || m.dispatching) throw new Error(`mission not startable: ${m.status}`);
     const room = this.deps.getRoom(m.roomId);
     if (!room) throw new Error(`unknown room: ${m.roomId}`);
     if (!room.members.some((mem) => mem.sessionId === m.ownerSessionId))
@@ -712,6 +821,32 @@ export class MissionManager {
     for (const mem of room.members) {
       if (this.deps.isBusy(mem.sessionId)) throw new Error(`member busy: ${mem.name}`);
     }
+    const single = room.members.length === 1 && room.mode === "mention";
+    let native = single ? this.deps.goalInfo?.(m.ownerSessionId) : undefined;
+    if (native) {
+      const other = [...this.missions.values()].find((x) => x.id !== m.id &&
+        x.execution?.mode === "native-goal" && x.execution.sessionId === m.ownerSessionId &&
+        (this.deps.nativeGoalOwner?.(m.ownerSessionId) === x.execution.id ||
+          ((x.status === "accepted" || x.reasonCode === "closed-for-rework") && native?.goal?.objective === x.execution.objective)));
+      const replaceable = other?.status === "accepted" ||
+        (other?.reasonCode === "closed-for-rework" && m.parentMissionId === other.id);
+      if (replaceable && native.goal?.status === "complete" &&
+          native.goal.objective === other.execution?.objective) {
+        m.dispatching = true;
+        try {
+          this.deps.bindNativeGoal!(m.ownerSessionId, other.execution!.id, other.execution!.objective!);
+          await this.deps.controlNativeGoal!(m.ownerSessionId, "clear");
+          other.execution.stopConfirmed = true;
+          this.deps.releaseNativeGoal?.(m.ownerSessionId, other.execution.id);
+          this.commit(other);
+        } finally { m.dispatching = false; }
+        if ((m.status as MissionStatus) !== "draft") return snapshot(m);
+        native = this.deps.goalInfo?.(m.ownerSessionId);
+      } else if (other) throw new Error(`session already occupied by native goal mission ${other.id}`);
+      if (!native || native.goal === undefined) throw new Error("native goal state is not synchronized");
+      if (native.goal !== null) throw new Error("native goal already exists");
+      if (!this.deps.bindNativeGoal || !this.deps.controlNativeGoal) throw new Error("native goal integration unavailable");
+    }
     m.baselineFlowId = preFlow?.flowId;
     m.startedAt = Date.now();
     m.finishedAt = undefined;
@@ -723,8 +858,37 @@ export class MissionManager {
     m.lastPhase = "";
     m.lastFlowSig = "";
     m.dispatching = true;
+    m.execution = {
+      id: `gx_${randomUUID()}`, sessionId: m.ownerSessionId, actions: [...(native?.capabilities.actions ?? [])],
+      mode: native ? "native-goal" : single ? "prompt" : "hub",
+      ...(native ? { stopConfirmed: false, desiredState: "running" as const } : { reason: single ? "native-goal-unavailable" : "hub-collaboration" }),
+    };
+    if (native) m.execution.objective = `${missionPrompt(m)}\n\nExecution: ${m.execution.id}`;
     this.transition(m, "running", "lifecycle", "started");
     this.commit(m);
+    if (native) {
+      const execution = m.execution;
+      try {
+        this.deps.bindNativeGoal!(execution.sessionId, execution.id, execution.objective!);
+        m.sent = [execution.sessionId];
+        m.pending = [execution.sessionId];
+        await this.deps.controlNativeGoal!(execution.sessionId, "set", execution.objective);
+        m.dispatching = false;
+        if (m.stopRequested) await this.cancelOwnWork(m);
+        else this.syncNativeGoal(m, this.deps.goalInfo?.(execution.sessionId)?.goal);
+        return this.commit(m);
+      } catch (e) {
+        m.dispatching = false;
+        m.stopRequested = true;
+        execution.desiredState = "stopped";
+        m.error = String(e);
+        this.transition(m, "failed", "error", `native goal start failed: ${String(e)}`, "native-goal-start-failed");
+        this.commit(m);
+        await this.cancelOwnWork(m);
+        this.commit(m);
+        throw e;
+      }
+    }
     let result: ModeResult;
     try {
       result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m), missionId: m.id, goal: m.goal });
@@ -775,6 +939,33 @@ export class MissionManager {
 
   private async cancelOwnWork(m: MissionRecord): Promise<void> {
     const errors: string[] = [];
+    const execution = m.execution;
+    if (execution?.mode === "native-goal") {
+      if (execution.stopConfirmed || this.stoppingGoals.has(execution.id)) return;
+      this.stoppingGoals.add(execution.id);
+      execution.desiredState = "stopped";
+      m.stopRequested = true;
+      try {
+        const info = this.deps.goalInfo?.(execution.sessionId);
+        if (info?.goal && info.goal.objective !== execution.objective) {
+          execution.stopConfirmed = true;
+          this.deps.releaseNativeGoal?.(execution.sessionId, execution.id);
+          return;
+        }
+        this.deps.bindNativeGoal?.(execution.sessionId, execution.id, execution.objective!);
+        await this.deps.controlNativeGoal!(execution.sessionId, "clear");
+        execution.goal = info?.goal?.status === "complete" ? info.goal : null;
+        execution.stopConfirmed = true;
+        this.deps.releaseNativeGoal?.(execution.sessionId, execution.id);
+      } catch (e) {
+        execution.stopConfirmed = false;
+        m.error = `native goal cancellation not confirmed: ${String(e)}`;
+        this.log(m, "error", m.error);
+      } finally {
+        this.stoppingGoals.delete(execution.id);
+      }
+      return;
+    }
     const flow = this.flowOf(m.roomId);
     const flowId = flow?.flowId;
     if (m.flowId && flowId === m.flowId && this.deps.hasActiveFlow(m.roomId)) {
@@ -802,14 +993,22 @@ export class MissionManager {
   async stop(id: string, reason?: string): Promise<MissionSnapshot> {
     const m = this.missions.get(id);
     if (!m) throw new Error(`unknown mission: ${id}`);
-    if (m.status === "stopped") return snapshot(m);
+    if (m.status === "stopped" || (m.status === "failed" && m.execution?.mode === "native-goal")) {
+      if (m.execution?.mode === "native-goal" && !m.execution.stopConfirmed) {
+        await this.cancelOwnWork(m);
+        return this.commit(m);
+      }
+      return snapshot(m);
+    }
     if (TERMINAL.has(m.status)) throw new Error(`mission not stoppable: ${m.status}`);
     const wasActive = m.status === "running" || m.status === "waiting-user";
     m.stopRequested = true;
+    if (m.execution?.mode === "native-goal") m.execution.desiredState = "stopped";
     this.transition(m, "stopped", "lifecycle", reason ? `stopped: ${reason}` : "stopped by user", "user-stopped");
     this.commit(m);
-    if (!wasActive) return snapshot(m);
+    if (!wasActive && m.execution?.mode !== "native-goal") return snapshot(m);
     await this.cancelOwnWork(m);
+    if (m.execution?.mode === "native-goal") return this.commit(m);
     if (m.error) this.commit(m);
     return snapshot(m);
   }
@@ -822,6 +1021,20 @@ export class MissionManager {
   async delete(id: string, force = false): Promise<{ deleted: boolean }> {
     const m = this.missions.get(id);
     if (!m) return { deleted: true };
+    if (m.execution?.mode === "native-goal" && !m.execution.stopConfirmed) {
+      if ((m.status === "running" || m.status === "waiting-user") && !force)
+        throw new Error(`mission active: stop first (or force): ${m.status}`);
+      if (m.status === "awaiting-acceptance") throw new Error(`mission not deletable in status: ${m.status}`);
+      if (m.status === "accepted" && this.deps.isBusy(m.execution.sessionId)) throw new Error("session busy; cannot clean up a completed native goal");
+      m.stopRequested = true;
+      m.execution.desiredState = "stopped";
+      if (m.status === "running" || m.status === "waiting-user")
+        this.transition(m, "stopped", "lifecycle", "stopped before deletion", "user-stopped");
+      this.commit(m);
+      await this.cancelOwnWork(m);
+      this.commit(m);
+      if (!m.execution.stopConfirmed) throw new Error("native goal stop not confirmed; mission retained");
+    }
     if (m.status === "running" || m.status === "waiting-user") {
       if (!force) throw new Error(`mission active: stop first (or force): ${m.status}`);
       await this.cancelOwnWork(m);
@@ -838,6 +1051,14 @@ export class MissionManager {
     let touched = false;
     for (const m of [...this.missions.values()]) {
       if (m.roomId !== roomId) continue;
+      if (m.execution?.mode === "native-goal" && !m.execution.stopConfirmed) {
+        m.stopRequested = true;
+        m.execution.desiredState = "stopped";
+        if (!TERMINAL.has(m.status)) this.transition(m, "stopped", "lifecycle", "room removed", "user-stopped");
+        this.commit(m);
+        await this.cancelOwnWork(m);
+        if (!m.execution.stopConfirmed) { this.commit(m); continue; }
+      }
       if (m.status === "running" || m.status === "waiting-user") {
         try { await this.cancelOwnWork(m); } catch { /* best effort */ }
       }
@@ -1059,7 +1280,126 @@ export class MissionManager {
     }
   }
 
+  private nativeRecord(sessionId: string): MissionRecord | undefined {
+    const owner = this.deps.nativeGoalOwner?.(sessionId);
+    return [...this.missions.values()].find((m) => m.execution?.mode === "native-goal" &&
+      m.execution.sessionId === sessionId && (owner ? m.execution.id === owner :
+        (m.status === "running" || m.status === "waiting-user" || (m.stopRequested && !m.execution.stopConfirmed))));
+  }
+
+  nativeMissionForSession(sessionId: string): MissionSnapshot | undefined {
+    const m = this.nativeRecord(sessionId);
+    return m ? snapshot(m) : undefined;
+  }
+
+  reservesSession(sessionId: string): boolean {
+    const m = this.nativeRecord(sessionId);
+    return !!m && (m.status === "running" || m.status === "waiting-user" ||
+      ((m.status !== "accepted" || m.stopRequested) && m.execution?.stopConfirmed === false));
+  }
+
+  private syncNativeGoal(m: MissionRecord, goal: GoalSnapshot | null | undefined): void {
+    const e = m.execution!;
+    e.actions = [...(this.deps.goalInfo?.(e.sessionId)?.capabilities.actions ?? [])];
+    if (goal === undefined) {
+      this.transition(m, "waiting-user", "lifecycle", "native goal state needs synchronization", "native-goal-reconnect");
+    } else if (goal && goal.objective !== e.objective) {
+      this.transition(m, "waiting-user", "lifecycle", "native goal was replaced outside this mission", "native-goal-replaced");
+    } else {
+      e.goal = goal;
+      if (goal === null) {
+        if (m.status !== "awaiting-acceptance")
+          this.transition(m, "waiting-user", "lifecycle", "native goal cleared; execution outcome needs confirmation", "native-goal-cleared");
+      } else if (goal.status === "complete") {
+        if (!m.dispatching && !this.deps.isBusy(e.sessionId))
+          this.transition(m, "awaiting-acceptance", "output", "native goal completed; human acceptance required");
+      } else if (goal.status === "active") {
+        if (m.reasonCode !== "native-goal-error") this.transition(m, "running", "lifecycle", "native goal active");
+      } else {
+        this.transition(m, "waiting-user", "lifecycle", `native goal ${goal.status}`, `native-goal-${goal.status}`);
+      }
+    }
+  }
+
+  onNativeGoal(sessionId: string, goal: GoalSnapshot | null): void {
+    let m = this.nativeRecord(sessionId);
+    if (!m && goal) {
+      m = [...this.missions.values()].find((x) => x.execution?.mode === "native-goal" &&
+        x.execution.sessionId === sessionId && x.execution.objective === goal.objective &&
+        (x.status === "running" || x.status === "waiting-user"));
+      if (m) {
+        try { this.deps.bindNativeGoal?.(sessionId, m.execution!.id, m.execution!.objective!); } catch {}
+      }
+    }
+    if (!m) return;
+    if (m.stopRequested || TERMINAL.has(m.status)) {
+      if (m.stopRequested && !m.execution!.stopConfirmed && goal?.objective === m.execution!.objective &&
+          !this.stoppingGoals.has(m.execution!.id)) {
+        void this.cancelOwnWork(m).finally(() => this.commit(m!));
+      }
+      return;
+    }
+    const before = JSON.stringify([m.status, m.reasonCode, m.execution]);
+    this.syncNativeGoal(m, goal);
+    if (before !== JSON.stringify([m.status, m.reasonCode, m.execution])) this.commit(m);
+  }
+
+  onNativeGoalError(sessionId: string, executionId: string, message: string): void {
+    const m = this.nativeRecord(sessionId);
+    if (!m || m.execution?.id !== executionId) return;
+    m.execution.actions = [...(this.deps.goalInfo?.(sessionId)?.capabilities.actions ?? [])];
+    if (TERMINAL.has(m.status)) { this.commit(m); return; }
+    m.error = message;
+    this.transition(m, "waiting-user", "error", message, "native-goal-error");
+    this.commit(m);
+  }
+
+  async goalControl(id: string, action: unknown): Promise<MissionSnapshot> {
+    const m = this.missions.get(id);
+    if (!m) throw new Error(`unknown mission: ${id}`);
+    const e = m.execution;
+    if (e?.mode !== "native-goal" || !["pause", "resume", "clear"].includes(String(action)) ||
+        !this.deps.goalInfo?.(e.sessionId)?.capabilities.actions.includes(action as GoalAction))
+      throw new Error(`native goal action unsupported: ${String(action)}`);
+    if (TERMINAL.has(m.status)) throw new Error(`mission not controllable: ${m.status}`);
+    if (action === "clear" && (m.status === "running" || m.status === "waiting-user")) return this.stop(id);
+    this.deps.bindNativeGoal?.(e.sessionId, e.id, e.objective!);
+    await this.deps.controlNativeGoal!(e.sessionId, action as GoalAction);
+    m.error = undefined;
+    if (action === "resume" && m.reasonCode === "native-goal-error") m.reasonCode = undefined;
+    this.syncNativeGoal(m, this.deps.goalInfo?.(e.sessionId)?.goal);
+    if (action === "clear") {
+      e.stopConfirmed = true;
+      this.deps.releaseNativeGoal?.(e.sessionId, e.id);
+    }
+    return this.commit(m);
+  }
+
+  submitForReview(id: string): MissionSnapshot {
+    const m = this.missions.get(id);
+    if (!m) throw new Error(`unknown mission: ${id}`);
+    const e = m.execution;
+    const goal = e ? this.deps.goalInfo?.(e.sessionId)?.goal : undefined;
+    if (e?.mode !== "native-goal" || m.status !== "waiting-user" ||
+        (goal !== null && goal?.status !== "complete") || this.deps.isBusy(e.sessionId))
+      throw new Error("native execution must be idle and complete or cleared before review");
+    this.transition(m, "awaiting-acceptance", "lifecycle", "user submitted native execution for human acceptance");
+    return this.commit(m);
+  }
+
   onTurnDone(sessionId: string, roomId: string | undefined, output: string): void {
+    const native = this.nativeRecord(sessionId);
+    if (native?.execution?.mode === "native-goal") {
+      if (native.status !== "running" && native.status !== "waiting-user") return;
+      native.pending = [];
+      if (output.trim()) {
+        native.output = [native.output, output].filter(Boolean).join("\n\n").slice(-OUTPUT_CAP);
+        this.log(native, "output", `${sessionId}: ${output.slice(0, 200)}`);
+      }
+      this.syncNativeGoal(native, this.deps.goalInfo?.(sessionId)?.goal);
+      this.commit(native);
+      return;
+    }
     const m = roomId ? this.activeFor(roomId) : this.findPending(sessionId);
     if (!m) return;
     if (!this.ownsTurn(m, sessionId)) return;
@@ -1127,6 +1467,11 @@ export class MissionManager {
   }
 
   onTurnError(sessionId: string, roomId: string | undefined, message: string, context?: MissionTurnContext): void {
+    const native = this.nativeRecord(sessionId);
+    if (native?.execution?.mode === "native-goal") {
+      this.onNativeGoalError(sessionId, native.execution.id, message);
+      return;
+    }
     if (context !== undefined) {
       const target = this.contextTarget(sessionId, context);
       if (!target) return;
@@ -1184,8 +1529,27 @@ export class MissionManager {
   reconcile(): void {
     try {
       for (const m of this.missions.values()) {
-        if (m.status !== "running" && m.status !== "waiting-user") continue;
+        const pendingStop = m.execution?.mode === "native-goal" && m.stopRequested && !m.execution.stopConfirmed;
+        if (m.status !== "running" && m.status !== "waiting-user" && !pendingStop) continue;
         try {
+          if (m.execution?.mode === "native-goal") {
+            const e = m.execution;
+            const goal = this.deps.goalInfo?.(e.sessionId)?.goal;
+            if (goal?.objective === e.objective) this.deps.bindNativeGoal?.(e.sessionId, e.id, e.objective!);
+            if (pendingStop) {
+              if (goal === null || (goal && goal.objective !== e.objective)) {
+                e.stopConfirmed = true;
+                this.deps.releaseNativeGoal?.(e.sessionId, e.id);
+              } else if (goal?.objective === e.objective) {
+                void this.cancelOwnWork(m).finally(() => this.commit(m));
+              }
+              this.commit(m);
+              continue;
+            }
+            this.syncNativeGoal(m, goal);
+            this.commit(m);
+            continue;
+          }
           const flow = this.flowOf(m.roomId);
           const flowId = flow?.flowId;
           // 认领依据：mission 显式持有的 flowId 匹配，或 flow 打标 missionId 归属
@@ -1265,12 +1629,18 @@ export class MissionManager {
     if (!m) throw new Error(`unknown mission: ${id}`);
     if (m.status === "accepted") return snapshot(m);
     if (m.status !== "awaiting-acceptance") throw new Error(`accept requires awaiting-acceptance: ${m.status}`);
+    if (m.execution?.mode === "native-goal") {
+      const goal = this.deps.goalInfo?.(m.execution.sessionId)?.goal;
+      if ((goal !== null && (goal?.status !== "complete" || goal.objective !== m.execution.objective)) ||
+          this.deps.isBusy(m.execution.sessionId)) throw new Error("native goal is not quiescent; acceptance must wait");
+    }
     if (m.reviews.length < m.acceptanceCriteria.length ||
         m.acceptanceCriteria.some((_, i) => m.reviews.find((r) => r.index === i)?.verdict !== "pass"))
       throw new Error("all acceptance criteria must be manually passed first");
     // acceptance.at 先落定，transition 再把 finishedAt 推到验收时刻（≥ acceptance.at）
     m.acceptance = { at: Date.now(), note: typeof note === "string" ? note.trim() : "" };
     this.transition(m, "accepted", "lifecycle", "accepted by user");
+    if (m.execution?.mode === "native-goal") this.deps.releaseNativeGoal?.(m.execution.sessionId, m.execution.id);
     return this.commit(m);
   }
 
@@ -1323,16 +1693,29 @@ export class MissionManager {
       at: Date.now(),
       text: t,
       delivered: false,
+      delivery: "recorded",
     };
     m.supplements.push(sup);
     m.updatedAt = Date.now();
     this.persist();
+    if (m.execution?.mode === "native-goal") {
+      try {
+        const delivery = await this.deps.supplementNativeGoal?.(m.execution.sessionId, t) ?? false;
+        sup.delivered = delivery === true || delivery === "delivered";
+        sup.delivery = sup.delivered ? "delivered" : delivery === "queued" ? "queued" : "recorded";
+      } catch (e) {
+        this.log(m, "error", `native goal supplement failed: ${String(e)}`);
+      }
+      this.log(m, "supplement", `native goal supplement ${sup.delivery ?? "recorded"}`);
+      return this.commit(m);
+    }
     const flowId = flow?.flowId;
     const bound = !!m.flowId && flowId === m.flowId && this.deps.hasActiveFlow(m.roomId);
     if (bound) {
       try {
         if (this.deps.supplementActive(room, `User supplement to mission ${m.id}:\n${t}`, m.id)) {
           sup.delivered = true;
+          sup.delivery = "queued";
         }
       } catch (e) {
         // 补充投递失败是操作级故障，不覆写 mission 级 m.error

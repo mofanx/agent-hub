@@ -257,9 +257,24 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
     }
 
     val lines = { v: String -> v.split("\n").map { it.trim() }.filter { it.isNotEmpty() } }
-    val missions = vm.missions.sortedByDescending { it.updatedAt }
+    // 需我处理（待用户/待验收/失败）→ 执行中 → 草稿 → 其他；同档按 updatedAt 倒序
+    val actionRank = { s: String ->
+        when (s) {
+            "waiting-user", "awaiting-acceptance", "failed" -> 0
+            "running" -> 1
+            "draft" -> 2
+            else -> 3
+        }
+    }
+    val missions = vm.missions.sortedWith(
+        compareBy<Mission> { actionRank(it.status) }.thenByDescending { it.updatedAt },
+    )
     val focusId = vm.missionFocusId
     val filtered = if (focusId != null) missions.filter { it.id == focusId } else missions.filter { filterMatch(it, filter) }
+    // 无活跃工单（执行中/待用户/待验收）时默认收起列表，可展开查看全部
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val hasActive = missions.any { it.status in setOf("running", "waiting-user", "awaiting-acceptance") }
+    val collapsed = !hasActive && !expanded && focusId == null
 
     Card(
         Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -277,8 +292,12 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                 if (focusId != null) {
                     TextButton(onClick = { vm.missionFocusId = null }) { Text(S.missionShowAll) }
                 }
+                if (collapsed) {
+                    TextButton(onClick = { expanded = true }) { Text(S.missionExpand) }
+                }
                 TextButton(onClick = { showForm = !showForm }) { Text(S.missionNew) }
             }
+            if (!collapsed) {
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 FILTERS.forEach { k ->
                     val count = missions.count { filterMatch(it, k) }
@@ -288,6 +307,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                 }
             }
             Text(S.missionRiskNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             vm.missionError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             if (showForm) {
                 if (rooms.isEmpty()) {
@@ -350,6 +370,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                     ) { Text(if (editId != null) S.missionEditContract else S.missionSaveDraft) }
                 }
             }
+            if (!collapsed) {
             if (filtered.isEmpty()) {
                 Text(S.missionEmpty, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -379,13 +400,38 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text("${S.missionCriteriaShort}: ${m.acceptanceCriteria.joinToString("；")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        m.execution?.let { e ->
+                            val mode = (e["mode"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            Text(S.missionExecutionModes[mode] ?: S.missionExecutionModes.getValue("unknown"), style = MaterialTheme.typography.bodySmall)
+                            if (mode == "native-goal") {
+                                val goalState = (e["goal"] as? kotlinx.serialization.json.JsonObject)?.get("status")?.jsonPrimitive?.content
+                                val stateKey = if (e["goal"] is kotlinx.serialization.json.JsonNull) "cleared" else goalState ?: "unknown"
+                                Text(S.missionNativeStatuses[stateKey] ?: S.missionNativeStatuses.getValue("unknown"), style = MaterialTheme.typography.bodySmall)
+                                val supported = (e["actions"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: emptyList()
+                                val unconfirmed = m.status in listOf("stopped", "failed") && (e["stopConfirmed"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull == false
+                                if (unconfirmed) Text(S.missionNativeStatuses.getValue("stopping"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                val action = when {
+                                    unconfirmed && "clear" in supported -> "stop"
+                                    m.status == "awaiting-acceptance" && e["goal"] is kotlinx.serialization.json.JsonObject && "clear" in supported -> "clear"
+                                    m.status !in listOf("running", "waiting-user") -> null
+                                    m.status == "waiting-user" && stateKey == "cleared" -> "review"
+                                    goalState == "active" && "pause" in supported -> "pause"
+                                    goalState in listOf("paused", "blocked", "limited") && "resume" in supported -> "resume"
+                                    else -> null
+                                }
+                                if (action != null) TextButton(enabled = !busy, onClick = {
+                                    busy = true
+                                    vm.controlMissionGoal(m.id, action) { busy = false }
+                                }) { Text(S.missionNativeActions.getValue(action)) }
+                            }
+                        }
                         m.reworkReason?.let { Text("${S.missionReworkReason}: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         if (m.maxAutoRetries > 0 || m.autoRetryCount > 0) {
                             Text(String.format(S.missionAutoRetryCount, m.autoRetryCount, m.maxAutoRetries), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         if (m.supplements.isNotEmpty()) {
                             Text(
-                                "${S.missionSupplement}: ${m.supplements.joinToString("；") { "${it.text}(${if (it.delivered) S.missionDelivered else S.missionRecordedOnly})" }}",
+                                "${S.missionSupplement}: ${m.supplements.joinToString("；") { "${it.text}(${if (it.delivery == "queued") S.missionQueued else if (it.delivered) S.missionDelivered else S.missionRecordedOnly})" }}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -561,6 +607,7 @@ fun MissionSection(vm: ChatViewModel, S: Strings, onCreateRoom: () -> Unit) {
                 }
                 }
             }
+            }
         }
     }
 
@@ -688,17 +735,17 @@ fun parseMissionDrafts(text: String): List<kotlinx.serialization.json.JsonObject
     }.toList()
 
 @Composable
-fun MissionDraftCards(text: String, vm: ChatViewModel) {
+fun MissionDraftCards(text: String, vm: ChatViewModel, sourceId: String? = null) {
     val drafts = parseMissionDrafts(text)
     if (drafts.isEmpty()) return
     val S = LocalStrings.current
     Column {
-        drafts.forEachIndexed { i, draft -> MissionDraftCard(draft, vm, S, key = i) }
+        drafts.forEachIndexed { i, draft -> MissionDraftCard(draft, vm, S, key = i, sourceId = sourceId?.let { "$it:$i" }) }
     }
 }
 
 @Composable
-private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: ChatViewModel, S: Strings, key: Int) {
+private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: ChatViewModel, S: Strings, key: Int, sourceId: String?) {
     val room = vm.currentRoom
     val session = vm.currentSession
     if (room == null && session == null) return
@@ -727,11 +774,11 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
     var busy by remember(key) { mutableStateOf(false) }
     val lines = { v: String -> v.split("\n").map { it.trim() }.filter { it.isNotEmpty() } }
     // 房→mission.create(roomId)，会话→mission.promote(sessionId 建房+绑定，hub 幂等去重)
-    val create = { onDone: (Mission?) -> Unit ->
+    val create = { start: Boolean, onDone: (Mission?) -> Unit ->
         if (room != null) {
-            vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, onDone)
+            vm.createMission(room.roomId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, sourceId, start, onDone)
         } else if (session != null) {
-            vm.promoteMission(session.sessionId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, onDone)
+            vm.promoteMission(session.sessionId, goal.trim(), lines(criteria), scopeText.trim(), lines(constraints), ownerId, retries, sourceId, start, onDone)
         }
     }
     // auto:true 草稿仅会话内自动执行；retries>0 / 已绑活跃工单 / 草稿缺必填 / 房场景 → 降级普通确认卡
@@ -741,13 +788,12 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
     } ?: false
     val autoRun = autoRequested && room == null && session != null && retries == 0 &&
         !boundActive && goal.isNotBlank() && lines(criteria).isNotEmpty()
-    var autoState by rememberSaveable(key) { mutableStateOf(if (autoRun) "creating" else "idle") }
+    var autoState by rememberSaveable(key) { mutableStateOf("idle") }
     var autoMissionId by rememberSaveable(key) { mutableStateOf<String?>(null) }
     var confirmAutoStop by rememberSaveable(key) { mutableStateOf(false) }
-    if (autoState == "creating" || autoState == "done") {
-        LaunchedEffect(Unit) {
-            if (autoState != "creating") return@LaunchedEffect
-            create { m ->
+    val startApproved = {
+            autoState = "creating"
+            create(true) { m ->
                 if (m != null) {
                     autoMissionId = m.id
                     autoState = "done"
@@ -755,7 +801,8 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
                     if (m.status == "draft") vm.startMission(m.id)
                 } else autoState = "idle" // 创建失败降级为普通卡，用户可手动编辑重试
             }
-        }
+    }
+    if (autoState == "creating" || autoState == "done") {
         Card(
             Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)),
@@ -817,7 +864,7 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
                     enabled = !busy && goal.isNotBlank() && lines(criteria).isNotEmpty(),
                     onClick = {
                         busy = true
-                        create { m ->
+                        create(false) { m ->
                             busy = false
                             if (m != null) created = true
                         }
@@ -826,12 +873,13 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
                 TextButton(
                     enabled = !busy && goal.isNotBlank() && lines(criteria).isNotEmpty(),
                     onClick = {
+                        if (autoRun) { startApproved(); return@TextButton }
                         busy = true
-                        create { m ->
+                        create(true) { m ->
                             busy = false
                             if (m != null) {
                                 created = true
-                                vm.startMission(m.id)
+                                if (m.status == "draft") vm.startMission(m.id)
                             }
                         }
                     },

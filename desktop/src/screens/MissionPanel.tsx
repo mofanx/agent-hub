@@ -1,8 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { MissionEvidence } from "./MissionEvidence";
-import { ExternalLink, Play, Square, Target } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, Play, Square, Target } from "lucide-react";
 import { useHubStore } from "../hub/store";
-import { missionEventKindLabel, missionReasonLabel, missionStatusLabel, missionTaskStatusLabel, stringsFor, type Strings } from "../hub/strings";
+import { missionEventKindLabel, missionReasonLabel, missionStatusLabel, missionTaskStatusLabel, missionNativeActions, stringsFor, type Strings } from "../hub/strings";
 import { FormRow } from "../components/FormRow";
 import type { DecisionInfo, MissionCriterionReview, MissionInfo, RoomInfo } from "../hub/types";
 
@@ -246,16 +246,25 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
     setMaxAutoRetries(0); setSchedTime("09:00"); setSchedAuto(false); setBusy(false);
   }, [client]);
 
-  const missions = useMemo(
-    () => store.missions.slice().sort((a, b) => b.updatedAt - a.updatedAt),
-    [store.missions],
+  const missions = useMemo(() => {
+    const needsAction = (m: MissionInfo) =>
+      m.status === "waiting-user" || m.status === "awaiting-acceptance" || m.status === "failed" || !!m.error ? 0 : 1;
+    return store.missions
+      .slice()
+      .sort((a, b) => needsAction(a) - needsAction(b) || b.updatedAt - a.updatedAt);
+  }, [store.missions]);
+  const hasActive = useMemo(
+    () => missions.some((m) => !["accepted", "stopped", "failed"].includes(m.status)),
+    [missions],
   );
+  const [panelOpen, setPanelOpen] = useState<boolean | null>(null);
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { all: 0, active: 0, waiting: 0, risk: 0, acceptance: 0, closed: 0 };
     for (const f of FILTERS) c[f.key] = missions.filter(f.match).length;
     return c;
   }, [missions]);
   const focusId = store.missionFocusId;
+  const expanded = panelOpen ?? (hasActive || focusId != null || missions.length <= 3);
   const filtered = useMemo(
     () => (focusId != null ? missions.filter((m) => m.id === focusId) : missions.filter(FILTERS.find((f) => f.key === filter)!.match)),
     [missions, filter, focusId],
@@ -303,15 +312,24 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
       <div className="home-section-title">
         <Target size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />
         {S.missionSection} ({filtered.length})
+        <button
+          className="secondary"
+          style={{ marginLeft: 8 }}
+          title={S.collapseToggleTitle}
+          onClick={() => setPanelOpen(!expanded)}
+        >
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
         {focusId != null && (
           <button className="secondary" style={{ marginLeft: 8 }} onClick={() => store.openMissionClear()}>
             {S.missionShowAll}
           </button>
         )}
-        <button className="secondary" style={{ marginLeft: 8 }} onClick={() => setShowForm(!showForm)}>
+        <button className="secondary" style={{ marginLeft: 8 }} onClick={() => { setShowForm(!showForm); if (!expanded) setPanelOpen(true); }}>
           {S.missionNew}
         </button>
       </div>
+      {!expanded ? null : (<>
       <div className="nav-sub mission-hint">{S.missionRiskNotice}</div>
       {store.missionError && <div className="nav-sub mission-error">{store.missionError}</div>}
       <div className="mission-filters">
@@ -388,13 +406,22 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
                     {m.constraints.length > 0 ? ` · ${m.constraints.join("；")}` : ""}
                   </span>
                   <span className="nav-sub">{S.missionCriteriaShort}: {m.acceptanceCriteria.join("；")}</span>
+                  {m.execution && <div className="nav-sub">
+                    {S.missionExecutionModes[m.execution.mode] ?? S.missionExecutionModes.unknown}
+                    {m.execution.mode === "native-goal" && <>
+                      {" · "}{S.missionNativeStatuses[m.execution.goal === null ? "cleared" : m.execution.goal?.status ?? "unknown"]}
+                      {["stopped", "failed"].includes(m.status) && m.execution.stopConfirmed === false && <span className="mission-error"> · {S.missionNativeStatuses.stopping}</span>}
+                      {missionNativeActions(m.status, m.execution).map((action) => <button key={action} className="secondary" disabled={busy}
+                        onClick={() => void run(() => store.controlMissionGoal(m.id, action))}>{S.missionNativeActions[action]}</button>)}
+                    </>}
+                  </div>}
                   {m.reworkReason && <span className="nav-sub">{S.missionReworkReason}: {m.reworkReason}</span>}
                   {(m.maxAutoRetries > 0 || m.autoRetryCount > 0) && (
                     <span className="nav-sub">{S.missionAutoRetryCount.replace("%s", String(m.autoRetryCount)).replace("%s", String(m.maxAutoRetries))}</span>
                   )}
                   {m.supplements.length > 0 && (
                     <span className="nav-sub">
-                      {S.missionSupplement}: {m.supplements.map((s) => `${s.text}(${s.delivered ? S.missionDelivered : S.missionRecordedOnly})`).join("；")}
+                      {S.missionSupplement}: {m.supplements.map((s) => `${s.text}(${s.delivery === "queued" ? S.missionQueued : s.delivered ? S.missionDelivered : S.missionRecordedOnly})`).join("；")}
                     </span>
                   )}
                   {m.status === "awaiting-acceptance" && <span className="nav-sub mission-hint">{S.missionAwaitingHint}</span>}
@@ -560,6 +587,7 @@ export function MissionPanel({ onCreateRoom }: { onCreateRoom: () => void }) {
           })}
         </div>
       )}
+      </>)}
     </section>
     </>
   );
@@ -669,17 +697,17 @@ function draftsFrom(text: string): MissionDraft[] {
 const listField = (v: unknown): string =>
   Array.isArray(v) ? v.map((x) => String(x)).join("\n") : typeof v === "string" ? v : "";
 
-export function MissionDraftCards({ text }: { text: string }) {
+export function MissionDraftCards({ text, sourceId }: { text: string; sourceId?: string }) {
   const store = useHubStore();
   const S = stringsFor(store.lang);
   const room = store.currentRoom;
   const session = store.currentSession;
   const drafts = useMemo(() => draftsFrom(text), [text]);
   if (drafts.length === 0 || (!room && !session)) return null;
-  return <>{drafts.map((d, i) => <MissionDraftCard key={i} draft={d} room={room ?? undefined} sessionId={session?.sessionId} S={S} />)}</>;
+  return <>{drafts.map((d, i) => <MissionDraftCard key={i} draft={d} room={room ?? undefined} sessionId={session?.sessionId} sourceId={sourceId ? `${sourceId}:${i}` : undefined} S={S} />)}</>;
 }
 
-function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; room?: { roomId: string; members: [string, string][] }; sessionId?: string; S: Strings }) {
+function MissionDraftCard({ draft, room, sessionId, sourceId, S }: { draft: MissionDraft; room?: { roomId: string; members: [string, string][] }; sessionId?: string; sourceId?: string; S: Strings }) {
   const store = useHubStore();
   const roomId = room?.roomId;
   const [goal, setGoal] = useState(typeof draft.goal === "string" ? draft.goal : "");
@@ -689,8 +717,6 @@ function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; 
   const [dismissed, setDismissed] = useState(false);
   const [created, setCreated] = useState(false);
   const [busy, setBusy] = useState(false);
-  if (dismissed) return null;
-  if (created) return <div className="mission-draft-card"><span className="nav-sub">✓ {S.missionCreatedOk}</span></div>;
   const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
   const ownerRaw = typeof draft.owner === "string" ? draft.owner.trim() : "";
   // 会话场景（room 缺省）：owner 恒为当前会话；房场景按成员名匹配
@@ -703,13 +729,16 @@ function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; 
   const autoMode = draft.auto === true && room == null && sessionId != null && retries === 0 && !boundActive && valid;
   const [autoState, setAutoState] = useState<"idle" | "running" | "done" | "failed">("idle");
   const [autoMission, setAutoMission] = useState<MissionInfo | null>(null);
-  React.useEffect(() => {
+  if (dismissed) return null;
+  if (created) return <div className="mission-draft-card"><span className="nav-sub">✓ {S.missionCreatedOk}</span></div>;
+  const startApproved = () => {
     if (!autoMode || autoState !== "idle") return;
     setAutoState("running");
     void store.promoteMission({
       sessionId: sessionId!, goal: goal.trim(), acceptanceCriteria: lines(criteria),
       scope: scopeText.trim(), constraints: lines(constraints),
       ownerSessionId, maxAutoRetries: retries,
+      sourceId, start: true,
     }).then(async (m) => {
       // 创建失败回落普通确认卡（idle 出 autoMode 分支），与 Android m==null→idle 同语义
       if (!m) { setAutoState("idle"); return; }
@@ -719,7 +748,7 @@ function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; 
       setAutoState("done");
     }).catch(() => setAutoState("idle"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoMode, autoState]);
+  };
   if (autoMode && autoState !== "idle") {
     return (
       <div className="mission-draft-card">
@@ -739,24 +768,27 @@ function MissionDraftCard({ draft, room, sessionId, S }: { draft: MissionDraft; 
   }
   const submit = (start: boolean) => {
     if (!valid || busy) return;
+    if (start && autoMode) { startApproved(); return; }
     setBusy(true);
     void (roomId
       ? store.createMission({
           roomId, goal: goal.trim(), acceptanceCriteria: lines(criteria),
           scope: scopeText.trim(), constraints: lines(constraints),
           ownerSessionId, maxAutoRetries: retries,
+          sourceId, start,
         })
       : sessionId
         ? store.promoteMission({
             sessionId, goal: goal.trim(), acceptanceCriteria: lines(criteria),
             scope: scopeText.trim(), constraints: lines(constraints),
             ownerSessionId, maxAutoRetries: retries,
+            sourceId, start,
           })
         : Promise.resolve(null)
     ).then((m) => {
       setBusy(false);
       if (m) {
-        if (start) void store.startMission(m.id);
+        if (start && m.status === "draft") void store.startMission(m.id);
         setCreated(true);
       }
     });

@@ -267,6 +267,8 @@ export interface RoomInfo {
   debateRounds?: number | null;
   /** IFC 敏感度标签：shared/private（默认 shared） */
   sensitivity?: string;
+  /** 内部房（如工单执行房）：列表默认隐藏，跳转不受限 */
+  internal?: boolean;
 }
 
 export interface RoleInfo {
@@ -613,6 +615,7 @@ export interface MissionSupplement {
   at: number;
   text: string;
   delivered: boolean;
+  delivery?: string;
 }
 
 export interface MissionInfo {
@@ -625,6 +628,15 @@ export interface MissionInfo {
   ownerSessionId: string;
   /** 会话 promote 绑定：由哪个会话升级而来 */
   boundSessionId?: string;
+  sourceId?: string;
+  execution?: {
+    id: string;
+    mode: string;
+    sessionId: string;
+    actions: string[];
+    goal?: { status: string; objective: string; tokensUsed?: number; tokenBudget?: number | null } | null;
+    stopConfirmed?: boolean;
+  };
   status: MissionStatus;
   createdAt: number;
   updatedAt: number;
@@ -670,4 +682,6 @@ export interface MissionCreateInput {
   constraints: string[];
   ownerSessionId?: string;
   maxAutoRetries?: number;
+  sourceId?: string;
+  start?: boolean;
 }

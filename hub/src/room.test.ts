@@ -59,6 +59,18 @@ describe("room", () => {
     assert.deepEqual(room.memberRoles, { s1: "test" });
   });
 
+  it("create 透传 internal 标记，缺省为 undefined，clone remap 保留", () => {
+    const rooms = new RoomManager();
+    const bound = rooms.create("目标·a1", [{ sessionId: "s1", name: "a1" }], "mention", {
+      internal: true,
+    });
+    assert.equal(bound.internal, true);
+    const plain = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
+    assert.equal(plain.internal, undefined);
+    const remapped = remapRoomModeConfig({ internal: true }, new Map());
+    assert.equal(remapped.internal, true);
+  });
+
   it("update 更新 memberRoles", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [{ sessionId: "s1", name: "a1" }]);
@@ -1022,6 +1034,7 @@ describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {
       debateRounds: undefined,
       maxRounds: undefined,
       relevanceFilter: undefined,
+      internal: undefined,
       memberRoles: undefined,
       aliases: undefined,
     });

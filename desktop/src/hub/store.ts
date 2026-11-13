@@ -51,7 +51,7 @@ import {
   requestNotificationPermission,
   isNotificationPermissionGranted,
 } from "./commands";
-import { stringsFor, type Strings } from "./strings";
+import { stringsFor } from "./strings";
 
 type SelectedIds = { sessions: string[]; rooms: string[] };
 
@@ -349,6 +349,7 @@ interface Actions {
   promoteToMission(): void;
   startMission(id: string): Promise<void>;
   stopMission(id: string): Promise<void>;
+  controlMissionGoal(id: string, action: string): Promise<void>;
   deleteMission(id: string, force?: boolean): Promise<boolean>;
   reviewMission(id: string, index: number, verdict: "pass" | "fail" | "unverified", taskIds: string[], note: string): Promise<boolean>;
   acceptMission(id: string, note: string): Promise<boolean>;
@@ -2045,6 +2046,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       conductorId: stringOrNull(o.conductorId),
       members,
       archived: o.archived === true,
+      internal: o.internal === true,
       memberRoles: parseMemberRoles(o.memberRoles),
       aliases: (() => {
         const a = o.aliases;
@@ -2075,6 +2077,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       constraints: strList(o.constraints),
       ownerSessionId: String(o.ownerSessionId ?? ""),
       ...(typeof o.boundSessionId === "string" ? { boundSessionId: o.boundSessionId } : {}),
+      ...(typeof o.sourceId === "string" ? { sourceId: o.sourceId } : {}),
+      ...(o.execution && typeof o.execution === "object" ? { execution: o.execution as MissionInfo["execution"] } : {}),
       status: (typeof o.status === "string" ? o.status : "draft") as MissionStatus,
       createdAt: typeof o.createdAt === "number" ? o.createdAt : 0,
       updatedAt: typeof o.updatedAt === "number" ? o.updatedAt : 0,
@@ -2132,6 +2136,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
               at: typeof sp.at === "number" ? sp.at : 0,
               text: String(sp.text ?? ""),
               delivered: sp.delivered === true,
+              ...(typeof sp.delivery === "string" ? { delivery: sp.delivery } : {}),
             };
           })
         : [],
@@ -2437,7 +2442,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     updateLang: (lang: string) => {
       const S = stringsFor(lang);
       const prev = get().agentStatus;
-      const remap: [keyof Strings, string][] = (["zh", "en"] as const).flatMap((l) => {
+      const remap: ["connected" | "notConnected" | "agentDisconnected", string][] = (["zh", "en"] as const).flatMap((l) => {
         const t = stringsFor(l);
         return [
           ["connected", t.connected],
@@ -4702,6 +4707,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           scope: input.scope,
           constraints: input.constraints,
           maxAutoRetries: input.maxAutoRetries,
+          sourceId: input.sourceId,
+          start: input.start,
           ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
         });
         if (get().client !== client) return null;
@@ -4725,6 +4732,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           scope: input.scope,
           constraints: input.constraints,
           maxAutoRetries: input.maxAutoRetries,
+          sourceId: input.sourceId,
+          start: input.start,
           ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
         });
         if (get().client !== client) return null;
@@ -4765,6 +4774,20 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!client || !client.isConnected) return;
       try {
         const resp = await client.call("mission.start", { id });
+        if (get().client !== client) return;
+        const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
+        set({ missions: upsertMission(get().missions, mission), missionError: null });
+      } catch (e) {
+        if (get().client === client) set({ missionError: String(e) });
+      }
+    },
+
+    controlMissionGoal: async (id, action) => {
+      const client = get().client;
+      if (!client?.isConnected) return;
+      try {
+        const method = action === "review" ? "mission.submitForReview" : action === "stop" ? "mission.stop" : "mission.goalControl";
+        const resp = await client.call(method, { id, action });
         if (get().client !== client) return;
         const mission = parseMission((resp.mission as Record<string, unknown>) ?? {});
         set({ missions: upsertMission(get().missions, mission), missionError: null });
