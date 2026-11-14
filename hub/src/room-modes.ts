@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
-import { ConductorOrchestrator, extractTaskResult, flowOwnerOf, newFlowId, parseTasks, resolveMemberByString, type IsolatedCheckResult } from "./conductor.js";
+import { ConductorOrchestrator, extractTaskResult, flowOwnerOf, newFlowId, parseTasks, resolveMemberByString, taskGraphIssue, type IsolatedCheckResult } from "./conductor.js";
 import {
   SELF_MODE_NOTE,
   autoDecisionPrompt,
@@ -62,9 +62,17 @@ type PromptOptions = {
   missionId?: string | undefined;
   /** flow 展示目标（≤80 字）：mission 派发传 mission.goal，缺省由原始需求截断 */
   goal?: string | undefined;
+  acceptanceCriteria?: string[] | undefined;
   /** 决策来源标注（规则:x/LLM/兜底）：随「自动选择」通知透出，便于定位哪层判的 */
   decisionVia?: string | undefined;
 };
+
+function executionContinuation(text: string, paused = false): boolean {
+  const value = text.trim().replace(/^(?:好的?|ok|行|可以)[，,。\s]*/i, "");
+  if (/[?？]|讨论|解释|说明|分析|先别|不要|暂不|不执行|不推进|只看|仅看/i.test(value)) return false;
+  return (paused && /^(?:继续|推进|重试)[。！!\s]*$/i.test(value)) ||
+    /^(?:(?:按(?:照)?|照).{0,30}(?:建议|方案|计划).{0,20}(?:推进|执行|实施|落地)|继续(?:执行|完成|推进)|(?:修正|修复|调整).{0,8}依赖.{0,8}继续)/i.test(value);
+}
 
 export function parseTaskCommand(
   text: string,
@@ -109,33 +117,34 @@ const normalizeFilePath = (f: string) =>
   f.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 
 /** 声明了相同文件的并行任务合并为一个，避免多 worker 写同一文件产生冲突 */
-function mergeFileOverlappingTasks(tasks: ConductorTask[] | undefined): ConductorTask[] | undefined {
+function mergeFileOverlappingTasks(tasks: ConductorTask[] | undefined, room: Room): ConductorTask[] | undefined {
   if (!tasks || tasks.length === 0 || tasks.every((t) => !t.files?.length)) return tasks;
-  const out: ConductorTask[] = [];
-  const idMap = new Map<string, string>();
-  let merged = false;
-  for (const t of tasks) {
-    const files = (t.files ?? []).map(normalizeFilePath);
-    const target = files.length
-      ? out.find((o) => (o.files ?? []).map(normalizeFilePath).some((f) => files.includes(f)))
-      : undefined;
-    if (!target) {
-      out.push({ ...t });
-      continue;
+  if (tasks.some((t) => !t.task.trim() || !resolveMemberByString(room, t.to))) return tasks;
+  let out = tasks.map((t, i) => ({ ...t, id: t.id?.trim() || `t${i + 1}`, dependsOn: [...(t.dependsOn ?? [])] }));
+  const ids = new Map(out.map((t, i) => [String(i), t.id]));
+  out = out.map((t, i) => ({ ...t, dependsOn: ConductorOrchestrator.normalizeDependsOn(t.dependsOn, out, i, ids, room) }));
+  if (taskGraphIssue(out)) return out;
+  for (let i = 0; i < out.length; i++) {
+    for (let j = i + 1; j < out.length; j++) {
+      const target = out[i]!, t = out[j]!;
+      const files = new Set((target.files ?? []).map(normalizeFilePath));
+      if (!(t.files ?? []).some((f) => files.has(normalizeFilePath(f)))) continue;
+      const candidate = out.filter((_, k) => k !== j).map((n, k) => ({
+        ...n,
+        ...(k === i ? {
+          task: `${target.task}\n\n${t.task}`,
+          files: [...new Set([...(target.files ?? []), ...(t.files ?? [])])],
+        } : {}),
+        dependsOn: [...new Set((k === i ? [...n.dependsOn, ...t.dependsOn] : n.dependsOn)
+          .map((d) => d === t.id ? target.id : d))],
+      }));
+      if (taskGraphIssue(candidate)) continue;
+      out = candidate;
+      j = i;
     }
-    merged = true;
-    target.task = `${target.task}\n\n${t.task}`;
-    if (t.files) target.files = [...new Set([...(target.files ?? []), ...t.files])];
-    target.dependsOn = [...new Set([...(target.dependsOn ?? []), ...(t.dependsOn ?? [])])];
-    if (t.id && !target.id) target.id = t.id;
-    if (t.id && target.id && t.id !== target.id) idMap.set(t.id, target.id);
   }
-  if (!merged) return tasks;
-  logWarn("room-modes conductor", `检测到声明相同文件的并行任务，已合并（${tasks.length} -> ${out.length}）`);
-  for (const t of out) {
-    if (!t.dependsOn) continue;
-    t.dependsOn = [...new Set(t.dependsOn.map((d) => idMap.get(d) ?? d))].filter((d) => d !== t.id);
-  }
+  if (out.length !== tasks.length)
+    logWarn("room-modes conductor", `检测到声明相同文件的并行任务，已合并（${tasks.length} -> ${out.length}）`);
   return out;
 }
 
@@ -1086,6 +1095,13 @@ export class RoomModeManager {
         this.emitFlowUpdate(room.roomId);
         return { sent: [], mentioned: [], skipped: [] };
       }
+      if (!mid && executionContinuation(text, true) && this.rooms.route(room.roomId, text).mentioned.length === 0 &&
+          !Array.isArray(options?.params?.targets) && this.conductor.continueFlow(room.roomId, text)) {
+        this.setSubMode(room.roomId, "conductor", room.conductorId, undefined);
+        this.excuseRoomTurns(room.roomId);
+        this.emitFlowUpdate(room.roomId);
+        return { sent: [], mentioned: [], skipped: [] };
+      }
       const absorbed = this.absorbActiveMessage(room, text, options);
       if (absorbed) {
         // 消息已被流程吸收（supplement/extras/答复/决策上下文），在途回合
@@ -1097,6 +1113,17 @@ export class RoomModeManager {
       await this.cancelActive(room.roomId, "收到新消息，当前流程已取消");
     }
 
+    const previous = this.getFlow(room.roomId);
+    if (!options?.missionId && executionContinuation(text) && previous?.phase === "done") {
+      const parallel = this.parallelFlows.get(room.roomId);
+      const pipeline = this.pipelineFlows.get(room.roomId);
+      const outputs = parallel?.done
+        ? Object.fromEntries([...parallel.results].map(([sid, output]) => [sid, output.slice(0, 2000)]))
+        : pipeline?.done ? pipeline.outputs.map((output) => output.slice(0, 2000)) : undefined;
+      mergedOptions.note = [mergedOptions.note,
+        `上一轮目标与对话结果（仅供规划，不替代本轮执行证据；不要重复已完成动作，也不代表用户已验收）：\n${JSON.stringify({ previous, outputs })}`,
+      ].filter(Boolean).join("\n\n");
+    }
     this.conductor.clearCompleted(room.roomId);
 
     // nano 相关性过滤：仅作用于 auto/mention 的广播唤起路径；
@@ -1214,7 +1241,11 @@ export class RoomModeManager {
           logWarn("room-modes auto", `短回答兜底：self→mention @${lastSpeaker}`);
         }
       }
-      if (mode === "conductor" && Array.isArray(params?.tasks) && params.tasks.length > 0) {
+      if (mode === "conductor" && !autoCtx.missionId && !autoCtx.goal && !autoCtx.acceptanceCriteria?.length &&
+          !(typeof params?.goal === "string" && params.goal.trim()) &&
+          !(Array.isArray(params?.acceptanceCriteria) && params.acceptanceCriteria.length > 0) &&
+          Array.isArray(params?.tasks) && params.tasks.length > 0 &&
+          !(params.tasks as { dependsOn?: unknown[] }[]).some((t) => t.dependsOn?.length)) {
         const resolved = (params.tasks as { to?: unknown }[]).map((t) =>
           typeof t.to === "string" ? resolveMemberByString(room, t.to)?.sessionId : undefined,
         );
@@ -1246,6 +1277,8 @@ export class RoomModeManager {
         params,
         artifactContext: autoCtx.artifactContext,
         missionId: autoCtx.missionId,
+        goal: autoCtx.goal,
+        acceptanceCriteria: autoCtx.acceptanceCriteria,
         decisionVia: viaLabel,
       });
       logWarn("room-modes auto", `executeMode 完成：sent=[${result.sent.join(", ")}]，skipped=[${result.skipped.join(", ")}]`);
@@ -1732,8 +1765,8 @@ export class RoomModeManager {
     const paramTasks = Array.isArray(options?.params?.tasks)
       ? (options.params.tasks as unknown[])
           .map((t) => {
-            const o = t as Record<string, unknown>;
-            if (typeof o.to !== "string" || typeof o.task !== "string") return null;
+            const o = t !== null && typeof t === "object" ? t as Record<string, unknown> : {};
+            if (typeof o.to !== "string" || typeof o.task !== "string") return { to: "", task: "" };
             const result: { to: string; task: string; id?: string; dependsOn?: string[]; files?: string[] } = {
               to: o.to,
               task: o.task,
@@ -1747,14 +1780,19 @@ export class RoomModeManager {
             }
             return result;
           })
-          .filter((t) => t !== null) as { to: string; task: string; id?: string; dependsOn?: string[]; files?: string[] }[]
       : undefined;
 
     const jsonTasks = parseTasks(text, room) ?? [];
     const commandTasks = parseTaskCommand(text) ?? [];
     const initialTasks = mergeFileOverlappingTasks(
       paramTasks?.length ? paramTasks : jsonTasks.length ? jsonTasks : (commandTasks.length ? commandTasks : undefined),
+      room,
     );
+    const goal = options?.goal ?? (typeof options?.params?.goal === "string" ? options.params.goal : undefined);
+    const rawCriteria = options?.acceptanceCriteria ?? options?.params?.acceptanceCriteria;
+    const acceptanceCriteria = Array.isArray(rawCriteria)
+      ? rawCriteria.filter((s): s is string => typeof s === "string" && !!s.trim()).map((s) => s.trim()) : undefined;
+    const contract = { goal, acceptanceCriteria, requireTasks: executionContinuation(text) };
 
     let task = text;
     if (options?.note) task = `${options.note}\n\n${task}`;
@@ -1770,13 +1808,16 @@ export class RoomModeManager {
         if (m) sent.add(m.sessionId);
         else skipped.push(t.to);
       }
-      this.conductor.start(room, task, initialTasks, options?.artifactContext, options?.missionId, options?.goal).catch((err) => {
+      await this.conductor.start(room, task, initialTasks, options?.artifactContext, options?.missionId, goal?.trim() || text, contract).catch((err) => {
         logError("room-modes conductor start", err);
       });
+      const accepted = this.conductor.getFlow(room.roomId)?.tasks;
+      if (!Array.isArray(accepted) || accepted.length === 0)
+        return { sent: [], mentioned: [], skipped: [...sent, ...skipped].filter(Boolean) };
       return { sent: [...sent], mentioned: [], skipped };
     }
 
-    this.conductor.start(room, task, undefined, options?.artifactContext, options?.missionId, options?.goal).catch((err) => {
+    this.conductor.start(room, task, undefined, options?.artifactContext, options?.missionId, goal?.trim() || text, contract).catch((err) => {
       logError("room-modes conductor start", err);
     });
     return { sent: conductorBusy ? [] : [room.conductorId], mentioned: [], skipped: conductorBusy ? [room.conductorId] : [] };
@@ -2213,6 +2254,12 @@ export class RoomModeManager {
       this.notice({ roomId: room.roomId, message: "自动模式未指定主持人，已兜底为点名应答" });
       return this.handleMention(room, text, options);
     }
+    if (executionContinuation(text) && this.rooms.route(room.roomId, text).mentioned.length === 0 &&
+        !Array.isArray(options?.params?.targets)) {
+      this.setSubMode(room.roomId, "conductor", room.conductorId, "用户明确批准执行方案");
+      this.recordAutoMode(room.roomId, "conductor", "用户明确批准执行方案");
+      return this.executeMode(room, "conductor", text, options);
+    }
     const conductorBusy = this.agent.isBusy(room.conductorId);
     const conductorId = room.conductorId;
     this.setSubMode(room.roomId, "deciding", conductorId, undefined);
@@ -2225,6 +2272,8 @@ export class RoomModeManager {
       sessionNote: options?.sessionNote,
       artifactContext: options?.artifactContext,
       missionId: options?.missionId,
+      goal: options?.goal,
+      acceptanceCriteria: options?.acceptanceCriteria,
     };
     // decision-model 一期：廉价裁决层前置分流
     // - shadow（默认）：fire-and-forget 并行裁决，verdict 挂到 autoCtx 供结果回收，编排零变化

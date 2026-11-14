@@ -997,7 +997,7 @@ describe("openTopics 编排注入与归档", () => {
     // 模拟上轮 parallel 编排刚跑过
     (manager as unknown as { autoHistory: Map<string, { at: number; mode: string; reason: string }[]> })
       .autoHistory.set(autoRoom.roomId, [{ at: Date.now(), mode: "parallel", reason: "x" }]);
-    await manager.handle(autoRoom, "好的，按照你们的建议推进");
+    await manager.handle(autoRoom, "继续");
     // 应走 deciding（发决策 prompt 给 host），而非直出 self 应答
     const sent = prompts.at(-1)?.sessionId;
     assert.equal(sent, "host");

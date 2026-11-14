@@ -1463,7 +1463,7 @@ describe("conductor", () => {
       "should not dispatch a 4th round",
     );
     await orchestrator.onPromptDone("conductor", "最终答复");
-    assert.equal(orchestrator.hasActiveFlow(r.roomId), false);
+    assert.equal(orchestrator.hasAwaitingRetry(r.roomId), true);
   });
 
   it("export/import 保留 goal/criteria/iteration 并可恢复 reviewing", async () => {

@@ -81,7 +81,39 @@ type TaskResult = {
 
 type FlowPhase = "planning" | "awaiting-input" | "working" | "reviewing" | "summarizing" | "awaiting-retry" | "done";
 
-type ParsedTask = { id?: string; to: string; task: string; dependsOn?: string[] };
+type ParsedTask = { id?: string; to: string; task: string; dependsOn?: string[]; files?: string[] };
+type FlowContract = { goal?: string | undefined; acceptanceCriteria?: string[] | undefined; requireTasks?: boolean };
+const taskFileKeys = (files: readonly string[] | undefined) =>
+  (files ?? []).map((f) => f.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase()).filter(Boolean);
+export function taskGraphIssue(tasks: readonly { id: string; dependsOn: readonly string[] }[]): string | undefined {
+  const ids = new Set<string>();
+  for (const t of tasks) {
+    if (!t.id || ids.has(t.id)) return `invalid or duplicate task id: ${t.id}`;
+    ids.add(t.id);
+  }
+  const pending = new Map<string, number>();
+  const downstream = new Map<string, string[]>();
+  for (const t of tasks) {
+    const deps = new Set(t.dependsOn);
+    pending.set(t.id, deps.size);
+    for (const d of deps) {
+      if (!ids.has(d)) return `unknown dependency: ${t.id} -> ${d}`;
+      const next = downstream.get(d) ?? [];
+      next.push(t.id);
+      downstream.set(d, next);
+    }
+  }
+  const ready = [...pending].filter(([, n]) => n === 0).map(([id]) => id);
+  for (let i = 0; i < ready.length; i++) {
+    for (const id of downstream.get(ready[i]!) ?? []) {
+      const n = pending.get(id)! - 1;
+      pending.set(id, n);
+      if (n === 0) ready.push(id);
+    }
+  }
+  if (ready.length !== tasks.length)
+    return `dependency cycle: ${[...pending].filter(([, n]) => n > 0).map(([id]) => id).join(", ")}`;
+}
 type ConductorPlan = {
   goal?: string | undefined;
   acceptanceCriteria: string[];
@@ -154,10 +186,13 @@ type FlowTask = {
   sessionId: string;
   task: string;
   dependsOn: string[];
+  files?: string[];
   status: "pending" | "running" | "done" | "failed";
   iteration: number;
   failureMessage?: string;
   retries?: number;
+  turnErrors?: number;
+  manualRetry?: boolean;
   /** 已发起的求助轮数（上限 MAX_HELP_ROUNDS） */
   helpRounds?: number;
   /** 等待中的求助交换 id */
@@ -204,6 +239,12 @@ type Flow = {
   /** 创建本 flow 的 mission id：mission 恢复/同步只认领归属自己的 flow */
   missionId?: string | undefined;
   reviewReason?: string;
+  blockedStage?: FlowPhase;
+  stageFailures?: number;
+  replanning?: boolean;
+  contractLocked?: boolean;
+  planningText?: string;
+  requireTasks?: boolean;
   /** 用户在流程执行中补充的信息，并入后续派发/验收/汇总 prompt */
   supplements: Supplement[];
   /** 任务执行中的定向求助交换 */
@@ -911,11 +952,26 @@ export class ConductorOrchestrator {
   }
 
   /** 交还用户：复用 maxRounds 的 awaiting-retry 语义（waitingFor=user 由快照层派生） */
-  private handbackFlowToUser(flow: Flow, reason: string): void {
+  private handbackFlowToUser(flow: Flow, reason: string, stage = flow.phase): void {
+    if (this.flows.get(flow.roomId) !== flow) return;
+    if (stage !== "awaiting-retry") flow.blockedStage = stage;
     flow.phase = "awaiting-retry";
+    flow.failureMessage = reason;
+    delete flow.finishedAt;
+    this.stagePrompts.delete(flow);
     this.clearFlowRetryTimers(flow);
     this.emitFlow?.(flow.roomId);
     this.notice({ roomId: flow.roomId, message: reason });
+  }
+
+  private retryStage(flow: Flow, stage: FlowPhase, err: unknown, retry: () => void): void {
+    if (this.flows.get(flow.roomId) !== flow || flow.phase !== stage) return;
+    flow.stageFailures = (flow.stageFailures ?? 0) + 1;
+    if (flow.stageFailures >= DISPATCH_RETRY_TASK_MAX) {
+      this.handbackFlowToUser(flow, `指挥家 ${stage} 连续派发失败，请检查后重试：${String(err)}`, stage);
+      return;
+    }
+    this.scheduleReschedule(flow, this.promptRetryMs, retry);
   }
 
   /**
@@ -1061,6 +1117,7 @@ export class ConductorOrchestrator {
               waitingHelpId: waiting.id,
             }
           : {}),
+        ...(t.manualRetry ? { waitingFor: "user" } : {}),
         ...(t.verifications?.length
           ? {
               verifications: t.verifications.map((v) => ({
@@ -1206,7 +1263,13 @@ export class ConductorOrchestrator {
     this.pendingToolCalls.delete(sessionId);
     for (const [roomId, flow] of this.flows) {
       const room = this.rooms.get(roomId);
-      if (!room || (flow.phase !== "working" && flow.phase !== "awaiting-retry")) continue;
+      if (!room) continue;
+      if (sessionId === room.conductorId && ["planning", "reviewing", "summarizing"].includes(flow.phase)) {
+        this.planningInFlight.delete(roomId);
+        this.handbackFlowToUser(flow, "指挥家已停止/中断，请检查后继续");
+        return roomId;
+      }
+      if (flow.phase !== "working" && flow.phase !== "awaiting-retry") continue;
       // 该会话正被求助方等待回复：按无响应收敛；working 立即唤醒，awaiting-retry 收录待恢复
       const pendingReply = [...flow.help.values()].find(
         (e) => e.status === "pending" && e.dispatched && e.to === sessionId,
@@ -1225,6 +1288,7 @@ export class ConductorOrchestrator {
       const name = this.rooms.displayNameForId(room.roomId, sessionId);
       for (const t of hits) {
         t.status = "failed";
+        t.manualRetry = true;
         t.failureMessage = "成员被停止/中断";
         t.finishedAt = Date.now();
         delete t.waitingForHelp;
@@ -1248,6 +1312,7 @@ export class ConductorOrchestrator {
 
   /** prompt 异常（含取消）时清理该会话在编排中的状态 */
   onPromptError(sessionId: string, message?: string): string | undefined {
+    const hadPendingTool = (this.pendingToolCalls.get(sessionId)?.size ?? 0) > 0;
     this.pendingToolCalls.delete(sessionId);
     for (const [roomId, flow] of [...this.flows]) {
       const room = this.rooms.get(roomId);
@@ -1256,15 +1321,12 @@ export class ConductorOrchestrator {
         continue;
       }
       if (flow.phase === "done") continue;
-      if (sessionId === room.conductorId) {
+      if (sessionId === room.conductorId && !((flow.phase === "working" || flow.phase === "awaiting-retry") &&
+          [...flow.tasks.values()].some((t) => t.sessionId === sessionId && t.status === "running"))) {
         for (const t of flow.retryTimers ?? []) clearTimeout(t);
         flow.retryTimers?.clear();
         this.planningInFlight.delete(roomId);
-        flow.phase = "done";
-        flow.finishedAt = Date.now();
-        flow.failureMessage = message ?? "指挥家执行中断";
-        this.emitFlow?.(roomId);
-        this.notice({ roomId, message: "指挥家中断，本轮编排已取消" });
+        this.handbackFlowToUser(flow, message ?? "指挥家执行中断，请检查后继续");
         return roomId;
       }
       if (flow.phase === "working" || flow.phase === "awaiting-retry") {
@@ -1284,6 +1346,18 @@ export class ConductorOrchestrator {
           (t) => t.sessionId === sessionId && t.status === "running",
         );
         if (running) {
+          running.turnErrors = (running.turnErrors ?? 0) + 1;
+          const hadOutward = hadPendingTool || (running.backendRuns?.length ?? 0) > 0 ||
+            (running.dispatchedAt !== undefined && this.store?.hasToolAction(sessionId, running.dispatchedAt));
+          if (hadOutward || running.turnErrors >= DISPATCH_RETRY_TASK_MAX) {
+            running.status = "failed";
+            running.manualRetry = true;
+            running.failureMessage = message ?? "执行回合中断";
+            running.finishedAt = Date.now();
+            delete running.waitingForHelp;
+            this.handbackFlowToUser(flow, `子任务 ${running.id} 执行中断，${hadOutward ? "已有工具动作，未自动重复执行" : "已达到回合重试上限"}，请检查后重试`, "working");
+            return roomId;
+          }
           running.status = "pending";
           delete running.waitingForHelp;
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
@@ -1322,6 +1396,7 @@ export class ConductorOrchestrator {
     maxRounds?: number,
     missionId?: string,
     titleGoal?: string,
+    contract?: FlowContract,
   ): Flow {
     const startedAt = Date.now();
     return {
@@ -1330,9 +1405,12 @@ export class ConductorOrchestrator {
       startedAt,
       ...(missionId !== undefined ? { missionId } : {}),
       phase: "planning",
-      goal,
-      title: (titleGoal ?? goal).slice(0, 80),
-      acceptanceCriteria: [...DEFAULT_ACCEPTANCE_CRITERIA],
+      goal: contract?.goal?.trim() || goal,
+      planningText: goal,
+      title: (titleGoal ?? contract?.goal ?? goal).slice(0, 80),
+      acceptanceCriteria: contract?.acceptanceCriteria?.length ? [...contract.acceptanceCriteria] : [...DEFAULT_ACCEPTANCE_CRITERIA],
+      contractLocked: !!missionId || !!contract?.goal || !!contract?.acceptanceCriteria?.length,
+      ...(contract?.requireTasks ? { requireTasks: true } : {}),
       iteration: 1,
       maxIterations: MAX_ITERATIONS,
       rounds: 0,
@@ -1347,6 +1425,23 @@ export class ConductorOrchestrator {
   }
 
   private planningInFlight = new Set<string>();
+  private stagePrompts = new WeakMap<Flow, { key: string }>();
+
+  private stagePromptKey(flow: Flow, stage: FlowPhase): string {
+    return `${stage}:${flow.iteration}:${flow.rounds}`;
+  }
+
+  private async sendStagePrompt(flow: Flow, room: Room, stage: FlowPhase, prompt: string): Promise<void> {
+    const ticket = { key: this.stagePromptKey(flow, stage) };
+    this.stagePrompts.set(flow, ticket);
+    try {
+      await this.sendPrompt(flow.roomId, room.conductorId!, prompt);
+    } catch (err) {
+      if (this.stagePrompts.get(flow) !== ticket) return;
+      this.stagePrompts.delete(flow);
+      throw err;
+    }
+  }
 
   private buildPlanningPrompt(
     room: Room,
@@ -1364,10 +1459,13 @@ export class ConductorOrchestrator {
         artifactLines.push(`- ${parts.join(" ")}`);
       }
     }
+    const recent = this.rooms.getBlackboard(room.roomId)
+      .filter((e) => (e.type ?? "note") === "note").slice(-8)
+      .map((e) => `${e.from}: ${e.text}`).join("\n");
     return conductorPlanningPrompt({
       roomName: room.name,
       memberList: conductorMemberList(room.members, room.conductorId),
-      task: text,
+      task: recent ? `${text}\n\n最近对话结论（仅供理解本轮计划，不代替实际执行和验收证据）：\n${recent}` : text,
       example: planExample(room.members, room.conductorId),
       qa,
       artifactLines: artifactLines.length > 0 ? artifactLines : undefined,
@@ -1392,14 +1490,20 @@ export class ConductorOrchestrator {
             supplements: flow.supplements.map((s) => s.text),
           }
         : undefined;
+    const context = flow.replanning ? `\n保留原目标和验收项，仅修正未完成计划。已完成节点不得重复执行或覆盖；新任务可依赖这些节点。\n${JSON.stringify({
+      goal: flow.goal, acceptanceCriteria: flow.acceptanceCriteria,
+      completed: [...flow.tasks.values()].filter((t) => t.status === "done")
+        .map((t) => ({ id: t.id, task: t.task, result: flow.results.get(t.id)?.text })),
+      issue: flow.failureMessage,
+    })}` : "";
     const promptText =
-      this.buildPlanningPrompt(room, flow.goal, flow.artifactContext, qa) +
+      this.buildPlanningPrompt(room, `${flow.planningText ?? flow.goal}\n目标：${flow.goal}\n验收项：${flow.acceptanceCriteria.join("；")}${context}`, flow.artifactContext, qa) +
       (flow.planFormatRetries > 0 ? `\n\n${PLAN_FORMAT_FIX_PROMPT}` : "");
     this.sendPrompt(flow.roomId, room.conductorId, promptText).catch((err: unknown) => {
       const cur = this.flows.get(flow.roomId);
       if (cur !== flow || cur.phase !== "planning") return;
       this.planningInFlight.delete(flow.roomId);
-      this.scheduleReschedule(flow, this.promptRetryMs, () => {
+      this.retryStage(flow, "planning", err, () => {
         if (flow.phase !== "planning") return;
         this.sendPlanningPrompt(flow, room);
       });
@@ -1409,23 +1513,24 @@ export class ConductorOrchestrator {
   async start(
     room: Room,
     text: string,
-    initialTasks?: { to: string; task: string; id?: string; dependsOn?: string[] }[],
+    initialTasks?: ParsedTask[],
     artifactContext?: { refs?: string[] },
     missionId?: string,
     titleGoal?: string,
+    contract?: FlowContract,
   ): Promise<void> {
     if (!room.conductorId) throw new Error("room has no conductor");
     this.planningInFlight.delete(room.roomId);
     if (initialTasks && initialTasks.length > 0) {
       // 由 auto 模式推荐的初始派工单，直接 dispatch
-      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId, titleGoal));
+      this.flows.set(room.roomId, this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId, titleGoal, contract));
       const flow = this.flows.get(room.roomId)!;
       this.emitFlow?.(room.roomId);
       await this.dispatchFromTasks(flow, room, initialTasks, text);
       return;
     }
-    const promptText = this.buildPlanningPrompt(room, text, artifactContext);
-    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId, titleGoal);
+    const flow = this.newFlow(room.roomId, text, artifactContext, room.maxRounds, missionId, titleGoal, contract);
+    const promptText = this.buildPlanningPrompt(room, `${text}\n目标：${flow.goal}\n验收项：${flow.acceptanceCriteria.join("；")}`, artifactContext);
     this.flows.set(room.roomId, flow);
     this.emitFlow?.(room.roomId);
     this.planningInFlight.add(room.roomId);
@@ -1435,6 +1540,7 @@ export class ConductorOrchestrator {
     } catch (err) {
       if (this.flows.get(room.roomId) === flow) {
         this.planningInFlight.delete(room.roomId);
+        this.handbackFlowToUser(flow, `指挥家规划派发失败：${String(err)}`, "planning");
       }
       throw err;
     }
@@ -1452,6 +1558,8 @@ export class ConductorOrchestrator {
       if (flow.phase === "done") continue;
       if (sessionId === room.conductorId) {
         this.planningInFlight.delete(flow.roomId);
+        this.stagePrompts.delete(flow);
+        delete flow.stageFailures;
         if (flow.phase === "planning") {
           await this.dispatch(flow, room, output);
           return flow.roomId;
@@ -1466,17 +1574,14 @@ export class ConductorOrchestrator {
           for (const a of result.artifacts) {
             this.commitArtifact(roomId, a, sessionId);
           }
-          const hasFailed = [...flow.tasks.values()].some((t) => t.status === "failed");
-          if (hasFailed) {
-            flow.phase = "awaiting-retry";
-            this.emitFlow?.(roomId);
+          const incomplete = [...flow.tasks.values()].some((t) => t.status !== "done");
+          if (incomplete || flow.failureMessage) {
             const failedIds = [...flow.tasks.values()]
-              .filter((t) => t.status === "failed")
+              .filter((t) => t.status !== "done")
               .map((t) => t.id);
-            this.notice({
-              roomId,
-              message: `部分子任务失败（${failedIds.join(", ")}），发送"重试"重新派发失败任务，或发送新消息继续`,
-            });
+            this.handbackFlowToUser(flow, flow.failureMessage ??
+              `部分子任务未完成（${failedIds.join(", ")}），发送"重试"重新派发失败任务，或发送新消息继续`,
+              incomplete ? "working" : flow.blockedStage ?? "reviewing");
           } else {
             flow.phase = "done";
             this.clearFlowRetryTimers(flow);
@@ -1539,6 +1644,7 @@ export class ConductorOrchestrator {
           const pendingCount = [...flow.tasks.values()].filter((t) => t.status === "pending").length;
 
           running.status = "done";
+          delete running.turnErrors;
           running.finishedAt = Date.now();
           this.notice({
             roomId: flow.roomId,
@@ -1937,6 +2043,10 @@ export class ConductorOrchestrator {
         this.sendPlanningPrompt(flow, room);
         return;
       }
+      if (flow.replanning || flow.contractLocked || flow.missionId || flow.requireTasks) {
+        this.handbackFlowToUser(flow, "规划格式纠正后仍无效，已保留目标和现有成果，请修正后继续", "planning");
+        return;
+      }
       this.removeFlow(flow.roomId);
       this.emitFlow?.(flow.roomId);
       this.notice({
@@ -1969,13 +2079,18 @@ export class ConductorOrchestrator {
       });
       return;
     }
-    if (typeof plan.goal === "string" && plan.goal.trim()) {
+    if (!flow.replanning && !flow.contractLocked && typeof plan.goal === "string" && plan.goal.trim()) {
       flow.goal = plan.goal.trim();
+      flow.title = flow.goal.slice(0, 80);
     }
-    if (plan.acceptanceCriteria.length > 0) {
+    if (!flow.replanning && !flow.contractLocked && plan.acceptanceCriteria.length > 0) {
       flow.acceptanceCriteria = plan.acceptanceCriteria;
     }
     if (tasks.length === 0) {
+      if (flow.replanning || flow.missionId || flow.requireTasks || flow.contractLocked) {
+        this.handbackFlowToUser(flow, "目标仍需执行计划，不能用空任务跳过未完成工作", "planning");
+        return;
+      }
       flow.phase = "done";
       this.clearFlowRetryTimers(flow);
       flow.finishedAt = Date.now();
@@ -2000,35 +2115,47 @@ export class ConductorOrchestrator {
       this.removeFlow(flow.roomId);
       return;
     }
-    flow.phase = "working";
-    flow.rounds += 1;
-
     const idMap = new Map<string, string>();
+    const additions: FlowTask[] = [];
+    for (let i = 0; i < tasks.length; i++) idMap.set(String(i), tasks[i]!.id?.trim() || `t${i + 1}`);
     for (let i = 0; i < tasks.length; i++) {
       const t = tasks[i]!;
-      if (!t.task.trim()) continue;
       const member = this.resolveMember(room, t.to);
-      if (!member) {
-        this.notice({ roomId: flow.roomId, message: `派工跳过：未知成员 ${t.to}` });
-        continue;
+      if (!member || !t.task.trim()) {
+        this.handbackFlowToUser(flow, `任务计划无效：${!member ? `未知成员 ${t.to}` : "任务内容为空"}，请修正规划后继续`);
+        return;
       }
       const taskId = t.id?.trim() || `t${i + 1}`;
-      const dependsOn = this.normalizeDependsOn(t.dependsOn, tasks, i, idMap, room);
-      flow.tasks.set(taskId, {
+      const dependsOn = ConductorOrchestrator.normalizeDependsOn(t.dependsOn, tasks, i, idMap, room);
+      additions.push({
         id: taskId,
         sessionId: member.sessionId,
         task: t.task.trim(),
         dependsOn,
+        ...(t.files?.length ? { files: [...t.files] } : {}),
         status: "pending",
         iteration: flow.iteration,
       });
-      this.taskSubs.add(flow.roomId, taskId, member.sessionId);
-      idMap.set(String(i), taskId);
     }
-
-    if (flow.tasks.size === 0) {
-      this.removeFlow(flow.roomId);
+    const retained = flow.replanning ? [...flow.tasks.values()].filter((t) => t.status === "done") : [];
+    const issue = taskGraphIssue([...retained, ...additions]);
+    if (issue) {
+      this.handbackFlowToUser(flow, `任务依赖无效：${issue}，请修正规划后继续`);
       return;
+    }
+    flow.phase = "working";
+    flow.rounds += 1;
+    if (flow.replanning) {
+      this.taskSubs.removeTasks(flow.roomId, [...flow.tasks.keys()].filter((id) => !retained.some((t) => t.id === id)));
+      flow.tasks = new Map(retained.map((t) => [t.id, t]));
+      for (const id of flow.results.keys()) if (!flow.tasks.has(id)) flow.results.delete(id);
+      delete flow.replanning;
+    }
+    delete flow.failureMessage;
+    delete flow.blockedStage;
+    for (const t of additions) {
+      flow.tasks.set(t.id, t);
+      this.taskSubs.add(flow.roomId, t.id, t.sessionId);
     }
 
     if (originalText) {
@@ -2041,7 +2168,7 @@ export class ConductorOrchestrator {
     await this.scheduleTasks(flow, room);
   }
 
-  private normalizeDependsOn(
+  static normalizeDependsOn(
     raw: string[] | undefined,
     tasks: { id?: string; to: string }[],
     currentIndex: number,
@@ -2062,7 +2189,7 @@ export class ConductorOrchestrator {
       // 2. 通过索引引用，如 "t1" 或 "1"（历史索引）
       const prevIdx = Number(dep);
       if (!Number.isNaN(prevIdx) && prevIdx > 0 && prevIdx <= tasks.length) {
-        const mapped = idMap.get(String(prevIdx - 1)) ?? `t${prevIdx}`;
+        const mapped = idMap.get(String(prevIdx - 1)) ?? tasks[prevIdx - 1]!.id?.trim() ?? `t${prevIdx}`;
         result.add(mapped);
         continue;
       }
@@ -2076,8 +2203,10 @@ export class ConductorOrchestrator {
         });
         if (prev >= 0) {
           result.add(idMap.get(String(prev)) ?? `t${prev + 1}`);
+          continue;
         }
       }
+      result.add(dep);
     }
     return [...result];
   }
@@ -2088,8 +2217,12 @@ export class ConductorOrchestrator {
       if (t.status === "done") doneIds.add(id);
     }
     const runningSessions = new Set<string>();
+    const claimedFiles = new Set<string>();
     for (const t of flow.tasks.values()) {
-      if (t.status === "running") runningSessions.add(t.sessionId);
+      if (t.status === "running") {
+        runningSessions.add(t.sessionId);
+        for (const file of taskFileKeys(t.files)) claimedFiles.add(file);
+      }
     }
     const out: FlowTask[] = [];
     for (const t of flow.tasks.values()) {
@@ -2097,13 +2230,22 @@ export class ConductorOrchestrator {
       const depsDone = t.dependsOn.every((d) => doneIds.has(d));
       if (!depsDone) continue;
       if (runningSessions.has(t.sessionId)) continue;
+      const files = taskFileKeys(t.files);
+      if (files.some((f) => claimedFiles.has(f))) continue;
       out.push(t);
+      runningSessions.add(t.sessionId);
+      for (const file of files) claimedFiles.add(file);
     }
     return out;
   }
 
   private async scheduleTasks(flow: Flow, room: Room): Promise<void> {
-    if (!this.flows.has(flow.roomId)) return;
+    if (this.flows.get(flow.roomId) !== flow || flow.phase !== "working") return;
+    const issue = taskGraphIssue([...flow.tasks.values()]);
+    if (issue) {
+      this.handbackFlowToUser(flow, `任务依赖无效：${issue}，请修正规划后继续`, "planning");
+      return;
+    }
 
     // 先把可派发的求助送出去（目标空闲且无自己在跑的任务）
     this.dispatchPendingHelp(flow, room);
@@ -2159,6 +2301,10 @@ export class ConductorOrchestrator {
       const values = [...flow.tasks.values()];
       const hasActive = values.some((t) => t.status === "running");
       if (hasActive) return;
+      if (values.some((t) => t.status === "pending")) {
+        this.handbackFlowToUser(flow, "仍有待办任务但没有可执行节点，请检查依赖后继续", "planning");
+        return;
+      }
       const doneCount = values.filter((t) => t.status === "done").length;
       const failedCount = values.filter((t) => t.status === "failed").length;
       if (doneCount > 0) {
@@ -2178,10 +2324,7 @@ export class ConductorOrchestrator {
           roomId: flow.roomId,
           message: `所有子任务均失败（${names.join("、")}），无法汇总`,
         });
-        flow.phase = "done";
-        this.clearFlowRetryTimers(flow);
-        flow.finishedAt = Date.now();
-        this.emitFlow?.(flow.roomId);
+        this.handbackFlowToUser(flow, "所有子任务均失败，请检查后重试", "working");
       }
       return;
     }
@@ -2244,6 +2387,9 @@ export class ConductorOrchestrator {
       const taskBody = workerTaskPrompt({
         taskId: t.id,
         task: t.task,
+        goal: flow.goal,
+        criteria: flow.acceptanceCriteria,
+        contract: flow.missionId ? flow.planningText : undefined,
         upstreamLines,
         qaLines: this.clarificationQaLines(flow),
         supplements: flow.supplements.map((s) => s.text),
@@ -2320,35 +2466,43 @@ export class ConductorOrchestrator {
   }
 
   private appendTasks(flow: Flow, room: Room, tasks: ParsedTask[]): number {
-    let added = 0;
     const assigned = new Set<string>();
+    const renamed = new Map<string, string>();
+    const additions: FlowTask[] = [];
     for (let i = 0; i < tasks.length; i++) {
       const t = tasks[i]!;
-      if (!t.task.trim()) continue;
       const member = this.resolveMember(room, t.to);
-      if (!member) continue;
-      let taskId = t.id?.trim() || `r${flow.iteration}t${i + 1}`;
-      if (flow.tasks.has(taskId) || assigned.has(taskId)) {
-        taskId = `r${flow.iteration}t${i + 1}`;
+      if (!member || !t.task.trim() || (t.id && renamed.has(t.id.trim()))) {
+        this.handbackFlowToUser(flow, "追加任务计划无效，请修正规划后继续");
+        return 0;
       }
+      let taskId = t.id?.trim() || `r${flow.iteration + 1}t${i + 1}`;
+      if (flow.tasks.has(taskId)) taskId = `r${flow.iteration + 1}t${i + 1}`;
       while (flow.tasks.has(taskId) || assigned.has(taskId)) taskId = `${taskId}x`;
-      const dependsOn = [...new Set(
-        (t.dependsOn ?? [])
-          .map((d) => d.trim())
-          .filter((d) => d && d !== taskId && (flow.tasks.has(d) || assigned.has(d))),
-      )];
-      flow.tasks.set(taskId, {
+      if (t.id) renamed.set(t.id.trim(), taskId);
+      additions.push({
         id: taskId,
         sessionId: member.sessionId,
         task: t.task.trim(),
-        dependsOn,
+        dependsOn: (t.dependsOn ?? []).map((d) => d.trim()).filter(Boolean),
+        ...(t.files?.length ? { files: [...t.files] } : {}),
         status: "pending",
-        iteration: flow.iteration,
+        iteration: flow.iteration + 1,
       });
       assigned.add(taskId);
-      added++;
     }
-    return added;
+    for (const t of additions)
+      t.dependsOn = [...new Set(t.dependsOn.map((d) => flow.tasks.has(d) ? d : renamed.get(d) ?? d))];
+    const issue = taskGraphIssue([...flow.tasks.values(), ...additions]);
+    if (issue) {
+      this.handbackFlowToUser(flow, `追加任务依赖无效：${issue}，请修正规划后继续`);
+      return 0;
+    }
+    for (const t of additions) {
+      flow.tasks.set(t.id, t);
+      this.taskSubs.add(flow.roomId, t.id, t.sessionId);
+    }
+    return additions.length;
   }
 
   private maybeInjectPeerReview(flow: Flow, room: Room): boolean {
@@ -2401,18 +2555,21 @@ export class ConductorOrchestrator {
   /** 主持人会话已被删除时终止 flow，避免无限重试 */
   private conductorGone(flow: Flow, room: Room): boolean {
     if (room.conductorId && (!this.agent.has || this.agent.has(room.conductorId))) return false;
-    this.notice({ roomId: flow.roomId, message: "主持人会话已失效，本次编排终止" });
-    flow.phase = "done";
-    this.clearFlowRetryTimers(flow);
-    flow.finishedAt = Date.now();
-    this.emitFlow?.(flow.roomId);
+    this.handbackFlowToUser(flow, "主持人会话已失效，未完成验收；请恢复主持人后继续",
+      flow.phase === "working" ? "reviewing" : flow.phase);
     return true;
   }
 
   private async review(flow: Flow, room: Room): Promise<void> {
+    if (this.flows.get(flow.roomId) !== flow) return;
     if (flow.phase !== "working" && flow.phase !== "reviewing") return;
     if (this.conductorGone(flow, room)) return;
+    if (this.stagePrompts.get(flow)?.key === this.stagePromptKey(flow, "reviewing")) return;
     if (flow.phase === "reviewing" && this.agent.isBusy(room.conductorId!)) return;
+    if ([...flow.tasks.values()].some((t) => t.status === "pending" || t.status === "running")) {
+      this.handbackFlowToUser(flow, "仍有未完成任务，未进入验收", "working");
+      return;
+    }
     flow.phase = "reviewing";
     this.emitFlow?.(flow.roomId);
     this.notice({
@@ -2465,11 +2622,11 @@ export class ConductorOrchestrator {
       openTopics: this.openTopicsFor(room),
     });
     try {
-      await this.sendPrompt(flow.roomId, room.conductorId!, prompt);
+      await this.sendStagePrompt(flow, room, "reviewing", prompt);
     } catch (err) {
       logError("conductor review prompt", err);
       this.notice({ roomId: flow.roomId, message: `指挥家验收派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
-      this.scheduleReschedule(flow, this.promptRetryMs, () => {
+      this.retryStage(flow, "reviewing", err, () => {
         if (flow.phase !== "reviewing") return;
         this.review(flow, room).catch((e) => logError("conductor review retry", e));
       });
@@ -2479,6 +2636,12 @@ export class ConductorOrchestrator {
   private async handleReview(flow: Flow, room: Room, output: string): Promise<void> {
     const decision = parseReviewDecision(output, room);
     if (decision?.decision === "complete") {
+      if ([...flow.tasks.values()].some((t) => t.status !== "done")) {
+        this.handbackFlowToUser(flow, "验收不能越过未完成任务", "working");
+        return;
+      }
+      delete flow.failureMessage;
+      delete flow.blockedStage;
       flow.reviewReason = decision.reason;
       await this.summarize(flow, room);
       return;
@@ -2500,23 +2663,24 @@ export class ConductorOrchestrator {
       decision.tasks.length > 0 &&
       flow.iteration < flow.maxIterations
     ) {
+      const added = this.appendTasks(flow, room, decision.tasks);
+      if (added === 0) return;
       flow.iteration += 1;
       flow.rounds += 1;
       flow.reviewReason = decision.reason;
-      const added = this.appendTasks(flow, room, decision.tasks);
-      if (added > 0) {
-        flow.phase = "working";
-        this.emitFlow?.(flow.roomId);
-        this.notice({
-          roomId: flow.roomId,
-          message: `验收未通过：${decision.reason}。新增 ${added} 项任务，进入第 ${flow.iteration}/${flow.maxIterations} 轮`,
-        });
-        await this.scheduleTasks(flow, room);
-        return;
-      }
+      flow.phase = "working";
+      this.emitFlow?.(flow.roomId);
+      this.notice({
+        roomId: flow.roomId,
+        message: `验收未通过：${decision.reason}。新增 ${added} 项任务，进入第 ${flow.iteration}/${flow.maxIterations} 轮`,
+      });
+      await this.scheduleTasks(flow, room);
+      return;
     }
     if (decision) flow.reviewReason = decision.reason;
     const hitLimit = flow.iteration >= flow.maxIterations;
+    flow.failureMessage = hitLimit ? "已达到迭代上限，但验收尚未通过" : "验收未确认完成，请修正验收或后续计划";
+    flow.blockedStage = "reviewing";
     this.notice({
       roomId: flow.roomId,
       message: hitLimit
@@ -2527,9 +2691,15 @@ export class ConductorOrchestrator {
   }
 
   private async summarize(flow: Flow, room: Room): Promise<void> {
+    if (this.flows.get(flow.roomId) !== flow) return;
     if (flow.phase !== "working" && flow.phase !== "reviewing" && flow.phase !== "summarizing") return;
     if (this.conductorGone(flow, room)) return;
+    if (this.stagePrompts.get(flow)?.key === this.stagePromptKey(flow, "summarizing")) return;
     if (flow.phase === "summarizing" && this.agent.isBusy(room.conductorId!)) return;
+    if ([...flow.tasks.values()].some((t) => t.status === "pending" || t.status === "running")) {
+      this.handbackFlowToUser(flow, "仍有未完成任务，未进入最终汇总", "working");
+      return;
+    }
     flow.phase = "summarizing";
     this.emitFlow?.(flow.roomId);
     const failedTasks = [...flow.tasks.values()].filter((t) => t.status === "failed");
@@ -2591,11 +2761,11 @@ export class ConductorOrchestrator {
       message: hasFailures ? "子任务部分完成，指挥家降级汇总中…" : "子任务全部完成，指挥家汇总中…",
     });
     try {
-      await this.sendPrompt(flow.roomId, room.conductorId!, prompt);
+      await this.sendStagePrompt(flow, room, "summarizing", prompt);
     } catch (err) {
       logError("conductor summarize prompt", err);
       this.notice({ roomId: flow.roomId, message: `指挥家汇总派发失败，${this.promptRetryMs / 1000}s 后重试：${String(err)}` });
-      this.scheduleReschedule(flow, this.promptRetryMs, () => {
+      this.retryStage(flow, "summarizing", err, () => {
         if (flow.phase !== "summarizing") return;
         this.summarize(flow, room).catch((e) => logError("conductor summarize retry", e));
       });
@@ -2625,6 +2795,45 @@ export class ConductorOrchestrator {
     return flow?.phase === "awaiting-retry";
   }
 
+  continueFlow(roomId: string, text: string): boolean {
+    const flow = this.flows.get(roomId), room = this.rooms.get(roomId);
+    if (!flow || !room || flow.phase !== "awaiting-retry") return false;
+    if ([...flow.tasks.values()].some((t) => t.status === "running") || (room.conductorId && this.agent.isBusy(room.conductorId))) {
+      this.notice({ roomId, message: "仍有已派发回合未结束，未重复派发；请等待结果后继续" });
+      return true;
+    }
+    if ([...flow.tasks.values()].some((t) => t.status === "failed")) {
+      this.notice({ roomId, message: "存在执行失败或状态未知的任务，未自动重跑；请检查后明确发送“重试”" });
+      return true;
+    }
+    const issue = taskGraphIssue([...flow.tasks.values()]);
+    const stage = flow.blockedStage;
+    delete flow.stageFailures;
+    this.clearFlowRetryTimers(flow);
+    flow.contractLocked = true;
+    flow.supplements.push({ text, at: Date.now() });
+    if (issue || stage === "planning" || flow.tasks.size === 0) {
+      flow.replanning = true;
+      flow.phase = "planning";
+      flow.planFormatRetries = 0;
+      this.planningInFlight.delete(roomId);
+      this.emitFlow?.(roomId);
+      this.sendPlanningPrompt(flow, room);
+    } else {
+      delete flow.failureMessage;
+      delete flow.blockedStage;
+      if (flow.iteration >= flow.maxIterations) flow.maxIterations = flow.iteration + 1;
+      if (flow.rounds >= flow.maxRounds) flow.maxRounds = flow.rounds + 1;
+      flow.phase = "working";
+      this.emitFlow?.(roomId);
+      const resume = stage === "summarizing"
+        ? this.summarize(flow, room)
+        : stage === "reviewing" ? this.review(flow, room) : this.scheduleTasks(flow, room);
+      void resume.catch((err) => logError("conductor continue", err));
+    }
+    return true;
+  }
+
   /** 重试失败的子任务：把 failed 任务回退为 pending 并重新调度 */
   retryFailedTasks(roomId: string, taskIds?: string[]): boolean {
     const flow = this.flows.get(roomId);
@@ -2637,17 +2846,21 @@ export class ConductorOrchestrator {
     const failed = [...flow.tasks.values()].filter(
       (t) => t.status === "failed" && (!taskIds || taskIds.includes(t.id)),
     );
-    if (failed.length === 0) return false;
+    if (failed.length === 0) return taskIds ? false : this.continueFlow(roomId, "用户明确重试");
     for (const t of failed) {
       t.status = "pending";
       delete t.failureMessage;
       delete t.finishedAt;
       t.retries = 0;
+      delete t.turnErrors;
+      delete t.manualRetry;
       delete t.lastRetryAt;
     }
     flow.retryWindow = [];
     this.clearFlowRetryTimers(flow);
     flow.phase = "working";
+    delete flow.failureMessage;
+    delete flow.blockedStage;
     this.emitFlow?.(roomId);
     const failedIds = failed.map((t) => t.id);
     this.notice({ roomId, message: `重试失败子任务：${failedIds.join(", ")}` });
@@ -2682,18 +2895,27 @@ export class ConductorOrchestrator {
       maxRounds: flow.maxRounds,
       ...(flow.missionId !== undefined ? { missionId: flow.missionId } : {}),
       ...(flow.failureMessage !== undefined ? { failureMessage: flow.failureMessage } : {}),
+      ...(flow.blockedStage !== undefined ? { blockedStage: flow.blockedStage } : {}),
+      ...(flow.stageFailures !== undefined ? { stageFailures: flow.stageFailures } : {}),
+      ...(flow.replanning ? { replanning: true } : {}),
+      ...(flow.contractLocked ? { contractLocked: true } : {}),
+      ...(flow.planningText !== undefined ? { planningText: flow.planningText } : {}),
+      ...(flow.requireTasks ? { requireTasks: true } : {}),
       ...(flow.reviewReason !== undefined ? { reviewReason: flow.reviewReason } : {}),
       tasks: [...flow.tasks.values()].map((t) => ({
         id: t.id,
         sessionId: t.sessionId,
         task: t.task,
         dependsOn: t.dependsOn,
+        ...(t.files?.length ? { files: t.files } : {}),
         status: t.status,
         iteration: t.iteration,
         ...(t.dispatchedAt !== undefined ? { dispatchedAt: t.dispatchedAt } : {}),
         ...(t.finishedAt !== undefined ? { finishedAt: t.finishedAt } : {}),
         ...(t.failureMessage !== undefined ? { failureMessage: t.failureMessage } : {}),
         ...(t.retries !== undefined ? { retries: t.retries } : {}),
+        ...(t.turnErrors !== undefined ? { turnErrors: t.turnErrors } : {}),
+        ...(t.manualRetry ? { manualRetry: true } : {}),
         ...(t.helpRounds !== undefined ? { helpRounds: t.helpRounds } : {}),
         ...(t.waitingForHelp !== undefined ? { waitingForHelp: t.waitingForHelp } : {}),
         ...(t.verifications !== undefined ? { verifications: t.verifications } : {}),
@@ -2797,6 +3019,14 @@ export class ConductorOrchestrator {
           : [],
         help: new Map(),
         ...(typeof f.reviewReason === "string" ? { reviewReason: f.reviewReason } : {}),
+        ...(f.replanning === true ? { replanning: true } : {}),
+        ...(f.contractLocked === true ? { contractLocked: true } : {}),
+        ...(typeof f.planningText === "string" ? { planningText: f.planningText } : {}),
+        ...(f.requireTasks === true ? { requireTasks: true } : {}),
+        ...(typeof f.blockedStage === "string" && ["planning", "working", "reviewing", "summarizing"].includes(f.blockedStage)
+          ? { blockedStage: f.blockedStage as FlowPhase } : {}),
+        ...(typeof f.stageFailures === "number" && Number.isFinite(f.stageFailures)
+          ? { stageFailures: f.stageFailures } : {}),
         ...(typeof f.clarificationAsked === "boolean" ? { clarificationAsked: f.clarificationAsked } : {}),
         ...(typeof f.clarificationAnswer === "string" && f.clarificationAnswer
           ? { clarificationAnswer: f.clarificationAnswer.slice(0, 2000) }
@@ -2848,6 +3078,7 @@ export class ConductorOrchestrator {
           dependsOn: Array.isArray(o.dependsOn)
             ? o.dependsOn.map((s) => String(s)).filter(Boolean)
             : [],
+          ...(Array.isArray(o.files) ? { files: o.files.filter((f): f is string => typeof f === "string" && !!f.trim()) } : {}),
           status,
           iteration: typeof o.iteration === "number" && o.iteration > 0 ? o.iteration : 1,
           ...(typeof o.dispatchedAt === "number" ? { dispatchedAt: o.dispatchedAt } : {}),
@@ -2862,6 +3093,8 @@ export class ConductorOrchestrator {
               ? { failureMessage: o.failureMessage }
               : {}),
           ...(typeof o.retries === "number" ? { retries: o.retries } : {}),
+          ...(typeof o.turnErrors === "number" && Number.isFinite(o.turnErrors) ? { turnErrors: o.turnErrors } : {}),
+          ...(o.manualRetry === true ? { manualRetry: true } : {}),
           ...(o.autoRetried === true ? { autoRetried: true } : {}),
           ...(o.recoveryNote === true ? { recoveryNote: true } : {}),
           ...(typeof o.helpRounds === "number" ? { helpRounds: o.helpRounds } : {}),
@@ -2951,6 +3184,20 @@ export class ConductorOrchestrator {
           waitingTask.waitingForHelp = id;
         }
       }
+      const graphIssue = taskGraphIssue([...flow.tasks.values()]);
+      if (["summarizing", "reviewing", "done"].includes(flow.phase) &&
+          [...flow.tasks.values()].some((t) => t.status === "pending" || t.status === "running")) {
+        flow.phase = "awaiting-retry";
+        flow.blockedStage = "working";
+        flow.failureMessage ??= "旧流程还有未完成任务，请检查后继续";
+        delete flow.finishedAt;
+      }
+      if (graphIssue && !flow.replanning && (flow.phase !== "done" || [...flow.tasks.values()].some((t) => t.status !== "done"))) {
+        flow.phase = "awaiting-retry";
+        flow.blockedStage = "planning";
+        flow.failureMessage = `任务依赖无效：${graphIssue}，请修正规划后继续`;
+        delete flow.finishedAt;
+      }
       const results = f.results as Record<string, Record<string, unknown>> | undefined;
       if (results) {
         for (const [id, r] of Object.entries(results)) {
@@ -2992,7 +3239,7 @@ export class ConductorOrchestrator {
       }
       const interrupted: string[] = [];
       const autoResumed: string[] = [];
-      if (flow.phase === "working") {
+      if (flow.phase === "working" || flow.phase === "awaiting-retry") {
         // 重启对账 outward()：running 任务查房史——该任务派发后若已有
         // assistant/process/tool 外发信号则保守标 failed 人工重试；
         // 可证无外发 → 回 pending 由 scheduleTasks 自动重派（每任务限 1 次防循环）
@@ -3052,6 +3299,7 @@ export class ConductorOrchestrator {
             delete t.automaticCheck;
             flow.results.delete(t.id);
             interrupted.push(t.id);
+            t.manualRetry = true;
           }
         }
         const hasPendingHelp = [...flow.help.values()].some((h) => h.status === "pending");
@@ -3285,7 +3533,10 @@ function resolveParsedTasks(raw: unknown, room: Room): ParsedTask[] | null {
       const dependsOn = Array.isArray(o.dependsOn)
         ? o.dependsOn.map((s) => String(s)).filter(Boolean)
         : undefined;
-      return { id, to: member.sessionId, task: taskRaw, dependsOn };
+      const files = Array.isArray(o.files)
+        ? o.files.filter((f): f is string => typeof f === "string" && !!f.trim())
+        : undefined;
+      return { id, to: member.sessionId, task: taskRaw, dependsOn, files };
     })
     .filter((t) => t !== null);
   return tasks as ParsedTask[];
@@ -3329,7 +3580,9 @@ function parseReviewDecision(output: string, room: Room): ReviewDecision | null 
         return { decision: "complete", reason };
       }
       if (decision === "continue") {
-        return { decision: "continue", reason, tasks: resolveParsedTasks(obj.tasks, room) ?? [] };
+        const tasks = resolveParsedTasks(obj.tasks, room);
+        if (!tasks || !Array.isArray(obj.tasks) || tasks.length !== obj.tasks.length) continue;
+        return { decision: "continue", reason, tasks };
       }
     } catch {
       // 继续尝试下一个候选

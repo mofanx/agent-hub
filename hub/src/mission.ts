@@ -144,7 +144,7 @@ export type MissionDeps = {
   dispatch(
     room: Room,
     text: string,
-    options?: { note?: string; missionId?: string; goal?: string },
+    options?: { note?: string; missionId?: string; goal?: string; acceptanceCriteria?: string[] },
   ): Promise<ModeResult>;
   cancelActive(roomId: string, reason?: string): Promise<void>;
   cancel(sessionId: string): Promise<void>;
@@ -891,7 +891,7 @@ export class MissionManager {
     }
     let result: ModeResult;
     try {
-      result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m), missionId: m.id, goal: m.goal });
+      result = await this.deps.dispatch(room, m.goal, { note: missionPrompt(m), missionId: m.id, goal: m.goal, acceptanceCriteria: [...m.acceptanceCriteria] });
     } catch (e) {
       m.dispatching = false;
       if (m.stopRequested) {
@@ -1126,6 +1126,12 @@ export class MissionManager {
       flow.waitingFor === "user" ||
       tasks.some((t) => t.waitingFor === "user");
     if (phase === "done") {
+      if (!flow.failureMessage && !tasks.some((t) => t.status === "failed") &&
+          tasks.some((t) => t.status === "pending" || t.status === "running")) {
+        m.error = "flow ended with unfinished tasks";
+        this.transition(m, "waiting-user", "flow", m.error, "awaiting-retry");
+        return;
+      }
       const flowFailure = flow.failureMessage ? flow.failureMessage : undefined;
       const anyFailed = tasks.some((t) => t.status === "failed") || flowFailure !== undefined;
       m.output = summarizeFlow(flow);
@@ -1143,6 +1149,7 @@ export class MissionManager {
     } else if (phase === "cancelled") {
       this.transition(m, "stopped", "flow", "flow cancelled", "flow-cancelled");
     } else if (waitingUser) {
+      if (flow.failureMessage) m.error = flow.failureMessage;
       this.transition(
         m,
         "waiting-user",
@@ -1152,6 +1159,7 @@ export class MissionManager {
       );
       if (phase === "awaiting-retry") this.maybeAutoRetry(m, flow);
     } else if (RUNNING_PHASES.has(phase)) {
+      m.error = undefined;
       this.transition(m, "running", "flow", "flow active");
     }
     // 未识别 phase：白名单忽略——仅 lastPhase/事件轨迹更新，不迁移 status

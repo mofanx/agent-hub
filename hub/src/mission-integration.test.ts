@@ -153,16 +153,16 @@ describe("mission-integration", () => {
     fx.store.close();
   });
 
-  it("conductor 主持人 error：保留 done 失败快照且 Mission failed", async () => {
+  it("conductor 主持人 error：保留待重试快照，Mission 等待用户且保留真实原因", async () => {
     const fx = makeFixture("conductor");
     const m = fx.mk("COND_GOAL");
     await fx.mission.start(m.id);
     fx.err("s1", "MOCK_CONDUCTOR_DOWN");
     const cur = fx.mission.get(m.id)!;
-    assert.equal(cur.status, "failed");
+    assert.equal(cur.status, "waiting-user");
     assert.equal(cur.error, "MOCK_CONDUCTOR_DOWN");
     const flow = fx.roomModes.getFlow(fx.room.roomId);
-    assert.equal(flow?.phase, "done");
+    assert.equal(flow?.phase, "awaiting-retry");
     assert.equal(flow?.failureMessage, "MOCK_CONDUCTOR_DOWN");
     fx.store.close();
   });

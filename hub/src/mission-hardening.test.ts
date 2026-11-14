@@ -128,6 +128,23 @@ function makeMission(h: Harness, extra: Record<string, unknown> = {}) {
   });
 }
 
+it("旧 flow 声称 done 但仍有待办时，工单不能进入人工验收", async () => {
+  const h = makeHarness(undefined, "conductor");
+  const m = makeMission(h);
+  h.setDispatch(async () => {
+    h.state.flow = {
+      flowId: "unfinished", phase: "working", missionId: m.id,
+      tasks: [{ id: "t1", status: "done" }, { id: "t2", status: "pending" }],
+    };
+    h.state.activeFlow = true;
+    return { sent: ["s1"], mentioned: [], skipped: [] };
+  });
+  await h.manager.start(m.id);
+  h.state.flow = { ...h.state.flow, phase: "done" };
+  h.manager.syncFlow(h.room.roomId, h.state.flow);
+  assert.equal(h.manager.get(m.id)?.status, "waiting-user");
+});
+
 function flowView(flowId: string, phase: string, tasks: Record<string, unknown>[] = [], missionId?: string) {
   return { roomId: "x", flowId, phase, tasks, ...(missionId !== undefined ? { missionId } : {}) };
 }

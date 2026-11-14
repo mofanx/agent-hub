@@ -128,11 +128,17 @@ const cleanLines = (ls: readonly string[] | undefined): string[] | undefined =>
 export function workerTaskPrompt(args: {
   taskId: string;
   task: string;
+  goal?: string | undefined;
+  criteria?: string[] | undefined;
+  contract?: string | undefined;
   upstreamLines?: string[] | undefined;
   qaLines?: string[] | undefined;
   supplements?: string[] | undefined;
 }): string {
   return [
+    ...(args.goal ? [`本轮目标（仅执行分配给你的子任务，不重复或越权认领其他节点）：${args.goal}`] : []),
+    ...(args.criteria?.length ? [`目标验收项：${args.criteria.join("；")}`] : []),
+    ...(args.contract ? [`用户批准的任务契约：\n${args.contract}`] : []),
     ...(args.upstreamLines && args.upstreamLines.length > 0
       ? [
           "前置任务结果（这是你的直接输入，请在此基础上继续）：",
