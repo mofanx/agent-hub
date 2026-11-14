@@ -194,13 +194,15 @@ class HubClient(
             }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 actor {
-                    if (webSocket != ws || gen != attemptGen) { webSocket.close(code, reason); return@actor }
+                    // 服务端发来的保留码（1004-1006/1015）或越界码不可回显——okhttp 会抛 IllegalArgumentException 崩溃
+                    val echo = if (code in 1000..4999 && code !in setOf(1004, 1005, 1006, 1015)) code else 1000
+                    if (webSocket != ws || gen != attemptGen) { webSocket.close(echo, reason); return@actor }
                     if (code == 4001 || (code == 1008 && reason.contains("token", true))) {
                         terminal(HubConnectionState.AuthFailed)
                     } else if (code == 1008) {
                         terminal(HubConnectionState.PolicyRejected)
                     }
-                    webSocket.close(code, reason)
+                    webSocket.close(echo, reason)
                 }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
