@@ -602,12 +602,35 @@ export class Store {
     for (const k of stale) this.savedRows.delete(k);
   }
 
+  /** 该 scope 已落库条目的最大 at：新行 at 钳制下限，保证 at/id 同向单调不倒置 */
+  maxHistoryAt(scope: "session" | "room", id: string): number {
+    try {
+      const row = this.prep("SELECT MAX(at) AS m FROM history WHERE scope = ? AND scope_id = ?")
+        .get(scope, id) as { m: number | null } | undefined;
+      return row?.m ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  entryAt(rowId: number): number | undefined {
+    try {
+      const row = this.prep("SELECT at FROM history WHERE id = ?").get(rowId) as { at: number } | undefined;
+      return row?.at;
+    } catch {
+      return undefined;
+    }
+  }
+
   append(scope: "session" | "room", id: string, entry: HistoryEntry): number {
     try {
+      // 调用方给的 at 是语义锚点（事件时刻/flow 起点），但落库 at 必须不早于已有
+      // 条目——否则 id 大 at 小的倒置会让新条目渲染到历史中间
+      const at = Math.max(entry.at, this.maxHistoryAt(scope, id));
       const r = this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(scope, id, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
+        .run(scope, id, at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
       return Number(r.lastInsertRowid);
     } catch (err) {
       logWarn("store", `append failed: ${String(err)}`);
@@ -617,10 +640,11 @@ export class Store {
 
   beginReplyDraft(scope: "session" | "room", id: string, entry: HistoryEntry): number {
     try {
+      const at = Math.max(entry.at, this.maxHistoryAt(scope, id));
       const r = this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, draft) VALUES (?, ?, ?, ?, ?, ?, 1)",
         )
-        .run(scope, id, entry.at, entry.kind, entry.author, entry.text);
+        .run(scope, id, at, entry.kind, entry.author, entry.text);
       return Number(r.lastInsertRowid);
     } catch (err) {
       logWarn("store", `beginReplyDraft failed: ${String(err)}`);
@@ -1001,7 +1025,7 @@ export class Store {
       const r = this.prep(
           "INSERT INTO history(scope, scope_id, at, kind, author, text, client_message_id, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(scope, scopeId, entry.at, entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
+        .run(scope, scopeId, Math.max(entry.at, this.maxHistoryAt(scope, scopeId)), entry.kind, entry.author, entry.text, entry.clientMessageId ?? null, entry.missionId ?? null);
       const historyId = Number(r.lastInsertRowid);
       if (!(historyId > 0)) throw new Error("client_message_history");
       const receipt = {

@@ -1251,21 +1251,21 @@ const markTurnStart = (sessionId: string): void => {
 function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interrupted" = "done"): number | undefined {
   const buf = turnProcess.take(sessionId);
   if (buf.length === 0) return undefined;
-  // 返回最后过程事件时刻：调用方用作草稿定稿 at 的下限（cardAt+1），
-  // 消除同毫秒 (at,id) 并列时小 id 草稿行排到过程卡之前的错序窗
-  const lastAt = buf[buf.length - 1]!.at;
+  // 落库统一按 append 时刻：at/id 同向单调，卡不再锚回事件时刻插到时间线中段；
+  // 事件时序保留在 meta.turnStartAt/turnEndAt 供客户端归位钻取
+  const flushAt = Date.now();
   const roomId = roomIdForSessionTurn(sessionId);
   for (const item of buf) {
     store.append("session", sessionId, {
-      at: item.at,
+      at: flushAt,
       kind: item.kind,
       author: item.author,
       text: item.text,
     });
   }
-  if (!roomId) return lastAt;
+  if (!roomId) return flushAt;
   // 自动决策回合的过程卡与 assistant 草稿同等隐藏：host 内部模式思考落房史即成孤儿卡
-  if (roomModeManager.isDecidingTurn(sessionId, roomId)) return lastAt;
+  if (roomModeManager.isDecidingTurn(sessionId, roomId)) return flushAt;
   // 房间历史只写一条聚合过程卡（不逐条散装），meta 供客户端钻取/展开
   const turnStartAt = buf[0]!.at;
   const turnEndAt = buf[buf.length - 1]!.at;
@@ -1279,19 +1279,28 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
     roomModeManager.flowIdForTurn(sessionId, roomId),
     missionManager.missionIdForTurn(sessionId, roomId),
   );
-  if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return lastAt;
-  // 卡锚定最后一条过程事件的时刻而非落库时刻：结论条目以完成时刻落库必然在其后；
-  // 延迟 flush（僵尸/取消/异常收尾）也不会把卡钉到时间线末尾
-  const at = lastAt;
+  if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return flushAt;
+  const at = flushAt;
   const text = JSON.stringify(meta);
   const author = displayNameFor(sessionId);
   const id = store.append("room", roomId, { at, kind: "process", author, text });
-  if (id < 0) return lastAt;
+  if (id < 0) return flushAt;
   broadcast({
     method: "room.process",
-    params: { roomId, entry: { id, at, kind: "process", author, text } },
+    params: { roomId, entry: { id, at: store.entryAt(id) ?? at, kind: "process", author, text } },
   } as HubEvent);
-  return lastAt;
+  return flushAt;
+}
+
+/** 定稿 at 下限：严格大于本回合刚落库条目（过程散装/过程卡）的实际存储 at，含 store 级单调钳制后的抬升值 */
+function turnTailFloor(sessionId: string): number {
+  const roomId = roomIdForSessionTurn(sessionId);
+  return (
+    Math.max(
+      store.maxHistoryAt("session", sessionId),
+      roomId ? store.maxHistoryAt("room", roomId) : 0,
+    ) + 1
+  );
 }
 
 function displayNameFor(sessionId: string): string {
@@ -1365,8 +1374,8 @@ function onTurnProgress(sessionId: string, fullText: string): void {
 function interruptTurnDrafts(sessionId: string, minAt = 0): void {
   turnStarts.delete(sessionId);
   turnEnds.set(sessionId, Date.now());
-  const procAt = flushTurnProcess(sessionId, "interrupted");
-  const atFloor = Math.max(minAt, (procAt ?? -1) + 1);
+  flushTurnProcess(sessionId, "interrupted");
+  const atFloor = Math.max(minAt, turnTailFloor(sessionId));
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
   dropTurnDraft(sessionId);
@@ -1389,9 +1398,9 @@ function onTurnEnd(
   const t0 = turnStarts.get(sessionId) ?? Date.now();
   turnStarts.delete(sessionId);
   turnEnds.set(sessionId, Date.now());
-  const procAt = flushTurnProcess(sessionId, status);
-  // 定稿 at 下限抬到过程卡锚点 +1：同毫秒 (at,id) 并列时防止小 id 草稿行排到卡前
-  const atFloor = (procAt ?? -1) + 1;
+  flushTurnProcess(sessionId, status);
+  // 定稿 at 下限严格大于本回合已落库条目的实际存储 at：过程卡稳排结论之前
+  const atFloor = turnTailFloor(sessionId);
   const draft = turnDrafts.get(sessionId);
   dropTurnDraft(sessionId);
   if (status === "interrupted") {

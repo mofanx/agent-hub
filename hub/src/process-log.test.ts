@@ -204,7 +204,7 @@ describe("process history persistence", () => {
     }
   });
 
-  it("过程卡锚定最后过程事件时刻：延迟 flush 也不排在结论之后", () => {
+  it("过程卡按 append 时刻落库：事件锚点留在 meta，at/id 不倒置", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
     const store = new Store(dir);
     try {
@@ -214,18 +214,43 @@ describe("process history persistence", () => {
       ];
       const meta = buildProcessMeta("room1", "s1", buf, "t1", "done");
       assert.equal(meta.turnStartAt, 100);
-      assert.equal(meta.turnEndAt, 200, "turnEndAt 锚定最后过程事件而非落库时刻");
-      // 结论以完成时刻先落库（at=300），过程卡延迟 flush 后落库但 at 仍为事件时刻
+      assert.equal(meta.turnEndAt, 200, "事件时序锚点保留在 meta 供归位钻取");
+      // 结论先落库（at=300）；过程卡即使带过去时刻锚点，落库 at 钳到 ≥300 排尾部
       store.append("room", "room1", { at: 300, kind: "assistant", author: "bot", text: "结论" });
-      const cardAt = buf[buf.length - 1]!.at; // 与 flushTurnProcess 相同的锚点取法
-      store.append("room", "room1", { at: cardAt, kind: "process", author: "bot", text: JSON.stringify(meta) });
+      store.append("room", "room1", { at: buf[buf.length - 1]!.at, kind: "process", author: "bot", text: JSON.stringify(meta) });
       const entries = store.read("room", "room1");
       assert.deepEqual(
         entries.map((e) => e.kind),
-        ["process", "assistant"],
-        "过程卡 at ≤ 结论 at，按 at 升序排在结论之前",
+        ["assistant", "process"],
+        "后落库的过程卡 at 钳制到尾部，不插回结论之前",
       );
-      assert.ok(entries[0]!.at <= entries[1]!.at);
+      assert.equal(entries[1]!.at, 300, "过去锚点被钳制到当前最大 at");
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("落库 at 单调钳制：append 过去时刻抬到 scope 最大 at，at/id 同向", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    try {
+      // 用户消息 → 主持人决策 → 编排卡：决策/卡带过去锚点不得插到用户消息之前
+      store.append("room", "r1", { at: 1000, kind: "user", author: "me", text: "需求" });
+      const decisionId = store.append("room", "r1", { at: 500, kind: "decision", author: "host", text: "{}" });
+      const flowId = store.append("room", "r1", { at: 200, kind: "flow", author: "", text: "{}" });
+      const entries = store.read("room", "r1");
+      assert.deepEqual(
+        entries.map((e) => e.kind),
+        ["user", "decision", "flow"],
+        "用户消息→决策→编排卡 展示序不因过去锚点倒置",
+      );
+      assert.deepEqual(
+        entries.map((e) => e.at),
+        [1000, 1000, 1000],
+        "决策/flow at 钳制到 append 时当前最大 at，id 序兜底",
+      );
+      assert.ok(decisionId > 0 && flowId > decisionId);
     } finally {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });

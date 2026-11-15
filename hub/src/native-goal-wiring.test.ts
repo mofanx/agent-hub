@@ -37,7 +37,7 @@ function fixture() {
       onTurnDone: (...p: unknown[]) => done.push(p),
     },
     rooms: { recordOutput: () => false },
-    store: { append: (...p: unknown[]) => { writes.push(p); } },
+    store: { append: (...p: unknown[]) => { writes.push(p); }, maxHistoryAt: () => 0 },
     sessionLedger: { captureOutput: () => {} },
     extractTaskResult: () => ({ artifacts: [] }),
     promptDoneInternalOutput: (p: any) => p.output,
@@ -46,7 +46,7 @@ function fixture() {
   };
   vm.createContext(sandbox);
   const js = ts.transpileModule(
-    `${functionSource("onAgentEvent")}\n${functionSource("onTurnEnd")}\nmodule.exports = { onAgentEvent, onTurnEnd };`,
+    `${functionSource("onAgentEvent")}\n${functionSource("turnTailFloor")}\n${functionSource("onTurnEnd")}\nmodule.exports = { onAgentEvent, onTurnEnd };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
   ).outputText;
   vm.runInContext(js, sandbox);

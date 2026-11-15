@@ -238,10 +238,9 @@ export function makeFlowCardSync(
     const room = deps.rooms.get(roomId);
     const text = JSON.stringify(toCardSnapshot(flow, room?.mode ?? ""));
     const hash = createHash("sha1").update(text, "utf8").digest("hex");
-    const at =
-      typeof flow.startedAt === "number" && flow.startedAt > 0
-        ? flow.startedAt
-        : Date.now();
+    // 落库 at 用 append 时刻：flow.startedAt 是语义锚点（已随快照序列化进 text 供归位），
+    // 拿它当排序键会让卡插到触发它的用户消息之前（at/id 倒置）
+    const at = Date.now();
 
     const afterFinalize = cards.get(roomId);
     if (afterFinalize && afterFinalize.flowId === flowId) {
@@ -256,8 +255,10 @@ export function makeFlowCardSync(
     const restored = deps.cardRowId(roomId);
     if (restored !== undefined) {
       deps.store.updateEntry(restored, text);
-      cards.set(roomId, { flowId, rowId: restored, hash, at, text });
-      emit(roomId, { rowId: restored, at }, text);
+      // 原位覆写不改 at：信封与追踪状态须沿用该行实际存储 at，不能冒用 append 时刻
+      const storedAt = deps.store.entryAt(restored) ?? at;
+      cards.set(roomId, { flowId, rowId: restored, hash, at: storedAt, text });
+      emit(roomId, { rowId: restored, at: storedAt }, text);
       return;
     }
     const rowId = deps.store.append("room", roomId, {
@@ -267,8 +268,10 @@ export function makeFlowCardSync(
       text,
     });
     if (rowId < 0) return;
+    // 存储 at 可能被 store 钳制抬升（已有更晚条目）：信封/追踪用实际值
+    const storedAt = deps.store.entryAt(rowId) ?? at;
     deps.setCardRowId(roomId, rowId);
-    cards.set(roomId, { flowId, rowId, hash, at, text });
-    emit(roomId, { rowId, at }, text);
+    cards.set(roomId, { flowId, rowId, hash, at: storedAt, text });
+    emit(roomId, { rowId, at: storedAt }, text);
   };
 }

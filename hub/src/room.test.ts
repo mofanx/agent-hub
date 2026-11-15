@@ -927,11 +927,12 @@ describe("lostReplyAction", () => {
     const store = new Store(dir);
     try {
       const at = 1000;
+      // 更早时刻的消息先落库（append 钳制保证 at/id 同向，无法补写更老的 at）
+      store.append("room", "r1", { at: 999, kind: "user", author: "我", text: "old" });
       // 三条同一毫秒写入的条目
       for (const text of ["a", "b", "c"]) {
         store.append("room", "r1", { at, kind: "assistant", author: "bot", text });
       }
-      store.append("room", "r1", { at: 999, kind: "user", author: "我", text: "old" });
       // 窗口边界落在同毫秒簇中间：只取最新的 2 条（c、b）
       const window = store.read("room", "r1", 2);
       assert.deepEqual(window.map((e) => e.text), ["b", "c"]);
