@@ -470,10 +470,42 @@ export const useHubStore = create<State & Actions>((set, get) => {
   /** 会话升级工单起草挂起：prompt.done/error 时若无 mission 块产出，注入空模板草稿卡兜底 */
   let pendingPromoteDraftSid: string | null = null;
   let pendingPromoteDraftAt = 0;
+  /** promote 界桩前服务端已接受的未终止 prompt 数——它们的终止事件只消费 skip，不 settle。
+   *  精确锚点在 promote 自身 prompt.send 被 accepted 时取值（见 finish()） */
+  let pendingPromoteDraftSkips = 0;
+  let pendingPromoteDraftCmId: string | null = null;
+  /** 最近一次 sendPrompt 成功入队返回的 clientMessageId */
+  let lastSentPromptCmId: string | null = null;
+  /** 每会话服务端已接受未终止的 prompt 数；done/error -1，取消经 generating(false) deferred -1 */
+  const pendingTurns = new Map<string, number>();
+  /** 每会话在途生成回合数（含外端发起）；generating(true) +1，终止 -1 */
+  const activeTurns = new Map<string, number>();
+  /** 每会话 done/error 终止事件计数——generating(false) deferred 据此判定取消（无终止事件跟随） */
+  const settledTurns = new Map<string, number>();
+  const bumpTurn = (m: Map<string, number>, sid: string, d: number) =>
+    m.set(sid, Math.max(0, (m.get(sid) ?? 0) + d));
+  const promoteDraftProduced = (sid: string): boolean => {
+    const author = get().sessionName(sid);
+    return get().chatItems.some(
+      (it) => it.kind === "assistant" && (it.at ?? 0) >= pendingPromoteDraftAt &&
+        it.author === author && it.text.includes("```mission"),
+    );
+  };
+  const settlePromoteIfPending = (sid: string, produced: boolean) => {
+    if (pendingPromoteDraftSid !== sid) return;
+    if (pendingPromoteDraftSkips > 0) {
+      pendingPromoteDraftSkips--;
+      pendingPromoteDraftAt = Date.now();
+      return;
+    }
+    settlePromoteDraft(sid, produced);
+  };
   const settlePromoteDraft = (sid: string, produced: boolean) => {
     if (pendingPromoteDraftSid !== sid) return;
     pendingPromoteDraftSid = null;
     pendingPromoteDraftAt = 0;
+    pendingPromoteDraftSkips = 0;
+    pendingPromoteDraftCmId = null;
     if (produced || !get().inScope(sid)) return;
     const item: ChatItem = {
       kind: "assistant", at: Date.now(), id: 0,
@@ -520,11 +552,31 @@ export const useHubStore = create<State & Actions>((set, get) => {
     return get().historyCache[historyCacheKey(scope, id)];
   };
 
+  /** 服务端时钟估计：跟踪见过的最大服务端 at 及本地到达时刻；
+   * 客户端时戳（Date.now() 生成的 at）与 server 域条目混排/覆盖比较前平移到服务端时钟域，
+   * 避免客户端时钟偏移导致"新消息插到历史中间" */
+  let latestServerAt = 0;
+  let latestServerAtAt = 0;
+  const noteServerAt = (at: unknown) => {
+    if (typeof at === "number" && Number.isFinite(at) && at > latestServerAt) {
+      latestServerAt = at;
+      latestServerAtAt = Date.now();
+    }
+  };
+  const serverOffset = () => latestServerAt - latestServerAtAt;
+  /** at 是否客户端时戳：无 historyId 的 live 项；flow/process 合成卡的 at 属服务端域
+   * （startedAt/entry.at，缺 startedAt 时创建即归一化）；补 historyId 时 at 已归一化 */
+  const isClientStamped = (it: ChatItem): boolean =>
+    it.historyId == null && it.kind !== "flow" && it.kind !== "process";
+  const serverAtOf = (it: ChatItem): number | undefined =>
+    it.at != null && isClientStamped(it) ? it.at + serverOffset() : it.at;
+
   const entryToChatItem = (o: Record<string, unknown>): ChatItem | null => {
     const kind = String(o.kind ?? "");
     const author = String(o.author ?? "");
     const text = String(o.text ?? "");
     const at = typeof o.at === "number" ? o.at : undefined;
+    noteServerAt(at);
     const historyId = typeof o.id === "number" ? o.id : undefined;
     const usage = (o as Record<string, unknown>).usage as Record<string, unknown> | undefined;
     const attachments = ((o as Record<string, unknown>).attachments as unknown[] | undefined)
@@ -672,7 +724,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
   const isCoveredByHistory = (it: ChatItem, hist: ChatItem[]): boolean => {
     const near = hist.filter(
-      (h) => h.at == null || it.at == null || Math.abs(h.at - it.at) <= 300_000,
+      (h) =>
+        h.at == null ||
+        it.at == null ||
+        Math.abs(h.at - (serverAtOf(it) ?? it.at)) <= 300_000,
     );
     switch (it.kind) {
       case "user":
@@ -691,7 +746,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           (h) =>
             h.kind === "assistant" &&
             sameAuthor(h, it) &&
-            (h.at == null || it.at == null || it.at <= h.at) &&
+            (h.at == null || it.at == null || (serverAtOf(it) ?? it.at) <= h.at) &&
             (h.text === (it.replyText ?? it.text) || h.text.startsWith(it.replyText ?? it.text) || (it.replyText ?? it.text).startsWith(h.text)),
         );
       case "thought":
@@ -699,7 +754,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           (h) =>
             h.kind === "thought" &&
             sameAuthor(h, it) &&
-            (h.at == null || it.at == null || it.at <= h.at) &&
+            (h.at == null || it.at == null || (serverAtOf(it) ?? it.at) <= h.at) &&
             (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
         );
       case "tool":
@@ -912,11 +967,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
   const timelineAt = (it: ChatItem): number => {
     if ((it.kind === "assistant" || it.kind === "thought") && it.streaming) return Infinity;
-    if (it.historyId == null && (it.kind === "assistant" || it.kind === "thought" || it.kind === "tool" || it.kind === "plan")) return Infinity;
+    // 乐观 user 气泡（未落库、outbox 追踪中）给尾键：merge 重排时不跳到在途流式块上方；
+    // markUserSendStatus 补 historyId 后回落真实时序位；liveControl 气泡无回传，保持原 at 位
+    if (it.kind === "user" && it.historyId == null && it.clientMessageId != null && it.deliveryTracked !== false) return Infinity;
     const at = it.kind === "process" && (it.at ?? 0) <= 0
       ? (it.turnEndAt != null && it.turnEndAt > 0 ? it.turnEndAt : it.turnStartAt)
       : it.kind === "flow" && (it.at ?? 0) <= 0 ? it.snapshot.startedAt : it.at;
-    return at != null && at > 0 ? at : Infinity;
+    if (at == null || at <= 0) return Infinity;
+    // 客户端时戳条目平移到服务端时钟域，完成态 live 项归位而非永久尾键
+    return isClientStamped(it) ? at + serverOffset() : at;
   };
 
   const compareTimeline = (a: ChatItem, b: ChatItem): number =>
@@ -977,7 +1036,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     set({
       chatItems: mergeHistoryItems([
         ...items,
-        { kind: "flow", at: flow.startedAt ?? Date.now(), flowId, snapshot, author: "" },
+        { kind: "flow", at: flow.startedAt ?? (Date.now() + serverOffset()), flowId, snapshot, author: "" },
       ], []),
     });
   };
@@ -1086,7 +1145,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const kind = u.sessionUpdate === "agent_thought_chunk" ? "thought" : "assistant";
       const last = items[items.length - 1];
       if (last?.kind === kind && last.author === author && last.streaming) {
-        items[items.length - 1] = { ...last, text: last.text + text, streaming: true };
+        items[items.length - 1] = { ...last, text: last.text + text, streaming: true, at: Date.now() };
       } else {
         items.push({ kind, at: Date.now(), id: ++seq, text, author, streaming: true });
       }
@@ -1138,12 +1197,27 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const stoppable = params.stoppable === true;
         if (!get().inScope(sid)) return;
         if (stoppable) {
+          bumpTurn(activeTurns, sid, 1);
           if (!get().busyIds.includes(sid)) {
             set({ busyIds: [...get().busyIds, sid] });
           }
         } else {
           set({ busyIds: get().busyIds.filter((id) => id !== sid) });
           get().refreshAll();
+          // 取消回合的唯一终止信号：done/error 与 generating(false) 同 tick 发出，
+          // 短延迟让在途终止事件先结算；超时未结算即取消——回收 pendingTurns 并兜底 settle
+          if ((pendingTurns.get(sid) ?? 0) > 0 || pendingPromoteDraftSid === sid) {
+            const te = settledTurns.get(sid) ?? 0;
+            const marker = pendingPromoteDraftAt;
+            setTimeout(() => {
+              if ((settledTurns.get(sid) ?? 0) !== te) return;
+              bumpTurn(pendingTurns, sid, -1);
+              bumpTurn(activeTurns, sid, -1);
+              if (pendingPromoteDraftSid !== sid || pendingPromoteDraftAt !== marker) return;
+              applyStreamBatch(sid);
+              settlePromoteIfPending(sid, promoteDraftProduced(sid));
+            }, 200);
+          }
         }
         break;
       }
@@ -1160,15 +1234,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
         clearStreaming(get().sessionName(sid), typeof params.output === "string" ? params.output : undefined);
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
         get().refreshAll();
-        {
-          // 本回合 assistant 任一条含 mission 块即算产出——时间戳界桩免疫历史 promote 卡残留
-          const author = get().sessionName(sid);
-          const produced = get().chatItems.some(
-            (it) => it.kind === "assistant" && (it.at ?? 0) >= pendingPromoteDraftAt &&
-              it.author === author && it.text.includes("```mission"),
-          );
-          settlePromoteDraft(sid, produced);
-        }
+        bumpTurn(pendingTurns, sid, -1);
+        bumpTurn(activeTurns, sid, -1);
+        bumpTurn(settledTurns, sid, 1);
+        // 本回合 assistant 任一条含 mission 块即算产出——时间戳界桩免疫历史 promote 卡残留
+        settlePromoteIfPending(sid, promoteDraftProduced(sid));
         const sess = get().sessions.find((s) => s.sessionId === sid);
         if ((sess?.backendType ?? sess?.agent) === "devin") {
           void get().refreshBackendQuota();
@@ -1207,7 +1277,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         applyStreamBatch(sid);
         clearStreaming(get().sessionName(sid));
         set({ busyIds: get().busyIds.filter((id) => id !== sid) });
-        settlePromoteDraft(sid, false);
+        bumpTurn(pendingTurns, sid, -1);
+        bumpTurn(activeTurns, sid, -1);
+        bumpTurn(settledTurns, sid, 1);
+        settlePromoteIfPending(sid, false);
         if ((get().inScope(sid) || !sid) && get().shouldShowInRoom(sid)) {
           const msg = String(params.message ?? "error");
           const author = get().sessionName(sid);
@@ -1653,12 +1726,19 @@ export const useHubStore = create<State & Actions>((set, get) => {
   const markUserSendStatus = (cmId: string, status: NonNullable<OutboxItem["status"]>, historyId?: number, sendError?: "context" | "expired") => {
     const update = (items: ChatItem[]) => items.map((it) =>
       it.kind === "user" && it.clientMessageId === cmId
-        ? { ...it, sendStatus: status, ...(historyId ? { historyId } : {}),
+        ? { ...it, sendStatus: status,
+            // 补 historyId 的同时把 at 平移到服务端域（serverAtOf 对已是服务端域的项幂等）：
+            // 此后该气泡不再算客户端时戳，排序/分页游标/覆盖比较统一服务端口径
+            ...(historyId ? { historyId, at: serverAtOf(it) ?? (Date.now() + serverOffset()) } : {}),
             ...(status === "failed" && sendError ? { sendError } : {}) } : it);
     const historyCache = Object.fromEntries(Object.entries(get().historyCache).map(([key, items]) => [key, update(items)]));
     const record = outbox.find((i) => i.clientMessageId === cmId);
     if (record?.bubble) record.bubble = update([record.bubble])[0] as Extract<ChatItem, { kind: "user" }>;
     set({ chatItems: update(get().chatItems), historyCache });
+    // promote prompt 发送失败：回合不会启动，直接结算挂起（produced=false 走空模板兜底）
+    if (status === "failed" && cmId === pendingPromoteDraftCmId && pendingPromoteDraftSid) {
+      settlePromoteDraft(pendingPromoteDraftSid, false);
+    }
   };
 
   const syncOutboxPending = () => {
@@ -1741,6 +1821,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
     if (stale() || !client) return "blocked";
     const finish = (result: Record<string, unknown>): SendOutcome => {
       item.status = "sent";
+      if (item.method === "prompt.send") {
+        const sid = String(item.params.sessionId ?? item.scopeKey.slice(8));
+        // outbox 单会话 FIFO：promote 入队前的 prompt 此刻已全部 accepted 并计入 pendingTurns
+        if (item.clientMessageId === pendingPromoteDraftCmId) {
+          // pendingTurns=本端已接受未终止（在途+排队）；activeTurns 额外覆盖外端发起的在途回合
+          pendingPromoteDraftSkips = Math.max(pendingTurns.get(sid) ?? 0, activeTurns.get(sid) ?? 0);
+        }
+        bumpTurn(pendingTurns, sid, 1);
+      }
       const hid = typeof result.historyId === "number" ? result.historyId : undefined;
       markUserSendStatus(item.clientMessageId, "sent", hid);
       const index = outbox.indexOf(item);
@@ -2489,6 +2578,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
       client.addEventListener("close", () => {
         if (get().client !== client) return;
         connectionEpoch++;
+        // 断连后在途回合的终止事件不会到达——清账本防残留计数误伤后续 promote 界桩
+        pendingTurns.clear();
+        activeTurns.clear();
+        settledTurns.clear();
         parkOutbox();
         set({ agentStatus: stringsFor(get().lang).agentDisconnected, linkDown: true, deliveryReady: false });
         updateTray();
@@ -2522,6 +2615,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
     disconnect: () => {
       connectionEpoch++;
+      pendingTurns.clear();
+      activeTurns.clear();
+      settledTurns.clear();
       scopeWatermarks.clear();
       scopeDrafts.clear();
       scopeRevisions.clear();
@@ -3442,6 +3538,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           sendStatus: "pending", deliveryTracked: true },
       });
       if (!cm) return false;
+      lastSentPromptCmId = cm;
       set({ busyIds: [...get().busyIds, session.sessionId] });
       const userItem: ChatItem = {
         kind: "user", at: Date.now(), text, author: "我",
@@ -4766,7 +4863,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
       }
       pendingPromoteDraftSid = sess.sessionId;
       pendingPromoteDraftAt = Date.now();
-      get().sendPrompt(S.promoteDraftPrompt);
+      pendingPromoteDraftCmId = null;
+      pendingPromoteDraftSkips = 0;
+      if (!get().sendPrompt(S.promoteDraftPrompt)) {
+        pendingPromoteDraftSid = null;
+        pendingPromoteDraftAt = 0;
+        pendingPromoteDraftSkips = 0;
+        pendingPromoteDraftCmId = null;
+      } else {
+        // skips 在此 prompt 被服务端 accepted 时才定值（finish() 按 cmId 回填），此前终止事件只消费 skip
+        pendingPromoteDraftCmId = lastSentPromptCmId;
+        pendingPromoteDraftSkips = Number.MAX_SAFE_INTEGER;
+      }
     },
 
     startMission: async (id: string) => {
