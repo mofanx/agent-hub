@@ -3886,7 +3886,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 过程卡 at<=0 时用 turnEndAt/turnStartAt 归位——否则晚到的执行过程排尾部而非汇总前
         // 在途条目（流式/刚完成未合并 historyId）at 是回合开始时刻而非完成时刻，
         // 按其 at 排序会把 at 更大的迟到落库卡钉在流式结论之后——在途条目恒置尾键
-        val combined = (incoming + dedupeTail(incoming, tail)).sortedWith(compareBy<ChatItem> { item ->
+        val merged = incoming + dedupeTail(incoming, tail)
+        // 未回显气泡的落库锚：ACK 已回 historyId 但回显未到时，气泡真实位=下一个更大
+        // historyId 落库条目的 at（钳制后 at/id 同向，user.id < 其触发卡 id 恒成立）——
+        // 先到的 process/flow/decision 卡不再把气泡压到半尾之下
+        val persistedAsc = merged.filter { historyIdOf(it) != null }.sortedBy { historyIdOf(it) }
+        fun anchorAtOf(bubble: ChatItem.User): Long? {
+            val h = bubble.historyId ?: return null
+            return persistedAsc.firstOrNull { (historyIdOf(it) ?: -1) > h }?.at?.takeIf { it > 0 }
+        }
+        val combined = merged.sortedWith(compareBy<ChatItem> { item ->
             // 乐观用户气泡：at=record.createdAt 是客户端时钟——与落库条目的 server 域 at 混排
             // 在设备时钟偏移时会沉到历史中间且越陷越深；未回显占位恒置半尾键 MAX_VALUE-1
             // （已落库 < 未合并气泡 < 在途卡），回显 copy(at=server at) 后归真实时序位
@@ -3894,7 +3903,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val inFlight = historyIdOf(item) == null &&
                 (item is ChatItem.Assistant || item is ChatItem.Thought ||
                     item is ChatItem.Tool || item is ChatItem.Plan)
-            val at = if (unmergedUser) Long.MAX_VALUE - 1
+            val anchored = if (unmergedUser) anchorAtOf(item as ChatItem.User) else null
+            val at = if (anchored != null) anchored
+                else if (unmergedUser) Long.MAX_VALUE - 1
                 else if (inFlight) Long.MAX_VALUE
                 else if (item is ChatItem.Process && item.at <= 0)
                     item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
@@ -4620,8 +4631,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     hist.none { it is ChatItem.System && sameWindow(it, t) && it.text == t.text }
                 is ChatItem.Assistant ->
                     // 指纹级匹配不限 300s 窗口但带时间门控：同作者 + live 不晚于持久化 +
-                    // 全文相等或互为前缀（含持久化截断为前缀）
-                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && earlierLive(it, t) && (it.text == (t.replyText ?: t.text) || it.text.startsWith(t.replyText ?: t.text) || (t.replyText ?: t.text).startsWith(it.text)) }
+                    // 全文相等或互为前缀（含持久化截断为前缀）；已定稿 replyText 与落库条目
+                    // 是同一条——断线/迟到恢复时 client at 可大于 server at，不再受时间门控
+                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && (t.replyText != null || earlierLive(it, t)) && (it.text == (t.replyText ?: t.text) || it.text.startsWith(t.replyText ?: t.text) || (t.replyText ?: t.text).startsWith(it.text)) }
                 is ChatItem.Thought ->
                     hist.none { it is ChatItem.Thought && sameAuthor(it, t) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Tool ->

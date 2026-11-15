@@ -134,7 +134,7 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
     section("    private data class StreamRun(", "    private val streamRuns"),
     section("    private fun queueChunk(", "    private fun applyUpdate("),
   ].join("\n");
-  const timelineOrder = section("        val combined =", "        updateScopeItems(key, combined)");
+  const timelineOrder = section("        val merged =", "        updateScopeItems(key, combined)");
   const cacheProperty = vm.match(/private val chatListCache = .+/)?.[0];
   const cacheKey = vm.match(/chatListCache\.getOrPut\(([^)]+)\)/)?.[1];
   assert.ok(cacheProperty && cacheKey);
