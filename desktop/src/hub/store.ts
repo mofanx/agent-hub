@@ -557,6 +557,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
    * 避免客户端时钟偏移导致"新消息插到历史中间" */
   let latestServerAt = 0;
   let latestServerAtAt = 0;
+  /** live 条目出生时见过的最大持久化 id：去重时只有"出生后落库"的行可覆盖它，
+   * 免疫时钟偏斜；出生前的旧行仍走 at 门控，防老前缀文本误吞新 live 条目 */
+  let maxHistIdSeen = 0;
   const noteServerAt = (at: unknown) => {
     if (typeof at === "number" && Number.isFinite(at) && at > latestServerAt) {
       latestServerAt = at;
@@ -578,6 +581,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const at = typeof o.at === "number" ? o.at : undefined;
     noteServerAt(at);
     const historyId = typeof o.id === "number" ? o.id : undefined;
+    if (historyId != null && historyId > maxHistIdSeen) maxHistIdSeen = historyId;
     const usage = (o as Record<string, unknown>).usage as Record<string, unknown> | undefined;
     const attachments = ((o as Record<string, unknown>).attachments as unknown[] | undefined)
       ?.map((it) => parseAttachment(it as Record<string, unknown>));
@@ -740,13 +744,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
       case "system":
         return near.some((h) => h.kind === "system" && h.text === it.text);
       case "assistant":
-        // 指纹级匹配不限 300s 窗口但带时间门控：同作者 + live 不晚于持久化 +
+        // 指纹级匹配不限 300s 窗口但带时序门控：同作者 +（live 不晚于持久化 at，
+        // 或历史行 id 晚于 live 条目出生水位——新行免疫时钟偏斜）+
         // 全文相等或互为前缀（含持久化截断为前缀）
         return hist.some(
           (h) =>
             h.kind === "assistant" &&
             sameAuthor(h, it) &&
-            (h.at == null || it.at == null || (serverAtOf(it) ?? it.at) <= h.at) &&
+            (h.at == null || it.at == null || (serverAtOf(it) ?? it.at) <= h.at ||
+              (it.birthHistoryId != null && h.historyId != null && h.historyId > it.birthHistoryId)) &&
             (h.text === (it.replyText ?? it.text) || h.text.startsWith(it.replyText ?? it.text) || (it.replyText ?? it.text).startsWith(h.text)),
         );
       case "thought":
@@ -754,7 +760,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
           (h) =>
             h.kind === "thought" &&
             sameAuthor(h, it) &&
-            (h.at == null || it.at == null || (serverAtOf(it) ?? it.at) <= h.at) &&
+            (h.at == null || it.at == null || (serverAtOf(it) ?? it.at) <= h.at ||
+              (it.birthHistoryId != null && h.historyId != null && h.historyId > it.birthHistoryId)) &&
             (h.text === it.text || h.text.startsWith(it.text) || it.text.startsWith(h.text)),
         );
       case "tool":
@@ -978,8 +985,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
     return isClientStamped(it) ? at + serverOffset() : at;
   };
 
+  /** 归位键：乐观 user 气泡的 Infinity 尾键只对流式块殿后有意义；与已持久化
+   * 服务端条目排序时应按真实发送时刻（归一化）比较，否则 live 卡/history 合并
+   * 会把卡插到刚发的消息之前——与落库序（消息 id < 卡 id）相反 */
+  const liveInsertKey = (it: ChatItem): number =>
+    it.kind === "user" && it.historyId == null && it.clientMessageId != null &&
+    it.deliveryTracked !== false && it.at != null && it.at > 0 && latestServerAt > 0
+      ? it.at + serverOffset()
+      : timelineAt(it);
+
   const compareTimeline = (a: ChatItem, b: ChatItem): number =>
-    timelineAt(a) - timelineAt(b) || (a.historyId ?? Infinity) - (b.historyId ?? Infinity);
+    liveInsertKey(a) - liveInsertKey(b) || (a.historyId ?? Infinity) - (b.historyId ?? Infinity);
 
   const mergeHistoryItems = (a: ChatItem[], b: ChatItem[]): ChatItem[] => {
     const byId = new Map<number, ChatItem>();
@@ -1136,6 +1152,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
     streamQueue.delete(sessionId);
     // 33ms 窗口内用户可能已切换会话/房间：scope 校验与事件入口一致，防止 A 的缓冲写进 B 的 chatItems
     if (!get().inScope(sessionId) || !get().shouldShowInRoom(sessionId)) return;
+    // 回合终止（done/error/取消）后在途的迟到 chunk 丢弃——否则会在已 clearStreaming 的
+    // 尾部再造一个 streaming 幽灵条目，与随后落库的结论行重复渲染
+    if (!get().busyIds.includes(sessionId)) return;
     const author = get().sessionName(sessionId);
     const items = [...get().chatItems];
     let seq = get().itemSeq;
@@ -1147,7 +1166,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (last?.kind === kind && last.author === author && last.streaming) {
         items[items.length - 1] = { ...last, text: last.text + text, streaming: true, at: Date.now() };
       } else {
-        items.push({ kind, at: Date.now(), id: ++seq, text, author, streaming: true });
+        items.push({ kind, at: Date.now(), id: ++seq, text, author, streaming: true, birthHistoryId: maxHistIdSeen });
       }
     }
     set({ chatItems: items, itemSeq: seq });
@@ -1202,6 +1221,9 @@ export const useHubStore = create<State & Actions>((set, get) => {
             set({ busyIds: [...get().busyIds, sid] });
           }
         } else {
+          // 清 busy 前先吸收取消前排队的合法尾块；busy 移除后 applyStreamBatch
+          // 门控会丢弃终止信号之后才到达的 straggler chunk（防幽灵条目）
+          applyStreamBatch(sid);
           set({ busyIds: get().busyIds.filter((id) => id !== sid) });
           get().refreshAll();
           // 取消回合的唯一终止信号：done/error 与 generating(false) 同 tick 发出，
@@ -1214,7 +1236,6 @@ export const useHubStore = create<State & Actions>((set, get) => {
               bumpTurn(pendingTurns, sid, -1);
               bumpTurn(activeTurns, sid, -1);
               if (pendingPromoteDraftSid !== sid || pendingPromoteDraftAt !== marker) return;
-              applyStreamBatch(sid);
               settlePromoteIfPending(sid, promoteDraftProduced(sid));
             }, 200);
           }
@@ -1378,11 +1399,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
               : -1;
         if (idx >= 0) items[idx] = { ...item, at: items[idx]!.at ?? item.at };
         else {
-          // 迟到补写卡（过程卡/flow 卡）按 at 锚定插入，越过尾部 at 更大项与在途流式条目
+          // 迟到补写卡（过程卡/flow 卡）按 at 锚定插入，越过尾部 at 更大项与在途流式条目；
+          // 乐观 user 气泡按真实发送时刻比较（liveInsertKey），卡不插到已发消息之前
+          const key = timelineAt(item);
           let insertAt = items.length;
           for (let i = items.length - 1; i >= 0; i--) {
-            const t = items[i]!;
-            if (compareTimeline(t, item) > 0) insertAt = i; else break;
+            if (liveInsertKey(items[i]!) > key) insertAt = i; else break;
           }
           items.splice(insertAt, 0, item);
         }
@@ -1500,7 +1522,19 @@ export const useHubStore = create<State & Actions>((set, get) => {
           list = list.filter((it) => !(it.kind === "permission" && it.requestId === reqId));
         }
         const idx = list.findIndex((it) => it.kind === "decision" && it.historyId === item.historyId);
-        set({ chatItems: idx >= 0 ? list.map((it, i) => (i === idx ? item : it)) : [...list, item] });
+        if (idx >= 0) {
+          set({ chatItems: list.map((it, i) => (i === idx ? item : it)) });
+        } else {
+          // 新卡按落库序归位：越过尾部 at 更大项与在途流式/尾键条目，与 room.process 同构
+          const key = timelineAt(item);
+          let insertAt = list.length;
+          for (let i = list.length - 1; i >= 0; i--) {
+            if (liveInsertKey(list[i]!) > key) insertAt = i; else break;
+          }
+          list = [...list];
+          list.splice(insertAt, 0, item);
+          set({ chatItems: list });
+        }
         break;
       }
       case "member.quota": {
@@ -1724,6 +1758,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
   /** 标记 user 气泡的发送状态（按 clientMessageId 定位最近一条） */
   const markUserSendStatus = (cmId: string, status: NonNullable<OutboxItem["status"]>, historyId?: number, sendError?: "context" | "expired") => {
+    if (historyId != null && historyId > maxHistIdSeen) maxHistIdSeen = historyId;
     const update = (items: ChatItem[]) => items.map((it) =>
       it.kind === "user" && it.clientMessageId === cmId
         ? { ...it, sendStatus: status,

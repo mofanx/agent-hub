@@ -267,6 +267,8 @@ test("迟到过程卡位于正在输出的结论之前且不拆断后续 chunk",
   const e = await environment(t);
   await e.connect();
   await e.view();
+  // 真实事件序：generating 先于 chunk 到达；无 busy 的 chunk 会被 applyStreamBatch 门控丢弃
+  e.sockets[0]!.emit({ method: "session.generating", params: { sessionId: "s1", stoppable: true } });
   e.get().applyUpdate("s1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "part" } });
   await until(() => e.get().chatItems.some((it: Obj) => it.streaming));
   const stream = e.get().chatItems.find((it: Obj) => it.streaming);
@@ -300,6 +302,9 @@ test("并行成员的 chunk 与工具事件按接收顺序落入时间线", asyn
   const e = await environment(t);
   await e.connect();
   e.set({ currentRoom: { ...room, members: [["s1", "Worker"], ["s2", "Other"]] }, currentSession: null, chatItems: [] });
+  // 真实事件序：generating 先于 chunk 到达；无 busy 的 chunk 会被 applyStreamBatch 门控丢弃
+  e.sockets[0]!.emit({ method: "session.generating", params: { sessionId: "s1", stoppable: true } });
+  e.sockets[0]!.emit({ method: "session.generating", params: { sessionId: "s2", stoppable: true } });
   const chunk = (id: string, text: string) =>
     e.get().applyUpdate(id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
   chunk("s1", "A1");
