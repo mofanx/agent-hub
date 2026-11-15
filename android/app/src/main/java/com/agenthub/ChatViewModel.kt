@@ -2781,6 +2781,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         pendingPromoteDraftSid = s.sessionId
         pendingPromoteDraftFromSeq = itemSeq
+        pendingPromoteDraftFromHistoryId = chatItems.mapNotNull { historyIdOf(it) }.maxOrNull() ?: 0
         sendPrompt(stringsFor(lang).promoteDraftPrompt)
     }
 
@@ -2790,6 +2791,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (pendingPromoteDraftSid != sid) return
         pendingPromoteDraftSid = null
         pendingPromoteDraftFromSeq = -1
+        pendingPromoteDraftFromHistoryId = 0
         if (produced || !inScope(sid)) return
         chatItems.add(ChatItem.Assistant(++itemSeq,
             "```mission\n{\"goal\":\"\",\"acceptanceCriteria\":[]}\n```", sessionName(sid)))
@@ -3672,7 +3674,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 flowId,
                 f,
                 "",
-                f.startedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                // 兜底 at 取时间线最大落库 at+1（server 域尾部锚定）——client 时钟占位会
+                // 在设备钟慢于 hub 时插到历史中间
+                f.startedAt.takeIf { it > 0 }
+                    ?: (items.mapNotNull { i -> i.at.takeIf { it > 0 } }.maxOrNull()?.plus(1)
+                        ?: System.currentTimeMillis()),
             )
         )
         updateScopeItems(key, items)
@@ -3878,14 +3884,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 在途条目（流式/刚完成未合并 historyId）at 是回合开始时刻而非完成时刻，
         // 按其 at 排序会把 at 更大的迟到落库卡钉在流式结论之后——在途条目恒置尾键
         val combined = (incoming + dedupeTail(incoming, tail)).sortedWith(compareBy<ChatItem> { item ->
-            // 乐观用户气泡：at=record.createdAt 是入队时刻——deferred/离线排队件滞后于实际送达，
-            // 恒置半尾键 MAX_VALUE-1（已落库 < 排队消息 < 在途卡）；即时件 createdAt 即真实到达序，
-            // 按 at 排序才不会被自己触发的编排/过程卡反超（卡片 at 必晚于消息）
+            // 乐观用户气泡：at=record.createdAt 是客户端时钟——与落库条目的 server 域 at 混排
+            // 在设备时钟偏移时会沉到历史中间且越陷越深；未回显占位恒置半尾键 MAX_VALUE-1
+            // （已落库 < 未合并气泡 < 在途卡），回显 copy(at=server at) 后归真实时序位
             val unmergedUser = item is ChatItem.User && item.clientMessageId != null && item.historyAt == null
             val inFlight = historyIdOf(item) == null &&
                 (item is ChatItem.Assistant || item is ChatItem.Thought ||
                     item is ChatItem.Tool || item is ChatItem.Plan)
-            val at = if (unmergedUser && item.sendStatus == "deferred") Long.MAX_VALUE - 1
+            val at = if (unmergedUser) Long.MAX_VALUE - 1
                 else if (inFlight) Long.MAX_VALUE
                 else if (item is ChatItem.Process && item.at <= 0)
                     item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
@@ -4600,7 +4606,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 is ChatItem.User ->
                     hist.none { it is ChatItem.User && if (it.clientMessageId != null || t.clientMessageId != null) {
                         it.clientMessageId != null && it.clientMessageId == t.clientMessageId
-                    } else sameWindow(it, t) && sameAuthor(it, t) && (it.text == t.text || it.text.endsWith(t.text)) }
+                    } else {
+                        // 同域比较：已回显气泡用 historyAt（server 域）套窗；未回显气泡 client at
+                        // 与 server at 跨时钟域，300s 窗在偏移下失效——按指纹吞并（重复发送回显后自愈）
+                        val fp = sameAuthor(it, t) && (it.text == t.text || it.text.endsWith(t.text))
+                        val ha = t.historyAt
+                        if (ha != null) fp && kotlin.math.abs(it.at - ha) <= 300_000L else fp
+                    } }
                 is ChatItem.System ->
                     hist.none { it is ChatItem.System && sameWindow(it, t) && it.text == t.text }
                 is ChatItem.Assistant ->
@@ -6281,10 +6293,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (sessions.firstOrNull { it.sessionId == sid }?.let { it.backendType ?: it.agent } == "devin") {
                     refreshBackendQuota()
                 }
-                // 本回合任一条 assistant 含 mission 块即算产出——界桩序号界定，免疫历史 promote 卡残留
+                // 本回合任一条 assistant 含 mission 块即算产出——双界桩界定（live 序号 +
+                // 恢复 historyId 水位），免疫历史 promote 卡残留；断线恢复的负 id 落库项
+                // 经 historyIdOf>界桩识别为同回合产出，author 兼容持久化 "(来源)" 后缀
+                val promoteAuthor = sessionName(sid)
                 settlePromoteDraft(sid, chatItems.any {
-                    it is ChatItem.Assistant && it.id > pendingPromoteDraftFromSeq &&
-                        it.author == sessionName(sid) && it.text.contains("```mission")
+                    it is ChatItem.Assistant &&
+                        (it.id > pendingPromoteDraftFromSeq ||
+                            (historyIdOf(it) ?: 0) > pendingPromoteDraftFromHistoryId) &&
+                        (it.author == promoteAuthor || it.author.startsWith("$promoteAuthor (")) &&
+                        it.text.contains("```mission")
                 })
                 refreshAll()
             }
@@ -6489,6 +6507,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 会话升级工单起草挂起：prompt.done/error 时若无 mission 块产出，注入空模板草稿卡兜底 */
     private var pendingPromoteDraftSid: String? = null
     private var pendingPromoteDraftFromSeq: Long = -1
+    private var pendingPromoteDraftFromHistoryId: Long = 0
 
     /** UI 层判定：该 ChatItem id 是否为仍在流式增长的尾部 item（与 UI streaming 标记同语义） */
     fun isStreamingTail(id: Long): Boolean =
