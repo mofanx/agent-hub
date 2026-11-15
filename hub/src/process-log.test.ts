@@ -283,4 +283,58 @@ describe("process history persistence", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("同毫秒并列兜底：定稿 at 取 minAt 下限，过程卡不落到总结之后", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    const realNow = Date.now;
+    try {
+      Date.now = () => 5000;
+      // 草稿行在首 chunk 即占位（id 小于过程卡行）；过程事件与定稿同毫秒
+      const draft = store.beginReplyDraft("room", "room1", {
+        at: 5000,
+        kind: "assistant",
+        author: "bot",
+        text: "片段",
+      });
+      store.append("room", "room1", { at: 5000, kind: "process", author: "bot", text: "{}" });
+      const cardAt = 5000;
+      store.completeReplyDraft(draft, "完成", cardAt + 1);
+      const entries = store.read("room", "room1");
+      assert.deepEqual(
+        entries.map((e) => e.kind),
+        ["process", "assistant"],
+        "同毫秒时 id 并列不放大错序：定稿 at 抬到 cardAt+1 仍排在卡后",
+      );
+      assert.equal(entries[1]!.at, cardAt + 1, "minAt 高于当前时刻时定稿 at 取下限值");
+    } finally {
+      Date.now = realNow;
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("同毫秒并列兜底（中断）：interruptReplyDraft 同样吃 minAt 下限", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
+    const store = new Store(dir);
+    const realNow = Date.now;
+    try {
+      Date.now = () => 7000;
+      const draft = store.beginReplyDraft("room", "room1", {
+        at: 7000,
+        kind: "assistant",
+        author: "bot",
+        text: "片段",
+      });
+      store.append("room", "room1", { at: 7000, kind: "process", author: "bot", text: "{}" });
+      store.interruptReplyDraft(draft, 7001);
+      const entries = store.read("room", "room1");
+      assert.deepEqual(entries.map((e) => e.kind), ["process", "assistant"]);
+      assert.equal(entries[1]!.at, 7001);
+    } finally {
+      Date.now = realNow;
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

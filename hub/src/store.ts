@@ -637,21 +637,21 @@ export class Store {
     }
   }
 
-  completeReplyDraft(rowId: number, text: string): void {
+  completeReplyDraft(rowId: number, text: string, minAt = 0): void {
     try {
       this.prep("UPDATE history SET text = ?, draft = 0, at = ? WHERE id = ? AND draft = 1")
-        .run(text, Date.now(), rowId);
+        .run(text, Math.max(Date.now(), minAt), rowId);
     } catch (err) {
       logWarn("store", `completeReplyDraft failed: ${String(err)}`);
     }
   }
 
-  interruptReplyDraft(rowId: number): void {
+  interruptReplyDraft(rowId: number, minAt = 0): void {
     try {
       this.prep(
           "UPDATE history SET text = CASE WHEN trim(text) = '' THEN ? ELSE text || ? END, draft = 0, at = ? WHERE id = ? AND draft = 1",
         )
-        .run(INTERRUPTED_REPLY_MARKER, `\n\n${INTERRUPTED_REPLY_MARKER}`, Date.now(), rowId);
+        .run(INTERRUPTED_REPLY_MARKER, `\n\n${INTERRUPTED_REPLY_MARKER}`, Math.max(Date.now(), minAt), rowId);
     } catch (err) {
       logWarn("store", `interruptReplyDraft failed: ${String(err)}`);
     }

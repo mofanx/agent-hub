@@ -1248,9 +1248,12 @@ const markTurnStart = (sessionId: string): void => {
   if (!turnStarts.has(sessionId)) turnStarts.set(sessionId, Date.now());
 };
 
-function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interrupted" = "done"): void {
+function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interrupted" = "done"): number | undefined {
   const buf = turnProcess.take(sessionId);
-  if (buf.length === 0) return;
+  if (buf.length === 0) return undefined;
+  // 返回最后过程事件时刻：调用方用作草稿定稿 at 的下限（cardAt+1），
+  // 消除同毫秒 (at,id) 并列时小 id 草稿行排到过程卡之前的错序窗
+  const lastAt = buf[buf.length - 1]!.at;
   const roomId = roomIdForSessionTurn(sessionId);
   for (const item of buf) {
     store.append("session", sessionId, {
@@ -1260,9 +1263,9 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
       text: item.text,
     });
   }
-  if (!roomId) return;
+  if (!roomId) return lastAt;
   // 自动决策回合的过程卡与 assistant 草稿同等隐藏：host 内部模式思考落房史即成孤儿卡
-  if (roomModeManager.isDecidingTurn(sessionId, roomId)) return;
+  if (roomModeManager.isDecidingTurn(sessionId, roomId)) return lastAt;
   // 房间历史只写一条聚合过程卡（不逐条散装），meta 供客户端钻取/展开
   const turnStartAt = buf[0]!.at;
   const turnEndAt = buf[buf.length - 1]!.at;
@@ -1276,18 +1279,19 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
     roomModeManager.flowIdForTurn(sessionId, roomId),
     missionManager.missionIdForTurn(sessionId, roomId),
   );
-  if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return;
+  if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return lastAt;
   // 卡锚定最后一条过程事件的时刻而非落库时刻：结论条目以完成时刻落库必然在其后；
   // 延迟 flush（僵尸/取消/异常收尾）也不会把卡钉到时间线末尾
-  const at = buf[buf.length - 1]!.at;
+  const at = lastAt;
   const text = JSON.stringify(meta);
   const author = displayNameFor(sessionId);
   const id = store.append("room", roomId, { at, kind: "process", author, text });
-  if (id < 0) return;
+  if (id < 0) return lastAt;
   broadcast({
     method: "room.process",
     params: { roomId, entry: { id, at, kind: "process", author, text } },
   } as HubEvent);
+  return lastAt;
 }
 
 function displayNameFor(sessionId: string): string {
@@ -1358,20 +1362,21 @@ function onTurnProgress(sessionId: string, fullText: string): void {
   }
 }
 
-function interruptTurnDrafts(sessionId: string): void {
+function interruptTurnDrafts(sessionId: string, minAt = 0): void {
   turnStarts.delete(sessionId);
   turnEnds.set(sessionId, Date.now());
-  flushTurnProcess(sessionId, "interrupted");
+  const procAt = flushTurnProcess(sessionId, "interrupted");
+  const atFloor = Math.max(minAt, (procAt ?? -1) + 1);
   const draft = turnDrafts.get(sessionId);
   if (!draft) return;
   dropTurnDraft(sessionId);
   // 中断收尾前补写节流期内未落库的尾部增量，保留最新片段
   if (draft.lastText) writeTurnDraft(sessionId, draft);
   if (draft.sessionDraftId !== undefined) {
-    store.interruptReplyDraft(draft.sessionDraftId);
+    store.interruptReplyDraft(draft.sessionDraftId, atFloor);
   }
   if (draft.roomDraftId !== undefined) {
-    store.interruptReplyDraft(draft.roomDraftId);
+    store.interruptReplyDraft(draft.roomDraftId, atFloor);
   }
 }
 
@@ -1384,7 +1389,9 @@ function onTurnEnd(
   const t0 = turnStarts.get(sessionId) ?? Date.now();
   turnStarts.delete(sessionId);
   turnEnds.set(sessionId, Date.now());
-  flushTurnProcess(sessionId, status);
+  const procAt = flushTurnProcess(sessionId, status);
+  // 定稿 at 下限抬到过程卡锚点 +1：同毫秒 (at,id) 并列时防止小 id 草稿行排到卡前
+  const atFloor = (procAt ?? -1) + 1;
   const draft = turnDrafts.get(sessionId);
   dropTurnDraft(sessionId);
   if (status === "interrupted") {
@@ -1392,20 +1399,20 @@ function onTurnEnd(
     // 收尾前先补写节流期内未落库的尾部增量
     if (draft?.lastText) writeTurnDraft(sessionId, draft);
     if (draft?.sessionDraftId !== undefined) {
-      store.interruptReplyDraft(draft.sessionDraftId);
+      store.interruptReplyDraft(draft.sessionDraftId, atFloor);
     }
     if (draft?.roomDraftId !== undefined) {
-      store.interruptReplyDraft(draft.roomDraftId);
+      store.interruptReplyDraft(draft.roomDraftId, atFloor);
     }
     roomModeManager.endDecidingTurn(sessionId);
     return;
   }
   if (text.trim()) {
     if (draft?.sessionDraftId !== undefined) {
-      store.completeReplyDraft(draft.sessionDraftId, text);
+      store.completeReplyDraft(draft.sessionDraftId, text, atFloor);
     } else if (opLedger.commit(`reply:${sessionId}:${t0}:session`, "assistant")) {
       store.append("session", sessionId, {
-        at: Date.now(),
+        at: Math.max(Date.now(), atFloor),
         kind: "assistant",
         author: displayName,
         text,
@@ -1417,13 +1424,13 @@ function onTurnEnd(
       // turn 提交不变量：游标推进的过期回复不落房史（将被作废重跑）
       if (roomModeManager.isStaleTurnCommit(sessionId, roomId)) {
         if (draft?.roomDraftId !== undefined) {
-          store.interruptReplyDraft(draft.roomDraftId);
+          store.interruptReplyDraft(draft.roomDraftId, atFloor);
         }
       } else if (draft?.roomDraftId !== undefined) {
-        store.completeReplyDraft(draft.roomDraftId, text);
+        store.completeReplyDraft(draft.roomDraftId, text, atFloor);
       } else if (opLedger.commit(`reply:${sessionId}:${t0}:room:${roomId}`, "assistant")) {
         store.append("room", roomId, {
-          at: Date.now(),
+          at: Math.max(Date.now(), atFloor),
           kind: "assistant",
           author: displayName,
           text,
@@ -1432,10 +1439,10 @@ function onTurnEnd(
     }
   } else {
     if (draft?.sessionDraftId !== undefined) {
-      store.interruptReplyDraft(draft.sessionDraftId);
+      store.interruptReplyDraft(draft.sessionDraftId, atFloor);
     }
     if (draft?.roomDraftId !== undefined) {
-      store.interruptReplyDraft(draft.roomDraftId);
+      store.interruptReplyDraft(draft.roomDraftId, atFloor);
     }
   }
   roomModeManager.endDecidingTurn(sessionId);
@@ -1611,10 +1618,10 @@ function onAgentEvent(event: HubEvent): void {
       });
   } else if (event.method === "prompt.error") {
     if (sessionId) {
-      flushTurnProcess(sessionId, "failed");
+      const procAt = flushTurnProcess(sessionId, "failed");
       const errorRoomId = roomIdForSessionTurn(sessionId);
       const turnContext = missionManager.captureTurnContext(sessionId, errorRoomId);
-      interruptTurnDrafts(sessionId);
+      interruptTurnDrafts(sessionId, (procAt ?? -1) + 1);
       const message = String(event.params.message ?? "").trim() || "turn error";
       const author = displayNameFor(sessionId);
       const stage =
