@@ -171,25 +171,30 @@ describe("编排唤起过滤（RoomModeManager 集成）", () => {
   });
 
   it("开关关闭（房间级 relevanceFilter=false / 全局 disabled）时全放行", async () => {
-    const { room, prompted, manager } = setup("mention");
-    // 复刻 index.ts 接线语义：房间级覆盖 > 全局开关
-    const filter = new RelevanceFilter({ enabled: true });
-    manager.setRelevanceFilter(async (r, text) => {
-      const enabled = r.relevanceFilter ?? filter.enabled;
-      if (!enabled) return true;
-      return (await filter.isRelevant(text)).relevant;
-    });
-    room.relevanceFilter = false;
-    const r = await manager.handle(room, "你好", {});
-    assert.deepEqual(r.sent.sort(), ["host", "s1"], "房间级关闭时无 @ 广播照常派发");
-    assert.equal(prompted.length, 2);
+    for (const [roomFlag, globalEnabled] of [
+      [false, true],
+      [undefined, false],
+    ] as const) {
+      const { room, prompted, manager } = setup("mention");
+      // 复刻 index.ts 接线语义：房间级覆盖 > 全局开关
+      const filter = new RelevanceFilter({ enabled: globalEnabled });
+      manager.setRelevanceFilter(async (r, text) => {
+        const enabled = r.relevanceFilter ?? filter.enabled;
+        if (!enabled) return true;
+        return (await filter.isRelevant(text)).relevant;
+      });
+      room.relevanceFilter = roomFlag;
+      const r = await manager.handle(room, "你好", {});
+      assert.deepEqual(r.sent, ["host"], "关闭过滤后由默认应答者回答");
+      assert.deepEqual(prompted, ["host"]);
+    }
   });
 
   it("mention 模式：携带 note 的短消息跳过 chatter 判定照常派发", async () => {
     const { room, prompted, manager } = setup("mention");
     const note = "上一条用户消息已处理，但回复因 Hub 重启未保存。请直接回答以下新消息，不要重复处理上一条：";
     const r = await manager.handle(room, "嗯", { note });
-    assert.deepEqual(r.sent.sort(), ["host", "s1"], "note 存在时短消息不应被过滤");
-    assert.equal(prompted.length, 2);
+    assert.deepEqual(r.sent, ["host"], "note 存在时短消息不应被过滤");
+    assert.deepEqual(prompted, ["host"]);
   });
 });

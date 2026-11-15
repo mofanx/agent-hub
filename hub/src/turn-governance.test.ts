@@ -209,7 +209,7 @@ describe("mention 模式 SILENT 语义", () => {
     assert.equal(manager.isRoomTurn("s3"), false);
   });
 
-  it("无 @ 时回退为全体成员（既有兜底语义）", async () => {
+  it("无 @ 时回退为默认应答者单成员（既有兜底语义）", async () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [
       { sessionId: "s1", name: "coder" },
@@ -228,7 +228,8 @@ describe("mention 模式 SILENT 语义", () => {
       () => {},
     );
     const res = await manager.handle(room, "大家看看", {});
-    assert.deepEqual(res.sent.sort(), ["s1", "s2"]);
+    assert.deepEqual(res.sent, ["s1"], "无 @ 默认首成员单人应答");
+    assert.deepEqual(res.mentioned, []);
   });
 });
 
@@ -279,7 +280,7 @@ describe("conductor maxRounds 轮次预算", () => {
     );
   });
 
-  it("默认 maxRounds=8，未超限时 continue 正常加轮", async () => {
+  it("默认 maxRounds 不限，continue 正常加轮", async () => {
     const rooms = new RoomManager();
     const room = rooms.create(
       "team",
@@ -307,7 +308,7 @@ describe("conductor maxRounds 轮次预算", () => {
       '```json\n{"tasks":[{"to":"coder","task":"实现"}]}\n```',
     );
     let flow = orch.getFlow(room.roomId) as Record<string, unknown>;
-    assert.equal(flow.maxRounds, 8);
+    assert.equal(flow.maxRounds, null);
 
     await orch.onPromptDone("worker", "done");
     await orch.onPromptDone(
@@ -396,7 +397,7 @@ describe("turnGuards 生命周期", () => {
     );
   });
 
-  it("steer-queue：turn 完成后 drain 合并走 sendPrompt 正常登记 guard", async () => {
+  it("steer-queue：turn 完成后 drain 逐项走 sendPrompt 正常登记 guard", async () => {
     const { store, room, agent, manager, prompts } = setup();
     let busy = false;
     agent.isBusy = () => busy;
@@ -409,12 +410,25 @@ describe("turnGuards 生命周期", () => {
     await new Promise((r) => setImmediate(r));
     assert.equal(prompts.length, 1);
 
+    const contents: unknown[] = [];
+    agent.prompt = async (sid, content) => {
+      prompts.push(sid);
+      contents.push(content);
+    };
     busy = false;
     await manager.onPromptDone("s1", "完成");
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(prompts.length, 2, "drain 后合并 prompt 外发");
+    assert.equal(prompts.length, 2, "drain 逐项外发队首");
+    assert.ok(String(contents[0]).includes("补充A"));
+    assert.ok(!String(contents[0]).includes("补充B"), "不合并后续排队项");
     assert.equal(guardsOf(manager).size, 1, "drain 出的 prompt 正常登记 guard");
+    busy = false;
+    await manager.onPromptDone("s1", "完成2");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 3, "下一回合 drain 第二条");
+    assert.ok(String(contents[1]).includes("补充B"));
   });
 
   it("steer-queue：在跑 turn 输出不误判 stale（入队消息不推进游标覆盖）", async () => {
@@ -502,8 +516,19 @@ describe("turnGuards 生命周期", () => {
     m2.resumeFlows();
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(prompts.length, 1, "idle 后 drain 合并为单 prompt");
-    assert.ok(prompts[0]!.includes("排一") && prompts[0]!.includes("排二"));
+    assert.equal(prompts.length, 1, "idle 后 drain 逐项投递队首");
+    assert.ok(prompts[0]!.includes("排一"));
+    assert.ok(!prompts[0]!.includes("排二"), "不合并");
+    assert.equal(
+      (m2 as unknown as { followUps: Map<string, unknown[]> }).followUps.get("s1")?.length,
+      1,
+      "队首投递后仍保留后一条",
+    );
+    await m2.onPromptDone("s1", "done");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(prompts.length, 2, "下一回合 drain 第二条");
+    assert.ok(prompts[1]!.includes("排二"));
     assert.equal(
       (m2 as unknown as { followUps: Map<string, unknown[]> }).followUps.size, 0,
     );
@@ -779,7 +804,8 @@ describe("self→lastSpeaker 回退收窄", () => {
       executed = { mode, params: (opts as { params?: unknown }).params };
       return { sent: [], mentioned: [], skipped: [] };
     };
-    rm.autoDecisions.set("s1", { roomId, text: "好", note: undefined, quote: undefined, content: undefined, sessionNote: undefined, artifactContext: undefined, missionId: undefined });
+    rm.autoDecisions.set(roomId, { roomId, text: "好", note: undefined, quote: undefined, content: undefined, sessionNote: undefined, artifactContext: undefined, missionId: undefined });
+    (m as unknown as { promptRooms: Map<string, string> }).promptRooms.set("s1", roomId);
     await m.onPromptDone("s1", '```json\n{"mode":"self","reason":"简单对话"}\n```');
     return executed;
   };

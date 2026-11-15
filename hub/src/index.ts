@@ -15,7 +15,7 @@ import {
   type ElicitationValue,
   type HubEvent,
 } from "./agent.js";
-import { RoomManager, dedupeName, remapRoomModeConfig, normalizePersonaValue, parseAliasesParam, parseMemberRolesParam, serializePersonaCard, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
+import { RoomManager, dedupeName, remapRoomModeConfig, normalizePersonaValue, parseAliasesParam, parseMemberRolesParam, roomExecutionLimits, roomNoticeText, serializePersonaCard, type Room, type RoomMode, type RoomModeConfig, type EventAction } from "./room.js";
 import { helpAnswerIntent, RoomModeManager } from "./room-modes.js";
 import type { AgentOps } from "./room-modes.js";
 import { Store, lostReplyAction, type SessionMeta, type Connection } from "./store.js";
@@ -299,19 +299,35 @@ function parseRoomModeConfig(
     const n = Number(params.debateRounds);
     if (Number.isFinite(n) && n > 0) config.debateRounds = Math.max(1, Math.min(5, Math.floor(n)));
   }
-  if (params?.maxRounds != null) {
-    const n = Number(params.maxRounds);
-    if (Number.isFinite(n) && n > 0) config.maxRounds = Math.max(1, Math.min(64, Math.floor(n)));
-  }
+
+  const strictInt = (key: string, v: unknown): number => {
+    const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
+    roomExecutionLimits({ [key]: n } as { maxConcurrent?: number });
+    return n;
+  };
+  if (params?.maxRounds != null) config.maxRounds = strictInt("maxRounds", params.maxRounds);
+  if (params?.maxConcurrent != null) config.maxConcurrent = strictInt("maxConcurrent", params.maxConcurrent);
+  if (params?.maxAgentCalls != null) config.maxAgentCalls = strictInt("maxAgentCalls", params.maxAgentCalls);
+  if (params?.maxFlowDurationMs != null) config.maxFlowDurationMs = strictInt("maxFlowDurationMs", params.maxFlowDurationMs);
   const rf = params?.relevanceFilter;
   if (rf != null) {
     const on = !(rf === false || rf === "false" || rf === "off" || rf === "0" || rf === 0);
     config.relevanceFilter = on;
   }
-  const roles = parseMemberRolesParam(params?.memberRoles, all);
-  if (roles) config.memberRoles = roles;
-  const aliases = parseAliasesParam(params?.aliases, all);
-  if (aliases) config.aliases = aliases;
+  if (params?.memberRoles !== undefined) {
+    config.memberRoles = parseMemberRolesParam(params.memberRoles, all) ?? {};
+  }
+  if (params?.aliases !== undefined) {
+    config.aliases = parseAliasesParam(params.aliases, all) ?? {};
+  }
+  const CONFIG_KEYS = ["conductorId", "parallelSummarizerId", "pipelineOrder", "debateSides", "debateJudge", "debateRounds", "maxRounds", "maxConcurrent", "maxAgentCalls", "maxFlowDurationMs", "relevanceFilter", "memberRoles", "aliases", "internal"] as const;
+  if (params) {
+    for (const k of CONFIG_KEYS) {
+      if (Object.hasOwn(params, k) && params[k] === null) {
+        (config as Record<string, unknown>)[k] = undefined;
+      }
+    }
+  }
   return config;
 }
 
@@ -737,6 +753,7 @@ const roomModeManager = new RoomModeManager(
     return Number.isFinite(v) && v > 0 ? v : 0;
   })(),
 );
+roomModeManager.setAutomaticChecksEnabled(process.env.HUB_GROUP_ISOLATED_CHECKS === "1");
 roomModeManager.setStore(store);
 
 let restoringRuntime = true;
@@ -1721,6 +1738,7 @@ function onAgentEvent(event: HubEvent): void {
 
 function broadcastRoomNotice(roomId: string, message: string, meta?: unknown): void {
   if (!roomId || !message) return;
+  message = roomNoticeText(message, meta);
   // 恢复 flow 会重放派工等通知；与最后一条历史相同时跳过写入，避免重启后重复。
   // 派工类通知会在 system 条目后再落一张 process 卡，尾部为 [system, process] 对时同样视为已写入
   const tail = store.read("room", roomId, 2);
@@ -1737,7 +1755,10 @@ function broadcastRoomNotice(roomId: string, message: string, meta?: unknown): v
       text: message,
     });
   }
-  broadcast({ method: "room.notice", params: { roomId, message } });
+  broadcast({
+    method: "room.notice",
+    params: { roomId, message, ...(meta !== undefined ? { meta } : {}) },
+  });
   // 结构化通知（如派工清单）：系统文本之外再落一条 process 卡并广播，恢复重放去重时不重复落卡
   const m = meta as { type?: unknown; sessionId?: unknown; tasks?: unknown } | undefined;
   if (wrote && m?.type === "dispatch" && Array.isArray(m.tasks)) {
@@ -2426,14 +2447,17 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       const room = rooms.get(roomId);
       if (!room) throw new Error(`unknown room: ${roomId}`);
       const name = dedupeRoomName(String(req.params?.name ?? "").trim() || room.name, roomId);
-      const ids = (req.params?.sessionIds as string[]) ?? [];
-      const mode = parseRoomMode(req.params?.mode);
+      const rawIds = req.params?.sessionIds;
+      const ids = Array.isArray(rawIds) ? (rawIds as string[]) : undefined;
+      const mode = req.params?.mode != null ? parseRoomMode(req.params.mode) : room.mode;
       const all = listAllSessions();
-      const members = ids.map((id) => {
-        const s = all.find((x) => x.sessionId === id);
-        if (!s) throw new Error(`unknown session: ${id}`);
-        return { sessionId: s.sessionId, name: s.name };
-      });
+      const members = ids === undefined
+        ? room.members.map((m) => ({ sessionId: m.sessionId, name: m.name }))
+        : ids.map((id) => {
+            const s = all.find((x) => x.sessionId === id);
+            if (!s) throw new Error(`unknown session: ${id}`);
+            return { sessionId: s.sessionId, name: s.name };
+          });
       const config = parseRoomModeConfig(req.params, members);
       rooms.update(roomId, name, members, mode, config);
       persistState();

@@ -242,18 +242,20 @@ for (const phase of ["summarizing", "reviewing", "done"]) {
   });
 }
 
-it("验收已否定且达到迭代上限，只能汇总未完成状态，不能 done", async (t) => {
+it("验收 continue 无迭代上限：超过旧上限仍派工，complete 才收敛", async (t) => {
   const f = fixture(t);
   await f.orch.start(f.room, "goal", [task("t1", "a"), task("t2", "b"), task("t3", "c")]);
   for (const sid of ["a", "b", "c"]) await f.orch.onPromptDone(sid, "done");
-  for (let i = 2; i <= 3; i++) {
+  for (let i = 2; i <= 10; i++) {
     await f.orch.onPromptDone("host", JSON.stringify({ decision: "continue", reason: "not yet", tasks: [task(`r${i}`, "a")] }));
     await f.orch.onPromptDone("a", "done");
   }
-  await f.orch.onPromptDone("host", JSON.stringify({ decision: "continue", reason: "still missing", tasks: [task("r4", "a")] }));
-  await f.orch.onPromptDone("host", "部分工作已完成");
-  assert.equal(f.view().phase, "awaiting-retry");
-  assert.ok(f.view().failureMessage);
+  const mid = f.view();
+  assert.equal(mid.phase, "reviewing");
+  assert.ok(((mid as { iteration?: number }).iteration ?? 0) >= 10, "无迭代上限继续加轮不在 8 轮停");
+  await f.orch.onPromptDone("host", JSON.stringify({ decision: "complete", reason: "done" }));
+  await f.orch.onPromptDone("host", "全部完成");
+  assert.equal(f.view().phase, "done");
 });
 
 it("明确批准讨论方案后直接规划执行，不能再走主持人自答或重复讨论", async (t) => {
@@ -287,6 +289,7 @@ it("明确批准讨论方案后直接规划执行，不能再走主持人自答�
 
 it("主持人中断后用户继续，只补派未完成节点，不重跑已完成任务", async (t) => {
   const f = fixture(t);
+  Object.assign(f.agent, { cwd: (sid: string) => `/w/${sid}` });
   await f.manager.handle(f.room, "original goal", { params: { tasks: [task("t1", "a"), task("t2", "b", ["t1"]), task("t3", "c")] } });
   await f.manager.onPromptDone("a", "first done");
   f.manager.onPromptError("host", "host error");
@@ -545,3 +548,91 @@ for (const phase of ["reviewing", "summarizing"]) {
     assert.equal(attempts, 1);
   });
 }
+
+it("同 cwd 未声明 files 的并行候选串行派发", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: () => "/repo" });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [task("t1", "a"), task("t2", "b")] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid), ["a"], "同 cwd 未声明 files 只派首个");
+});
+
+it("未知 cwd 按同房共享：未声明 files 串行", async (t) => {
+  const f = fixture(t);
+  await f.manager.handle(f.room, "goal", { params: { tasks: [task("t1", "a"), task("t2", "b")] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid), ["a"]);
+});
+
+it("同 cwd 双边非重叠 files 声明可并行", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: () => "/repo" });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [
+    { ...task("t1", "a"), files: ["src/a.ts"] },
+    { ...task("t2", "b"), files: ["src/b.ts"] },
+  ] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid).sort(), ["a", "b"]);
+});
+
+it("不同 cwd 互不阻塞，未声明 files 也可并行", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: (sid: string) => (sid === "a" ? "/repo-x" : "/repo-y") });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [task("t1", "a"), task("t2", "b")] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid).sort(), ["a", "b"]);
+});
+
+it("Linux 文件键大小写敏感：Foo.ts 与 foo.ts 不算同文件", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: () => "/repo" });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [
+    { ...task("t1", "a"), files: ["Foo.ts"] },
+    { ...task("t2", "b"), files: ["foo.ts"] },
+  ] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid).sort(), ["a", "b"], "大小写不同视为不同文件");
+});
+
+it("同 cwd 同文件仍互斥串行", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: () => "/repo" });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [
+    { ...task("t1", "a"), files: ["shared.ts"] },
+    { ...task("t2", "b"), files: ["./shared.ts"] },
+  ] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid), ["a"], "./ 归一化后同文件互斥");
+});
+
+it("同 cwd 相对与绝对 files 声明视为同文件互斥", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: () => "/repo" });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [
+    { ...task("t1", "a"), files: ["src/a.ts"] },
+    { ...task("t2", "b"), files: ["/repo/src/a.ts"] },
+  ] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid), ["a"], "相对/绝对同文件应互斥串行");
+});
+
+it("不同 cwd 声明同一绝对文件仍互斥", async (t) => {
+  const f = fixture(t);
+  Object.assign(f.agent, { cwd: (sid: string) => (sid === "a" ? "/repo-x" : "/repo-y") });
+  await f.manager.handle(f.room, "goal", { params: { tasks: [
+    { ...task("t1", "a"), files: ["/shared/out.ts"] },
+    { ...task("t2", "b"), files: ["/shared/out.ts"] },
+  ] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid), ["a"], "不同 cwd 同绝对文件仍互斥");
+});
+
+it("未知 cwd 声明不同 files 仍保守串行", async (t) => {
+  const f = fixture(t);
+  await f.manager.handle(f.room, "goal", { params: { tasks: [
+    { ...task("t1", "a"), files: ["a.ts"] },
+    { ...task("t2", "b"), files: ["b.ts"] },
+  ] } });
+  await tick();
+  assert.deepEqual(f.sent.map((p) => p.sid), ["a"], "未知 cwd 无法证明独立，保守串行");
+});

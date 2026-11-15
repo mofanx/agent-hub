@@ -292,6 +292,24 @@ export interface Strings {
   rmDebateDesc: string;
   rmAutoLabel: string;
   rmAutoDesc: string;
+  advancedSectionLabel: string;
+  advancedModePlaceholder: string;
+  resourceSectionLabel: string;
+  resourceDefaultsHint: string;
+  maxConcurrentLabel: string;
+  maxAgentCallsLabel: string;
+  maxFlowDurationLabel: string;
+  maxRoundsLabel: string;
+  relevanceFilterLabel: string;
+  relevanceFilterGlobal: string;
+  relevanceFilterOn: string;
+  relevanceFilterOff: string;
+  budgetUsageFmt: string;
+  unlimitedLabel: string;
+  budgetStoppedCallLimit: string;
+  budgetStoppedDeadline: string;
+  budgetNoticeCallLimit: string;
+  budgetNoticeDeadline: string;
   conductorLabel: string;
   moderatorLabel: string;
   firstSpeakerLabel: string;
@@ -1023,19 +1041,37 @@ const zh: Strings = {
   editTitle: "编辑",
   connectTitle: "连接",
   rmMentionLabel: "普通群 (@mention / 广播)",
-  rmMentionDesc: "成员自由发言，@某个成员时该成员单独回答。适合闲聊、快速提问。",
+  rmMentionDesc: "默认仅应答者回复，@成员精确点名，@all 明确广播。",
   rmConductorLabel: "指挥家（拆解派工汇总）",
   rmConductorDesc: "指挥家自动拆解任务，派发给不同成员并行执行，最后汇总结果。适合复杂任务。",
   rmRoundrobinLabel: "轮询（轮流作答）",
-  rmRoundrobinDesc: "每个问题按顺序由一个成员回答，可设置起始发言人。适合多角色依次表态。",
+  rmRoundrobinDesc: "每条新问题由下一名成员回答，并非同一问题全员依次发言。",
   rmParallelLabel: "并行（集思广益 + 汇总）",
-  rmParallelDesc: "所有成员同时回答同一个问题，最后由汇总者综合出一致结论。适合头脑风暴。",
+  rmParallelDesc: "选定的可用成员只读分析后汇总；忙碌成员明确跳过，不在后台补跑。",
   rmPipelineLabel: "流水线（按成员顺序串行）",
   rmPipelineDesc: "成员按指定顺序串行处理，后一个成员基于前一个的结果继续。适合多步骤流程。",
   rmDebateLabel: "辩论（正反方 + 裁判）",
   rmDebateDesc: "正方与反方交替辩论若干轮，最后由裁判给出公正总结。适合观点碰撞。",
   rmAutoLabel: "自动（由主持人选择模式）",
-  rmAutoDesc: "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。",
+  rmAutoDesc: "主持人根据任务自动选择协作方式，优先调用最少必要成员。",
+  advancedSectionLabel: "高级模式",
+  advancedModePlaceholder: "选择高级模式…",
+  resourceSectionLabel: "资源限制",
+  resourceDefaultsHint: "默认不设上限。仅填写时限制本房间，不影响其他房间；调用次数不包含后端内部工具和子代理。",
+  maxConcurrentLabel: "最大并发数",
+  maxAgentCallsLabel: "每流程最大调用数",
+  maxFlowDurationLabel: "最长流程时长（分钟）",
+  maxRoundsLabel: "最大派发轮次",
+  relevanceFilterLabel: "相关性过滤",
+  relevanceFilterGlobal: "跟随全局",
+  relevanceFilterOn: "开",
+  relevanceFilterOff: "关",
+  budgetUsageFmt: "成员调用 %s/%s · 并发上限 %s",
+  unlimitedLabel: "不限",
+  budgetStoppedCallLimit: "已达调用上限，流程已暂停",
+  budgetStoppedDeadline: "已达时长上限，流程已暂停",
+  budgetNoticeCallLimit: "本轮已达调用上限，已停止追加工作。请检查现有结果后继续或重新发起任务。",
+  budgetNoticeDeadline: "本轮已达时长上限，已停止追加工作。请检查现有结果后继续或重新发起任务。",
   conductorLabel: "指挥家",
   moderatorLabel: "主持人",
   firstSpeakerLabel: "起始发言人",
@@ -1767,19 +1803,37 @@ const en: Strings = {
   editTitle: "Edit",
   connectTitle: "Connect",
   rmMentionLabel: "Plain group (@mention / broadcast)",
-  rmMentionDesc: "Members speak freely; @a member makes only that member reply. Good for casual chat and quick questions.",
+  rmMentionDesc: "One default responder; @a member to target them, or @all to broadcast.",
   rmConductorLabel: "Conductor (plan, dispatch, summarize)",
   rmConductorDesc: "The conductor breaks the task down, dispatches subtasks to members in parallel, then summarizes. Good for complex tasks.",
   rmRoundrobinLabel: "Round robin (take turns)",
-  rmRoundrobinDesc: "Each question is answered by one member in order, with a configurable first speaker. Good for sequential statements.",
+  rmRoundrobinDesc: "Each new question goes to the next member, not to every member in turn.",
   rmParallelLabel: "Parallel (brainstorm + summarize)",
-  rmParallelDesc: "All members answer the same question, then a summarizer merges the results. Good for brainstorming.",
+  rmParallelDesc: "Selected available members analyze read-only, then summarize. Busy members are explicitly skipped, not run later.",
   rmPipelineLabel: "Pipeline (serial by member order)",
   rmPipelineDesc: "Members process in a fixed order, each building on the previous result. Good for multi-step flows.",
   rmDebateLabel: "Debate (sides + judge)",
   rmDebateDesc: "Pro and con sides alternate for several rounds, then a judge summarizes fairly. Good for weighing options.",
   rmAutoLabel: "Auto (moderator picks the mode)",
-  rmAutoDesc: "The moderator picks the most suitable collaboration mode for each task. Use when unsure which mode fits.",
+  rmAutoDesc: "The moderator picks the collaboration mode per task, preferring the fewest members needed.",
+  advancedSectionLabel: "Advanced",
+  advancedModePlaceholder: "Choose an advanced mode…",
+  resourceSectionLabel: "Resource limits",
+  resourceDefaultsHint: "No limits by default. Limits apply only to this room and do not affect others; call counts exclude backend-internal tools and subagents.",
+  maxConcurrentLabel: "Max concurrency",
+  maxAgentCallsLabel: "Max calls per flow",
+  maxFlowDurationLabel: "Max flow duration (minutes)",
+  maxRoundsLabel: "Max dispatch rounds",
+  relevanceFilterLabel: "Relevance filter",
+  relevanceFilterGlobal: "Follow global",
+  relevanceFilterOn: "On",
+  relevanceFilterOff: "Off",
+  budgetUsageFmt: "Agent calls %s/%s · concurrency limit %s",
+  unlimitedLabel: "Unlimited",
+  budgetStoppedCallLimit: "Call limit reached; flow paused",
+  budgetStoppedDeadline: "Time limit reached; flow paused",
+  budgetNoticeCallLimit: "The call limit was reached; no more work will be dispatched. Review existing results before continuing or starting a new task.",
+  budgetNoticeDeadline: "The time limit was reached; no more work will be dispatched. Review existing results before continuing or starting a new task.",
   conductorLabel: "Conductor",
   moderatorLabel: "Moderator",
   firstSpeakerLabel: "First speaker",

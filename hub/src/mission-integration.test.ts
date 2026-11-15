@@ -288,4 +288,42 @@ describe("mission-integration", () => {
     assert.equal(card.missionId, "ms_x");
     assert.equal(card.failureMessage, "MOCK_ERR");
   });
+
+  it("flow-card 快照保留 budget 白名单字段并剔除非法值", () => {
+    const card = toCardSnapshot(
+      {
+        flowId: "f1",
+        phase: "working",
+        goal: "g",
+        startedAt: 1,
+        budget: {
+          id: "b1",
+          usedCalls: 5,
+          maxCalls: 24,
+          maxConcurrent: 2,
+          deadlineAt: 123456,
+          stopped: true,
+          reason: "call-limit",
+          internal: "drop-me",
+        },
+        tasks: [],
+      },
+      "conductor",
+    );
+    const b = card.budget as Record<string, unknown> | undefined;
+    assert.ok(b, "budget 应进入快照");
+    assert.equal(b.id, "b1");
+    assert.equal(b.usedCalls, 5);
+    assert.equal(b.maxCalls, 24);
+    assert.equal(b.maxConcurrent, 2);
+    assert.equal(b.deadlineAt, 123456);
+    assert.equal(b.stopped, true);
+    assert.equal(b.reason, "call-limit");
+    assert.equal(b.internal, undefined, "非白名单字段不得透传");
+    const bad = toCardSnapshot(
+      { flowId: "f2", phase: "working", goal: "g", startedAt: 1, budget: { usedCalls: "x", stopped: 1 }, tasks: [] },
+      "conductor",
+    );
+    assert.equal(bad.budget, undefined, "类型非法的 budget 应整体省略");
+  });
 });

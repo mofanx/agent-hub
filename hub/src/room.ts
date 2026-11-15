@@ -123,6 +123,9 @@ export type Room = {
   parallelSummarizerId?: string | undefined;
   /** conductor/auto 编排跟进派发轮次上限，未设置用默认 */
   maxRounds?: number | undefined;
+  maxConcurrent?: number | undefined;
+  maxAgentCalls?: number | undefined;
+  maxFlowDurationMs?: number | undefined;
   /** nano 相关性过滤开关：undefined 走全局默认，true/false 显式覆盖 */
   relevanceFilter?: boolean | undefined;
   archived?: boolean | undefined;
@@ -146,11 +149,66 @@ export type RoomModeConfig = {
   debateJudge?: string | undefined;
   debateRounds?: number | undefined;
   maxRounds?: number | undefined;
+  maxConcurrent?: number | undefined;
+  maxAgentCalls?: number | undefined;
+  maxFlowDurationMs?: number | undefined;
   memberRoles?: Record<string, string | PersonaCard> | undefined;
   aliases?: Record<string, string[]> | undefined;
   relevanceFilter?: boolean | undefined;
   internal?: boolean | undefined;
 };
+
+export function roomNoticeText(message: string, meta: unknown): string {
+  const m = meta as { type?: unknown; reasonCode?: unknown } | undefined;
+  if (m?.type === "budget" && (m.reasonCode === "call-limit" || m.reasonCode === "deadline")) {
+    return `[room.budget:${m.reasonCode}]`;
+  }
+  return message;
+}
+
+export class RoomBudgetExceededError extends Error {
+  readonly roomId: string;
+  readonly reason: "call-limit" | "deadline";
+  constructor(roomId: string, reason: "call-limit" | "deadline") {
+    super(`room budget exceeded: ${reason}`);
+    this.name = "RoomBudgetExceededError";
+    this.roomId = roomId;
+    this.reason = reason;
+  }
+}
+
+export type RoomExecutionLimits = {
+  maxConcurrent: number | null;
+  maxCalls: number | null;
+  maxFlowDurationMs: number | null;
+};
+
+export function roomExecutionLimits(room: {
+  maxConcurrent?: number | undefined;
+  maxAgentCalls?: number | undefined;
+  maxFlowDurationMs?: number | undefined;
+  maxRounds?: number | undefined;
+}): RoomExecutionLimits {
+  const pick = (v: number | undefined, min: number) => {
+    if (v === undefined) return null;
+    if (!Number.isSafeInteger(v) || v < min) {
+      throw new Error(`invalid room execution limit: ${v} (expected integer >= ${min})`);
+    }
+    return v;
+  };
+  if (room.maxRounds !== undefined && (!Number.isSafeInteger(room.maxRounds) || room.maxRounds < 1)) {
+    throw new Error(`invalid room execution limit: ${room.maxRounds} (expected integer >= 1)`);
+  }
+  const maxFlowDurationMs = pick(room.maxFlowDurationMs, 1000);
+  if (maxFlowDurationMs !== null && !Number.isSafeInteger(Date.now() + maxFlowDurationMs)) {
+    throw new Error(`invalid room execution limit: ${maxFlowDurationMs} (deadline not representable)`);
+  }
+  return {
+    maxConcurrent: pick(room.maxConcurrent, 1),
+    maxCalls: pick(room.maxAgentCalls, 1),
+    maxFlowDurationMs,
+  };
+}
 
 export type BlackboardEntry = {
   id: string;
@@ -206,6 +264,9 @@ export function remapRoomModeConfig(
     debateJudge: remap(source.debateJudge),
     debateRounds: source.debateRounds,
     maxRounds: source.maxRounds,
+    maxConcurrent: source.maxConcurrent,
+    maxAgentCalls: source.maxAgentCalls,
+    maxFlowDurationMs: source.maxFlowDurationMs,
     relevanceFilter: source.relevanceFilter,
     internal: source.internal,
     memberRoles: source.memberRoles
@@ -444,6 +505,7 @@ export class RoomManager {
     mode: RoomMode = "mention",
     config?: RoomModeConfig,
   ): Room {
+    roomExecutionLimits(config ?? {});
     const conductorId = config?.conductorId;
     if (mode === "conductor" || mode === "auto") {
       if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
@@ -468,6 +530,9 @@ export class RoomManager {
       debateJudge: config?.debateJudge,
       debateRounds: config?.debateRounds,
       maxRounds: config?.maxRounds,
+      maxConcurrent: config?.maxConcurrent,
+      maxAgentCalls: config?.maxAgentCalls,
+      maxFlowDurationMs: config?.maxFlowDurationMs,
       relevanceFilter: config?.relevanceFilter,
       internal: config?.internal,
       blackboard: [],
@@ -495,6 +560,7 @@ export class RoomManager {
 
   /** 从持久化状态恢复：拆分旧 artifact、初始化黑板 */
   import(room: Room): void {
+    roomExecutionLimits(room);
     const legacy: LegacyArtifact[] = (room.artifacts ?? []) as LegacyArtifact[];
     const artifacts: Artifact[] = [];
     const events: RoomEvent[] = [];
@@ -773,28 +839,84 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) throw new Error(`unknown room: ${roomId}`);
     if (members.length === 0) throw new Error("room needs at least 1 member");
-    const conductorId = config?.conductorId;
-    if (mode === "conductor" || mode === "auto") {
-      if (!conductorId || !members.some((m) => m.sessionId === conductorId)) {
-        throw new Error(`${mode} room needs a valid conductorId`);
+    const has = (k: keyof RoomModeConfig) => config !== undefined && Object.hasOwn(config, k);
+    const pick = <K extends keyof RoomModeConfig>(k: K): RoomModeConfig[K] | undefined =>
+      has(k) ? config![k] : room[k];
+    const memberIdsEarly = new Set(members.map((m) => m.sessionId));
+    const resolveSel = (k: "conductorId" | "parallelSummarizerId" | "debateJudge"): string | undefined => {
+      if (has(k)) return config![k] as string | undefined;
+      const v = room[k] as string | undefined;
+      return v !== undefined && !memberIdsEarly.has(v) ? undefined : v;
+    };
+    const conductorId = resolveSel("conductorId");
+    const parallelSummarizerId = resolveSel("parallelSummarizerId");
+    const pipelineOrder = has("pipelineOrder")
+      ? (config!.pipelineOrder as string[] | undefined)
+      : room.pipelineOrder?.filter((sid) => memberIdsEarly.has(sid));
+    const debateSides = has("debateSides")
+      ? (config!.debateSides as [string, string] | undefined)
+      : room.debateSides &&
+          memberIdsEarly.has(room.debateSides[0]) &&
+          memberIdsEarly.has(room.debateSides[1])
+        ? room.debateSides
+        : undefined;
+    const debateJudge = resolveSel("debateJudge");
+    const debateRounds = pick("debateRounds");
+    const maxRounds = pick("maxRounds");
+    const maxConcurrent = pick("maxConcurrent");
+    const maxAgentCalls = pick("maxAgentCalls");
+    const maxFlowDurationMs = pick("maxFlowDurationMs");
+    const relevanceFilter = pick("relevanceFilter");
+    const memberRoles = pick("memberRoles");
+    const aliases = pick("aliases");
+    const memberIds = memberIdsEarly;
+    const filtMap = <T>(m: Record<string, T> | undefined): Record<string, T> | undefined => {
+      if (m === undefined) return undefined;
+      const out: Record<string, T> = {};
+      for (const [k, v] of Object.entries(m)) if (memberIds.has(k)) out[k] = v;
+      return Object.keys(out).length ? out : undefined;
+    };
+    const filtAliases = (a: Record<string, string[]> | undefined): Record<string, string[]> | undefined => {
+      if (a === undefined) return undefined;
+      const out: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(a)) {
+        const kept = v.filter((sid) => memberIds.has(sid));
+        if (kept.length) out[k] = kept;
       }
+      return Object.keys(out).length ? out : undefined;
+    };
+    const valid = (sid: string | undefined, what: string) => {
+      if (sid !== undefined && !memberIds.has(sid)) throw new Error(`${what} must be a member of the room`);
+    };
+    if (has("conductorId")) valid(conductorId, "conductorId");
+    if (has("parallelSummarizerId")) valid(parallelSummarizerId, "parallelSummarizerId");
+    if (has("debateJudge")) valid(debateJudge, "debateJudge");
+    if ((mode === "conductor" || mode === "auto") && (!conductorId || !memberIds.has(conductorId))) {
+      throw new Error(`${mode} room needs a valid conductorId`);
     }
-    if (conductorId && !members.some((m) => m.sessionId === conductorId)) {
-      throw new Error("conductorId must be a member of the room");
+    if (has("pipelineOrder") && pipelineOrder !== undefined && pipelineOrder.some((sid) => !memberIds.has(sid))) {
+      throw new Error("pipelineOrder members must be in the room");
     }
+    if (has("debateSides") && debateSides !== undefined && debateSides.some((sid) => !memberIds.has(sid))) {
+      throw new Error("debateSides must be members of the room");
+    }
+    roomExecutionLimits({ maxConcurrent, maxAgentCalls, maxFlowDurationMs, maxRounds });
     room.name = name;
     room.mode = mode;
     room.members = members;
-    room.memberRoles = config?.memberRoles;
-    room.aliases = config?.aliases;
+    room.memberRoles = filtMap(memberRoles);
+    room.aliases = filtAliases(aliases);
     room.conductorId = conductorId;
-    room.parallelSummarizerId = config?.parallelSummarizerId;
-    room.pipelineOrder = config?.pipelineOrder;
-    room.debateSides = config?.debateSides;
-    room.debateJudge = config?.debateJudge;
-    room.debateRounds = config?.debateRounds;
-    room.maxRounds = config?.maxRounds;
-    room.relevanceFilter = config?.relevanceFilter;
+    room.parallelSummarizerId = parallelSummarizerId;
+    room.pipelineOrder = pipelineOrder;
+    room.debateSides = debateSides;
+    room.debateJudge = debateJudge;
+    room.debateRounds = debateRounds;
+    room.maxRounds = maxRounds;
+    room.maxConcurrent = maxConcurrent;
+    room.maxAgentCalls = maxAgentCalls;
+    room.maxFlowDurationMs = maxFlowDurationMs;
+    room.relevanceFilter = relevanceFilter;
     this.dedupMemberNames(room.roomId);
     return room;
   }
@@ -846,8 +968,12 @@ export class RoomManager {
     const mentioned = room.members
       .filter((m) => mentionedSet.has(m.sessionId))
       .map((m) => m.sessionId);
+    const fallback =
+      [room.conductorId, room.parallelSummarizerId].find(
+        (sid) => sid !== undefined && memberIds.has(sid),
+      ) ?? room.members[0]?.sessionId;
     return {
-      targets: mentioned.length > 0 ? mentioned : room.members.map((m) => m.sessionId),
+      targets: mentioned.length > 0 ? mentioned : fallback !== undefined ? [fallback] : [],
       mentioned,
     };
   }

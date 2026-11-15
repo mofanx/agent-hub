@@ -767,6 +767,178 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+  it("进行中 tool_call 豁免 stall 看门狗，终态后静默恢复判死", async () => {
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    setTurnStallTimeoutMs(60);
+    setTurnDeadGraceMs(40);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "train", { stallMs: 60 });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "working" } },
+      });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call", toolCallId: "tc-train", status: "in_progress", kind: "execute", title: "train" },
+      });
+      await new Promise((r) => setTimeout(r, 220));
+      assert.equal(hub.isBusy("s1"), true, "进行中工具跨 stall+grace 仍 busy");
+      assert.equal(events.some((e) => e.method === "prompt.error"), false, "工具活跃不得判死");
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-train", status: "completed" },
+      });
+      await waitFor(() => events.find((e) => e.method === "prompt.error"));
+      assert.equal(hub.isBusy("s1"), false, "工具终态后真静默恢复判死");
+    } finally {
+      setTurnStallTimeoutMs(300_000);
+      setTurnDeadGraceMs(300_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("tool_call_update 无 status 不清豁免，多工具部分完成仍受保护", async () => {
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    setTurnStallTimeoutMs(60);
+    setTurnDeadGraceMs(40);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "train2", { stallMs: 60 });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "w" } },
+      });
+      for (const id of ["tc-a", "tc-b"]) {
+        await agentConn.client.notify("session/update", {
+          sessionId: "s1",
+          update: { sessionUpdate: "tool_call", toolCallId: id, status: "in_progress", kind: "execute", title: id },
+        });
+      }
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-a", kind: "execute", title: "meta only" },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(hub.isBusy("s1"), true, "无 status update 不得清除豁免");
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-b", status: "completed" },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(hub.isBusy("s1"), true, "仅完成一个工具仍受保护");
+      assert.equal(events.some((e) => e.method === "prompt.error"), false);
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-a", status: "completed" },
+      });
+      await waitFor(() => events.find((e) => e.method === "prompt.error"));
+      assert.equal(hub.isBusy("s1"), false);
+    } finally {
+      setTurnStallTimeoutMs(300_000);
+      setTurnDeadGraceMs(300_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("completed 后迟到 update 与新回合均不沿用旧工具豁免", async () => {
+    const resolvers: ((r: acp.PromptResponse) => void)[] = [];
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => resolvers.push(r)),
+    });
+    setTurnStallTimeoutMs(60);
+    setTurnDeadGraceMs(40);
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "t1", { stallMs: 60 });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "w" } },
+      });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call", toolCallId: "tc-old", status: "in_progress", kind: "execute", title: "old" },
+      });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-old", status: "completed" },
+      });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-old", status: "in_progress" },
+      });
+      await waitFor(() => events.find((e) => e.method === "prompt.error"));
+      assert.equal(hub.isBusy("s1"), false, "迟到 in_progress update 不得复活豁免");
+      resolvers.at(-1)?.({ stopReason: "cancelled" });
+      await new Promise((r) => setTimeout(r, 30));
+      await hub.prompt("s1", "t2", { stallMs: 60 });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "w2" } },
+      });
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc-old", status: "in_progress" },
+      });
+      const errsBefore = events.filter((e) => e.method === "prompt.error").length;
+      await waitFor(() => events.filter((e) => e.method === "prompt.error").length > errsBefore ? events : undefined);
+      assert.equal(hub.isBusy("s1"), false, "新回合不沿用旧工具豁免");
+    } finally {
+      setTurnStallTimeoutMs(300_000);
+      setTurnDeadGraceMs(300_000);
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  for (const [name, status, exempt] of [
+    ["pending", "pending", true],
+    ["缺省status", undefined, true],
+    ["failed", "failed", false],
+    ["初始completed", "completed", false],
+  ] as const) {
+    it(`tool_call 初始 status=${name} ${exempt ? "豁免" : "不豁免"}`, async () => {
+      const { hub, agentConn, events } = setup({
+        promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+      });
+      setTurnStallTimeoutMs(60);
+      setTurnDeadGraceMs(40);
+      try {
+        await hub.createSession("/tmp", "s");
+        await hub.prompt("s1", `gate-${name}`, { stallMs: 60 });
+        await agentConn.client.notify("session/update", {
+          sessionId: "s1",
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "w" } },
+        });
+        await agentConn.client.notify("session/update", {
+          sessionId: "s1",
+          update: { sessionUpdate: "tool_call", toolCallId: `tc-${name}`, ...(status !== undefined ? { status } : {}), kind: "execute", title: name },
+        });
+        if (exempt) {
+          await new Promise((r) => setTimeout(r, 160));
+          assert.equal(hub.isBusy("s1"), true, "豁免状态应保持 busy");
+          await agentConn.client.notify("session/update", {
+            sessionId: "s1",
+            update: { sessionUpdate: "tool_call_update", toolCallId: `tc-${name}`, status: "completed" },
+          });
+        }
+        await waitFor(() => events.find((e) => e.method === "prompt.error"));
+        assert.equal(hub.isBusy("s1"), false);
+      } finally {
+        setTurnStallTimeoutMs(300_000);
+        setTurnDeadGraceMs(300_000);
+        hub.close();
+        agentConn.close();
+      }
+    });
+  }
+
   it("cancel 换代后旧 prompt 迟到 settle 被丢弃", async () => {
     const resolvers: ((r: acp.PromptResponse) => void)[] = [];
     const turnEnds: { sessionId: string; status?: string }[] = [];

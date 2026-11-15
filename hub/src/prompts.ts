@@ -174,7 +174,7 @@ export function workerTaskPrompt(args: {
     '```',
     "",
     "若子任务涉及代码修改，强烈建议在 JSON 中附加可验证字段：baseline（修改前代码/状态）、diff（实际修改）、reproSteps（复现步骤）、verifyCommand（验证命令）。这些会直接进入验收证据，供其他成员或用户复查。",
-    "若报告 verifyCommand，Hub 只会在命令与管理员已预设的检查完全匹配时尝试隔离运行；未提供 verifyCheckId 时还需文件产物。若知道预设 ID，可附加 verifyCheckId；ID 未获批准或与命令不一致不会回退为自动匹配。未获批准的命令仅保留成员自报，绝不自动运行。",
+    "请优先使用当前后端已有的工具、子代理与验证能力，报告实际执行的命令、退出码与关键输出；Hub 不会默认重复运行验证命令。只有管理员显式启用群聊隔离复跑时，才可能额外执行已批准的预设检查。",
     "如果没有 artifact，可以只输出文本，不必输出 JSON。",
   ].join("\n");
 }
@@ -204,7 +204,7 @@ export function helpResumePrompt(args: {
   fromLabel: string;
   question: string;
   answer?: string | undefined;
-  remaining: number;
+  remaining: number | null;
 }): string {
   return [
     `你此前在执行子任务（id: ${args.taskId}）时向 ${sanitizeInline(args.fromLabel)} 求助。`,
@@ -212,9 +212,11 @@ export function helpResumePrompt(args: {
     `${sanitizeInline(args.fromLabel)} 的回复：${sanitizeBlock((args.answer ?? "（未获得回复）").slice(0, 2000))}`,
     "",
     `请据此继续完成子任务：${sanitizeBlock(args.task)}`,
-    args.remaining > 0
-      ? `若仍有关键阻塞可再次求助（剩余 ${args.remaining} 次）；否则完成任务并输出 artifact 报告 JSON。`
-      : "请基于现有信息完成任务并输出 artifact 报告 JSON。",
+    args.remaining === null
+      ? "请优先复用当前后端已有的工具、子代理和已收到的答复；如果仍有影响任务完成的具体阻塞，可继续向相关成员或用户求助，并说明缺失的信息，不要无意义地重复已经解决的问题；否则完成任务并输出 artifact 报告 JSON。"
+      : args.remaining > 0
+        ? `若仍有关键阻塞可再次求助（剩余 ${args.remaining} 次）；否则完成任务并输出 artifact 报告 JSON。`
+        : "请基于现有信息完成任务并输出 artifact 报告 JSON。",
   ].join("\n");
 }
 
@@ -243,7 +245,7 @@ export function conductorReviewPrompt(args: {
   goal: string;
   criteria: string[];
   iteration: number;
-  maxIterations: number;
+  maxIterations: number | null;
   resultLines: string[];
   qaLines?: string[] | undefined;
   supplements?: string[] | undefined;
@@ -263,7 +265,9 @@ export function conductorReviewPrompt(args: {
     "验收标准：",
     criteria,
     "",
-    `第 ${args.iteration}/${args.maxIterations} 轮子任务已全部完成，结果如下：`,
+    args.maxIterations == null
+      ? `第 ${args.iteration} 轮子任务已全部完成，结果如下：`
+      : `第 ${args.iteration}/${args.maxIterations} 轮子任务已全部完成，结果如下：`,
     ...cleanLines(args.resultLines) ?? [],
     ...(cleanLines(args.qaLines) ?? []),
     ...(args.supplements && args.supplements.length > 0
@@ -389,7 +393,7 @@ export function autoDecisionPrompt(args: {
     `成员：${sanitizeInline(args.members)}`,
     "",
     "可用模式及含义：",
-    "- mention：用户明确@某人，或问题简单直接，应指定/全部成员独立回答",
+    "- mention：只向指定成员派发；未指定时由默认应答者回答，只有用户明确要求全员时才广播",
     "- conductor：任务复杂，需要拆解成子任务并派工给不同成员",
     "- roundrobin：适合轮流发言、按顺序补充，每个问题一人作答",
     "- parallel：需要多个成员独立给出观点后汇总，适合集思广益",
@@ -398,6 +402,7 @@ export function autoDecisionPrompt(args: {
     "- self：你自己就能直接回答，不需要其他成员",
     "",
     "选择原则：成员可能本身具备 Devin Fusion 或内部子代理。仅在需要跨成员独立责任、不同专长、真正并行观点或顺序交接时使用 Hub 多成员模式；单个成员可端到端完成时优先 self/mention，避免双重编排和重复成本。",
+    "优先选择能提供独立增量的最少成员；不要重复调用多个具备同类内部子代理能力的成员执行同一端到端任务。用户显式点名或要求全员时必须尊重其范围。",
     "",
     "可拆分性判断（重要）：任务量大不是拆分的理由，子任务可独立执行才是。",
     "- 可拆分 → parallel/conductor：子任务落在互不共享的文件/模块上、结果可独立验证；",
@@ -419,7 +424,7 @@ export function autoDecisionPrompt(args: {
     "params 说明（可选，不确定时可省略）：",
     '- mention: { "targets": ["sessionId", ...] }',
     '- roundrobin: { "speaker": "sessionId" }',
-    '- parallel: { "summarizer": "sessionId" }',
+    '- parallel: { "targets": ["sessionId", ...], "summarizer": "sessionId" }',
     '- pipeline: { "order": ["sessionId", ...] }',
     '- debate: { "sides": ["sessionId", "sessionId"], "judge": "sessionId", "rounds": 2 }',
     '- conductor: { "tasks": [{"to":"成员名或id","task":"具体子任务","id":"t1","dependsOn":[],"files":["预计修改的文件，可选"]}] }',
@@ -457,7 +462,7 @@ export function parallelSummarizerPrompt(args: {
   lines: string[];
   extras?: readonly string[] | undefined;
 }): string {
-  return `你是群聊「${sanitizeInline(args.roomName)}」的汇总者。多位成员就同一问题给出了独立回答：\n${(cleanLines(args.lines) ?? []).join("\n")}${extrasBlock(args.extras)}\n\n请综合以上观点，给用户一个清晰、全面的最终回答。`;
+  return `你是群聊「${sanitizeInline(args.roomName)}」的汇总者。多位成员就同一问题给出了独立回答：\n${(cleanLines(args.lines) ?? []).join("\n")}${extrasBlock(args.extras)}\n\n请给用户一个清晰的最终回答，分别说明共识、关键分歧及反例、证据来源、未解决项。摘要被截断或证据不足时，先通过既有 room.flow 获取完整 tasks[].output，或通过 room.history.search 按 roomId/author/时间窗检索原始回答；不得把未读到的尾部内容当作不存在。`;
 }
 
 /** pipeline 阶段任务正文与引用（首阶段带 note，后续阶段引用上一阶段输出） */
@@ -507,5 +512,5 @@ export function debateJudgePrompt(args: {
   lines: string[];
   extras?: readonly string[] | undefined;
 }): string {
-  return `你是辩论裁判。辩题：${sanitizeBlock(args.topic)}\n\n辩论记录：\n${(cleanLines(args.lines) ?? []).join("\n")}${extrasBlock(args.extras)}\n\n请做出公正总结，指出共识与分歧，给出最终判断。`;
+  return `你是辩论裁判。辩题：${sanitizeBlock(args.topic)}\n\n辩论记录：\n${(cleanLines(args.lines) ?? []).join("\n")}${extrasBlock(args.extras)}\n\n请做出公正总结，指出共识与分歧，给出最终判断。请保留关键反例、证据来源及未解决分歧。摘要不足时通过 room.flow 的 tasks[].output 或 room.history.search 检索完整内容，不得仅凭前缀摘要判定胜负。`;
 }

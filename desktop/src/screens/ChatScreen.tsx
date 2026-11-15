@@ -1926,9 +1926,21 @@ const ChatMessage = memo(function ChatMessage({
 
   switch (item.kind) {
     case "system": {
+      const budgetText =
+        item.meta?.type === "budget"
+          ? item.meta.reasonCode === "deadline"
+            ? S.budgetNoticeDeadline
+            : item.meta.reasonCode === "call-limit"
+              ? S.budgetNoticeCallLimit
+              : item.text
+          : item.text === "[room.budget:deadline]"
+            ? S.budgetNoticeDeadline
+            : item.text === "[room.budget:call-limit]"
+              ? S.budgetNoticeCallLimit
+              : item.text;
       return (
         <div className={`message system ${currentMatchClass}`} onContextMenu={onContextMenu}>
-          <div className="text">{highlight ? highlightText(item.text, highlight) : item.text}</div>
+          <div className="text">{highlight ? highlightText(budgetText, highlight) : budgetText}</div>
           {menuEl}
           {selectModal}
         </div>
@@ -2636,6 +2648,7 @@ type FlowView = {
   missionId?: string;
   failureMessage?: string;
   phase: string;
+  budget?: import("../hub/types").RoomBudgetView;
   goal?: string;
   mode?: string;
   startedAt?: number;
@@ -2811,6 +2824,16 @@ function FlowCardBody({ flow, showRetry }: { flow: FlowView; showRetry: boolean 
               <li key={i}>{c}</li>
             ))}
           </ol>
+        </div>
+      )}
+      {flow.budget && (
+        <div className="flow-budget-line">
+          {S.budgetUsageFmt
+            .replace("%s", String(flow.budget.usedCalls))
+            .replace("%s", flow.budget.maxCalls === null ? S.unlimitedLabel : String(flow.budget.maxCalls))
+            .replace("%s", flow.budget.maxConcurrent === null ? S.unlimitedLabel : String(flow.budget.maxConcurrent))}
+          {flow.budget.stopped &&
+            ` · ${flow.budget.reason === "deadline" ? S.budgetStoppedDeadline : S.budgetStoppedCallLimit}`}
         </div>
       )}
       {phase === "done" && (
@@ -3557,7 +3580,7 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
       : verificationStatus === "member_nonpass"
         ? S.verificationStatusMemberNonpass
         : S.verificationStatusUnverified;
-  const ac = task.automaticCheck;
+  const ac = task.automaticCheck?.status === "not_run" ? undefined : task.automaticCheck;
   const blockedDetail =
     ac?.reason === "check_unapproved"
       ? S.checkUnapproved
@@ -3751,7 +3774,7 @@ function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: 
             {task.status === "done" && (
               <>
                 <div className="flow-task-meta">{S.verificationStatusLabel}{verificationText}</div>
-                {(ac?.status !== "exited_zero" || automaticCheckExtra || ac?.snapshotCurrent === false) && (
+                {ac !== undefined && (ac.status !== "exited_zero" || automaticCheckExtra !== "" || ac.snapshotCurrent === false) && (
                   <div className="flow-task-meta">{S.automaticCheckLabel}{automaticCheckText}</div>
                 )}
                 {automaticCheckExtra && (

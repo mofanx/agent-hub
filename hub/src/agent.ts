@@ -247,6 +247,7 @@ type SessionEntry = {
   stallNotified?: boolean;
   /** stall 判疑已告警并处于回收宽限期（宽限内再静默才杀） */
   stallWarned?: boolean;
+  activeToolIds?: Set<string> | undefined;
 };
 
 export function stripLoneSurrogates(s: string): string {
@@ -524,6 +525,7 @@ export class AcpAgent {
     id: string; objective: string; enabled: boolean; revision: number; firstOutput: boolean;
     initialWatchdog?: ReturnType<typeof setTimeout> | undefined;
     pendingTurnRevision?: number | undefined;
+    stallWarned?: boolean | undefined;
   }>();
   private nativeGoalWaiters = new Map<string, Set<() => void>>();
 
@@ -680,22 +682,26 @@ export class AcpAgent {
   private beginNativeGoalTurn(sessionId: string, entry: SessionEntry): void {
     entry.nativeGoalTurn = true;
     entry.turnEpoch = (entry.turnEpoch ?? 0) + 1;
+    const goalOwner = this.nativeGoalOwners.get(sessionId);
+    if (goalOwner) goalOwner.stallWarned = false;
     entry.busy = true;
     entry.stoppable = true;
     entry.turnText = "";
+    entry.activeToolIds = undefined;
     entry.lastActivityAt = Date.now();
     this.emit({ method: "session.generating", params: { sessionId, stoppable: true } });
+    const epoch = entry.turnEpoch;
     const poll = () => {
-      if (!entry.nativeGoalTurn || !entry.busy) return;
+      if (!entry.nativeGoalTurn || !entry.busy || this.nativeGoalOwners.get(sessionId) !== goalOwner || entry.turnEpoch !== epoch) return;
       const interactive = [...this.pendingPermissions.values(), ...this.pendingElicitations.values()]
-        .some((p) => p.sessionId === sessionId);
+        .some((p) => p.sessionId === sessionId) || (entry.activeToolIds?.size ?? 0) > 0;
       const remaining = turnStallTimeoutMs - (Date.now() - (entry.lastActivityAt ?? 0));
       if (interactive || remaining > 0) {
         entry.watchdog = setTimeout(poll, interactive ? turnStallTimeoutMs : remaining);
         entry.watchdog.unref?.();
         return;
       }
-      this.stopStalledNativeGoal(sessionId, "native goal stalled; user intervention required");
+      this.warnStalledNativeGoal(sessionId, Date.now() - (entry.lastActivityAt ?? Date.now()));
     };
     if (turnStallTimeoutMs > 0) {
       entry.watchdog = setTimeout(poll, turnStallTimeoutMs);
@@ -706,30 +712,33 @@ export class AcpAgent {
   private armNativeGoalInitialWatchdog(sessionId: string): void {
     const owner = this.nativeGoalOwners.get(sessionId);
     if (!owner) return;
+    owner.stallWarned = false;
+    const startedAt = Date.now();
     clearTimeout(owner.initialWatchdog);
     const check = () => {
       if (this.nativeGoalOwners.get(sessionId) !== owner || !owner.enabled || owner.firstOutput ||
           this.getNativeGoal(sessionId)?.status !== "active") return;
-      if ([...this.pendingPermissions.values(), ...this.pendingElicitations.values()].some((p) => p.sessionId === sessionId)) {
+      const entry = this.sessions.get(sessionId);
+      if ([...this.pendingPermissions.values(), ...this.pendingElicitations.values()].some((p) => p.sessionId === sessionId) || (entry?.activeToolIds?.size ?? 0) > 0) {
         owner.initialWatchdog = setTimeout(check, Math.max(100, promptAckTimeoutMs));
         owner.initialWatchdog.unref?.();
         return;
       }
-      this.stopStalledNativeGoal(sessionId, "native goal produced no output; user intervention required");
+      this.warnStalledNativeGoal(sessionId, Date.now() - startedAt);
     };
     owner.initialWatchdog = setTimeout(check, Math.max(0, promptAckTimeoutMs));
     owner.initialWatchdog.unref?.();
   }
 
-  private stopStalledNativeGoal(sessionId: string, message: string): void {
+  private warnStalledNativeGoal(sessionId: string, idleMs: number): void {
     const owner = this.nativeGoalOwners.get(sessionId);
-    if (!owner) return;
-    void this.controlGoal(sessionId, this.nativeGoalCapabilities?.actions.includes("pause") ? "pause" : "clear")
-      .catch((err) => logWarn("native-goal", `stall recovery: ${String(err)}`))
-      .finally(() => {
-        if (this.ready && this.nativeGoalOwners.get(sessionId) === owner)
-          this.emit({ method: "session.goal.error", params: { sessionId, executionId: owner.id, message } });
-      });
+    if (!owner || owner.stallWarned || !owner.enabled) return;
+    if (this.getNativeGoal(sessionId)?.status !== "active") return;
+    owner.stallWarned = true;
+    this.emit({
+      method: "session.stall",
+      params: { sessionId, idleMs: Math.max(0, idleMs) },
+    });
   }
 
   getContextUsage(sessionId: string): ContextUsage | undefined {
@@ -1124,6 +1133,7 @@ export class AcpAgent {
     this.onTurnEnd?.(sessionId, fullText, "done");
     entry.busy = false;
     entry.stoppable = false;
+    entry.activeToolIds = undefined;
     this.emit({
       method: "session.generating",
       params: { sessionId, stoppable: false },
@@ -1473,6 +1483,20 @@ export class AcpAgent {
   }
 
   private handleToolCall(sessionId: string, u: Record<string, unknown>): void {
+    const toolId = typeof u.toolCallId === "string" && u.toolCallId ? u.toolCallId : undefined;
+    if (toolId) {
+      const entry = this.sessions.get(sessionId);
+      if (entry) {
+        const status = String(u.status ?? "");
+        if (u.sessionUpdate === "tool_call") {
+          if (status === "" || status === "pending" || status === "in_progress") {
+            (entry.activeToolIds ??= new Set()).add(toolId);
+          }
+        } else if (entry.activeToolIds?.has(toolId)) {
+          if (status === "completed" || status === "failed") entry.activeToolIds.delete(toolId);
+        }
+      }
+    }
     const status = String(u.status ?? "");
     if (status && status !== "completed" && status !== "in_progress") return;
 
@@ -1719,6 +1743,7 @@ export class AcpAgent {
     entry.turnGotUpdate = false;
     entry.stallNotified = false;
     entry.stallWarned = false;
+    entry.activeToolIds = undefined;
     entry.lastActivityAt = Date.now();
     const epoch = (entry.turnEpoch ?? 0) + 1;
     entry.turnEpoch = epoch;
@@ -1749,7 +1774,8 @@ export class AcpAgent {
           ) ||
           [...this.pendingElicitations.values()].some(
             (p) => p.sessionId === sessionId,
-          );
+          ) ||
+          (entry.activeToolIds?.size ?? 0) > 0;
         if (interactive) {
           // 等待用户答复期间续命：以当前阶段预算为轮询间隔
           const poll = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
@@ -1874,6 +1900,7 @@ export class AcpAgent {
         const wasActive = entry.busy || entry.stoppable;
         entry.busy = false;
         entry.stoppable = false;
+        entry.activeToolIds = undefined;
         if (wasActive) {
           this.emit({
             method: "session.generating",
@@ -1957,6 +1984,7 @@ export class AcpAgent {
     entry.stoppable = false;
     entry.busy = false;
     entry.nativeGoalTurn = false;
+    entry.activeToolIds = undefined;
     this.clearTaskGrants(sessionId);
     this.onTurnEnd?.(sessionId, entry.turnText, "interrupted");
     entry.turnText = "";

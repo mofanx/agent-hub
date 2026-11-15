@@ -7,47 +7,51 @@ import { FormRow } from "../../components/FormRow";
 
 type RoomModeOption = { value: string; label: string; description: string };
 
-function roomModeOptions(S: Strings): RoomModeOption[] {
+const MAIN_MODES = ["auto", "mention", "conductor", "parallel"];
+const ADV_MODES = ["roundrobin", "pipeline", "debate"];
+
+function modeOptions(S: Strings): RoomModeOption[] {
   return [
+    { value: "auto", label: S.rmAutoLabel, description: S.rmAutoDesc },
     { value: "mention", label: S.rmMentionLabel, description: S.rmMentionDesc },
     { value: "conductor", label: S.rmConductorLabel, description: S.rmConductorDesc },
-    { value: "roundrobin", label: S.rmRoundrobinLabel, description: S.rmRoundrobinDesc },
     { value: "parallel", label: S.rmParallelLabel, description: S.rmParallelDesc },
+    { value: "roundrobin", label: S.rmRoundrobinLabel, description: S.rmRoundrobinDesc },
     { value: "pipeline", label: S.rmPipelineLabel, description: S.rmPipelineDesc },
     { value: "debate", label: S.rmDebateLabel, description: S.rmDebateDesc },
-    { value: "auto", label: S.rmAutoLabel, description: S.rmAutoDesc },
   ];
 }
 
-function recommendMode(name: string): string | null {
-  const n = name.toLowerCase();
-  if (/bug|fix|测试|test|review|审查|重构|refactor|实现|implement|添加功能|feature|任务|分工|拆解/.test(n)) return "conductor";
-  if (/brainstorm|头脑风暴|想法|方案|收集|调研|优缺点|分析|集思广益|多观点/.test(n)) return "parallel";
-  if (/辩论|debate|正反|利弊|争论|对比|vs|观点碰撞/.test(n)) return "debate";
-  if (/流程|流水线|pipeline|步骤|step|顺序|sequence|链路|串联|串行/.test(n)) return "pipeline";
-  if (/轮流|轮询|round|依次|每人|顺序发言/.test(n)) return "roundrobin";
-  if (/闲聊|讨论|提问|@|广播|通知/.test(n)) return "mention";
-  return null;
-}
+const isAdvancedMode = (m: string) => ADV_MODES.includes(m);
 
 export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; editingRoom?: RoomInfo | null }) {
   const store = useHubStore();
   const S = stringsFor(store.lang);
-  const modes = roomModeOptions(S);
+  const modes = modeOptions(S);
   const editing = editingRoom;
   const isEdit = !!editing;
   const [form, setForm] = useState({
     name: editing?.name ?? "",
-    mode: editing?.mode ?? "mention",
+    mode: editing?.mode ?? "auto",
     selected: (editing?.members.map((m) => m[0]) ?? []) as string[],
-    specialId: editing?.conductorId ?? editing?.parallelSummarizerId ?? editing?.debateJudge ?? "",
+    specialId:
+      editing?.mode === "parallel"
+        ? (editing?.parallelSummarizerId ?? "")
+        : editing?.mode === "debate"
+          ? (editing?.debateJudge ?? "")
+          : (editing?.conductorId ?? ""),
     pipelineOrder: editing?.pipelineOrder ?? (editing?.members.map((m) => m[0]) ?? []),
     debateSides: (editing?.debateSides ?? ["", ""]) as [string, string],
     debateJudge: editing?.debateJudge ?? "",
     debateRounds: editing?.debateRounds ?? 2,
     memberRoles: (editing?.memberRoles ?? {}) as Record<string, string | PersonaCard>,
+    maxConcurrent: editing?.maxConcurrent != null ? String(editing.maxConcurrent) : "",
+    maxAgentCalls: editing?.maxAgentCalls != null ? String(editing.maxAgentCalls) : "",
+    maxFlowDurationMin: editing?.maxFlowDurationMs != null ? String(editing.maxFlowDurationMs / 60000) : "",
+    maxRounds: editing?.maxRounds != null ? String(editing.maxRounds) : "",
+    relevanceFilter: (editing?.relevanceFilter === true ? "on" : editing?.relevanceFilter === false ? "off" : "global") as "global" | "on" | "off",
   });
-  const [modeManuallyChanged, setModeManuallyChanged] = useState(false);
+  const [advOpen, setAdvOpen] = useState(isEdit && isAdvancedMode(editing?.mode ?? ""));
 
   const available = store.sessions.filter((s) => !s.archived);
 
@@ -98,32 +102,61 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
     setForm({ ...form, pipelineOrder: order });
   };
 
+  const needsSpecial = (m: string) =>
+    m === "conductor" || m === "auto" || m === "roundrobin" || m === "parallel" || m === "debate";
+
   const isValid = (): boolean => {
     if (form.selected.length < (isEdit ? 1 : 2) || !form.name.trim()) return false;
-    switch (form.mode) {
-      case "conductor":
-      case "auto":
-      case "roundrobin":
-      case "parallel":
-      case "debate":
-        return !!form.specialId;
-      case "pipeline":
-        return form.pipelineOrder.length > 0;
-      default:
-        return true;
-    }
+    if (needsSpecial(form.mode) && !form.specialId && !form.selected[0]) return false;
+    if (form.mode === "pipeline" && form.pipelineOrder.length === 0) return false;
+    if (!limitsValid()) return false;
+    return true;
+  };
+
+  const durationValue = (raw: string): number | null => {
+    const ms = Math.round(Number(raw.trim()) * 60000);
+    return Number.isSafeInteger(ms) && ms >= 1000 && Number.isSafeInteger(Date.now() + ms) ? ms : null;
+  };
+
+  const limitsValid = (): boolean => {
+    const posInt = (s: string) => {
+      if (s.trim() === "") return true;
+      const n = Number(s);
+      return Number.isSafeInteger(n) && n >= 1;
+    };
+    if (!posInt(form.maxConcurrent)) return false;
+    if (!posInt(form.maxAgentCalls)) return false;
+    if (!posInt(form.maxRounds)) return false;
+    if (form.maxFlowDurationMin.trim() !== "" && durationValue(form.maxFlowDurationMin) === null) return false;
+    return true;
+  };
+
+  const origNum = (v: number | null | undefined) => v ?? null;
+
+  const numField = (
+    raw: string,
+    orig: number | null | undefined,
+    toValue: (s: string) => number | null,
+  ): number | null | undefined => {
+    const t = raw.trim();
+    const parsed = t === "" ? null : toValue(t);
+    if (parsed === null && t !== "") return undefined;
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed <= 0)) return undefined;
+    if (isEdit && parsed === origNum(orig)) return undefined;
+    return parsed;
   };
 
   const submit = () => {
     if (!isValid()) return;
+    const effectiveSpecial = form.specialId || form.selected[0] || "";
     const config: RoomModeConfig = {};
-    if (form.specialId) {
+    if (effectiveSpecial) {
       if (form.mode === "conductor" || form.mode === "auto" || form.mode === "roundrobin") {
-        config.conductorId = form.specialId;
+        config.conductorId = effectiveSpecial;
       } else if (form.mode === "parallel") {
-        config.parallelSummarizerId = form.specialId;
+        config.parallelSummarizerId = effectiveSpecial;
       } else if (form.mode === "debate") {
-        config.debateJudge = form.specialId;
+        config.debateJudge = effectiveSpecial;
       }
     }
     if (form.mode === "pipeline" && form.pipelineOrder.length > 0) {
@@ -135,21 +168,79 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
       }
       config.debateRounds = Math.max(1, Math.min(5, form.debateRounds));
     }
+    const mc = numField(form.maxConcurrent, editing?.maxConcurrent, (s) => {
+      const n = Number(s);
+      return Number.isSafeInteger(n) && n >= 1 ? n : null;
+    });
+    if (mc !== undefined) config.maxConcurrent = mc;
+    const mac = numField(form.maxAgentCalls, editing?.maxAgentCalls, (s) => {
+      const n = Number(s);
+      return Number.isSafeInteger(n) && n >= 1 ? n : null;
+    });
+    if (mac !== undefined) config.maxAgentCalls = mac;
+    const mfd = numField(form.maxFlowDurationMin, editing?.maxFlowDurationMs, (s) => durationValue(s));
+    if (mfd !== undefined) config.maxFlowDurationMs = mfd;
+    const mr = numField(form.maxRounds, editing?.maxRounds, (s) => {
+      const n = Number(s);
+      return Number.isSafeInteger(n) && n >= 1 ? n : null;
+    });
+    if (mr !== undefined) config.maxRounds = mr;
+    const rfOrig = editing?.relevanceFilter ?? null;
+    const rfVal = form.relevanceFilter === "on" ? true : form.relevanceFilter === "off" ? false : null;
+    if (rfVal !== rfOrig) config.relevanceFilter = rfVal;
+    if (isEdit && editing && form.mode !== editing.mode) {
+      const activeKeys = new Set(
+        form.mode === "conductor" || form.mode === "auto" || form.mode === "roundrobin"
+          ? ["conductorId"]
+          : form.mode === "parallel"
+            ? ["parallelSummarizerId"]
+            : form.mode === "pipeline"
+              ? ["pipelineOrder"]
+              : form.mode === "debate"
+                ? ["debateSides", "debateJudge", "debateRounds"]
+                : [],
+      );
+      for (const k of [
+        "conductorId",
+        "parallelSummarizerId",
+        "pipelineOrder",
+        "debateSides",
+        "debateJudge",
+        "debateRounds",
+      ] as const) {
+        if (!activeKeys.has(k) && !Object.prototype.hasOwnProperty.call(config, k)) {
+          (config as Record<string, unknown>)[k] = null;
+        }
+      }
+    }
     const memberRoles = Object.fromEntries(
       Object.entries(form.memberRoles).filter(([, v]) =>
         typeof v === "string" ? v.trim() : !!v?.persona?.trim(),
       ),
-    );
+    ) as Record<string, string | PersonaCard>;
+    const stableRole = (v: string | PersonaCard | undefined): string => {
+      if (typeof v === "string") return JSON.stringify(v);
+      if (v && typeof v === "object") {
+        const o = v as Record<string, unknown>;
+        return JSON.stringify(["persona", "tone", "boundaries", "examples"].map((k) => o[k] ?? ""));
+      }
+      return JSON.stringify(v);
+    };
+    const rolesEqual = (a: Record<string, string | PersonaCard>, b: Record<string, string | PersonaCard> | null | undefined): boolean => {
+      const bk = Object.keys(b ?? {});
+      const ak = Object.keys(a);
+      return ak.length === bk.length && ak.every((k) => stableRole(a[k]) === stableRole(b?.[k]));
+    };
+    const rolesDirty = isEdit ? !rolesEqual(memberRoles, editing?.memberRoles) : true;
     if (isEdit && editing) {
-      void store.updateRoom(editing, form.name, form.selected, form.mode, config, memberRoles);
+      void store.updateRoom(editing, form.name, form.selected, form.mode, config, rolesDirty ? memberRoles : undefined);
     } else {
       void store.createRoom(form.name, form.selected, form.mode, config, memberRoles);
     }
     onClose();
   };
 
-  const onModeChange = (mode: string) => {
-    setModeManuallyChanged(true);
+  const applyMode = (mode: string) => {
     setForm({
       ...form,
       mode,
@@ -157,6 +248,8 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
       debateSides: ensureDebateDefaults(form.selected),
     });
   };
+
+  const onModeChange = (mode: string) => applyMode(mode);
 
   const renderConfig = () => {
     switch (form.mode) {
@@ -178,7 +271,7 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
         return (
           <FormRow label={label}>
             <select
-              value={form.specialId}
+              value={form.specialId || form.selected[0] || ""}
               onChange={(e) => setForm({ ...form, specialId: e.currentTarget.value })}
             >
               <option value="">{S.pleaseSelect}</option>
@@ -273,6 +366,9 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
     );
   };
 
+  const mainModeOptions = modes.filter((m) => MAIN_MODES.includes(m.value) || m.value === form.mode);
+  const modeInfo = modes.find((m) => m.value === form.mode);
+
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
@@ -280,37 +376,109 @@ export function RoomDialog({ onClose, editingRoom }: { onClose: () => void; edit
         <FormRow label={S.nameLabel}>
           <input
             value={form.name}
-            onChange={(e) => {
-              const name = e.currentTarget.value;
-              const next: typeof form = { ...form, name };
-              if (!modeManuallyChanged) {
-                const recommended = recommendMode(name);
-                if (recommended && recommended !== form.mode) {
-                  next.mode = recommended;
-                  next.specialId = "";
-                }
-              }
-              setForm(next);
-            }}
+            onChange={(e) => setForm({ ...form, name: e.currentTarget.value })}
           />
         </FormRow>
         <FormRow label={S.modeSection}>
           <select value={form.mode} onChange={(e) => onModeChange(e.currentTarget.value)}>
-            {modes.map((m) => (
+            {mainModeOptions.map((m) => (
               <option key={m.value} value={m.value}>
                 {m.label}
               </option>
             ))}
           </select>
         </FormRow>
-        {(() => {
-          const modeInfo = modes.find((m) => m.value === form.mode);
-          if (!modeInfo) return null;
-          return <div className="mode-description">{modeInfo.description}</div>;
-        })()}
+        {modeInfo && <div className="mode-description">{modeInfo.description}</div>}
 
-        {renderConfig()}
-        {renderDebateConfig()}
+        {!isAdvancedMode(form.mode) && renderConfig()}
+        {!isAdvancedMode(form.mode) && renderDebateConfig()}
+
+        <details
+          className="advanced-section"
+          open={advOpen}
+          onToggle={(e) => setAdvOpen(e.currentTarget.open)}
+        >
+          <summary>{S.advancedSectionLabel}</summary>
+          <FormRow label={S.modeSection}>
+            <select
+              value={isAdvancedMode(form.mode) ? form.mode : ""}
+              onChange={(e) => {
+                if (e.currentTarget.value) {
+                  applyMode(e.currentTarget.value);
+                  setAdvOpen(true);
+                }
+              }}
+            >
+              <option value="">{S.advancedModePlaceholder}</option>
+              {modes.filter((m) => ADV_MODES.includes(m.value)).map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </FormRow>
+          {isAdvancedMode(form.mode) && modeInfo && (
+            <div className="mode-description">{modeInfo.description}</div>
+          )}
+          {isAdvancedMode(form.mode) && renderConfig()}
+          {isAdvancedMode(form.mode) && renderDebateConfig()}
+          <div className="resource-section">
+            <h4>{S.resourceSectionLabel}</h4>
+            <div className="resource-hint">{S.resourceDefaultsHint}</div>
+            <FormRow label={S.maxConcurrentLabel}>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                placeholder={S.unlimitedLabel}
+                value={form.maxConcurrent}
+                onChange={(e) => setForm({ ...form, maxConcurrent: e.currentTarget.value })}
+              />
+            </FormRow>
+            <FormRow label={S.maxAgentCallsLabel}>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                placeholder={S.unlimitedLabel}
+                value={form.maxAgentCalls}
+                onChange={(e) => setForm({ ...form, maxAgentCalls: e.currentTarget.value })}
+              />
+            </FormRow>
+            <FormRow label={S.maxFlowDurationLabel}>
+              <input
+                type="number"
+                min={0}
+                step="any"
+                placeholder={S.unlimitedLabel}
+                value={form.maxFlowDurationMin}
+                onChange={(e) => setForm({ ...form, maxFlowDurationMin: e.currentTarget.value })}
+              />
+            </FormRow>
+            <FormRow label={S.maxRoundsLabel}>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                placeholder={S.unlimitedLabel}
+                value={form.maxRounds}
+                onChange={(e) => setForm({ ...form, maxRounds: e.currentTarget.value })}
+              />
+            </FormRow>
+            <FormRow label={S.relevanceFilterLabel}>
+              <select
+                value={form.relevanceFilter}
+                onChange={(e) =>
+                  setForm({ ...form, relevanceFilter: e.currentTarget.value as "global" | "on" | "off" })
+                }
+              >
+                <option value="global">{S.relevanceFilterGlobal}</option>
+                <option value="on">{S.relevanceFilterOn}</option>
+                <option value="off">{S.relevanceFilterOff}</option>
+              </select>
+            </FormRow>
+          </div>
+        </details>
 
         <div className="member-picker">
           <h4>{S.pickMembersLabel}</h4>

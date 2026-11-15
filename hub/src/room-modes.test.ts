@@ -1069,3 +1069,652 @@ describe("openTopics 编排注入与归档", () => {
     assert.equal(manager.subModeFor(autoRoom.roomId)?.mode, "self");
   });
 });
+
+describe("followUp 逐项投递与归属", () => {
+  const tick = () => new Promise((r) => setImmediate(r));
+  const text = (c: unknown) => (typeof c === "string" ? c : JSON.stringify(c));
+
+  function queueHarness() {
+    const rooms = new RoomManager();
+    const busy = new Set<string>();
+    const calls: { sessionId: string; content: unknown; opts: unknown; roomIdAtDispatch: string | undefined }[] = [];
+    const cancelled: string[] = [];
+    const events: { method: string; params: Record<string, unknown> }[] = [];
+    let manager!: RoomModeManager;
+    const agent: AgentOps = {
+      prompt: async (sessionId, content, opts) => {
+        calls.push({ sessionId, content, opts, roomIdAtDispatch: manager.roomIdForTurn(sessionId) });
+        busy.add(sessionId);
+      },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => {
+        cancelled.push(sid);
+        busy.delete(sid);
+      },
+    };
+    manager = new RoomModeManager(agent, rooms, (method, params) => events.push({ method, params }));
+    return { rooms, busy, calls, cancelled, events, agent, get manager() { return manager; } };
+  }
+
+  it("跨房共享会话：排队按 FIFO 逐项投递，归属与 artifact 各自归房", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create("roomA", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rB = h.rooms.create("roomB", [{ sessionId: "s1", name: "coder" }], "mention");
+    h.busy.add("s1");
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    await h.manager.handle(rB, "@coder TASK_B", {});
+    assert.equal(h.calls.length, 0);
+
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "old done");
+    await tick();
+    assert.equal(h.calls.length, 1, "旧 done 后只派队首，不合并");
+    assert.ok(text(h.calls[0]!.content).includes("TASK_A"));
+    assert.ok(!text(h.calls[0]!.content).includes("TASK_B"), "不得并入 B 房内容");
+    assert.equal(h.calls[0]!.roomIdAtDispatch, rA.roomId);
+    assert.equal(h.manager.roomIdForTurn("s1"), rA.roomId, "在途归属 A 房");
+
+    h.busy.delete("s1");
+    await h.manager.onPromptDone(
+      "s1",
+      '```json\n{"text":"done","artifacts":[{"type":"file","path":"a.ts","summary":"产物A"}]}\n```',
+    );
+    await tick();
+    assert.equal(h.calls.length, 2, "A 完成后才派 B");
+    assert.ok(text(h.calls[1]!.content).includes("TASK_B"));
+    assert.ok(!text(h.calls[1]!.content).includes("TASK_A"));
+    assert.equal(h.calls[1]!.roomIdAtDispatch, rB.roomId);
+    assert.equal(h.manager.roomIdForTurn("s1"), rB.roomId, "在途归属 B 房");
+    assert.ok(h.rooms.getArtifacts(rA.roomId, 10).some((a) => a.path === "a.ts"), "A 产物归 rA");
+    assert.equal(h.rooms.getArtifacts(rB.roomId, 10).length, 0);
+
+    h.busy.delete("s1");
+    await h.manager.onPromptDone(
+      "s1",
+      '```json\n{"text":"done","artifacts":[{"type":"file","path":"b.ts","summary":"产物B"}]}\n```',
+    );
+    await tick();
+    assert.ok(h.rooms.getArtifacts(rB.roomId, 10).some((a) => a.path === "b.ts"), "B 产物归 rB");
+    assert.equal(h.rooms.getArtifacts(rA.roomId, 10).filter((a) => a.path === "b.ts").length, 0);
+  });
+
+  it("同房排队同样逐项投递；importRuntime 仅保留数值 opts 且过滤失效条目", async () => {
+    const h = queueHarness();
+    const room = h.rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "tester" },
+      ],
+      "mention",
+    );
+    h.busy.add("s1");
+    await h.manager.handle(room, "@coder 第一条", {});
+    await h.manager.handle(room, "@coder 第二条", {});
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "old done");
+    await tick();
+    assert.equal(h.calls.length, 1);
+    assert.ok(text(h.calls[0]!.content).includes("第一条"));
+    assert.ok(!text(h.calls[0]!.content).includes("第二条"), "同房也不合并");
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "done1");
+    await tick();
+    assert.equal(h.calls.length, 2);
+    assert.ok(text(h.calls[1]!.content).includes("第二条"));
+
+    const rooms2 = new RoomManager();
+    const room2 = rooms2.create("team2", [{ sessionId: "s1", name: "coder" }], "mention");
+    const calls2: { content: unknown; opts: Record<string, unknown> | undefined }[] = [];
+    const agent2: AgentOps = {
+      prompt: async (_sid, content, opts) => {
+        calls2.push({ content, opts: opts as Record<string, unknown> | undefined });
+      },
+      isBusy: () => false,
+      has: () => true,
+      cancel: async () => {},
+    };
+    const m2 = new RoomModeManager(agent2, rooms2, () => {});
+    await m2.importRuntime({
+      followUps: {
+        s1: [
+          {
+            roomId: room2.roomId,
+            content: "有效任务",
+            opts: { ackTimeoutMs: 111, stallMs: 222, queueIfBusy: true, junk: "x" },
+          },
+          { roomId: "ghost-room", content: "已删房任务" },
+        ],
+        s9: [{ roomId: room2.roomId, content: "非成员任务" }],
+      },
+    });
+    m2.resumeFlows();
+    await tick();
+    await tick();
+    assert.equal(calls2.length, 1, "仅有效条目投递");
+    assert.ok(text(calls2[0]!.content).includes("有效任务"));
+    assert.equal(calls2[0]!.opts?.ackTimeoutMs, 111);
+    assert.equal(calls2[0]!.opts?.stallMs, 222);
+    assert.equal(calls2[0]!.opts?.queueIfBusy, false, "sendPrompt 统一 queueIfBusy:false");
+    assert.equal(calls2[0]!.opts?.junk, undefined, "非数值字段不恢复");
+  });
+
+  it("删房清空其队列不影响其他房；恢复的失效队列不投递", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create("roomA", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rB = h.rooms.create("roomB", [{ sessionId: "s1", name: "coder" }], "mention");
+    h.busy.add("s1");
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    await h.manager.handle(rB, "@coder TASK_B", {});
+    h.rooms.delete(rA.roomId);
+    h.manager.onRoomRemoved(rA.roomId);
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "old done");
+    await tick();
+    assert.equal(h.calls.length, 1, "已删房队列不投递");
+    assert.ok(text(h.calls[0]!.content).includes("TASK_B"));
+    assert.ok(!text(h.calls[0]!.content).includes("TASK_A"));
+  });
+
+  it("cancelActive 清本房未派发队列，且不取消归属其他房的在跑会话", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create(
+      "roomA",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "worker" },
+      ],
+      "mention",
+      { conductorId: "s1" },
+    );
+    const rB = h.rooms.create("roomB", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rC = h.rooms.create(
+      "roomC",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s3", name: "other" },
+      ],
+      "mention",
+      { conductorId: "s1" },
+    );
+
+    await h.manager.handle(rB, "@coder TASK_B", {});
+    assert.equal(h.manager.roomIdForTurn("s1"), rB.roomId);
+    assert.ok(h.busy.has("s1"));
+
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    const fu = () =>
+      (h.manager as unknown as { followUps: Map<string, { roomId: string }[]> }).followUps;
+    assert.ok(fu().get("s1")?.some((it) => it.roomId === rA.roomId), "rA 队列已建");
+
+    await h.manager.cancelActive(rA.roomId, "测试取消");
+    assert.ok(!h.cancelled.includes("s1"), "s1 当前回合属 rB，不得取消");
+    assert.ok(h.busy.has("s1"), "s1 仍忙（rB 回合继续）");
+    assert.equal(h.manager.roomIdForTurn("s1"), rB.roomId, "rB 归属未被清");
+    assert.ok(!(fu().get("s1") ?? []).some((it) => it.roomId === rA.roomId), "rA 未派发项已清");
+
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "B done");
+    await tick();
+    assert.equal(h.calls.filter((c) => text(c.content).includes("TASK_A")).length, 0, "rA 队列已清不再派发");
+
+    await h.manager.handle(rC, "@coder TASK_C", {});
+    assert.equal(h.manager.roomIdForTurn("s1"), rC.roomId);
+    await h.manager.cancelActive(rC.roomId, "测试取消2");
+    assert.ok(h.cancelled.includes("s1"), "归属本房的在跑会话仍应取消");
+  });
+
+  it("parallel：busy 成员明确跳过不排队，flow/notice 只含实际发送者", async () => {
+    const h = queueHarness();
+    const room = h.rooms.create(
+      "par",
+      [
+        { sessionId: "s1", name: "sum" },
+        { sessionId: "s2", name: "worker" },
+      ],
+      "parallel",
+      { parallelSummarizerId: "s1" },
+    );
+    h.busy.add("s2");
+    const res = await h.manager.handle(room, "TOPIC", {});
+    assert.deepEqual(res.sent, ["s1"]);
+    assert.deepEqual(res.skipped, ["s2"]);
+    assert.equal(h.calls.length, 1, "s2 不派发");
+    assert.equal(h.calls.filter((c) => c.sessionId === "s2").length, 0);
+    const fu = (h.manager as unknown as { followUps: Map<string, unknown[]> }).followUps;
+    assert.equal(fu.get("s2")?.length ?? 0, 0, "s2 无排队项");
+    const flow = h.manager.getFlow(room.roomId) as { tasks: { sessionId: string }[] };
+    assert.deepEqual(flow.tasks.map((t) => t.sessionId), ["s1"], "flow 只含发送者");
+    const notice = h.events.find(
+      (e) => e.method === "room.notice" && String(e.params.message ?? "").includes("并行模式"),
+    );
+    assert.ok(notice);
+    const msg = String(notice!.params.message);
+    assert.ok(!msg.includes("worker"), `notice 不得虚报忙碌成员已询问：${msg}`);
+
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "RESULT_S1");
+    await tick();
+    assert.equal(h.calls.length, 2, "s1 完成后汇总者可派发");
+    assert.equal(h.calls[1]!.sessionId, "s1");
+    h.busy.delete("s1");
+    await h.manager.onPromptDone("s1", "SUMMARY");
+    await tick();
+    assert.equal(h.calls.filter((c) => c.sessionId === "s2").length, 0, "全程 s2 零调用");
+    assert.equal((h.manager.getFlow(room.roomId) as { phase?: string })?.phase, "done");
+  });
+
+  it("error/cancel 收尾后排队项仍正常派发且归属正确", async () => {
+    const h = queueHarness();
+    const room = h.rooms.create("team", [{ sessionId: "s1", name: "coder" }], "mention");
+    h.busy.add("s1");
+    await h.manager.handle(room, "@coder TASK_Q", {});
+    h.busy.delete("s1");
+    h.manager.onPromptError("s1");
+    await tick();
+    assert.equal(h.calls.length, 1, "error 收尾后 drain 派发");
+    assert.equal(h.calls[0]!.roomIdAtDispatch, room.roomId, "error 后 drain 归属本房");
+
+    h.busy.add("s1");
+    await h.manager.handle(room, "@coder TASK_Q2", {});
+    h.busy.delete("s1");
+    h.manager.onSessionCancelled("s1");
+    await tick();
+    assert.equal(h.calls.length, 2, "cancel 收尾后 drain 派发");
+    assert.equal(h.calls[1]!.roomIdAtDispatch, room.roomId);
+    assert.ok(text(h.calls[1]!.content).includes("TASK_Q2"));
+  });
+
+  it("删除房间取消其明确在途回合一次，房队列清空不再派发", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create("delA", [{ sessionId: "s1", name: "coder" }], "mention");
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    assert.equal(h.manager.roomIdForTurn("s1"), rA.roomId);
+    assert.ok(h.busy.has("s1"));
+
+    h.rooms.delete(rA.roomId);
+    h.manager.onRoomRemoved(rA.roomId);
+    await tick();
+    await tick();
+
+    assert.deepEqual(h.cancelled, ["s1"], "在途回合应被 native cancel 一次");
+    assert.equal(h.manager.roomIdForTurn("s1"), undefined, "房间登记应已清");
+    assert.equal(h.calls.filter((c) => text(c.content).includes("TASK_A")).length, 1, "不再重复派发");
+  });
+
+  it("共享会话实际在他房在途：删本房不取消他房回合", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create("delA2", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rB = h.rooms.create("keepB", [{ sessionId: "s1", name: "coder" }], "mention");
+    await h.manager.handle(rB, "@coder TASK_B", {});
+    assert.equal(h.manager.roomIdForTurn("s1"), rB.roomId);
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    const fu = () =>
+      (h.manager as unknown as { followUps: Map<string, { roomId: string }[]> }).followUps;
+    assert.ok(fu().get("s1")?.some((it) => it.roomId === rA.roomId), "rA 队列已建");
+
+    h.rooms.delete(rA.roomId);
+    h.manager.onRoomRemoved(rA.roomId);
+    await tick();
+    await tick();
+
+    assert.deepEqual(h.cancelled, [], "s1 在途归属 rB，不得取消");
+    assert.equal(h.manager.roomIdForTurn("s1"), rB.roomId, "rB 归属保持");
+    assert.ok(h.busy.has("s1"), "rB 回合继续");
+    assert.ok(!(fu().get("s1") ?? []).some((it) => it.roomId === rA.roomId), "rA 队列已清");
+  });
+
+  it("删除房间取消 pending 期间真实 cancel 事件先到：confirm 后他房队列只补发一次", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create("delA3", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rB = h.rooms.create("keepB3", [{ sessionId: "s1", name: "coder" }], "mention");
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    await h.manager.handle(rB, "@coder TASK_B", {});
+    assert.ok(h.busy.has("s1"));
+
+    let releaseCancel!: () => void;
+    const gate = new Promise<void>((r) => (releaseCancel = r));
+    h.agent.cancel = async (sid) => {
+      h.cancelled.push(sid);
+      await gate;
+      h.busy.delete(sid);
+    };
+
+    h.rooms.delete(rA.roomId);
+    h.manager.onRoomRemoved(rA.roomId);
+    await tick();
+    assert.deepEqual(h.cancelled, ["s1"], "native cancel 已发起");
+
+    h.manager.onSessionCancelled("s1");
+    await tick();
+    await tick();
+    assert.equal(h.calls.length, 1, "cancel 未确认前他房队列不得补发");
+
+    releaseCancel();
+    await tick();
+    await tick();
+    await tick();
+    const bCalls = h.calls.filter((c) => text(c.content).includes("TASK_B"));
+    assert.equal(bCalls.length, 1, "confirm 后他房队列只补发一次");
+    assert.equal(bCalls[0]!.roomIdAtDispatch, rB.roomId, "补发归属 rB");
+  });
+
+  it("批量删除两房：共享成员回合只取消一次，活房回合不受影响", async () => {
+    const h = queueHarness();
+    const rA = h.rooms.create("delA4", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rB = h.rooms.create("delB4", [{ sessionId: "s1", name: "coder" }], "mention");
+    const rC = h.rooms.create("keepC4", [{ sessionId: "s2", name: "tester" }], "mention");
+    await h.manager.handle(rA, "@coder TASK_A", {});
+    await h.manager.handle(rB, "@coder TASK_B", {});
+    await h.manager.handle(rC, "@tester TASK_C", {});
+    assert.equal(h.manager.roomIdForTurn("s1"), rA.roomId);
+    assert.equal(h.manager.roomIdForTurn("s2"), rC.roomId);
+
+    h.rooms.delete(rA.roomId);
+    h.rooms.delete(rB.roomId);
+    h.manager.onRoomRemoved(rA.roomId);
+    h.manager.onRoomRemoved(rB.roomId);
+    await tick();
+    await tick();
+
+    assert.deepEqual(h.cancelled, ["s1"], "明确在途回合只取消一次");
+    assert.equal(h.manager.roomIdForTurn("s2"), rC.roomId, "活房回合归属保持");
+    assert.ok(h.busy.has("s2"), "活房回合不受影响");
+    assert.equal(h.calls.filter((c) => text(c.content).includes("TASK_B")).length, 0, "已删房队列不派发");
+    assert.equal(h.calls.filter((c) => text(c.content).includes("TASK_C")).length, 1);
+  });
+});
+
+describe("cancelActive 归属与并发边界", () => {
+  it("普通 mention 在途回合（无 conductorId）也可被本房取消", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("plain", [{ sessionId: "s1", name: "coder" }], "mention");
+    const busy = new Set<string>();
+    const cancelled: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid) => { busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => { cancelled.push(sid); busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "@coder TASK", {});
+    assert.ok(busy.has("s1"));
+    await manager.cancelActive(room.roomId, "停止");
+    assert.ok(cancelled.includes("s1"), "本房在途 mention 回合应被取消");
+  });
+
+  it("共享会话忙于他房/单聊时，conductor pending 任务不误杀", async () => {
+    const rooms = new RoomManager();
+    const rA = rooms.create(
+      "roomA",
+      [
+        { sessionId: "s1", name: "coder" },
+        { sessionId: "s2", name: "worker" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const rB = rooms.create("roomB", [{ sessionId: "s1", name: "coder" }], "mention");
+    const busy = new Set<string>();
+    const cancelled: string[] = [];
+    const prompts: { sessionId: string; content: unknown }[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, content) => { prompts.push({ sessionId: sid, content }); busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => { cancelled.push(sid); busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(rB, "@coder TASK_B", {});
+    assert.equal(manager.roomIdForTurn("s1"), rB.roomId);
+    const conductor = (manager as unknown as { conductor: { flows: Map<string, { tasks: Map<string, { sessionId: string; status: string }> }> } }).conductor;
+    const flow = { roomId: rA.roomId, phase: "working", tasks: new Map([["t1", { sessionId: "s1", status: "pending" }]]) };
+    conductor.flows.set(rA.roomId, flow as never);
+    assert.equal(manager.roomIdForTurn("s1"), rB.roomId, "promptRooms 优先于 conductor pending");
+    await manager.cancelActive(rA.roomId, "停止A");
+    assert.ok(!cancelled.includes("s1"), "s1 忙于 rB 回合，不得被 rA pending 任务误杀");
+    assert.ok(busy.has("s1"));
+    assert.equal(manager.roomIdForTurn("s1"), rB.roomId);
+  });
+});
+
+describe("统一外发 seam 与回合票据", () => {
+  it("conductor 派发经 manager seam 登记 promptRooms 归属", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid) => { busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "goal", {
+      params: { tasks: [{ id: "t1", to: "coder", task: "实现", dependsOn: [] }] },
+    });
+    const inner = manager as unknown as { promptRooms: Map<string, string> };
+    assert.equal(inner.promptRooms.get("s2"), room.roomId, "worker 外发应登记 promptRooms");
+    assert.equal(manager.roomIdForTurn("s2"), room.roomId);
+  });
+
+  it("worker done 触发同会话下一任务时，旧回合收尾不清新票据登记", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create(
+      "team",
+      [
+        { sessionId: "s1", name: "leader" },
+        { sessionId: "s2", name: "coder" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid) => { busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "goal", {
+      params: {
+        tasks: [
+          { id: "t1", to: "coder", task: "第一步", dependsOn: [] },
+          { id: "t2", to: "coder", task: "第二步", dependsOn: ["t1"] },
+        ],
+      },
+    });
+    const inner = manager as unknown as { promptRooms: Map<string, string>; promptTickets: Map<string, symbol> };
+    assert.equal(inner.promptRooms.get("s2"), room.roomId);
+    busy.delete("s2");
+    await manager.onPromptDone("s2", "step1 done");
+    assert.equal(inner.promptRooms.get("s2"), room.roomId, "下一任务外发后归属仍在");
+    assert.ok(inner.promptTickets.has("s2"), "新回合应持有新票据");
+    assert.equal(manager.roomIdForTurn("s2"), room.roomId);
+  });
+
+  it("queued pipeline 不消费其他房在途回合的 done", async () => {
+    const rooms = new RoomManager();
+    const rA = rooms.create("roomA", [
+      { sessionId: "s1", name: "a" },
+      { sessionId: "s2", name: "b" },
+    ], "pipeline");
+    const rB = rooms.create("roomB", [{ sessionId: "s2", name: "b" }], "mention");
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid) => { busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(rB, "@b ROOM_B_TASK", {});
+    await manager.handle(rA, "pipeline task", { params: { order: ["s1", "s2"] } });
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "stage1 out");
+    const fu = () => (manager as unknown as { followUps: Map<string, { roomId: string }[]> }).followUps;
+    assert.ok(fu().get("s2")?.some((it) => it.roomId === rA.roomId), "roomA stage2 应排队");
+    assert.equal(manager.roomIdForTurn("s2"), rB.roomId);
+    busy.delete("s2");
+    await manager.onPromptDone("s2", "ROOM_B_OUTPUT");
+    const view = manager.getFlow(rA.roomId) as { phase?: string; tasks?: { status: string }[] } | undefined;
+    assert.equal(view?.phase, "working", "roomB 回合输出不得推进 roomA pipeline");
+    assert.notEqual(view?.tasks?.[1]?.status, "done");
+  });
+});
+
+describe("A/E 回归", () => {
+  it("auto @all 与别名精确命中 mention 目标", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("auto1", [
+      { sessionId: "s1", name: "host" },
+      { sessionId: "s2", name: "a" },
+      { sessionId: "s3", name: "b" },
+    ], "auto", { conductorId: "s1" });
+    room.aliases = { 评审组: ["s2", "s3"] };
+    const sent: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid) => { sent.push(sid); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "@all 大家评估一下", {});
+    assert.deepEqual(sent.sort(), ["s1", "s2", "s3"], "@all 精确全员");
+    sent.length = 0;
+    await manager.handle(room, "@评审组 复核这个改动", {});
+    assert.deepEqual(sent.sort(), ["s2", "s3"], "别名精确命中");
+  });
+
+  it("auto 无 @ 默认回退 conductorId 单成员", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("auto2", [
+      { sessionId: "s1", name: "host" },
+      { sessionId: "s2", name: "a" },
+    ], "auto", { conductorId: "s1" });
+    const sent: string[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, content) => { sent.push(sid); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    const res = await manager.handle(room, "随便聊聊今天天气", {});
+    assert.ok(res.sent.length <= 1, "无 @ 不广播全员");
+  });
+
+  it("parallel >400 字输出尾部经 flow.tasks.output 可取，汇总行含引用元数据", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("par", [
+      { sessionId: "s1", name: "sum" },
+      { sessionId: "s2", name: "w" },
+    ], "parallel", { parallelSummarizerId: "s1" });
+    const busy = new Set<string>();
+    const prompts: { sessionId: string; text: string }[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, content) => { prompts.push({ sessionId: sid, text: String(content) }); busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "评估方案", {});
+    const longTail = "X".repeat(500) + "TAIL_MARKER_12345";
+    busy.delete("s2");
+    await manager.onPromptDone("s2", longTail);
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "short sum input");
+    const view = manager.getFlow(room.roomId) as { tasks?: { sessionId: string; output?: string }[] } | undefined;
+    const t2 = view?.tasks?.find((t) => t.sessionId === "s2");
+    assert.ok(t2?.output?.includes("TAIL_MARKER_12345"), "原始输出尾部应保留在 flow.tasks.output");
+    const sumPrompt = prompts.filter((p) => p.sessionId === "s1").at(-1);
+    assert.ok(sumPrompt, "应有汇总 prompt");
+    assert.ok(sumPrompt!.text.includes("outputLen="), "汇总行应含原始长度");
+    assert.ok(sumPrompt!.text.includes(`sessionId=s2`), "汇总行应含 sessionId");
+    assert.ok(sumPrompt!.text.includes(`flowId=`), "汇总行应含 flowId");
+    assert.ok(sumPrompt!.text.includes(`roomId=${room.roomId}`), "汇总行应含 roomId");
+  });
+
+  it("parallel 成员 prompt 带只读 note 且不丢用户 note", async () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("par2", [
+      { sessionId: "s1", name: "sum" },
+      { sessionId: "s2", name: "w" },
+    ], "parallel", { parallelSummarizerId: "s1" });
+    const prompts: { sessionId: string; text: string }[] = [];
+    const agent: AgentOps = {
+      prompt: async (sid, content) => { prompts.push({ sessionId: sid, text: String(content) }); },
+      isBusy: () => false,
+      cancel: async () => {},
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    await manager.handle(room, "评估方案", { note: "用户补充NOTE_ABC" });
+    const memberPrompt = prompts.find((p) => p.sessionId === "s2");
+    assert.ok(memberPrompt, "成员应收到 prompt");
+    assert.ok(memberPrompt!.text.includes("只读分析"), "成员 prompt 应含只读约束");
+    assert.ok(memberPrompt!.text.includes("用户补充NOTE_ABC"), "用户 note 不应丢失");
+  });
+});
+
+describe("严格回流门控", () => {
+  it("未登记单聊的旧 done 不推进排队中的 pipeline 流程", async () => {
+    const rooms = new RoomManager();
+    const rA = rooms.create("roomA", [
+      { sessionId: "s1", name: "a" },
+      { sessionId: "s2", name: "b" },
+    ], "pipeline");
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid) => { busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    busy.add("s1");
+    await manager.handle(rA, "pipeline task", { params: { order: ["s1", "s2"] } });
+    const fu = () => (manager as unknown as { followUps: Map<string, { roomId: string }[]> }).followUps;
+    assert.ok(fu().get("s1")?.some((it) => it.roomId === rA.roomId), "s1 的 pipeline 阶段应排队");
+    await manager.onPromptDone("s1", "DM_OLD_OUTPUT");
+    const view = manager.getFlow(rA.roomId) as { phase?: string; outputs?: unknown[] } | undefined;
+    assert.notEqual(view?.phase, "done", "未登记 done 不得完成 pipeline");
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "DM_OLD_OUTPUT2");
+    const inner = manager as unknown as { promptRooms: Map<string, string> };
+    assert.equal(inner.promptRooms.get("s1"), rA.roomId, "收尾后排队项应真正派发并登记");
+  });
+
+  it("未登记单聊的旧 done 不消费 auto 决策上下文", async () => {
+    const rooms = new RoomManager();
+    const rAuto = rooms.create("autoR", [
+      { sessionId: "s1", name: "host" },
+      { sessionId: "s2", name: "a" },
+    ], "auto", { conductorId: "s1" });
+    const busy = new Set<string>();
+    const agent: AgentOps = {
+      prompt: async (sid) => { busy.add(sid); },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, () => {});
+    busy.add("s1");
+    await manager.handle(rAuto, "帮我评估这个方案", {});
+    const autoDec = () => (manager as unknown as { autoDecisions: Map<string, { roomId: string }> }).autoDecisions;
+    assert.ok(autoDec().has(rAuto.roomId), "auto 决策应已登记（prompt 排队中）");
+    await manager.onPromptDone("s1", "DM_DONE");
+    assert.ok(autoDec().has(rAuto.roomId), "未登记 done 不得消费 auto 决策");
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "DM_DONE2");
+    const inner = manager as unknown as { promptRooms: Map<string, string> };
+    assert.equal(inner.promptRooms.get("s1"), rAuto.roomId, "排队决策 prompt 应派发并登记");
+  });
+});

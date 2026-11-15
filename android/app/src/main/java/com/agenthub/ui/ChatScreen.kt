@@ -2571,6 +2571,11 @@ private fun RawChatBubble(
     ) else Modifier
     when (item) {
         is ChatItem.System -> {
+            val sysText = when (item.text) {
+                "[room.budget:call-limit]" -> S.budgetNoticeCallLimit
+                "[room.budget:deadline]" -> S.budgetNoticeDeadline
+                else -> item.text
+            }
             Box(
                 Modifier.fillMaxWidth().padding(vertical = if (compact) 1.dp else 6.dp),
                 contentAlignment = Alignment.Center,
@@ -2578,7 +2583,7 @@ private fun RawChatBubble(
             val bgColor = if (isCurrentMatch) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
             val textColor = MaterialTheme.colorScheme.onSurfaceVariant
             MessageBubbleBox(
-                copyText = item.text,
+                copyText = sysText,
                 quote = null,
                 vm = vm,
                 itemId = item.id.toString(),
@@ -2590,7 +2595,7 @@ private fun RawChatBubble(
                     color = bgColor,
                 ) {
                     HighlightText(
-                        text = item.text,
+                        text = sysText,
                         highlight = highlight,
                         onMatchKeywordY = keywordCallback,
                         style = MaterialTheme.typography.labelSmall,
@@ -3232,6 +3237,14 @@ private fun FlowCardBlock(
                     }
                 }
                 Spacer(Modifier.weight(1f))
+                flow.budget?.let { b ->
+                    Text(
+                        S.budgetUsageFmt.format(b.usedCalls.toString(), b.maxCalls?.toString() ?: S.unlimitedLabel, b.maxConcurrent?.toString() ?: S.unlimitedLabel) +
+                            if (b.stopped) " · " + (if (b.reason == "deadline") S.budgetStoppedDeadline else S.budgetStoppedCallLimit) else "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (flow.tasks.isNotEmpty()) {
                     Text(
                         S.flowProgressFmt.format(progress.done, progress.total, progress.running, progress.pending) +
@@ -3626,7 +3639,8 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                     }
                     Text("${S.verificationStatusLabel}$statusText", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     val acHasExtra = task.automaticCheckSnapshot != null || task.automaticCheckTruncated || task.automaticCheckSnapshotCurrent == false
-                    val acText = if (task.automaticCheckStatus == "exited_zero" && !acHasExtra) null else when (task.automaticCheckStatus) {
+                    val acText = if (task.automaticCheckStatus == "not_run") null
+                    else if (task.automaticCheckStatus == "exited_zero" && !acHasExtra) null else when (task.automaticCheckStatus) {
                         "exited_zero" -> S.automaticCheckExitedZero
                         "exited_nonzero" -> task.automaticCheckExitCode
                             ?.let { S.automaticCheckExitedNonzero.format(it) }
@@ -3647,7 +3661,7 @@ private fun FlowTaskRow(task: FlowTask, flowId: String, showRetry: Boolean, vm: 
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    val acExtra = listOfNotNull(
+                    val acExtra = if (task.automaticCheckStatus == "not_run") "" else listOfNotNull(
                         task.automaticCheckSnapshot?.take(12)?.let { S.automaticCheckSnapshot.format(it) },
                         if (task.automaticCheckSnapshotCurrent == true) S.snapshotCurrentTrue else null,
                         if (task.automaticCheckTruncated) S.automaticCheckTruncated else null,

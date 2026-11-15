@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as acp from "@agentclientprotocol/sdk";
-import { AcpAgent, setPromptAckTimeoutMs, type HubEvent } from "./agent.js";
+import { AcpAgent, setPromptAckTimeoutMs, setTurnStallTimeoutMs, type HubEvent } from "./agent.js";
 
 function pipe() {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -167,15 +167,50 @@ test("ACP goal: 空闲期断连仍通知目标失联，不保留虚假的执行�
   assert.ok(f.events.some((e) => e.method === "session.goal.error" && e.params.executionId === "execution-1"));
 });
 
-test("ACP goal: 目标已确认但一直零输出仍受 ACK 看门狗保护，不无限挂起", async (t) => {
+test("ACP goal: 目标已确认但一直零输出仅告警，active 生命周期由后端负责", async (t) => {
   setPromptAckTimeoutMs(10);
   const f = await fixture();
   t.after(() => { f.agent.close(); f.backend.close(); setPromptAckTimeoutMs(180000); });
+  const before = Date.now();
   f.agent.bindNativeGoal("s1", "execution-1", "approved");
   await f.agent.controlGoal("s1", "set", "approved");
-  await new Promise((r) => setTimeout(r, 50));
-  assert.deepEqual(f.calls.map((p) => p.action), ["set", "pause"]);
-  assert.equal(f.agent.getNativeGoal("s1")?.status, "paused");
+  await new Promise((r) => setTimeout(r, 60));
+  const after = Date.now();
+  assert.deepEqual(f.calls.map((p) => p.action), ["set"], "静默不得 pause/clear");
+  assert.equal(f.agent.getNativeGoal("s1")?.status, "active", "active 目标保持不被误杀");
+  const stallEv = f.events.find((e) => e.method === "session.stall");
+  assert.ok(stallEv, "应发出 stall 告警");
+  const idleMs = (stallEv!.params as { idleMs: number }).idleMs;
+  assert.ok(idleMs >= 0 && idleMs <= after - before, `idleMs 应在告警窗口内: ${idleMs}`);
+  assert.equal(f.events.filter((e) => e.method === "session.stall").length, 1, "至多一次 stall 告警");
+  assert.equal(f.events.some((e) => e.method === "session.goal.error"), false);
+});
+
+test("ACP goal: midturn 静默仅告警，进行中工具豁免且 active 不被 pause/clear", async (t) => {
+  setPromptAckTimeoutMs(10);
+  setTurnStallTimeoutMs(50);
+  const f = await fixture();
+  t.after(() => { f.agent.close(); f.backend.close(); setPromptAckTimeoutMs(180000); setTurnStallTimeoutMs(300000); });
+  f.agent.bindNativeGoal("s1", "execution-1", "approved");
+  await f.agent.controlGoal("s1", "set", "approved");
+  await f.chunk("working");
+  await f.tick();
+  await f.backend.client.notify(acp.methods.client.session.update, {
+    sessionId: "s1",
+    update: { sessionUpdate: "tool_call", toolCallId: "tc-goal", status: "in_progress", kind: "execute", title: "train" },
+  });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(f.calls.map((p) => p.action), ["set"], "工具活跃+静默不得 pause/clear");
+  assert.equal(f.agent.getNativeGoal("s1")?.status, "active");
+  assert.equal(f.agent.isBusy("s1"), true);
+  await f.backend.client.notify(acp.methods.client.session.update, {
+    sessionId: "s1",
+    update: { sessionUpdate: "tool_call_update", toolCallId: "tc-goal", status: "completed" },
+  });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(f.events.filter((e) => e.method === "session.stall").length >= 1, true, "终态后静默告警");
+  assert.deepEqual(f.calls.map((p) => p.action), ["set"], "仍不得 pause/clear");
+  assert.equal(f.agent.getNativeGoal("s1")?.status, "active");
 });
 
 test("ACP goal: complete 先于控制回合收尾时保留最后答复，不提前定稿", async (t) => {

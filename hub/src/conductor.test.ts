@@ -859,6 +859,7 @@ describe("conductor", () => {
           if (sessionId === "worker2") throw new Error("worker2 unavailable");
         },
         isBusy: () => false,
+        cwd: (sid: string) => "/test/" + sid,
       },
       rooms,
       (n) => notices.push(n.message),
@@ -1050,7 +1051,9 @@ describe("conductor", () => {
           if (first) { first = false; await gate; }
           throw new Error("worker2 unavailable");
         }
-      }, isBusy: () => false,
+      },
+        isBusy: () => false,
+        cwd: (sid: string) => "/test/" + sid,
     }, rooms, () => {}, undefined, 0);
     await orch.start(r, "paused peers");
     await orch.onPromptDone("conductor", '```json\n{"tasks":[{"id":"t1","to":"worker1","task":"front"},{"id":"t2","to":"worker2","task":"back"}]}\n```');
@@ -1230,7 +1233,7 @@ describe("conductor", () => {
     assert.equal((flow as { goal: string }).goal, "重写后的目标");
     assert.deepEqual((flow as { acceptanceCriteria: string[] }).acceptanceCriteria, ["标准A", "标准B"]);
     assert.equal((flow as { iteration: number }).iteration, 1);
-    assert.equal((flow as { maxIterations: number }).maxIterations, 3);
+    assert.equal((flow as { maxIterations: number | null }).maxIterations, null);
   });
 
   it("dependsOn 任务的 prompt 注入前置任务结果", async () => {
@@ -1450,20 +1453,28 @@ describe("conductor", () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
     assert.equal((orchestrator.getFlow(r.roomId) as { iteration: number }).iteration, 3);
     await orchestrator.onPromptDone("worker", "done3");
-    // 第 3 轮验收仍 continue -> 达到上限，直接汇总
+    // 第 3 轮验收仍 continue -> 无迭代上限，继续派工
     const workerPromptsBefore = prompts.filter((p) => p.sessionId === "worker").length;
     await orchestrator.onPromptDone(
       "conductor",
       '```json\n{"decision":"continue","reason":"还差","tasks":[{"id":"r4","to":"worker","task":"补3"}]}\n```',
     );
-    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "summarizing");
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    assert.equal((orchestrator.getFlow(r.roomId) as { phase: string }).phase, "working");
     assert.equal(
       prompts.filter((p) => p.sessionId === "worker").length,
-      workerPromptsBefore,
-      "should not dispatch a 4th round",
+      workerPromptsBefore + 1,
+      "无上限时第 4 轮照常派发",
     );
+    await orchestrator.onPromptDone("worker", "done4");
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"decision":"complete","reason":"已满足"}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
     await orchestrator.onPromptDone("conductor", "最终答复");
-    assert.equal(orchestrator.hasAwaitingRetry(r.roomId), true);
+    assert.equal(orchestrator.hasAwaitingRetry(r.roomId), false);
   });
 
   it("export/import 保留 goal/criteria/iteration 并可恢复 reviewing", async () => {
@@ -1697,7 +1708,7 @@ describe("conductor", () => {
     ).tasks.find((t) => t.id === "t1")!;
     assert.equal(t1b.status, "running");
     assert.equal(t1b.backendRuns, undefined, "重派应清除旧 backendRuns");
-    assert.equal(t1b.automaticCheck?.status, "not_run", "重派应清除旧 automaticCheck");
+    assert.equal(t1b.automaticCheck, undefined, "重派应清除旧 automaticCheck");
     await orchestrator2.onPromptDone(
       "w1",
       '```json\n{"text":"done","artifacts":[{"type":"file","path":"a.ts","summary":"x"}]}\n```',
@@ -1881,6 +1892,7 @@ describe("conductor", () => {
             prompts.push({ sessionId, content: String(content) });
           },
           isBusy: () => false,
+          cwd: (sid: string) => "/test/" + sid,
         },
         rooms,
         () => {},
@@ -2677,6 +2689,117 @@ describe("conductor", () => {
     );
   });
 
+  it("worker 连续 4 次求助成员不设固定上限：每次答复唤醒一次直至真实完成", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "help-member-loop",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+        { sessionId: "worker2", name: "b" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const notices: string[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      (n) => notices.push(n.message),
+      undefined,
+      0,
+    );
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"a","task":"实现接口"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    const worker1Prompts = () => prompts.filter((p) => p.sessionId === "worker1");
+    for (let round = 1; round <= 4; round++) {
+      const consumed = await orchestrator.onPromptDone(
+        "worker1",
+        '需要澄清\n```json\n{"help":{"to":"b","question":"第' + round + '个问题？"}}\n```',
+      );
+      assert.equal(consumed, r.roomId);
+      const flow = orchestrator.getFlow(r.roomId)!;
+      const t1 = (flow.tasks as Record<string, unknown>[]).find((t) => t.id === "t1")!;
+      assert.equal(t1.status, "running", `第${round}次求助后任务不得假完成`);
+      assert.equal(t1.waitingFor, "b");
+      await orchestrator.onPromptDone("worker2", `答案${round}`);
+      const resumes = worker1Prompts();
+      assert.equal(resumes.length, 1 + round, `第${round}次答复应恰好唤醒一次 worker`);
+      assert.match(resumes.at(-1)!.content, new RegExp(`答案${round}`));
+      const flow2 = orchestrator.getFlow(r.roomId)!;
+      const t1b = (flow2.tasks as Record<string, unknown>[]).find((t) => t.id === "t1")!;
+      assert.equal(t1b.status, "running");
+      assert.equal(t1b.waitingFor, undefined);
+    }
+    assert.ok(worker1Prompts().every((p, idx) => idx === 0 || /答案\d/.test(p.content)), "每次唤醒均携带答复");
+
+    await orchestrator.onPromptDone("worker1", "done");
+    await orchestrator.onPromptDone("worker2", "复核完成");
+    const flow3 = orchestrator.getFlow(r.roomId)!;
+    assert.equal(
+      (flow3.tasks as { id: string; status: string }[]).find((t) => t.id === "t1")!.status,
+      "done",
+    );
+  });
+
+  it("worker 连续 3 次向用户求助均被接受并唤醒", async () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "help-user-loop",
+      [
+        { sessionId: "conductor", name: "leader" },
+        { sessionId: "worker1", name: "a" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    const prompts: { sessionId: string; content: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      {
+        prompt: async (sessionId, content) => {
+          prompts.push({ sessionId, content: String(content) });
+        },
+        isBusy: () => false,
+      },
+      rooms,
+      () => {},
+      undefined,
+      0,
+    );
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"a","task":"起服务"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+
+    for (let round = 1; round <= 3; round++) {
+      await orchestrator.onPromptDone(
+        "worker1",
+        `\`\`\`json\n{"help":{"to":"user","question":"第${round}轮端口？"}}\n\`\`\``,
+      );
+      const flow = orchestrator.getFlow(r.roomId)!;
+      const t1 = (flow.tasks as Record<string, unknown>[]).find((t) => t.id === "t1")!;
+      assert.equal(t1.status, "running");
+      assert.equal(t1.waitingFor, "user");
+      const resumed = orchestrator.answerUserHelp(r.roomId, `答复${round}`);
+      assert.deepEqual(resumed, ["worker1"], `第${round}轮用户求助应被接受`);
+      const last = prompts.filter((p) => p.sessionId === "worker1").at(-1)!;
+      assert.match(last.content, new RegExp(`答复${round}`));
+    }
+  });
+
   it("worker 向用户求助：answerUserHelp 用下一条消息唤醒", async () => {
     const rooms = new RoomManager();
     const r = rooms.create(
@@ -3341,6 +3464,132 @@ describe("conductor", () => {
       ["conductor", "worker1"],
       "房外回合结束应立即唤醒等待该会话的 pending 任务，不等 5000ms 轮询",
     );
+  });
+
+  const isoRoom = () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "iso-gate",
+      [
+        { sessionId: "conductor", name: "conductor" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "conductor",
+      { conductorId: "conductor" },
+    );
+    return { rooms, r };
+  };
+  const isoAgent = (calls: { cwd?: string; command?: string }[]) => ({
+    prompt: async () => {},
+    isBusy: () => false,
+    cwd: () => "/repo/ws",
+    runIsolatedCheck: async (cwd: string, command: string) => {
+      calls.push({ cwd, command });
+      return {
+        status: "exited_zero" as const,
+        runner: "bubblewrap" as const,
+        commandHash: "a".repeat(64),
+        snapshotHash: "b".repeat(64),
+        exitCode: 0,
+        startedAt: 1,
+        finishedAt: 2,
+      };
+    },
+  });
+  it("默认禁用群聊自动隔离检查：配 runner+approved 也不执行且不伪造 not_run", async () => {
+    const { rooms, r } = isoRoom();
+    const calls: { cwd?: string; command?: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      isoAgent(calls),
+      rooms,
+      () => {},
+      undefined,
+      0,
+      { unit: "npm test" },
+    );
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    await orchestrator.onPromptDone(
+      "worker",
+      '```json\n{"text":"完成","artifacts":[{"type":"file","path":"a.ts","summary":"x"}],"verifyCommand":"npm test","verifyCheckId":"unit","verifyExitCode":0}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(calls.length, 0, "默认禁用时 runner 不得执行");
+    const flow = orchestrator.getFlow(r.roomId) as {
+      tasks: { id: string; verifyCommand?: string; automaticCheck?: { status?: string } }[];
+    };
+    const t1 = flow.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.verifyCommand, "npm test", "成员自报证据仍保留");
+    assert.equal(t1.automaticCheck, undefined, "禁用且无历史检查时不得伪造 not_run");
+  });
+
+  it("显式启用后 approved runner 执行并写回真实检查", async () => {
+    const { rooms, r } = isoRoom();
+    const calls: { cwd?: string; command?: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      isoAgent(calls),
+      rooms,
+      () => {},
+      undefined,
+      0,
+      { unit: "npm test" },
+    );
+    orchestrator.setAutomaticChecksEnabled(true);
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    await orchestrator.onPromptDone(
+      "worker",
+      '```json\n{"text":"完成","artifacts":[{"type":"file","path":"a.ts","summary":"x"}],"verifyCommand":"npm test","verifyCheckId":"unit","verifyExitCode":0}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(calls.length, 1, "启用后 approved 检查应执行一次");
+    assert.equal(calls[0]!.command, "npm test", "执行预设命令而非成员字符串");
+    const flow = orchestrator.getFlow(r.roomId) as {
+      tasks: { id: string; automaticCheck?: { status?: string; exitCode?: number } }[];
+    };
+    const t1 = flow.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.automaticCheck?.status, "exited_zero");
+    assert.equal(t1.automaticCheck?.exitCode, 0);
+  });
+
+  it("启用后 unapproved/mismatch 仍拦截", async () => {
+    const { rooms, r } = isoRoom();
+    const calls: { cwd?: string; command?: string }[] = [];
+    const orchestrator = new ConductorOrchestrator(
+      isoAgent(calls),
+      rooms,
+      () => {},
+      undefined,
+      0,
+      { unit: "npm test" },
+    );
+    orchestrator.setAutomaticChecksEnabled(true);
+    await orchestrator.start(r, "任务");
+    await orchestrator.onPromptDone(
+      "conductor",
+      '```json\n{"tasks":[{"id":"t1","to":"worker","task":"做事"}]}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    await orchestrator.onPromptDone(
+      "worker",
+      '```json\n{"text":"完成","artifacts":[{"type":"file","path":"a.ts","summary":"x"}],"verifyCommand":"rm -rf /","verifyCheckId":"unit","verifyExitCode":0}\n```',
+    );
+    for (let i = 0; i < 10; i++) await new Promise((res) => setImmediate(res));
+    assert.equal(calls.length, 0, "mismatch 命令不得执行");
+    const flow = orchestrator.getFlow(r.roomId) as {
+      tasks: { id: string; automaticCheck?: { status?: string; reason?: string } }[];
+    };
+    const t1 = flow.tasks.find((t) => t.id === "t1")!;
+    assert.equal(t1.automaticCheck?.status, "blocked");
+    assert.equal(t1.automaticCheck?.reason, "command_mismatch");
   });
 
 });

@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
-import { isEventAction, type Room, type RoomManager } from "./room.js";
+import { isEventAction, RoomBudgetExceededError, type Room, type RoomManager } from "./room.js";
 import { distillMemoryText } from "./memory.js";
 import { TaskSubscriptions } from "./subscribe.js";
 import { logError, logWarn } from "./logger.js";
@@ -83,8 +83,15 @@ type FlowPhase = "planning" | "awaiting-input" | "working" | "reviewing" | "summ
 
 type ParsedTask = { id?: string; to: string; task: string; dependsOn?: string[]; files?: string[] };
 type FlowContract = { goal?: string | undefined; acceptanceCriteria?: string[] | undefined; requireTasks?: boolean };
-const taskFileKeys = (files: readonly string[] | undefined) =>
-  (files ?? []).map((f) => f.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase()).filter(Boolean);
+const taskFileKeys = (files: readonly string[] | undefined) => {
+  const ci = process.platform === "win32";
+  return (files ?? [])
+    .map((f) => {
+      const k = path.posix.normalize(f.trim().replace(/\\/g, "/").replace(/^\.\//, ""));
+      return ci ? k.toLowerCase() : k;
+    })
+    .filter((k) => k.length > 0 && k !== ".");
+};
 export function taskGraphIssue(tasks: readonly { id: string; dependsOn: readonly string[] }[]): string | undefined {
   const ids = new Set<string>();
   for (const t of tasks) {
@@ -193,7 +200,7 @@ type FlowTask = {
   retries?: number;
   turnErrors?: number;
   manualRetry?: boolean;
-  /** 已发起的求助轮数（上限 MAX_HELP_ROUNDS） */
+  /** 已发起的求助轮数 */
   helpRounds?: number;
   /** 等待中的求助交换 id */
   waitingForHelp?: string;
@@ -226,11 +233,11 @@ type Flow = {
   title?: string | undefined;
   acceptanceCriteria: string[];
   iteration: number;
-  maxIterations: number;
+  maxIterations: number | null;
   /** 已派发任务批次数（初始派工 + 每次验收 continue），上限 maxRounds */
   rounds: number;
   /** 跟进派发轮次上限：超限置 awaiting-retry 交还用户 */
-  maxRounds: number;
+  maxRounds: number | null;
   /** 任务以 taskId 为 key */
   tasks: Map<string, FlowTask>;
   /** 结果以 taskId 为 key */
@@ -348,9 +355,6 @@ export function flowOwnedBy(flow: { missionId?: unknown } | undefined, missionId
 }
 
 const PLAN_RESULT_LEN = 4000;
-const MAX_ITERATIONS = 3;
-const DEFAULT_MAX_ROUNDS = 8;
-const MAX_HELP_ROUNDS = 2;
 const DEFAULT_ACCEPTANCE_CRITERIA = ["交付结果满足用户目标，并包含必要的实现与验证证据"];
 const BUSY_RETRY_MS = 5000;
 /** 派发失败重试链：同一 task 连续失败上限（超限标 failed 并交还用户） */
@@ -659,6 +663,12 @@ export class ConductorOrchestrator {
     this.store = store;
   }
 
+  private automaticChecksEnabled = false;
+
+  setAutomaticChecksEnabled(enabled: boolean): void {
+    this.automaticChecksEnabled = enabled;
+  }
+
   /** turn 游标登记钩子（RoomModeManager 注入）：每次外发 prompt 前记录上下文游标；可返回发送失败时的清理函数 */
   private turnGuard?: (
     sessionId: string,
@@ -679,7 +689,44 @@ export class ConductorOrchestrator {
     this.enqueueFollowUp = fn;
   }
 
+  private promptSender?: (roomId: string, sessionId: string, content: string | PromptContent) => Promise<void>;
+
+  setPromptSender(fn: (roomId: string, sessionId: string, content: string | PromptContent) => Promise<void>): void {
+    this.promptSender = fn;
+  }
+
+  private budgetProvider?: (roomId: string) => Record<string, unknown> | undefined;
+
+  setBudgetProvider(fn: (roomId: string) => Record<string, unknown> | undefined): void {
+    this.budgetProvider = fn;
+  }
+
+  pauseForBudget(roomId: string, reason: string, unsentSessionId?: string, queuedSessionIds?: string[]): void {
+    const flow = this.flows.get(roomId);
+    if (!flow || flow.phase === "done" || flow.phase === "awaiting-retry") return;
+    const stage = flow.phase;
+    const revert = new Set([...(queuedSessionIds ?? []), ...(unsentSessionId !== undefined ? [unsentSessionId] : [])]);
+    for (const t of flow.tasks.values()) {
+      if (t.status !== "running" || t.dispatchedAt === undefined) continue;
+      if (revert.has(t.sessionId) || !this.agent.isBusy(t.sessionId)) {
+        t.status = "pending";
+        delete t.dispatchedAt;
+      }
+    }
+    this.handbackFlowToUser(flow, `流程预算已暂停（${reason}），请检查后继续`, stage);
+    this.emitFlow?.(roomId);
+  }
+
   private sendPrompt(roomId: string, sessionId: string, content: string | PromptContent): Promise<void> {
+    if (this.promptSender) {
+      return this.promptSender(roomId, sessionId, content).catch((err: unknown) => {
+        if (err instanceof RoomBudgetExceededError) {
+          this.pauseForBudget(roomId, err.reason, sessionId);
+          return;
+        }
+        throw err;
+      });
+    }
     const unguard = this.turnGuard?.(sessionId, roomId, content);
     return this.agent.prompt(sessionId, content, { queueIfBusy: false }).catch((err: unknown) => {
       // 发送即失败（session 未知/忙碌/同步 throw）：不会有 prompt.done/error 兜底，回收游标登记
@@ -842,6 +889,7 @@ export class ConductorOrchestrator {
     task: FlowTask,
     result: TaskResult,
   ): Promise<void> {
+    if (!this.automaticChecksEnabled) return;
     const runner = this.agent.runIsolatedCheck;
     if (!runner || task.automaticCheck !== undefined) return;
     const command = result.verifyCommand?.trim();
@@ -1077,6 +1125,7 @@ export class ConductorOrchestrator {
   getFlow(roomId: string): Record<string, unknown> | undefined {
     const flow = this.flows.get(roomId);
     if (!flow) return undefined;
+    const budget = this.budgetProvider?.(roomId);
     const hashCache = new Map<string, string | undefined>();
     const tasks = [...flow.tasks.values()].map((t) => {
       const result = flow.results.get(t.id);
@@ -1102,7 +1151,10 @@ export class ConductorOrchestrator {
         ...(t.finishedAt !== undefined ? { finishedAt: t.finishedAt } : {}),
         verificationStatus,
         automaticCheck: (() => {
-          const ac = t.automaticCheck ?? { status: "not_run" };
+          const ac =
+            t.automaticCheck ??
+            (this.automaticChecksEnabled ? { status: "not_run" } : undefined);
+          if (ac === undefined) return undefined;
           const sc = this.snapshotCurrentFor(t, hashCache);
           return sc === undefined ? ac : { ...ac, snapshotCurrent: sc };
         })(),
@@ -1180,6 +1232,7 @@ export class ConductorOrchestrator {
       ...(flow.phase === "awaiting-retry" ? { waitingFor: "user" } : {}),
       progress: { done, running, pending, failed, total: tasks.length },
       tasks,
+      ...(budget ? { budget } : {}),
       ...(flow.phase === "awaiting-input" && flow.clarification
         ? {
             clarificationId: flow.clarification.id,
@@ -1412,9 +1465,9 @@ export class ConductorOrchestrator {
       contractLocked: !!missionId || !!contract?.goal || !!contract?.acceptanceCriteria?.length,
       ...(contract?.requireTasks ? { requireTasks: true } : {}),
       iteration: 1,
-      maxIterations: MAX_ITERATIONS,
+      maxIterations: null,
       rounds: 0,
-      maxRounds: maxRounds ?? DEFAULT_MAX_ROUNDS,
+      maxRounds: maxRounds ?? null,
       tasks: new Map(),
       results: new Map(),
       artifactContext,
@@ -1768,7 +1821,7 @@ export class ConductorOrchestrator {
     return { id: flow.clarification.id, questions: [...flow.clarification.questions] };
   }
 
-  answerClarification(roomId: string, text: string, id?: string): boolean {
+  answerClarification(roomId: string, text: string, id?: string, beforeResume?: () => void): boolean {
     const flow = this.flows.get(roomId);
     if (!flow || flow.phase !== "awaiting-input" || !flow.clarification) return false;
     if (id !== undefined && id !== flow.clarification.id) return false;
@@ -1776,6 +1829,7 @@ export class ConductorOrchestrator {
     if (!answer) return false;
     const room = this.rooms.get(roomId);
     if (!room) return false;
+    beforeResume?.();
     flow.clarificationAnswer = answer;
     flow.phase = "planning";
     this.emitFlow?.(roomId);
@@ -1822,13 +1876,6 @@ export class ConductorOrchestrator {
     output: string,
   ): boolean {
     const rounds = task.helpRounds ?? 0;
-    if (rounds >= MAX_HELP_ROUNDS) {
-      this.notice({
-        roomId: flow.roomId,
-        message: `@${this.rooms.displayNameForId(flow.roomId, task.sessionId)} 求助次数已达上限（${MAX_HELP_ROUNDS}），按当前输出收尾`,
-      });
-      return false;
-    }
     const toRaw = req.to.trim();
     const toUser = toRaw === "" || /^(user|用户|我)$/i.test(toRaw);
     const target = toUser ? undefined : resolveMemberByString(room, toRaw);
@@ -1945,14 +1992,13 @@ export class ConductorOrchestrator {
       e.to === "user"
         ? "用户"
         : `@${this.rooms.displayNameForId(room.roomId, e.to)}`;
-    const remaining = MAX_HELP_ROUNDS - (task.helpRounds ?? 0);
     const taskBody = helpResumePrompt({
       taskId: task.id,
       task: task.task,
       fromLabel,
       question: e.question,
       answer: e.answer,
-      remaining,
+      remaining: null,
     });
     const prompt = this.rooms.buildPrompt(room.roomId, taskBody, task.sessionId, undefined, undefined, {
       taskId: task.id,
@@ -2211,17 +2257,38 @@ export class ConductorOrchestrator {
     return [...result];
   }
 
+  private taskScope(t: FlowTask): { cwd: string | undefined; files: Set<string> } {
+    const raw = this.agent.cwd?.(t.sessionId);
+    let cwd: string | undefined;
+    if (raw) {
+      const r = path.resolve(raw);
+      cwd = process.platform === "win32" ? r.toLowerCase() : r;
+    }
+    return { cwd, files: new Set(taskFileKeys(t.files).map((f) => (cwd ? path.resolve(cwd, f) : f))) };
+  }
+
+  private scopesConflict(
+    a: { cwd: string | undefined; files: Set<string> },
+    b: { cwd: string | undefined; files: Set<string> },
+  ): boolean {
+    for (const f of a.files) if (b.files.has(f)) return true;
+    if (a.cwd === undefined || b.cwd === undefined) return true;
+    if (a.cwd !== b.cwd) return false;
+    if (a.files.size === 0 || b.files.size === 0) return true;
+    return false;
+  }
+
   private runnableTasks(flow: Flow): FlowTask[] {
     const doneIds = new Set<string>();
     for (const [id, t] of flow.tasks) {
       if (t.status === "done") doneIds.add(id);
     }
     const runningSessions = new Set<string>();
-    const claimedFiles = new Set<string>();
+    const scopes: { cwd: string | undefined; files: Set<string> }[] = [];
     for (const t of flow.tasks.values()) {
       if (t.status === "running") {
         runningSessions.add(t.sessionId);
-        for (const file of taskFileKeys(t.files)) claimedFiles.add(file);
+        scopes.push(this.taskScope(t));
       }
     }
     const out: FlowTask[] = [];
@@ -2230,11 +2297,11 @@ export class ConductorOrchestrator {
       const depsDone = t.dependsOn.every((d) => doneIds.has(d));
       if (!depsDone) continue;
       if (runningSessions.has(t.sessionId)) continue;
-      const files = taskFileKeys(t.files);
-      if (files.some((f) => claimedFiles.has(f))) continue;
+      const scope = this.taskScope(t);
+      if (scopes.some((s) => this.scopesConflict(scope, s))) continue;
       out.push(t);
       runningSessions.add(t.sessionId);
-      for (const file of files) claimedFiles.add(file);
+      scopes.push(scope);
     }
     return out;
   }
@@ -2333,6 +2400,7 @@ export class ConductorOrchestrator {
     const dispatchedTasks: { id: string; to: string; task: string }[] = [];
     let skippedBusy = false;
     for (const t of tasks) {
+      if (flow.phase !== "working") return;
       if (this.agent.isBusy(t.sessionId)) {
         skippedBusy = true;
         continue;
@@ -2412,6 +2480,12 @@ export class ConductorOrchestrator {
           delete t.recoveryNote;
         })
         .catch((err: unknown) => {
+          if (err instanceof RoomBudgetExceededError) {
+            t.status = "pending";
+            delete t.dispatchedAt;
+            this.pauseForBudget(flow.roomId, err.reason, t.sessionId);
+            return;
+          }
           const msg = String(err);
           // 恢复派发 vs agent 重连竞态：连接性失败（agent 未连接）不是任务缺陷，
           // 不烧 3 次重试预算——task 留 pending，唤醒源=agent ensureStarted→resumeFlows
@@ -2574,7 +2648,7 @@ export class ConductorOrchestrator {
     this.emitFlow?.(flow.roomId);
     this.notice({
       roomId: flow.roomId,
-      message: `第 ${flow.iteration}/${flow.maxIterations} 轮任务完成，指挥家验收中…`,
+      message: flow.maxIterations === null ? `第 ${flow.iteration} 轮任务完成，指挥家验收中…` : `第 ${flow.iteration}/${flow.maxIterations} 轮任务完成，指挥家验收中…`,
     });
     const lines: string[] = [];
     const hashCache = new Map<string, string | undefined>();
@@ -2648,7 +2722,7 @@ export class ConductorOrchestrator {
     }
     if (decision?.decision === "continue" && decision.tasks.length > 0) {
       // 跟进轮次预算：超限不再派新批次，置 awaiting-retry 交还用户
-      if (flow.rounds >= flow.maxRounds) {
+      if (flow.maxRounds !== null && flow.rounds >= flow.maxRounds) {
         flow.phase = "awaiting-retry";
         this.emitFlow?.(flow.roomId);
         this.notice({
@@ -2661,7 +2735,7 @@ export class ConductorOrchestrator {
     if (
       decision?.decision === "continue" &&
       decision.tasks.length > 0 &&
-      flow.iteration < flow.maxIterations
+      (flow.maxIterations === null || flow.iteration < flow.maxIterations)
     ) {
       const added = this.appendTasks(flow, room, decision.tasks);
       if (added === 0) return;
@@ -2672,13 +2746,13 @@ export class ConductorOrchestrator {
       this.emitFlow?.(flow.roomId);
       this.notice({
         roomId: flow.roomId,
-        message: `验收未通过：${decision.reason}。新增 ${added} 项任务，进入第 ${flow.iteration}/${flow.maxIterations} 轮`,
+        message: flow.maxIterations === null ? `验收未通过：${decision.reason}。新增 ${added} 项任务，进入第 ${flow.iteration} 轮` : `验收未通过：${decision.reason}。新增 ${added} 项任务，进入第 ${flow.iteration}/${flow.maxIterations} 轮`,
       });
       await this.scheduleTasks(flow, room);
       return;
     }
     if (decision) flow.reviewReason = decision.reason;
-    const hitLimit = flow.iteration >= flow.maxIterations;
+    const hitLimit = flow.maxIterations !== null && flow.iteration >= flow.maxIterations;
     flow.failureMessage = hitLimit ? "已达到迭代上限，但验收尚未通过" : "验收未确认完成，请修正验收或后续计划";
     flow.blockedStage = "reviewing";
     this.notice({
@@ -2795,7 +2869,7 @@ export class ConductorOrchestrator {
     return flow?.phase === "awaiting-retry";
   }
 
-  continueFlow(roomId: string, text: string): boolean {
+  continueFlow(roomId: string, text: string, beforeResume?: () => void): boolean {
     const flow = this.flows.get(roomId), room = this.rooms.get(roomId);
     if (!flow || !room || flow.phase !== "awaiting-retry") return false;
     if ([...flow.tasks.values()].some((t) => t.status === "running") || (room.conductorId && this.agent.isBusy(room.conductorId))) {
@@ -2808,6 +2882,7 @@ export class ConductorOrchestrator {
     }
     const issue = taskGraphIssue([...flow.tasks.values()]);
     const stage = flow.blockedStage;
+    beforeResume?.();
     delete flow.stageFailures;
     this.clearFlowRetryTimers(flow);
     flow.contractLocked = true;
@@ -2822,8 +2897,8 @@ export class ConductorOrchestrator {
     } else {
       delete flow.failureMessage;
       delete flow.blockedStage;
-      if (flow.iteration >= flow.maxIterations) flow.maxIterations = flow.iteration + 1;
-      if (flow.rounds >= flow.maxRounds) flow.maxRounds = flow.rounds + 1;
+      if (flow.maxIterations !== null && flow.iteration >= flow.maxIterations) flow.maxIterations = flow.iteration + 1;
+      if (flow.maxRounds !== null && flow.rounds >= flow.maxRounds) flow.maxRounds = flow.rounds + 1;
       flow.phase = "working";
       this.emitFlow?.(roomId);
       const resume = stage === "summarizing"
@@ -2835,7 +2910,7 @@ export class ConductorOrchestrator {
   }
 
   /** 重试失败的子任务：把 failed 任务回退为 pending 并重新调度 */
-  retryFailedTasks(roomId: string, taskIds?: string[]): boolean {
+  retryFailedTasks(roomId: string, taskIds?: string[], beforeResume?: () => void): boolean {
     const flow = this.flows.get(roomId);
     if (!flow || flow.phase !== "awaiting-retry") return false;
     const room = this.rooms.get(roomId);
@@ -2846,7 +2921,8 @@ export class ConductorOrchestrator {
     const failed = [...flow.tasks.values()].filter(
       (t) => t.status === "failed" && (!taskIds || taskIds.includes(t.id)),
     );
-    if (failed.length === 0) return taskIds ? false : this.continueFlow(roomId, "用户明确重试");
+    if (failed.length === 0) return taskIds ? false : this.continueFlow(roomId, "用户明确重试", beforeResume);
+    beforeResume?.();
     for (const t of failed) {
       t.status = "pending";
       delete t.failureMessage;
@@ -2879,10 +2955,12 @@ export class ConductorOrchestrator {
   }
 
   private serializeFlow(flow: Flow): Record<string, unknown> {
+    const budget = this.budgetProvider?.(flow.roomId);
     return {
       id: flow.id,
       roomId: flow.roomId,
       startedAt: flow.startedAt,
+      ...(budget ? { budget } : {}),
       ...(flow.cardRowId !== undefined ? { cardRowId: flow.cardRowId } : {}),
       phase: flow.phase,
       ...(flow.finishedAt !== undefined ? { finishedAt: flow.finishedAt } : {}),
@@ -2997,15 +3075,9 @@ export class ConductorOrchestrator {
           ? f.acceptanceCriteria.map((s) => String(s)).filter(Boolean)
           : [...DEFAULT_ACCEPTANCE_CRITERIA],
         iteration: typeof f.iteration === "number" && f.iteration > 0 ? f.iteration : 1,
-        maxIterations:
-          typeof f.maxIterations === "number" && f.maxIterations > 0
-            ? f.maxIterations
-            : MAX_ITERATIONS,
+        maxIterations: null,
         rounds: typeof f.rounds === "number" && f.rounds >= 0 ? f.rounds : 0,
-        maxRounds:
-          typeof f.maxRounds === "number" && f.maxRounds > 0
-            ? f.maxRounds
-            : (room.maxRounds ?? DEFAULT_MAX_ROUNDS),
+        maxRounds: room.maxRounds ?? null,
         ...(typeof f.missionId === "string" && f.missionId
           ? { missionId: f.missionId }
           : {}),

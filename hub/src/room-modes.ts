@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { isEventAction, type Room, type RoomManager, type RoomMode } from "./room.js";
+import * as path from "node:path";
+import { isEventAction, RoomBudgetExceededError, roomExecutionLimits, type Room, type RoomManager, type RoomMode } from "./room.js";
 import { ConductorOrchestrator, extractTaskResult, flowOwnerOf, newFlowId, parseTasks, resolveMemberByString, taskGraphIssue, type IsolatedCheckResult } from "./conductor.js";
 import {
   SELF_MODE_NOTE,
@@ -35,6 +36,17 @@ type ConductorNotice = {
   roomId: string;
   message: string;
   meta?: Record<string, unknown>;
+};
+
+type RoomBudgetState = {
+  id: string;
+  usedCalls: number;
+  maxCalls: number | null;
+  deadlineAt: number | null;
+  maxConcurrent: number | null;
+  stopped: boolean;
+  reason?: "call-limit" | "deadline" | undefined;
+  timer?: NodeJS.Timeout | undefined;
 };
 type ModeSelectedEvent = {
   roomId: string;
@@ -113,8 +125,10 @@ type ConductorTask = {
   files?: string[];
 };
 
-const normalizeFilePath = (f: string) =>
-  f.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+const normalizeFilePath = (f: string) => {
+  const k = path.posix.normalize(f.trim().replace(/\\/g, "/").replace(/^\.\//, ""));
+  return process.platform === "win32" ? k.toLowerCase() : k;
+};
 
 /** 声明了相同文件的并行任务合并为一个，避免多 worker 写同一文件产生冲突 */
 function mergeFileOverlappingTasks(tasks: ConductorTask[] | undefined, room: Room): ConductorTask[] | undefined {
@@ -336,13 +350,17 @@ export class RoomModeManager {
     private readonly autoDecideStallMs = 0,
   ) {
     this.conductor = new ConductorOrchestrator(agent, rooms, (n) => this.notice(n), (roomId) => this.emitFlowUpdate(roomId), promptRetryMs, isolatedChecks);
-    this.conductor.setTurnGuard((sid, rid, content) => this.noteTurnGuard(sid, rid, content));
-    this.conductor.setEnqueueFollowUp((sid, rid, content) => this.enqueueFollowUp(rid, sid, content));
+    this.conductor.setPromptSender((rid, sid, content) => this.sendPrompt(rid, sid, content));
+    this.conductor.setBudgetProvider((rid) => this.budgetView(rid));
   }
 
   setStore(store: Store): void {
     this.store = store;
     this.conductor.setStore(store);
+  }
+
+  setAutomaticChecksEnabled(enabled: boolean): void {
+    this.conductor.setAutomaticChecksEnabled(enabled);
   }
 
   setRelevanceFilter(fn: (room: Room, text: string, note?: string) => Promise<boolean>): void {
@@ -390,6 +408,17 @@ export class RoomModeManager {
       conductor: this.conductor.export(),
       subModes: Object.fromEntries(this.roomSubMode),
       followUps: Object.fromEntries(this.followUps),
+      autoDecisions: [...this.autoDecisions.values()],
+      budgets: [...this.budgets.entries()].map(([roomId, b]) => ({
+        roomId,
+        id: b.id,
+        usedCalls: b.usedCalls,
+        maxCalls: b.maxCalls,
+        deadlineAt: b.deadlineAt,
+        maxConcurrent: b.maxConcurrent,
+        stopped: b.stopped,
+        ...(b.reason !== undefined ? { reason: b.reason } : {}),
+      })),
     };
   }
 
@@ -412,7 +441,90 @@ export class RoomModeManager {
       }
       if (byRoom.size > 0) conductorState.flows = [...byRoom.values()];
     }
+    const now = Date.now();
+    const budgetCandidates = new Map<string, Record<string, unknown>>();
+    const rawBudgets = Array.isArray(state.budgets) ? (state.budgets as unknown[]) : [];
+    for (const raw of rawBudgets) {
+      if (typeof raw === "object" && raw !== null) {
+        const o = raw as Record<string, unknown>;
+        if (typeof o.roomId === "string" && o.roomId) budgetCandidates.set(o.roomId, o);
+      }
+    }
+    const rawFlows = Array.isArray(conductorState.flows) ? (conductorState.flows as unknown[]) : [];
+    for (const raw of rawFlows) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const f = raw as Record<string, unknown>;
+      const roomId = typeof f.roomId === "string" ? f.roomId : "";
+      const fb = f.budget;
+      if (!roomId || typeof fb !== "object" || fb === null) continue;
+      const bo = fb as Record<string, unknown>;
+      const previous = budgetCandidates.get(roomId);
+      if (previous && previous.id === bo.id) {
+        const count = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : 0;
+        const stamp = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+        const prevDl = stamp(previous.deadlineAt);
+        const boDl = stamp(bo.deadlineAt);
+        budgetCandidates.set(roomId, {
+          ...previous, ...bo, roomId,
+          usedCalls: Math.max(count(previous.usedCalls), count(bo.usedCalls)),
+          stopped: previous.stopped === true || bo.stopped === true,
+          deadlineAt: prevDl !== null && boDl !== null ? Math.min(prevDl, boDl) : (prevDl ?? boDl),
+        });
+      } else if (!previous || f.phase !== "done") {
+        budgetCandidates.set(roomId, { ...bo, roomId });
+      }
+    }
+    const flowStartedAt = new Map<string, number>();
+    for (const raw of rawFlows) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const f = raw as Record<string, unknown>;
+      const rid = typeof f.roomId === "string" ? f.roomId : "";
+      if (rid && typeof f.startedAt === "number" && Number.isFinite(f.startedAt) && !flowStartedAt.has(rid)) {
+        flowStartedAt.set(rid, f.startedAt);
+      }
+    }
+    for (const [roomId, o] of budgetCandidates) {
+      const room = this.rooms.get(roomId);
+      if (!room) continue;
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+      const usedCalls = num(o.usedCalls);
+      if (usedCalls === undefined || !Number.isSafeInteger(usedCalls) || usedCalls < 0) continue;
+      const limits = roomExecutionLimits(room);
+      const reason = o.reason === "call-limit" || o.reason === "deadline" ? o.reason : undefined;
+      const snapDeadline = num(o.deadlineAt);
+      const startedAt = flowStartedAt.get(roomId);
+      const deadlineAt =
+        room.maxFlowDurationMs !== undefined && room.maxFlowDurationMs !== null
+          ? (snapDeadline ?? (startedAt !== undefined ? startedAt + room.maxFlowDurationMs : null))
+          : null;
+      const expired = deadlineAt !== null && deadlineAt <= now;
+      const quotaBlocked =
+        (reason === "call-limit" && limits.maxCalls !== null) ||
+        (reason === "deadline" && deadlineAt !== null);
+      const stopped =
+        (o.stopped === true && (reason === undefined || quotaBlocked || expired)) ||
+        (limits.maxCalls !== null && usedCalls >= limits.maxCalls) ||
+        expired;
+      const b: RoomBudgetState = {
+        id: typeof o.id === "string" && o.id ? o.id : randomUUID().slice(0, 8),
+        usedCalls,
+        maxCalls: limits.maxCalls,
+        deadlineAt,
+        maxConcurrent: limits.maxConcurrent,
+        stopped,
+        ...(reason !== undefined && stopped ? { reason } : {}),
+      };
+      this.budgets.set(roomId, b);
+      this.armBudgetTimer(roomId, b);
+    }
     await this.conductor.import(conductorState);
+    for (const [roomId, b] of this.budgets) {
+      if (!b.stopped) continue;
+      const flow = this.conductor.getFlow(roomId) as { phase?: string } | undefined;
+      if (flow && flow.phase !== "done" && flow.phase !== "awaiting-retry") {
+        this.conductor.pauseForBudget(roomId, b.reason ?? "call-limit");
+      }
+    }
     const subModes = typeof state.subModes === "object" && state.subModes !== null
       ? (state.subModes as Record<string, { mode: RuntimeMode; activeSpeaker?: string; reason?: string }>)
       : undefined;
@@ -427,15 +539,75 @@ export class RoomModeManager {
     if (fu) {
       for (const [sid, items] of Object.entries(fu)) {
         if (!Array.isArray(items)) continue;
-        const valid = items.filter(
-          (it): it is { roomId: string; content: string | PromptContent } =>
-            typeof it === "object" && it !== null &&
-            typeof (it as { roomId?: unknown }).roomId === "string" &&
-            (typeof (it as { content?: unknown }).content === "string" ||
-              Array.isArray((it as { content?: unknown }).content)),
-        );
+        if (this.agent.has?.(sid) === false) continue;
+        const valid = items
+          .filter(
+            (it): it is { roomId: string; content: string | PromptContent; opts?: unknown } =>
+              typeof it === "object" && it !== null &&
+              typeof (it as { roomId?: unknown }).roomId === "string" &&
+              (typeof (it as { content?: unknown }).content === "string" ||
+                Array.isArray((it as { content?: unknown }).content)),
+          )
+          .filter((it) => {
+            const room = this.rooms.get(it.roomId);
+            return room !== undefined && room.members.some((m) => m.sessionId === sid);
+          })
+          .map((it) => {
+            const raw = it.opts;
+            const opts: PromptOpts = {};
+            if (raw !== null && typeof raw === "object") {
+              const o = raw as Record<string, unknown>;
+              if (typeof o.ackTimeoutMs === "number" && Number.isFinite(o.ackTimeoutMs) && o.ackTimeoutMs > 0) opts.ackTimeoutMs = o.ackTimeoutMs;
+              if (typeof o.stallMs === "number" && Number.isFinite(o.stallMs) && o.stallMs > 0) opts.stallMs = o.stallMs;
+            }
+            const rawIt = it as { budgetId?: unknown; flowId?: unknown };
+            const budgetId = typeof rawIt.budgetId === "string" && rawIt.budgetId ? rawIt.budgetId : undefined;
+            const flowId = typeof rawIt.flowId === "string" && rawIt.flowId ? rawIt.flowId : undefined;
+            return {
+              roomId: it.roomId,
+              content: it.content,
+              ...(opts.ackTimeoutMs !== undefined || opts.stallMs !== undefined ? { opts } : {}),
+              ...(budgetId !== undefined ? { budgetId } : {}),
+              ...(flowId !== undefined ? { flowId } : {}),
+            };
+          })
+          .filter((it) => {
+            if (it.budgetId === undefined) return true;
+            return this.budgets.get(it.roomId)?.id === it.budgetId;
+          });
         if (valid.length) this.followUps.set(sid, valid.slice(-RoomModeManager.FOLLOW_UP_LIMIT));
       }
+    }
+    if (Array.isArray(state.autoDecisions)) {
+      for (const raw of state.autoDecisions) {
+        if (typeof raw !== "object" || raw === null) continue;
+        const ctx = raw as AutoDecisionContext;
+        const room = this.rooms.get(ctx.roomId);
+        if (!room?.conductorId || typeof ctx.text !== "string" || this.budgets.get(ctx.roomId)?.stopped) continue;
+        if (this.followUps.get(room.conductorId)?.some((q) => q.roomId === ctx.roomId)) {
+          this.autoDecisions.set(ctx.roomId, ctx);
+        }
+      }
+    }
+    for (const room of this.rooms.list()) {
+      if (this.budgets.has(room.roomId)) continue;
+      const flow = this.conductor.getFlow(room.roomId) as { phase?: string; startedAt?: number } | undefined;
+      if (!flow || flow.phase === "done" || typeof flow.startedAt !== "number") continue;
+      const limits = roomExecutionLimits(room);
+      const deadlineAt =
+        limits.maxFlowDurationMs !== null ? flow.startedAt + limits.maxFlowDurationMs : null;
+      const expired = deadlineAt !== null && deadlineAt <= now;
+      const b: RoomBudgetState = {
+        id: randomUUID().slice(0, 8),
+        usedCalls: 0,
+        maxCalls: limits.maxCalls,
+        deadlineAt,
+        maxConcurrent: limits.maxConcurrent,
+        stopped: expired,
+        ...(expired ? { reason: "deadline" as const } : {}),
+      };
+      this.budgets.set(room.roomId, b);
+      this.armBudgetTimer(room.roomId, b);
     }
   }
 
@@ -453,9 +625,13 @@ export class RoomModeManager {
     return this.conductor.hasAwaitingRetry(roomId);
   }
 
+  private renewBudgetIfStopped(roomId: string): void {
+    if (this.budgets.get(roomId)?.stopped) this.renewRoomBudget(roomId, this.rooms.get(roomId));
+  }
+
   /** 重试失败的子任务 */
   retryFailedTasks(roomId: string, taskIds?: string[]): boolean {
-    return this.conductor.retryFailedTasks(roomId, taskIds);
+    return this.conductor.retryFailedTasks(roomId, taskIds, () => this.renewBudgetIfStopped(roomId));
   }
 
   pendingClarification(roomId: string): { id: string; questions: string[] } | undefined {
@@ -463,7 +639,7 @@ export class RoomModeManager {
   }
 
   answerClarification(roomId: string, text: string, id?: string): boolean {
-    return this.conductor.answerClarification(roomId, text, id);
+    return this.conductor.answerClarification(roomId, text, id, () => this.renewBudgetIfStopped(roomId));
   }
 
   /** 向指定房间广播 room.notice 消息 */
@@ -476,10 +652,16 @@ export class RoomModeManager {
   }
 
   /** steer-queue：busy 会话的房侧待发送队列（外发时才登记 turnGuard/promptRooms） */
-  private followUps = new Map<string, Array<{ roomId: string; content: string | PromptContent; opts?: PromptOpts }>>();
+  private followUps = new Map<string, Array<{ roomId: string; content: string | PromptContent; opts?: PromptOpts; budgetId?: string; flowId?: string }>>();
+  private promptTickets = new Map<string, symbol>();
+  private fencedSessions = new Set<string>();
   private static readonly FOLLOW_UP_LIMIT = 5;
 
-  private enqueueFollowUp(roomId: string, sessionId: string, content: string | PromptContent, opts?: PromptOpts): void {
+  private budgets = new Map<string, RoomBudgetState>();
+
+  private enqueueFollowUp(roomId: string, sessionId: string, content: string | PromptContent, opts?: PromptOpts, budgetId?: string, flowId?: string): void {
+    budgetId ??= this.budgets.get(roomId)?.id;
+    flowId ??= this.flowIdForRoom(roomId);
     const q = this.followUps.get(sessionId) ?? [];
     if (q.length >= RoomModeManager.FOLLOW_UP_LIMIT) {
       logWarn("room-modes followUp", `queue full (${RoomModeManager.FOLLOW_UP_LIMIT}), dropping prompt for ${sessionId}`);
@@ -489,37 +671,246 @@ export class RoomModeManager {
       });
       return;
     }
-    q.push({ roomId, content, ...(opts !== undefined ? { opts } : {}) });
+    q.push({ roomId, content, ...(opts !== undefined ? { opts } : {}), ...(budgetId !== undefined ? { budgetId } : {}), ...(flowId !== undefined ? { flowId } : {}) });
     this.followUps.set(sessionId, q);
   }
 
   /** 回合结束后 drain 该会话的房侧队列：合并为单 prompt，经 sendPrompt 正常登记 guard/opId */
   private drainFollowUps(sessionId: string): void {
+    if (this.fencedSessions.has(sessionId)) return;
     if (this.agent.isBusy(sessionId)) return;
+    if (this.agent.has?.(sessionId) === false) {
+      this.followUps.delete(sessionId);
+      return;
+    }
     const q = this.followUps.get(sessionId);
     if (!q?.length) return;
-    this.followUps.delete(sessionId);
-    const texts = q.map((it) =>
-      typeof it.content === "string"
-        ? it.content
-        : it.content.map((b) => (b.type === "text" ? String(b.text ?? "") : "")).join(""),
-    ).filter((t) => t.length > 0);
-    const extras = q.flatMap((it) =>
-      typeof it.content === "string" ? [] : it.content.filter((b) => b.type !== "text"),
-    );
-    const merged: string | PromptContent =
-      extras.length > 0
-        ? [{ type: "text", text: texts.join("\n\n") }, ...extras]
-        : texts.join("\n\n");
-    // 合并后沿用首个携带预算的 opts（如 auto 决策短超时）
-    const drainAck = q.map((it) => it.opts?.ackTimeoutMs).find((v): v is number => typeof v === "number");
-    this.sendPrompt(q[0]!.roomId, sessionId, merged, drainAck !== undefined ? { ackTimeoutMs: drainAck } : undefined).catch((err) => {
+    for (let i = q.length - 1; i >= 0; i--) {
+      const item = q[i]!;
+      const room = this.rooms.get(item.roomId);
+      const budget = this.budgets.get(item.roomId);
+      const stale =
+        (item.budgetId !== undefined && item.budgetId !== budget?.id) ||
+        (item.flowId !== undefined && item.flowId !== this.flowIdForRoom(item.roomId)) ||
+        (budget?.stopped ?? false);
+      if (!room || !room.members.some((m) => m.sessionId === sessionId) || stale) q.splice(i, 1);
+    }
+    if (!q.length) {
+      this.followUps.delete(sessionId);
+      return;
+    }
+    const item = q.shift()!;
+    if (!q.length) this.followUps.delete(sessionId);
+    this.sendPrompt(item.roomId, sessionId, item.content, item.opts).catch((err) => {
       logError("room-modes followUp drain", err);
+      if (err instanceof RoomBudgetExceededError || !this.rooms.get(item.roomId) ||
+          (item.budgetId !== undefined && this.budgets.get(item.roomId)?.id !== item.budgetId) ||
+          (item.flowId !== undefined && this.flowIdForRoom(item.roomId) !== item.flowId)) return;
       // 发送失败不静默丢：重入队 + 告知
-      if (this.followUps.get(sessionId) === undefined) this.followUps.set(sessionId, q);
-      else this.followUps.get(sessionId)!.unshift(...q);
-      this.notice({ roomId: q[0]!.roomId, message: "⚠️ 排队消息补发失败，已暂存待重试" });
+      const cur = this.followUps.get(sessionId);
+      if (cur === undefined) this.followUps.set(sessionId, [item]);
+      else cur.unshift(item);
+      this.notice({ roomId: item.roomId, message: "⚠️ 排队消息补发失败，已暂存待重试" });
     });
+  }
+
+  private dropFollowUpsForRoom(roomId: string): void {
+    for (const [sid, q] of this.followUps) {
+      const kept = q.filter((it) => it.roomId !== roomId);
+      if (kept.length === q.length) continue;
+      if (kept.length) this.followUps.set(sid, kept);
+      else this.followUps.delete(sid);
+    }
+  }
+
+  private drainAllFollowUps(): void {
+    for (const sid of [...this.followUps.keys()]) this.drainFollowUps(sid);
+    for (const [roomId, budget] of this.budgets) {
+      if (budget.timer && !this.roomHasLiveWork(roomId)) {
+        clearTimeout(budget.timer);
+        budget.timer = undefined;
+      }
+    }
+  }
+
+  private budgetView(roomId: string) {
+    const b = this.budgets.get(roomId);
+    if (!b) return undefined;
+    return { id: b.id, usedCalls: b.usedCalls, maxCalls: b.maxCalls, deadlineAt: b.deadlineAt, maxConcurrent: b.maxConcurrent, stopped: b.stopped, ...(b.reason !== undefined ? { reason: b.reason } : {}) };
+  }
+
+  private roomHasLiveWork(roomId: string): boolean {
+    for (const rid of this.promptRooms.values()) if (rid === roomId) return true;
+    for (const q of this.followUps.values()) if (q.some((it) => it.roomId === roomId)) return true;
+    for (const d of this.autoDecisions.values()) {
+      if ((d as { roomId?: string }).roomId === roomId) return true;
+    }
+    if (this.conductor.hasActiveFlow(roomId)) return true;
+    const pf = this.parallelFlows.get(roomId);
+    if (pf && !pf.done) return true;
+    const pp = this.pipelineFlows.get(roomId);
+    if (pp && !pp.done) return true;
+    const db = this.debateFlows.get(roomId);
+    if (db && !db.done) return true;
+    return false;
+  }
+
+  private ensureRoomBudget(room: Room): RoomBudgetState {
+    const existing = this.budgets.get(room.roomId);
+    if (existing?.stopped) {
+      const flow = this.conductor.getFlow(room.roomId) as { phase?: string } | undefined;
+      if ((room.mode === "conductor" || room.mode === "auto") && flow?.phase === "awaiting-retry") return existing;
+      return this.renewRoomBudget(room.roomId, room);
+    }
+    if (existing && this.roomHasLiveWork(room.roomId)) return existing;
+    return this.renewRoomBudget(room.roomId, room);
+  }
+
+  private renewRoomBudget(roomId: string, room?: Room): RoomBudgetState {
+    const r = room ?? this.rooms.get(roomId);
+    const limits = r
+      ? roomExecutionLimits(r)
+      : { maxConcurrent: null, maxCalls: null, maxFlowDurationMs: null };
+    const old = this.budgets.get(roomId);
+    if (old?.timer) clearTimeout(old.timer);
+    const b: RoomBudgetState = {
+      id: randomUUID().slice(0, 8),
+      usedCalls: 0,
+      maxCalls: limits.maxCalls,
+      deadlineAt: limits.maxFlowDurationMs !== null ? Date.now() + limits.maxFlowDurationMs : null,
+      maxConcurrent: limits.maxConcurrent,
+      stopped: false,
+    };
+    this.budgets.set(roomId, b);
+    this.armBudgetTimer(roomId, b);
+    return b;
+  }
+
+  private armBudgetTimer(roomId: string, b: RoomBudgetState): void {
+    if (b.timer) {
+      clearTimeout(b.timer);
+      b.timer = undefined;
+    }
+    if (b.deadlineAt === null || b.stopped) return;
+    const remain = Math.max(b.deadlineAt - Date.now(), 0);
+    b.timer = setTimeout(() => {
+      b.timer = undefined;
+      if (this.budgets.get(roomId) !== b || b.stopped) return;
+      const left = (b.deadlineAt ?? 0) - Date.now();
+      if (left > 0) {
+        this.armBudgetTimer(roomId, b);
+        return;
+      }
+      this.exhaustBudget(roomId, "deadline");
+    }, Math.min(remain, 2147483647));
+    b.timer.unref?.();
+  }
+
+  private roomInflightCount(roomId: string): number {
+    let n = 0;
+    for (const [sid, rid] of this.promptRooms) {
+      if (rid === roomId && this.agent.isBusy(sid)) n++;
+    }
+    return n;
+  }
+
+  private exhaustBudget(roomId: string, reason: "call-limit" | "deadline"): void {
+    const b = this.budgets.get(roomId);
+    if (!b || b.stopped) return;
+    b.stopped = true;
+    b.reason = reason;
+    if (b.timer) {
+      clearTimeout(b.timer);
+      b.timer = undefined;
+    }
+    const queuedSids = new Set<string>();
+    for (const [sid, q] of this.followUps) {
+      if (q.some((it) => it.roomId === roomId)) queuedSids.add(sid);
+      const kept = q.filter((it) => it.roomId !== roomId);
+      if (kept.length === q.length) continue;
+      if (kept.length) this.followUps.set(sid, kept);
+      else this.followUps.delete(sid);
+    }
+    this.autoDecisions.delete(roomId);
+    this.interruptRoomFlows(roomId, reason);
+    this.conductor.pauseForBudget(roomId, reason, undefined, [...queuedSids]);
+    if (reason === "deadline") {
+      for (const [sid, rid] of [...this.promptRooms]) {
+        if (rid !== roomId) continue;
+        void this.cancelOwnedTurn(sid, this.promptTickets.get(sid), roomId, "deadline");
+      }
+    }
+    this.notice({
+      roomId,
+      message: reason === "deadline" ? "⏱️ 本轮编排已达时长上限，流程已暂停" : "📞 本轮编排已达调用上限，流程已暂停",
+      meta: { type: "budget", reasonCode: reason },
+    });
+  }
+
+  private async cancelOwnedTurn(sessionId: string, ticket: symbol | undefined, roomId: string, reason: "deadline" | "room-removed"): Promise<void> {
+    this.fencedSessions.add(sessionId);
+    let cancelled = false;
+    try {
+      await this.agent.cancel(sessionId);
+      cancelled = true;
+    } catch (err) {
+      logError(`room-modes ${reason} cancel`, err);
+      if (reason === "deadline") {
+        this.notice({ roomId, message: "⚠️ 超时取消在途回合失败，该回合保留待自然结束" });
+      }
+    } finally {
+      this.fencedSessions.delete(sessionId);
+    }
+    if (!cancelled) {
+      this.drainFollowUps(sessionId);
+      return;
+    }
+    if (this.promptTickets.get(sessionId) === ticket) {
+      this.onSessionCancelled(sessionId);
+    } else {
+      this.drainFollowUps(sessionId);
+    }
+  }
+
+  private interruptRoomFlows(roomId: string, reason: "call-limit" | "deadline"): void {
+    const msg = reason === "deadline" ? "流程超时中断" : "调用额度耗尽中断";
+    for (const [rid, flow] of this.parallelFlows) {
+      if (rid !== roomId || flow.done) continue;
+      flow.done = true;
+      flow.failureMessage = msg;
+      if (flow.pending.size) {
+        for (const sid of flow.pending) (flow.failed ??= new Set()).add(sid);
+        flow.pending.clear();
+      }
+      delete flow.summarizing;
+      this.emitFlowUpdate(rid);
+    }
+    for (const [rid, flow] of this.pipelineFlows) {
+      if (rid !== roomId || flow.done) continue;
+      flow.done = true;
+      flow.failed = true;
+      flow.failureMessage = msg;
+      this.emitFlowUpdate(rid);
+    }
+    for (const [rid, flow] of this.debateFlows) {
+      if (rid !== roomId || flow.done) continue;
+      flow.done = true;
+      flow.failed = true;
+      flow.failureMessage = msg;
+      delete flow.summarizing;
+      this.emitFlowUpdate(rid);
+    }
+  }
+
+  private turnTicketCurrent(sessionId: string, ticket: symbol | undefined): boolean {
+    return this.promptTickets.get(sessionId) === ticket;
+  }
+
+  private clearTurnRegistration(sessionId: string, ticket: symbol | undefined): void {
+    if (!this.turnTicketCurrent(sessionId, ticket)) return;
+    this.promptRooms.delete(sessionId);
+    this.turnFlowCtx.delete(sessionId);
+    this.promptTickets.delete(sessionId);
   }
 
   private async sendPrompt(
@@ -528,11 +919,41 @@ export class RoomModeManager {
     content: string | PromptContent,
     opts?: PromptOpts,
   ): Promise<void> {
-    if (this.agent.isBusy(sessionId)) {
-      this.enqueueFollowUp(roomId, sessionId, content, opts);
+    const room = this.rooms.get(roomId);
+    if (!room?.members.some((m) => m.sessionId === sessionId) || this.agent.has?.(sessionId) === false) {
+      throw new Error("room prompt is no longer valid");
+    }
+    const budget = this.budgets.get(roomId);
+    if (budget?.stopped) throw new RoomBudgetExceededError(roomId, budget.reason ?? "call-limit");
+    if (this.fencedSessions.has(sessionId)) {
+      this.enqueueFollowUp(roomId, sessionId, content, opts, budget?.id, this.flowIdForRoom(roomId));
       return;
     }
+    if (this.agent.isBusy(sessionId)) {
+      this.enqueueFollowUp(roomId, sessionId, content, opts, budget?.id, this.flowIdForRoom(roomId));
+      return;
+    }
+    if (budget) {
+      if (budget.maxCalls !== null && budget.usedCalls >= budget.maxCalls) {
+        this.exhaustBudget(roomId, "call-limit");
+        throw new RoomBudgetExceededError(roomId, "call-limit");
+      }
+      if (budget.deadlineAt !== null && Date.now() >= budget.deadlineAt) {
+        this.exhaustBudget(roomId, "deadline");
+        throw new RoomBudgetExceededError(roomId, "deadline");
+      }
+      if (budget.maxConcurrent !== null && this.roomInflightCount(roomId) >= budget.maxConcurrent) {
+        this.enqueueFollowUp(roomId, sessionId, content, opts, budget.id, this.flowIdForRoom(roomId));
+        return;
+      }
+      budget.usedCalls++;
+    }
     this.promptRooms.set(sessionId, roomId);
+    const ticket = Symbol();
+    this.promptTickets.set(sessionId, ticket);
+    if (this.autoDecisions.has(roomId) && this.rooms.get(roomId)?.conductorId === sessionId) {
+      this.decidingTurnLatches.set(sessionId, roomId);
+    }
     // 派发时点锁存 flow 上下文：turnEnd flush 时 flow 可能已被 removeFlow，现查必落空
     //（isHiddenTurn/taskIdForTurn/flowIdForRoom 全依赖运行期 flow——worker 孤儿卡与 assistant 泄漏同源）
     const flowId = this.flowIdForRoom(roomId);
@@ -549,15 +970,24 @@ export class RoomModeManager {
       return await this.agent.prompt(sessionId, content, { ...opts, queueIfBusy: false });
     } catch (err) {
       if (isSessionBusyError(err)) {
-        if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
-        this.turnFlowCtx.delete(sessionId);
+        if (budget) budget.usedCalls--;
+        if (this.turnTicketCurrent(sessionId, ticket)) {
+          this.promptRooms.delete(sessionId);
+          this.turnFlowCtx.delete(sessionId);
+          this.promptTickets.delete(sessionId);
+        }
         unguard();
-        this.enqueueFollowUp(roomId, sessionId, content, opts);
+        if (this.budgets.get(roomId) === budget && this.rooms.get(roomId)) {
+          this.enqueueFollowUp(roomId, sessionId, content, opts, budget?.id, flowId);
+        }
         return;
       }
       // 发送即失败（session 未知/同步 throw）：不会有 prompt.done/error 兜底，就地清理
-      if (this.promptRooms.get(sessionId) === roomId) this.promptRooms.delete(sessionId);
-      this.turnFlowCtx.delete(sessionId);
+      if (this.turnTicketCurrent(sessionId, ticket)) {
+        this.promptRooms.delete(sessionId);
+        this.turnFlowCtx.delete(sessionId);
+        this.promptTickets.delete(sessionId);
+      }
       unguard();
       throw err;
     }
@@ -625,14 +1055,14 @@ export class RoomModeManager {
         "room-modes stale",
         `${guard.roomId}:${sessionId} 回合期间上下文已更新，输出作废并按原 prompt 重跑一次`,
       );
-      this.agent.prompt(sessionId, guard.content, { queueIfBusy: false }).catch((err) => {
+      this.sendPrompt(guard.roomId, sessionId, guard.content).catch((err) => {
         if (isSessionBusyError(err)) {
           this.enqueueFollowUp(guard.roomId, sessionId, guard.content);
           return;
         }
         // 重跑发送失败不会有 prompt.error 事件兜底，按 prompt 异常收敛（含 turnGuards 清理）
         logError("room-modes stale retry", err);
-        this.onPromptError(sessionId);
+        this.finishPromptError(sessionId);
       });
       return true;
     }
@@ -640,12 +1070,12 @@ export class RoomModeManager {
     return false;
   }
 
-  private captureArtifacts(sessionId: string, output: string, taskId?: string): void {
-    const roomId = this.promptRooms.get(sessionId);
+  private captureArtifacts(sessionId: string, output: string, taskId?: string, roomId?: string, ticket?: symbol): void {
+    roomId ??= this.promptRooms.get(sessionId);
     if (!roomId) return;
     const room = this.rooms.get(roomId);
     if (!room) {
-      this.promptRooms.delete(sessionId);
+      if (this.turnTicketCurrent(sessionId, ticket)) this.promptRooms.delete(sessionId);
       return;
     }
     const result = extractTaskResult(output);
@@ -669,7 +1099,7 @@ export class RoomModeManager {
         });
       }
     }
-    this.promptRooms.delete(sessionId);
+    if (this.turnTicketCurrent(sessionId, ticket)) this.promptRooms.delete(sessionId);
   }
 
   private emitModeSelected(e: ModeSelectedEvent): void {
@@ -680,6 +1110,13 @@ export class RoomModeManager {
     const flow = this.getFlow(roomId);
     this.broadcast("room.flowUpdate", { roomId, flow });
     this.onFlowCard?.(roomId, flow);
+    if (flow?.phase === "done") {
+      const b = this.budgets.get(roomId);
+      if (b?.timer) {
+        clearTimeout(b.timer);
+        b.timer = undefined;
+      }
+    }
     // flow 终态归档：本轮 flow 期间开启且仍 open 的话题自动 resolve（幂等，重复触发无副作用）
     if (flow?.phase === "done" && typeof flow.startedAt === "number") {
       const until = typeof flow.finishedAt === "number" ? flow.finishedAt : Date.now();
@@ -703,15 +1140,18 @@ export class RoomModeManager {
   }
 
   getFlow(roomId: string): Record<string, unknown> | undefined {
+    const budget = this.budgetView(roomId);
+    const withBudget = (v: Record<string, unknown> | undefined) =>
+      v && budget && v.phase !== "done" ? { ...v, budget } : v;
     const conductorFlow = this.conductor.getFlow(roomId);
-    if (conductorFlow && conductorFlow.phase !== "done") return { ...conductorFlow, mode: "conductor" };
+    if (conductorFlow && conductorFlow.phase !== "done") return withBudget({ ...conductorFlow, mode: "conductor" });
     const parallel = this.parallelFlowView(roomId);
-    if (parallel) return { ...parallel, mode: "parallel" };
+    if (parallel) return withBudget({ ...parallel, mode: "parallel" });
     const pipeline = this.pipelineFlowView(roomId);
-    if (pipeline) return { ...pipeline, mode: "pipeline" };
+    if (pipeline) return withBudget({ ...pipeline, mode: "pipeline" });
     const debate = this.debateFlowView(roomId);
-    if (debate) return { ...debate, mode: "debate" };
-    return conductorFlow ? { ...conductorFlow, mode: "conductor" } : undefined;
+    if (debate) return withBudget({ ...debate, mode: "debate" });
+    return withBudget(conductorFlow ? { ...conductorFlow, mode: "conductor" } : undefined);
   }
 
   observeToolUpdate(sessionId: string, update: unknown): void {
@@ -737,6 +1177,7 @@ export class RoomModeManager {
       task: flow.topic,
       dependsOn: [] as string[],
       artifacts: [] as { type: string; path?: string; summary: string }[],
+      ...(flow.results.has(sid) ? { output: flow.results.get(sid) } : {}),
     }));
     const done = tasks.filter((t) => t.status === "done").length;
     const running = tasks.filter((t) => t.status === "running").length;
@@ -781,6 +1222,7 @@ export class RoomModeManager {
         task: isCurrent ? flow.topic : (isDone ? `已完成：${flow.outputs[i]?.slice(0, 80) ?? ""}` : `等待前序完成`),
         dependsOn: i > 0 ? [`p${i}`] : [],
         artifacts: [] as { type: string; path?: string; summary: string }[],
+        ...(isDone && flow.outputs[i] !== undefined ? { output: flow.outputs[i] } : {}),
       };
     });
     const done = tasks.filter((t) => t.status === "done").length;
@@ -829,6 +1271,7 @@ export class RoomModeManager {
         task: `${flow.topic}（第 ${round}/${flow.rounds} 轮 · ${side === 0 ? "正方" : "反方"}）`,
         dependsOn: [] as string[],
         artifacts: [] as { type: string; path?: string; summary: string }[],
+        ...(output ? { output: output.text } : {}),
       });
     }
     tasks.push({
@@ -874,13 +1317,18 @@ export class RoomModeManager {
     if (pipe && !pipe.done) return true;
     const d = this.debateFlows.get(roomId);
     if (d && !d.done) return true;
-    if (this.autoDecisions.has(this.hostFor(roomId))) return true;
+    if (this.autoDecisions.has(roomId)) return true;
     return false;
   }
 
   /** 取消当前房间的所有活动流 */
   async cancelActive(roomId: string, reason?: string): Promise<void> {
     const room = this.rooms.get(roomId);
+    const owned = new Set(
+      (room?.members ?? [])
+        .map((m) => m.sessionId)
+        .filter((sid) => this.roomIdForTurn(sid) === roomId),
+    );
     const toCancel = new Set<string>();
     const touched = this.conductor.cancel(roomId, reason);
     for (const sid of touched) toCancel.add(sid);
@@ -899,16 +1347,27 @@ export class RoomModeManager {
     this.parallelFlows.delete(roomId);
     this.pipelineFlows.delete(roomId);
     this.debateFlows.delete(roomId);
+    this.dropFollowUpsForRoom(roomId);
+    const budget = this.budgets.get(roomId);
+    if (budget) {
+      budget.stopped = true;
+      if (budget.timer) {
+        clearTimeout(budget.timer);
+        budget.timer = undefined;
+      }
+    }
     this.clearSubMode(roomId);
     const host = this.hostFor(roomId);
-    if (this.autoDecisions.has(host)) {
-      this.autoDecisions.delete(host);
+    if (this.autoDecisions.has(roomId)) {
+      this.autoDecisions.delete(roomId);
       toCancel.add(host);
     }
     if (room?.conductorId && (touched.length > 0 || this.agent.isBusy(room.conductorId))) {
       toCancel.add(room.conductorId);
     }
+    for (const sid of owned) toCancel.add(sid);
     for (const sid of toCancel) {
+      if (!owned.has(sid)) continue;
       if (this.agent.isBusy(sid)) {
         try {
           await this.agent.cancel(sid);
@@ -944,7 +1403,7 @@ export class RoomModeManager {
           });
           return [];
         }
-        if (targeted && this.conductor.answerClarification(roomId, intent.text, intent.helpId)) {
+        if (targeted && this.conductor.answerClarification(roomId, intent.text, intent.helpId, () => this.renewBudgetIfStopped(roomId))) {
           this.notice({
             roomId,
             message: "已收到你的答复，指挥家继续规划中…",
@@ -1019,8 +1478,7 @@ export class RoomModeManager {
     }
 
     // 4. auto 决策进行中：并入决策上下文
-    const host = this.hostFor(roomId);
-    const autoCtx = this.autoDecisions.get(host);
+    const autoCtx = this.autoDecisions.get(roomId);
     if (autoCtx && autoCtx.roomId === roomId) {
       autoCtx.note = autoCtx.note ? `${autoCtx.note}\n\n用户补充：${text}` : `用户补充：${text}`;
       this.notice({ roomId, message: `📝 补充信息已并入本轮决策：${text.slice(0, 80)}` });
@@ -1096,7 +1554,7 @@ export class RoomModeManager {
         return { sent: [], mentioned: [], skipped: [] };
       }
       if (!mid && executionContinuation(text, true) && this.rooms.route(room.roomId, text).mentioned.length === 0 &&
-          !Array.isArray(options?.params?.targets) && this.conductor.continueFlow(room.roomId, text)) {
+          !Array.isArray(options?.params?.targets) && this.conductor.continueFlow(room.roomId, text, () => this.renewBudgetIfStopped(room.roomId))) {
         this.setSubMode(room.roomId, "conductor", room.conductorId, undefined);
         this.excuseRoomTurns(room.roomId);
         this.emitFlowUpdate(room.roomId);
@@ -1188,12 +1646,14 @@ export class RoomModeManager {
     }
 
     if (room.mode === "auto") {
+      this.ensureRoomBudget(room);
       const result = await this.handleAuto(room, text, mergedOptions);
       this.emitFlowUpdate(room.roomId);
       return result;
     }
 
     this.setSubMode(room.roomId, room.mode, undefined, undefined);
+    this.ensureRoomBudget(room);
     const result = await this.executeMode(room, room.mode, text, mergedOptions);
     this.emitFlowUpdate(room.roomId);
     return result;
@@ -1201,14 +1661,24 @@ export class RoomModeManager {
 
   /** prompt 完成时的回调 */
   async onPromptDone(sessionId: string, output: string): Promise<boolean> {
+    const ticket = this.promptTickets.get(sessionId);
+    const turnRoomId = this.promptRooms.get(sessionId);
+    try {
+      return await this.finishPromptDone(sessionId, output, ticket, turnRoomId);
+    } finally {
+      this.clearTurnRegistration(sessionId, ticket);
+      this.drainAllFollowUps();
+    }
+  }
+
+  private async finishPromptDone(sessionId: string, output: string, ticket?: symbol, turnRoomId?: string): Promise<boolean> {
     // turn 提交不变量：上下文游标推进的输出作废重跑（≤1 次）
     if (this.handleStaleTurn(sessionId)) return true;
-    this.drainFollowUps(sessionId);
     // auto 决策完成
-    const autoCtx = this.autoDecisions.get(sessionId);
-    if (autoCtx) {
-      this.autoDecisions.delete(sessionId);
-      this.promptRooms.delete(sessionId);
+    const autoCtx = turnRoomId === undefined ? undefined : this.autoDecisions.get(turnRoomId);
+    if (autoCtx && autoCtx.roomId === turnRoomId) {
+      this.autoDecisions.delete(autoCtx.roomId);
+      if (this.turnTicketCurrent(sessionId, ticket)) this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (!room) {
         logWarn("room-modes auto", `auto 决策完成但房间不存在：${autoCtx.roomId}`);
@@ -1287,7 +1757,11 @@ export class RoomModeManager {
     }
 
     // conductor 编排
-    const conductorRoom = await this.conductor.onPromptDone(sessionId, output);
+    const claimRoom = this.conductor.getFlowForSession(sessionId)?.roomId;
+    const conductorRoom =
+      turnRoomId === undefined || (claimRoom !== undefined && claimRoom !== turnRoomId)
+        ? undefined
+        : await this.conductor.onPromptDone(sessionId, output);
     if (conductorRoom) {
       if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
       this.emitFlowUpdate(conductorRoom);
@@ -1295,27 +1769,28 @@ export class RoomModeManager {
     }
 
     // 其他流程
-    const parallelRoom = this.onParallelDone(sessionId, output);
+    const parallelRoom = this.onParallelDone(sessionId, output, turnRoomId, ticket);
     if (parallelRoom) {
       this.emitFlowUpdate(parallelRoom);
       return true;
     }
-    const pipelineRoom = this.onPipelineDone(sessionId, output);
+    const pipelineRoom = this.onPipelineDone(sessionId, output, turnRoomId, ticket);
     if (pipelineRoom) {
       this.emitFlowUpdate(pipelineRoom);
       return true;
     }
-    const debateRoom = this.onDebateDone(sessionId, output);
+    const debateRoom = this.onDebateDone(sessionId, output, turnRoomId, ticket);
     if (debateRoom) {
       this.emitFlowUpdate(debateRoom);
       return true;
     }
 
     // mention / 普通点名 / 汇总者等：统一提取 artifact 写入房间 registry
-    const endedRoomId = this.roomIdForTurn(sessionId);
-    this.captureArtifacts(sessionId, output);
+    const endedRoomId = turnRoomId;
+    this.captureArtifacts(sessionId, output, undefined, endedRoomId, ticket);
     // 汇总者/裁判的最终答复完成 → 快照转 done（此前保持 summarizing 供面板查看进度）
     for (const [rid, f] of this.parallelFlows) {
+      if (rid !== turnRoomId) continue;
       if (f.summarizing && f.summarizer === sessionId) {
         f.done = true;
         delete f.summarizing;
@@ -1323,6 +1798,7 @@ export class RoomModeManager {
       }
     }
     for (const [rid, f] of this.debateFlows) {
+      if (rid !== turnRoomId) continue;
       if (f.summarizing && f.judge === sessionId) {
         f.done = true;
         delete f.summarizing;
@@ -1345,6 +1821,14 @@ export class RoomModeManager {
    * 不清理 promptRooms/turnGuards 中指向其他房间的条目；在途 prompt 后续 done/error 仍会走正常路径。
    */
   onRoomRemoved(roomId: string): void {
+    for (const [sid, rid] of [...this.promptRooms]) {
+      if (rid === roomId && this.agent.isBusy(sid)) {
+        void this.cancelOwnedTurn(sid, this.promptTickets.get(sid), roomId, "room-removed");
+      }
+    }
+    const budget = this.budgets.get(roomId);
+    if (budget?.timer) clearTimeout(budget.timer);
+    this.budgets.delete(roomId);
     this.roomSubMode.delete(roomId);
     this.autoHistory.delete(roomId);
     this.lastAuto.delete(roomId);
@@ -1367,6 +1851,7 @@ export class RoomModeManager {
     this.pipelineFlows.delete(roomId);
     this.debateFlows.delete(roomId);
     this.conductor.dropRoom(roomId);
+    this.dropFollowUpsForRoom(roomId);
     this.broadcast("room.flowUpdate", { roomId, flow: null });
   }
 
@@ -1375,37 +1860,60 @@ export class RoomModeManager {
    * conductor 任务标 failed 终态（不自动重派）；auto 决策中止；其余模式复用 onPromptError 的终态收敛。
    */
   onSessionCancelled(sessionId: string): void {
-    this.turnGuards.delete(sessionId);
-    this.decidingTurnLatches.delete(sessionId);
-    this.turnFlowCtx.delete(sessionId);
-    // cancel 收尾后 busy 已清：排队消息应继续投递而非滞留
-    this.drainFollowUps(sessionId);
-    const autoCtx = this.autoDecisions.get(sessionId);
-    if (autoCtx) {
-      this.autoDecisions.delete(sessionId);
-      this.promptRooms.delete(sessionId);
-      this.clearSubMode(autoCtx.roomId);
-      this.emitFlowUpdate(autoCtx.roomId);
-      return;
+    const ticket = this.promptTickets.get(sessionId);
+    const turnRoomId = this.promptRooms.get(sessionId);
+    try {
+      if (this.turnTicketCurrent(sessionId, ticket)) {
+        this.turnGuards.delete(sessionId);
+        this.decidingTurnLatches.delete(sessionId);
+        this.turnFlowCtx.delete(sessionId);
+      }
+      const autoCtx = turnRoomId === undefined ? undefined : this.autoDecisions.get(turnRoomId);
+      if (autoCtx && autoCtx.roomId === turnRoomId) {
+        this.autoDecisions.delete(autoCtx.roomId);
+        if (this.turnTicketCurrent(sessionId, ticket)) this.promptRooms.delete(sessionId);
+        this.clearSubMode(autoCtx.roomId);
+        this.emitFlowUpdate(autoCtx.roomId);
+        return;
+      }
+      const claimRoom = this.conductor.getFlowForSession(sessionId)?.roomId;
+      const conductorRoom =
+        turnRoomId === undefined || (claimRoom !== undefined && claimRoom !== turnRoomId)
+          ? undefined
+          : this.conductor.onSessionCancelled(sessionId);
+      if (conductorRoom) {
+        if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
+        this.emitFlowUpdate(conductorRoom);
+        return;
+      }
+      // parallel/pipeline/debate 的成员中断收敛本就为终态，直接复用
+      this.finishPromptError(sessionId, undefined, ticket, turnRoomId);
+    } finally {
+      // cancel 收尾后 busy 已清：排队消息应继续投递而非滞留
+      this.clearTurnRegistration(sessionId, ticket);
+      this.drainAllFollowUps();
     }
-    const conductorRoom = this.conductor.onSessionCancelled(sessionId);
-    if (conductorRoom) {
-      if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
-      this.emitFlowUpdate(conductorRoom);
-      return;
-    }
-    // parallel/pipeline/debate 的成员中断收敛本就为终态，直接复用
-    this.onPromptError(sessionId);
   }
 
   /** prompt 异常/取消时的回调 */
   onPromptError(sessionId: string, message?: string): boolean {
+    const ticket = this.promptTickets.get(sessionId);
+    const turnRoomId = this.promptRooms.get(sessionId);
+    try {
+      return this.finishPromptError(sessionId, message, ticket, turnRoomId);
+    } finally {
+      this.clearTurnRegistration(sessionId, ticket);
+      this.drainAllFollowUps();
+    }
+  }
+
+  private finishPromptError(sessionId: string, message?: string, ticket?: symbol, turnRoomId?: string): boolean {
     message = message?.trim() || "turn error";
-    this.turnGuards.delete(sessionId);
-    const autoCtx = this.autoDecisions.get(sessionId);
-    if (autoCtx) {
-      this.autoDecisions.delete(sessionId);
-      this.promptRooms.delete(sessionId);
+    if (this.turnTicketCurrent(sessionId, ticket)) this.turnGuards.delete(sessionId);
+    const autoCtx = turnRoomId === undefined ? undefined : this.autoDecisions.get(turnRoomId);
+    if (autoCtx && autoCtx.roomId === turnRoomId) {
+      this.autoDecisions.delete(autoCtx.roomId);
+      if (this.turnTicketCurrent(sessionId, ticket)) this.promptRooms.delete(sessionId);
       const room = this.rooms.get(autoCtx.roomId);
       if (room) {
         // 决策失败兜底不静默吞 self：有房史最后发言成员则派给它保扇出语义
@@ -1441,10 +1949,11 @@ export class RoomModeManager {
       return true;
     }
 
-    // 非兜底分支：error 收尾后 busy 已清，排队消息应继续投递而非滞留
-    // （autoCtx 兜底会自起 self 回合，其 done 时自然 drain，不在此提前）
-    this.drainFollowUps(sessionId);
-    const conductorRoom = this.conductor.onPromptError(sessionId, message);
+    const claimRoom = this.conductor.getFlowForSession(sessionId)?.roomId;
+    const conductorRoom =
+      turnRoomId === undefined || (claimRoom !== undefined && claimRoom !== turnRoomId)
+        ? undefined
+        : this.conductor.onPromptError(sessionId, message);
     if (conductorRoom) {
       if (!this.conductor.hasActiveFlow(conductorRoom)) this.clearSubMode(conductorRoom);
       this.emitFlowUpdate(conductorRoom);
@@ -1452,6 +1961,7 @@ export class RoomModeManager {
     }
 
     for (const [roomId, flow] of this.parallelFlows) {
+      if (roomId !== turnRoomId) continue;
       if (!flow.done && flow.pending.has(sessionId)) {
         flow.pending.delete(sessionId);
         (flow.failed ??= new Set()).add(sessionId);
@@ -1467,6 +1977,7 @@ export class RoomModeManager {
     }
 
     for (const [roomId, flow] of this.pipelineFlows) {
+      if (roomId !== turnRoomId) continue;
       if (!flow.done && flow.order[flow.stage] === sessionId) {
         flow.done = true;
         flow.failed = true;
@@ -1479,6 +1990,7 @@ export class RoomModeManager {
     }
 
     for (const [roomId, flow] of this.parallelFlows) {
+      if (roomId !== turnRoomId) continue;
       if (flow.summarizing && flow.summarizer === sessionId) {
         flow.done = true;
         flow.failureMessage ??= message ?? "并行汇总中断";
@@ -1492,6 +2004,7 @@ export class RoomModeManager {
     }
 
     for (const [roomId, flow] of this.debateFlows) {
+      if (roomId !== turnRoomId) continue;
       if (!flow.done && (flow.sides.includes(sessionId) || flow.judge === sessionId)) {
         flow.done = true;
         flow.failed = true;
@@ -1505,9 +2018,11 @@ export class RoomModeManager {
     }
 
     const erroredRoomId = this.promptRooms.get(sessionId);
-    this.promptRooms.delete(sessionId);
-    this.decidingTurnLatches.delete(sessionId);
-    this.turnFlowCtx.delete(sessionId);
+    if (this.turnTicketCurrent(sessionId, ticket)) {
+      this.promptRooms.delete(sessionId);
+      this.decidingTurnLatches.delete(sessionId);
+      this.turnFlowCtx.delete(sessionId);
+    }
     if (
       erroredRoomId &&
       !this.hasActiveFlow(erroredRoomId) &&
@@ -1545,14 +2060,17 @@ export class RoomModeManager {
   }
 
   roomIdForTurn(sessionId: string): string | undefined {
-    return this.promptRooms.get(sessionId)
-      ?? this.autoDecisions.get(sessionId)?.roomId
-      ?? this.conductor.getFlowForSession(sessionId)?.roomId
-      // 成员归属覆盖已完成/失败成员的迟到事件，但已完成成员忙新 turn 时不误归本房间
-      ?? [...this.parallelFlows.entries()].find(([, flow]) =>
-        !flow.done &&
-        (flow.members ?? [...flow.pending]).includes(sessionId) &&
-        (flow.pending.has(sessionId) || !this.agent.isBusy(sessionId)))?.[0]
+    const direct = this.promptRooms.get(sessionId);
+    if (direct) return direct;
+    const conductorRoom = this.conductor.getFlowForSession(sessionId)?.roomId;
+    if (conductorRoom && (!this.agent.isBusy(sessionId) || this.turnGuards.get(sessionId)?.roomId === conductorRoom)) {
+      return conductorRoom;
+    }
+    // 成员归属覆盖已完成/失败成员的迟到事件，但已完成成员忙新 turn 时不误归本房间
+    return [...this.parallelFlows.entries()].find(([, flow]) =>
+      !flow.done &&
+      (flow.members ?? [...flow.pending]).includes(sessionId) &&
+      (flow.pending.has(sessionId) || !this.agent.isBusy(sessionId)))?.[0]
       ?? [...this.pipelineFlows.entries()].find(([, flow]) =>
         !flow.done &&
         flow.order.includes(sessionId) &&
@@ -1602,7 +2120,8 @@ export class RoomModeManager {
 
   /** 用于 prompt.done 跳过广播：是否是内部工作输出 */
   isHiddenSession(sessionId: string): boolean {
-    if (this.autoDecisions.has(sessionId)) return true;
+    const roomId = this.promptRooms.get(sessionId);
+    if (roomId !== undefined && this.autoDecisions.has(roomId)) return true;
     const flow = this.conductor.getFlowForSession(sessionId);
     if (flow) {
       if (flow.role === "worker") return true;
@@ -1888,10 +2407,6 @@ export class RoomModeManager {
       if (this.agent.isBusy(m.sessionId)) {
         // busy 成员消息入 followUp 队列（不丢、不进 flow 追踪），按 skipped 如实回报
         skipped.push(m.sessionId);
-        const queued = this.buildPromptContent(room, text, m.sessionId, options);
-        this.sendPrompt(room.roomId, m.sessionId, queued).catch((err) => {
-          logError("room-modes parallel queued prompt", err);
-        });
       } else {
         pending.add(m.sessionId);
         sent.push(m.sessionId);
@@ -1917,8 +2432,13 @@ export class RoomModeManager {
     };
     this.parallelFlows.set(room.roomId, flow);
     this.setSubMode(room.roomId, "parallel", summarizer, undefined);
+    const memberNote = "本轮为独立观点收集，请只做只读分析，不修改共享工作区、不执行部署或其他外部写操作；需要实施时交由主执行者统一落地。请优先给出独有发现、证据与反例，避免复述其他成员。";
+    const memberOptions: PromptOptions = {
+      ...options,
+      note: options?.note ? `${memberNote}\n\n${options.note}` : memberNote,
+    };
     for (const sid of sent) {
-      const prompt = this.buildPromptContent(room, text, sid, options);
+      const prompt = this.buildPromptContent(room, text, sid, memberOptions);
       this.sendPrompt(room.roomId, sid, prompt).catch((err) => {
         logError("room-modes parallel prompt", err);
         const f = this.parallelFlows.get(room.roomId);
@@ -1928,19 +2448,20 @@ export class RoomModeManager {
         if (f.pending.size === 0) this.summarizeParallel(room.roomId, f);
       });
     }
-    const names = members.map((m) => `@${this.rooms.displayNameFor(m)}`).join("、");
+    const names = members.filter((m) => sent.includes(m.sessionId)).map((m) => `@${this.rooms.displayNameFor(m)}`).join("、");
     const sName = summarizer ? this.nameFor(room.roomId, summarizer) : "无";
     this.notice({ roomId: room.roomId, message: `⚡ 并行模式：已询问 ${names}，汇总者 @${sName}` });
     return { sent, mentioned: [], skipped };
   }
 
-  private onParallelDone(sessionId: string, output: string): string | undefined {
+  private onParallelDone(sessionId: string, output: string, turnRoomId?: string, ticket?: symbol): string | undefined {
     for (const [roomId, flow] of this.parallelFlows) {
+      if (roomId !== turnRoomId) continue;
       if (flow.done) continue;
       if (!flow.pending.has(sessionId)) continue;
       flow.pending.delete(sessionId);
       flow.results.set(sessionId, output);
-      this.captureArtifacts(sessionId, output);
+      this.captureArtifacts(sessionId, output, undefined, roomId, ticket);
       if (flow.pending.size === 0) {
         this.summarizeParallel(roomId, flow);
       }
@@ -1964,7 +2485,7 @@ export class RoomModeManager {
       return;
     }
     const lines = [...flow.results.entries()].map(([sid, out]) => {
-      return `- @${this.nameFor(roomId, sid)}: ${out.trim().replace(/\s+/g, " ").slice(0, 400)}`;
+      return `- @${this.nameFor(roomId, sid)} [roomId=${roomId} sessionId=${sid} flowId=${flow.id} outputLen=${out.length}]: ${out.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
     const promptText = parallelSummarizerPrompt({ roomName: room.name, lines, extras: flow.extras });
     const prompt = this.buildPromptContent(room, promptText, flow.summarizer, { artifactContext: flow.artifactContext });
@@ -2021,8 +2542,9 @@ export class RoomModeManager {
     return { sent: firstBusy ? [] : [first], mentioned: [], skipped: firstBusy ? [first] : [] };
   }
 
-  private onPipelineDone(sessionId: string, output: string): string | undefined {
+  private onPipelineDone(sessionId: string, output: string, turnRoomId?: string, ticket?: symbol): string | undefined {
     for (const [roomId, flow] of this.pipelineFlows) {
+      if (roomId !== turnRoomId) continue;
       if (flow.done) continue;
       if (flow.order[flow.stage] !== sessionId) continue;
       const room = this.rooms.get(roomId);
@@ -2031,7 +2553,7 @@ export class RoomModeManager {
         return roomId;
       }
       flow.outputs.push(output);
-      this.captureArtifacts(sessionId, output);
+      this.captureArtifacts(sessionId, output, undefined, roomId, ticket);
       const nextStage = flow.stage + 1;
       if (nextStage >= flow.order.length) {
         flow.stage = nextStage;
@@ -2131,8 +2653,9 @@ export class RoomModeManager {
     return { sent: sideABusy ? [] : [sideA], mentioned: [], skipped: sideABusy ? [sideA] : [] };
   }
 
-  private onDebateDone(sessionId: string, output: string): string | undefined {
+  private onDebateDone(sessionId: string, output: string, turnRoomId?: string, ticket?: symbol): string | undefined {
     for (const [roomId, flow] of this.debateFlows) {
+      if (roomId !== turnRoomId) continue;
       const room = this.rooms.get(roomId);
       if (!room) {
         this.debateFlows.delete(roomId);
@@ -2142,7 +2665,7 @@ export class RoomModeManager {
       const currentSid = flow.sides[flow.sideIndex]!;
       if (sessionId !== currentSid) continue;
       flow.outputs.push({ round: flow.currentRound, side: flow.sideIndex, text: output });
-      this.captureArtifacts(sessionId, output);
+      this.captureArtifacts(sessionId, output, undefined, roomId, ticket);
 
       if (flow.sideIndex === 0) {
         flow.sideIndex = 1;
@@ -2211,7 +2734,8 @@ export class RoomModeManager {
   private buildJudgePrompt(room: Room, flow: DebateFlow): string | PromptContent {
     const lines = flow.outputs.map((o) => {
       const side = o.side === 0 ? "正方" : "反方";
-      return `- 第 ${o.round} 轮 ${side}：${o.text.trim().replace(/\s+/g, " ").slice(0, 400)}`;
+      const osid = flow.sides[o.side];
+      return `- 第 ${o.round} 轮 ${side} [roomId=${room.roomId} sessionId=${osid ?? ""} flowId=${flow.id} outputLen=${o.text.length}]：${o.text.trim().replace(/\s+/g, " ").slice(0, 400)}`;
     });
     const text = debateJudgePrompt({ topic: flow.topic, lines, extras: flow.extras });
     return this.buildPromptContent(room, text, flow.judge, { artifactContext: flow.artifactContext });
@@ -2260,6 +2784,11 @@ export class RoomModeManager {
       this.recordAutoMode(room.roomId, "conductor", "用户明确批准执行方案");
       return this.executeMode(room, "conductor", text, options);
     }
+    if (this.rooms.route(room.roomId, text).mentioned.length > 0) {
+      this.setSubMode(room.roomId, "mention", undefined, undefined);
+      this.recordAutoMode(room.roomId, "mention", "@点名");
+      return this.executeMode(room, "mention", text, options);
+    }
     const conductorBusy = this.agent.isBusy(room.conductorId);
     const conductorId = room.conductorId;
     this.setSubMode(room.roomId, "deciding", conductorId, undefined);
@@ -2303,7 +2832,11 @@ export class RoomModeManager {
       return this.executeMode(room, fast.mode as RuntimeMode, text, { ...options, decisionVia: `规则:${fast.reason}` });
     }
     if (this.modeDecider?.enforced) {
+      const budget = this.budgets.get(room.roomId);
       const dv = await this.modeDecider.decide(decideInput);
+      if (this.rooms.get(room.roomId) !== room || this.budgets.get(room.roomId) !== budget || budget?.stopped) {
+        return { sent: [], mentioned: [], skipped: [] };
+      }
       if (dv.action === "direct" && dv.mode !== undefined) {
         logWarn(
           "room-modes auto",
@@ -2321,8 +2854,7 @@ export class RoomModeManager {
         .catch(() => {});
     }
     autoCtx.decideInput = decideInput;
-    this.autoDecisions.set(conductorId, autoCtx);
-    this.decidingTurnLatches.set(conductorId, room.roomId);
+    this.autoDecisions.set(room.roomId, autoCtx);
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
     // 决策回合专属 ACK 预算：只兜"无输出卡死"，超时走 prompt.error→fail-open self 现行兜底
@@ -2336,10 +2868,10 @@ export class RoomModeManager {
     this.sendPrompt(room.roomId, conductorId, prompt, decideOpts).catch((err) => {
       logError("room-modes auto decision", err);
       // 发送失败不会有 prompt.done/error 兜底，清掉悬挂决策避免下次 done 误消费
-      if (this.autoDecisions.get(conductorId) === autoCtx) {
-        this.autoDecisions.delete(conductorId);
+      if (this.autoDecisions.get(room.roomId) === autoCtx) {
+        this.autoDecisions.delete(room.roomId);
+        if (this.decidingTurnLatches.get(conductorId) === room.roomId) this.decidingTurnLatches.delete(conductorId);
       }
-      this.decidingTurnLatches.delete(conductorId);
       // 同步释放 deciding 子态并告知用户，不等下条消息触发 cancelActive 才自愈
       this.clearSubMode(room.roomId);
       this.notice({

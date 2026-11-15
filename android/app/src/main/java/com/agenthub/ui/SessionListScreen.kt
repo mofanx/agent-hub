@@ -104,6 +104,11 @@ import com.agenthub.RoomInfo
 import com.agenthub.SessionGroupBy
 import com.agenthub.SessionInfo
 import com.agenthub.SessionStatus
+import kotlin.math.roundToLong
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+
+private const val JS_MAX_SAFE = 9007199254740991L
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -1399,21 +1404,7 @@ internal fun RoomEditorDialog(
     var roomName by remember(room) { mutableStateOf(editing?.name ?: "") }
     val roomNameTaken = roomName.isNotBlank() &&
         vm.rooms.any { it.roomId != editing?.roomId && it.name == roomName.trim() }
-    var mode by remember(room) { mutableStateOf(editing?.mode ?: "mention") }
-    var modeManuallyChanged by remember(room) { mutableStateOf(false) }
-
-    fun recommendMode(name: String): String? {
-        val n = name.lowercase()
-        return when {
-            Regex("bug|fix|测试|test|review|审查|重构|refactor|实现|implement|添加功能|feature|任务|分工|拆解").containsMatchIn(n) -> "conductor"
-            Regex("brainstorm|头脑风暴|想法|方案|收集|调研|优缺点|分析|集思广益|多观点").containsMatchIn(n) -> "parallel"
-            Regex("辩论|debate|正反|利弊|争论|对比|vs|观点碰撞").containsMatchIn(n) -> "debate"
-            Regex("流程|流水线|pipeline|步骤|step|顺序|sequence|链路|串联|串行").containsMatchIn(n) -> "pipeline"
-            Regex("轮流|轮询|round|依次|每人|顺序发言").containsMatchIn(n) -> "roundrobin"
-            Regex("闲聊|讨论|提问|@|广播|通知").containsMatchIn(n) -> "mention"
-            else -> null
-        }
-    }
+    var mode by remember(room) { mutableStateOf(editing?.mode ?: "auto") }
 
     val selected = remember(room) {
         mutableStateListOf<String>().apply {
@@ -1434,6 +1425,16 @@ internal fun RoomEditorDialog(
     var debateRounds by remember(room) { mutableIntStateOf(editing?.debateRounds ?: 2) }
     var pipelineOrder by remember(room) { mutableStateOf(initialPipelineOrder()) }
     var memberRoles by remember(room) { mutableStateOf<Map<String, String>>(editing?.memberRoles ?: emptyMap()) }
+    var maxConcurrent by remember(room) { mutableStateOf(editing?.maxConcurrent?.toString() ?: "") }
+    var maxAgentCalls by remember(room) { mutableStateOf(editing?.maxAgentCalls?.toString() ?: "") }
+    var maxFlowDurationMin by remember(room) {
+        mutableStateOf(editing?.maxFlowDurationMs?.let { (it / 60000.0).toString().trimEnd('0').trimEnd('.') } ?: "")
+    }
+    var maxRounds by remember(room) { mutableStateOf(editing?.maxRounds?.toString() ?: "") }
+    var relevanceFilter by remember(room) {
+        mutableStateOf(editing?.relevanceFilter?.let { if (it) "on" else "off" } ?: "global")
+    }
+    var advOpen by remember(room) { mutableStateOf(editing?.mode in listOf("roundrobin", "pipeline", "debate")) }
     var personaEditFor by remember(room) { mutableStateOf<String?>(null) }
     personaEditFor?.let { sid ->
         PersonaEditDialog(
@@ -1447,7 +1448,6 @@ internal fun RoomEditorDialog(
     }
 
     fun onModeChanged(newMode: String) {
-        modeManuallyChanged = true
         mode = newMode
         specialId = null
         parallelSummarizerId = null
@@ -1462,6 +1462,15 @@ internal fun RoomEditorDialog(
         if (checked) {
             selected.add(id)
             if (!pipelineOrder.contains(id)) pipelineOrder = pipelineOrder + id
+            when (mode) {
+                "conductor", "auto", "roundrobin" -> if (specialId == null) specialId = id
+                "parallel" -> if (parallelSummarizerId == null) parallelSummarizerId = id
+                "debate" -> {
+                    if (debateJudge == null) debateJudge = id
+                    if (debateSideA == null) debateSideA = id
+                    if (debateSideB == null && selected.size > 1) debateSideB = selected.firstOrNull { it != id }
+                }
+            }
         } else {
             selected.remove(id)
             if (specialId == id) specialId = null
@@ -1485,40 +1494,109 @@ internal fun RoomEditorDialog(
         pipelineOrder = list
     }
 
+    fun durationValue(raw: String): Long? = raw.trim().toDoubleOrNull()?.times(60000)
+        ?.takeIf { it.isFinite() }?.roundToLong()
+        ?.takeIf { it in 1000..JS_MAX_SAFE && System.currentTimeMillis() + it <= JS_MAX_SAFE }
+
     fun isValid(): Boolean {
         if (roomName.isBlank() || roomNameTaken || selected.size < (if (isCreate) 2 else 1)) return false
-        return when (mode) {
-            "conductor", "auto", "roundrobin" -> specialId != null
-            "parallel" -> parallelSummarizerId != null
+        val modeOk = when (mode) {
+            "conductor", "auto", "roundrobin" -> specialId != null || selected.isNotEmpty()
+            "parallel" -> parallelSummarizerId != null || selected.isNotEmpty()
             "pipeline" -> pipelineOrder.isNotEmpty()
             "debate" -> debateSideA != null && debateSideB != null && debateJudge != null
             else -> true
         }
+        if (!modeOk) return false
+        fun longOk(s: String) = s.isBlank() || (s.trim().toLongOrNull()?.let { it in 1..JS_MAX_SAFE } == true)
+        if (!longOk(maxConcurrent)) return false
+        if (!longOk(maxAgentCalls)) return false
+        if (!longOk(maxRounds)) return false
+        if (maxFlowDurationMin.isNotBlank() && durationValue(maxFlowDurationMin) == null) return false
+        return true
     }
 
-    fun buildConfig(): ChatViewModel.RoomModeConfig = when (mode) {
-        "conductor", "auto", "roundrobin" -> ChatViewModel.RoomModeConfig(
-            conductorId = specialId,
-            memberRoles = memberRoles.filter { it.value.isNotBlank() },
-        )
-        "parallel" -> ChatViewModel.RoomModeConfig(
-            parallelSummarizerId = parallelSummarizerId,
-            memberRoles = memberRoles.filter { it.value.isNotBlank() },
-        )
-        "pipeline" -> ChatViewModel.RoomModeConfig(
-            pipelineOrder = pipelineOrder,
-            memberRoles = memberRoles.filter { it.value.isNotBlank() },
-        )
-        "debate" -> ChatViewModel.RoomModeConfig(
-            debateSides = if (debateSideA != null && debateSideB != null) debateSideA!! to debateSideB!! else null,
-            debateJudge = debateJudge,
-            debateRounds = debateRounds.coerceIn(1, 5),
-            memberRoles = memberRoles.filter { it.value.isNotBlank() },
-        )
-        else -> ChatViewModel.RoomModeConfig(memberRoles = memberRoles.filter { it.value.isNotBlank() })
+    fun intField(raw: String, orig: Long?, hi: Long): Pair<Boolean, Long?> {
+        val t = raw.trim()
+        if (t.isEmpty()) return (orig != null) to null
+        val n = t.toLongOrNull() ?: return false to null
+        if (n < 1 || n > hi || n == orig) return false to null
+        return true to n
     }
 
-    val modes = remember { listOf("mention", "conductor", "roundrobin", "parallel", "pipeline", "debate", "auto") }
+    fun buildConfig(): ChatViewModel.RoomModeConfig {
+        val rolesFiltered = memberRoles.filter { it.value.isNotBlank() }
+        val rolesOut = if (rolesFiltered == editing?.memberRoles) null else rolesFiltered
+        val base = when (mode) {
+            "conductor", "auto", "roundrobin" -> ChatViewModel.RoomModeConfig(
+                conductorId = specialId ?: selected.firstOrNull(),
+                memberRoles = rolesOut,
+            )
+            "parallel" -> ChatViewModel.RoomModeConfig(
+                parallelSummarizerId = parallelSummarizerId ?: selected.firstOrNull(),
+                memberRoles = rolesOut,
+            )
+            "pipeline" -> ChatViewModel.RoomModeConfig(
+                pipelineOrder = pipelineOrder,
+                memberRoles = rolesOut,
+            )
+            "debate" -> ChatViewModel.RoomModeConfig(
+                debateSides = if (debateSideA != null && debateSideB != null) debateSideA!! to debateSideB!! else null,
+                debateJudge = debateJudge,
+                debateRounds = debateRounds.coerceIn(1, 5),
+                memberRoles = rolesOut,
+            )
+            else -> ChatViewModel.RoomModeConfig(
+                conductorId = if (mode == "auto" || mode == "conductor" || mode == "roundrobin") specialId ?: selected.firstOrNull() else null,
+                memberRoles = rolesOut,
+            )
+        }
+        val (sMr, vMr) = intField(maxRounds, editing?.maxRounds, JS_MAX_SAFE)
+        val (sMc, vMc) = intField(maxConcurrent, editing?.maxConcurrent, JS_MAX_SAFE)
+        val (sMac, vMac) = intField(maxAgentCalls, editing?.maxAgentCalls, JS_MAX_SAFE)
+        val durT = maxFlowDurationMin.trim()
+        val durMs = durationValue(durT)
+        val durOrig = editing?.maxFlowDurationMs
+        val sMfd = durT.isNotEmpty() && durMs != null && durMs != durOrig
+        val mfdClear = durT.isEmpty() && durOrig != null
+        val rfVal = when (relevanceFilter) {
+            "on" -> true
+            "off" -> false
+            else -> null
+        }
+        val rfOrig = editing?.relevanceFilter
+        val sRf = rfVal != rfOrig
+        val clears = buildSet {
+            if (!isCreate && editing != null && mode != editing.mode) {
+                val active = when (mode) {
+                    "conductor", "auto", "roundrobin" -> setOf("conductorId")
+                    "parallel" -> setOf("parallelSummarizerId")
+                    "pipeline" -> setOf("pipelineOrder")
+                    "debate" -> setOf("debateSides", "debateJudge", "debateRounds")
+                    else -> emptySet()
+                }
+                for (k in listOf("conductorId", "parallelSummarizerId", "pipelineOrder", "debateSides", "debateJudge", "debateRounds")) {
+                    if (k !in active) add(k)
+                }
+            }
+            if (sMr && vMr == null) add("maxRounds")
+            if (sMc && vMc == null) add("maxConcurrent")
+            if (sMac && vMac == null) add("maxAgentCalls")
+            if (mfdClear) add("maxFlowDurationMs")
+            if (sRf && rfVal == null) add("relevanceFilter")
+        }
+        return base.copy(
+            maxRounds = if (sMr) vMr else null,
+            maxConcurrent = if (sMc) vMc else null,
+            maxAgentCalls = if (sMac) vMac else null,
+            maxFlowDurationMs = if (sMfd) durMs else null,
+            relevanceFilter = if (sRf) rfVal else null,
+            clearKeys = clears,
+        )
+    }
+
+    val mainModes = listOf("auto", "mention", "conductor", "parallel")
+    val advModes = listOf("roundrobin", "pipeline", "debate")
     fun modeLabel(m: String) = when (m) {
         "mention" -> S.modeMention
         "conductor" -> S.modeConductor
@@ -1544,17 +1622,10 @@ internal fun RoomEditorDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (isCreate) S.createRoom else S.editRoom) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(
                     value = roomName,
-                    onValueChange = {
-                        roomName = it
-                        if (!modeManuallyChanged) {
-                            recommendMode(it)?.let { recommended ->
-                                if (recommended != mode) onModeChanged(recommended)
-                            }
-                        }
-                    },
+                    onValueChange = { roomName = it },
                     label = { Text(S.roomName) },
                     singleLine = true,
                     isError = roomNameTaken,
@@ -1573,7 +1644,7 @@ internal fun RoomEditorDialog(
                         expanded = expanded,
                         onDismissRequest = { expanded = false },
                     ) {
-                        modes.forEach { m ->
+                        mainModes.forEach { m ->
                             DropdownMenuItem(
                                 text = { Column {
                                     Text(modeLabel(m))
@@ -1598,6 +1669,74 @@ internal fun RoomEditorDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                 )
+
+                TextButton(onClick = { advOpen = !advOpen }) {
+                    Text(S.advancedSectionLabel + if (advOpen) " ▾" else " ▸")
+                }
+                if (advOpen) {
+                    Column {
+                        advModes.forEach { m ->
+                            val sel = mode == m
+                            TextButton(onClick = { onModeChanged(m) }) {
+                                Text(
+                                    (if (sel) "◉ " else "○ ") + modeLabel(m),
+                                    color = if (sel) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                            if (sel) {
+                                Text(
+                                    modeDescription(m),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                )
+                            }
+                        }
+                        Text(S.resourceSectionLabel, style = MaterialTheme.typography.titleSmall)
+                        Text(S.resourceDefaultsHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = maxConcurrent,
+                            onValueChange = { maxConcurrent = it },
+                            label = { Text(S.maxConcurrentLabel) },
+                            placeholder = { Text(S.unlimitedLabel) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = maxAgentCalls,
+                            onValueChange = { maxAgentCalls = it },
+                            label = { Text(S.maxAgentCallsLabel) },
+                            placeholder = { Text(S.unlimitedLabel) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = maxFlowDurationMin,
+                            onValueChange = { maxFlowDurationMin = it },
+                            label = { Text(S.maxFlowDurationLabel) },
+                            placeholder = { Text(S.unlimitedLabel) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = maxRounds,
+                            onValueChange = { maxRounds = it },
+                            label = { Text(S.maxRoundsLabel) },
+                            placeholder = { Text(S.unlimitedLabel) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(S.relevanceFilterLabel, modifier = Modifier.weight(1f))
+                            listOf("global" to S.relevanceFilterGlobal, "on" to S.relevanceFilterOn, "off" to S.relevanceFilterOff).forEach { (v, l) ->
+                                TextButton(onClick = { relevanceFilter = v }) {
+                                    Text((if (relevanceFilter == v) "◉ " else "○ ") + l)
+                                }
+                            }
+                        }
+                    }
+                }
 
                 val sessions = remember(vm.sessions) { vm.sessions.filter { !it.archived } }
                 LazyColumn(

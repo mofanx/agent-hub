@@ -15,8 +15,76 @@ import {
   parseAliasesParam,
   PERSONA_PROMPT_LIMIT,
   type Room,
+  roomNoticeText,
 } from "./room.js";
 import { lostReplyAction, Store } from "./store.js";
+
+describe("房间资源配置 patch", () => {
+  it("编辑名字保留资源、过滤器、别名与角色；显式清空才恢复默认", () => {
+    const rooms = new RoomManager();
+    const members = [{ sessionId: "s1", name: "one" }, { sessionId: "s2", name: "two" }];
+    const room = rooms.create("before", members, "mention", {
+      maxRounds: 4, relevanceFilter: false, maxConcurrent: 2, maxAgentCalls: 9, maxFlowDurationMs: 60000,
+      aliases: { team: ["s1", "s2"] }, memberRoles: { s1: "role-one", s2: "role-two" },
+    });
+    rooms.update(room.roomId, "after", members, "mention", {});
+    assert.equal(room.maxRounds, 4);
+    assert.equal(room.relevanceFilter, false);
+    assert.equal(room.maxConcurrent, 2);
+    assert.equal(room.maxAgentCalls, 9);
+    assert.equal(room.maxFlowDurationMs, 60000);
+    assert.deepEqual(room.aliases, { team: ["s1", "s2"] });
+    rooms.update(room.roomId, room.name, [members[0]!], "mention", {});
+    assert.deepEqual(room.aliases, { team: ["s1"] });
+    assert.deepEqual(room.memberRoles, { s1: "role-one" });
+    rooms.update(room.roomId, room.name, room.members, "mention", {
+      maxRounds: undefined, relevanceFilter: undefined, maxConcurrent: undefined,
+      maxAgentCalls: undefined, maxFlowDurationMs: undefined, aliases: {}, memberRoles: {},
+    });
+    for (const key of ["maxRounds", "relevanceFilter", "maxConcurrent", "maxAgentCalls", "maxFlowDurationMs", "aliases", "memberRoles"] as const) {
+      assert.equal(room[key], undefined);
+    }
+  });
+
+  it("创建、更新和导入拒绝非法预算且不留下半更新", () => {
+    const rooms = new RoomManager();
+    const members = [{ sessionId: "s1", name: "one" }];
+    assert.throws(() => rooms.create("invalid", members, "mention", { maxAgentCalls: 0 }));
+    assert.equal(rooms.list().length, 0);
+    const room = rooms.create("valid", members, "mention", { maxConcurrent: 2 });
+    const original = structuredClone(room);
+    assert.throws(() => rooms.update(room.roomId, "mutated", members, "mention", { maxConcurrent: 1.5 }));
+    assert.deepEqual(room, original);
+    const restored = new RoomManager();
+    assert.throws(() => restored.import({ ...original, maxFlowDurationMs: Number.POSITIVE_INFINITY }));
+    assert.equal(restored.list().length, 0);
+  });
+
+  it("update 单独传非法 maxRounds 也原子拒绝且不留下半更新", () => {
+    const rooms = new RoomManager();
+    const members = [{ sessionId: "s1", name: "one" }];
+    const room = rooms.create("mr", members, "mention", { maxRounds: 5 });
+    const original = structuredClone(room);
+    assert.throws(() => rooms.update(room.roomId, "mutated", members, "mention", { maxRounds: 0 }));
+    assert.throws(() => rooms.update(room.roomId, "mutated", members, "mention", { maxRounds: 2.5 }));
+    assert.deepEqual(room, original);
+  });
+
+  it("克隆配置和持久化导入保留三个预算字段", () => {
+    const rooms = new RoomManager();
+    const room = rooms.create("source", [{ sessionId: "s1", name: "one" }], "mention", {
+      maxConcurrent: 4, maxAgentCalls: 11, maxFlowDurationMs: 91000,
+    });
+    const config = remapRoomModeConfig(room, new Map([["s1", "s2"]]));
+    const clone = rooms.create("clone", [{ sessionId: "s2", name: "two" }], "mention", config);
+    const restored = new RoomManager();
+    restored.import(structuredClone(clone));
+    const result = restored.get(clone.roomId)!;
+    assert.equal(result.maxConcurrent, 4);
+    assert.equal(result.maxAgentCalls, 11);
+    assert.equal(result.maxFlowDurationMs, 91000);
+  });
+});
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../..");
 const WORKSPACE_ROOT = path.resolve(PROJECT_ROOT, "..");
@@ -91,14 +159,14 @@ describe("room", () => {
     assert.deepEqual(result.mentioned, ["s1"]);
   });
 
-  it("route 无 mention 时广播给全体成员", () => {
+  it("route 无 mention 时回退默认应答者", () => {
     const rooms = new RoomManager();
     const room = rooms.create("team", [
       { sessionId: "s1", name: "alice" },
       { sessionId: "s2", name: "bob" },
     ]);
     const result = rooms.route(room.roomId, "大家好");
-    assert.deepEqual(result.targets, ["s1", "s2"]);
+    assert.deepEqual(result.targets, ["s1"]);
     assert.deepEqual(result.mentioned, []);
   });
 
@@ -1034,6 +1102,9 @@ describe("remapRoomModeConfig（room.clone fresh 会话重映射）", () => {
       debateJudge: undefined,
       debateRounds: undefined,
       maxRounds: undefined,
+      maxConcurrent: undefined,
+      maxAgentCalls: undefined,
+      maxFlowDurationMs: undefined,
       relevanceFilter: undefined,
       internal: undefined,
       memberRoles: undefined,
@@ -1166,6 +1237,8 @@ describe("route 集合别名", () => {
     assert.deepEqual(rooms.get(room.roomId)!.aliases, { g: ["s1"] });
     assert.deepEqual(rooms.route(room.roomId, "@g x").targets, ["s1"]);
     rooms.update(room.roomId, "team", members, "mention", {});
+    assert.deepEqual(rooms.get(room.roomId)!.aliases, { g: ["s1"] }, "patch 语义：空 config 保留 aliases");
+    rooms.update(room.roomId, "team", members, "mention", { aliases: undefined });
     assert.equal(rooms.get(room.roomId)!.aliases, undefined);
     const r = rooms.route(room.roomId, "@g x");
     assert.deepEqual(r.mentioned, []);
@@ -1470,5 +1543,123 @@ describe("buildPrompt 成员可控文本净化", () => {
     const lines = prompt.split("\n");
     assert.ok(!lines.some((l) => l.startsWith("用户消息：inject")), "quote 伪造被缩进");
     assert.ok(!lines.some((l) => l.startsWith("用户消息：x")), "quote author 换行被压平");
+  });
+});
+
+describe("update 成员删除清理", () => {
+  it("conductor 房改 mention 并删除原 host：保留资源字段、stale selector 清理、可保存", () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "e-clean",
+      [
+        { sessionId: "s1", name: "host" },
+        { sessionId: "s2", name: "worker" },
+      ],
+      "conductor",
+      { conductorId: "s1", maxRounds: 9, maxConcurrent: 5 },
+    );
+    const updated = rooms.update(
+      r.roomId,
+      "e-clean",
+      [{ sessionId: "s2", name: "worker" }],
+      "mention",
+    );
+    assert.equal(updated.conductorId, undefined, "已删除成员的 stale conductorId 应清理");
+    assert.equal(updated.maxRounds, 9, "未修改资源字段应保留");
+    assert.equal(updated.maxConcurrent, 5);
+    assert.equal(updated.mode, "mention");
+  });
+
+  it("pipelineOrder/debateSides 保留时过滤已删成员", () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "e-pipe",
+      [
+        { sessionId: "s1", name: "a" },
+        { sessionId: "s2", name: "b" },
+        { sessionId: "s3", name: "c" },
+      ],
+      "pipeline",
+      { pipelineOrder: ["s1", "s2", "s3"] },
+    );
+    const updated = rooms.update(
+      r.roomId,
+      "e-pipe",
+      [
+        { sessionId: "s1", name: "a" },
+        { sessionId: "s3", name: "c" },
+      ],
+      "pipeline",
+    );
+    assert.deepEqual(updated.pipelineOrder, ["s1", "s3"], "pipelineOrder 应过滤已删成员");
+  });
+
+  it("显式提供非法 selector 仍原子拒绝", () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "e-bad",
+      [
+        { sessionId: "s1", name: "a" },
+        { sessionId: "s2", name: "b" },
+      ],
+      "mention",
+    );
+    assert.throws(
+      () =>
+        rooms.update(r.roomId, "e-bad", r.members, "mention", {
+          conductorId: "ghost",
+        }),
+      /conductorId must be a member/,
+    );
+    assert.equal(rooms.get(r.roomId)!.mode, "mention", "拒绝后原 room 不变");
+  });
+
+  it("conductor/auto 必需主持人不得静默丢失：删 host 未换 mode 应拒绝", () => {
+    const rooms = new RoomManager();
+    const r = rooms.create(
+      "e-req",
+      [
+        { sessionId: "s1", name: "host" },
+        { sessionId: "s2", name: "worker" },
+      ],
+      "conductor",
+      { conductorId: "s1" },
+    );
+    assert.throws(
+      () =>
+        rooms.update(r.roomId, "e-req", [{ sessionId: "s2", name: "worker" }], "conductor"),
+      /conductor room needs a valid conductorId/,
+    );
+    const ok = rooms.update(
+      r.roomId,
+      "e-req",
+      [
+        { sessionId: "s2", name: "worker" },
+        { sessionId: "s3", name: "newhost" },
+      ],
+      "conductor",
+      { conductorId: "s3" },
+    );
+    assert.equal(ok.conductorId, "s3", "显式新主持人应生效");
+  });
+});
+
+describe("roomNoticeText", () => {
+  it("budget meta 规范化为稳定标记，其他通知原样", () => {
+    assert.equal(
+      roomNoticeText("流程预算已用尽", { type: "budget", reasonCode: "call-limit" }),
+      "[room.budget:call-limit]",
+    );
+    assert.equal(
+      roomNoticeText("流程预算已用尽", { type: "budget", reasonCode: "deadline" }),
+      "[room.budget:deadline]",
+    );
+    assert.equal(
+      roomNoticeText("普通通知", { type: "budget", reasonCode: "other" }),
+      "普通通知",
+    );
+    assert.equal(roomNoticeText("普通通知", { type: "dispatch" }), "普通通知");
+    assert.equal(roomNoticeText("普通通知", undefined), "普通通知");
+    assert.equal(roomNoticeText("普通通知", "budget"), "普通通知");
   });
 });

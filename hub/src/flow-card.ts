@@ -10,6 +10,25 @@ const GENERIC_MAX = 300;
 const clip = (v: unknown, max = GENERIC_MAX): string | undefined =>
   typeof v === "string" && v ? v.slice(0, max) : undefined;
 
+const cardBudget = (v: unknown): Record<string, unknown> | undefined => {
+  if (typeof v !== "object" || v === null) return undefined;
+  const b = v as Record<string, unknown>;
+  const num = (k: string) => typeof b[k] === "number" && Number.isFinite(b[k]);
+  const nil = (k: string) => b[k] === null || num(k);
+  if (!num("usedCalls") || (b.usedCalls as number) < 0) return undefined;
+  if (!nil("maxCalls") || !nil("maxConcurrent") || !nil("deadlineAt")) return undefined;
+  if (typeof b.stopped !== "boolean") return undefined;
+  return {
+    ...(typeof b.id === "string" && b.id ? { id: b.id } : {}),
+    usedCalls: b.usedCalls,
+    maxCalls: b.maxCalls,
+    maxConcurrent: b.maxConcurrent,
+    deadlineAt: b.deadlineAt,
+    stopped: b.stopped,
+    ...(typeof b.reason === "string" && b.reason ? { reason: b.reason } : {}),
+  };
+};
+
 const strList = (v: unknown, max = GENERIC_MAX): string[] | undefined =>
   Array.isArray(v)
     ? v.map((s) => String(s).slice(0, max)).filter(Boolean)
@@ -136,6 +155,7 @@ export function toCardSnapshot(
     ...(strList(flow.supplements)?.length
       ? { supplements: strList(flow.supplements) }
       : {}),
+    ...(cardBudget(flow.budget) ? { budget: cardBudget(flow.budget) } : {}),
     ...(clip(flow.clarificationId, 64)
       ? {
           clarificationId: clip(flow.clarificationId, 64),

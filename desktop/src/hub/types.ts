@@ -60,6 +60,21 @@ export interface RoomModeConfig {
   debateSides?: [string, string] | null;
   debateJudge?: string | null;
   debateRounds?: number | null;
+  maxRounds?: number | null;
+  relevanceFilter?: boolean | null;
+  maxConcurrent?: number | null;
+  maxAgentCalls?: number | null;
+  maxFlowDurationMs?: number | null;
+}
+
+export interface RoomBudgetView {
+  id?: string;
+  usedCalls: number;
+  maxCalls: number | null;
+  maxConcurrent: number | null;
+  deadlineAt: number | null;
+  stopped: boolean;
+  reason?: string;
 }
 
 export interface FlowArtifact {
@@ -207,13 +222,14 @@ export interface FlowInfo {
   /** 编排实例 id（Hub 生成，跨重启稳定）；旧 Hub 快照可能缺失 */
   flowId?: string;
   phase: string;
+  budget?: RoomBudgetView;
   goal?: string;
   mode?: string;
   startedAt?: number;
   finishedAt?: number;
   acceptanceCriteria?: string[];
   iteration?: number;
-  maxIterations?: number;
+  maxIterations?: number | null;
   progress: { done: number; running: number; pending: number; failed: number; total: number };
   tasks: FlowTask[];
   /** 流程进行中用户补充并已并入的信息 */
@@ -228,6 +244,7 @@ export interface FlowCardSnapshot {
   missionId?: string;
   failureMessage?: string;
   phase: string;
+  budget?: RoomBudgetView;
   goal?: string;
   mode?: string;
   startedAt?: number;
@@ -265,6 +282,11 @@ export interface RoomInfo {
   debateJudge?: string | null;
   /** 辩论：轮数 */
   debateRounds?: number | null;
+  maxRounds?: number | null;
+  relevanceFilter?: boolean | null;
+  maxConcurrent?: number | null;
+  maxAgentCalls?: number | null;
+  maxFlowDurationMs?: number | null;
   /** IFC 敏感度标签：shared/private（默认 shared） */
   sensitivity?: string;
   /** 内部房（如工单执行房）：列表默认隐藏，跳转不受限 */
@@ -396,7 +418,7 @@ export type ChatItem =
   sendError?: "context" | "expired";
   /** 工单派发产生的条目：气泡上展示归因标记 */
   missionId?: string }
-  | { kind: "system"; at?: number; historyId?: number; text: string; author: string }
+  | { kind: "system"; at?: number; historyId?: number; text: string; author: string; meta?: { type?: string; reasonCode?: string } }
   | { kind: "assistant"; at?: number; historyId?: number; id: number; text: string; author: string; usage?: TokenUsage; quoteAuthor?: string; quoteText?: string; replyText?: string; /** 流式进行中：渲染层用轻量纯文本，turn 结束后完整 markdown 重排 */ streaming?: boolean; /** live 条目出生时见过的最大持久化 id：去重时只接受出生后落库的行，免疫时钟偏斜 */ birthHistoryId?: number }
   | { kind: "thought"; at?: number; historyId?: number; id: number; text: string; author: string; quoteAuthor?: string; quoteText?: string; streaming?: boolean; birthHistoryId?: number }
   | { kind: "tool"; at?: number; historyId?: number; toolCallId: string; title: string; status: string; author: string }

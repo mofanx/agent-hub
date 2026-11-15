@@ -487,6 +487,24 @@ interface Strings {
     val modeDescPipeline: String
     val modeDescDebate: String
     val modeDescAuto: String
+    val advancedSectionLabel: String
+    val advancedModePlaceholder: String
+    val resourceSectionLabel: String
+    val resourceDefaultsHint: String
+    val maxConcurrentLabel: String
+    val maxAgentCallsLabel: String
+    val maxFlowDurationLabel: String
+    val maxRoundsLabel: String
+    val relevanceFilterLabel: String
+    val relevanceFilterGlobal: String
+    val relevanceFilterOn: String
+    val relevanceFilterOff: String
+    val budgetUsageFmt: String
+    val unlimitedLabel: String
+    val budgetStoppedCallLimit: String
+    val budgetStoppedDeadline: String
+    val budgetNoticeCallLimit: String
+    val budgetNoticeDeadline: String
     val projectFiles: String
     val refresh: String
     val menu: String
@@ -1184,13 +1202,31 @@ object ZhStrings : Strings {
     override val defaultRole = "默认（无角色卡）"
     override val debateRoundsFmt = "%s 轮数："
     override val totalCountFmt = "共 %d 条"
-    override val modeDescMention = "成员自由发言，@某个成员时该成员单独回答。适合闲聊、快速提问。"
+    override val modeDescMention = "默认仅应答者回复，@成员精确点名，@all 明确广播。"
     override val modeDescConductor = "指挥家自动拆解任务，派发给不同成员并行执行，最后汇总结果。适合复杂任务。"
-    override val modeDescRoundRobin = "每个问题按顺序由一个成员回答，可设置起始发言人。适合多角色依次表态。"
-    override val modeDescParallel = "所有成员同时回答同一个问题，最后由汇总者综合出一致结论。适合头脑风暴。"
+    override val modeDescRoundRobin = "每条新问题由下一名成员回答，并非同一问题全员依次发言。"
+    override val modeDescParallel = "选定的可用成员只读分析后汇总；忙碌成员明确跳过，不在后台补跑。"
     override val modeDescPipeline = "成员按指定顺序串行处理，后一个成员基于前一个的结果继续。适合多步骤流程。"
     override val modeDescDebate = "正方与反方交替辩论若干轮，最后由裁判给出公正总结。适合观点碰撞。"
-    override val modeDescAuto = "主持人根据任务内容自动选择最合适的协作模式。不确定选哪个时可用。"
+    override val modeDescAuto = "主持人根据任务自动选择协作方式，优先调用最少必要成员。"
+    override val advancedSectionLabel = "高级模式"
+    override val advancedModePlaceholder = "选择高级模式…"
+    override val resourceSectionLabel = "资源限制"
+    override val resourceDefaultsHint = "默认不设上限。仅填写时限制本房间，不影响其他房间；调用次数不包含后端内部工具和子代理。"
+    override val maxConcurrentLabel = "最大并发数"
+    override val maxAgentCallsLabel = "每流程最大调用数"
+    override val maxFlowDurationLabel = "最长流程时长（分钟）"
+    override val maxRoundsLabel = "最大派发轮次"
+    override val relevanceFilterLabel = "相关性过滤"
+    override val relevanceFilterGlobal = "跟随全局"
+    override val relevanceFilterOn = "开"
+    override val relevanceFilterOff = "关"
+    override val budgetUsageFmt = "成员调用 %s/%s · 并发上限 %s"
+    override val unlimitedLabel = "不限"
+    override val budgetStoppedCallLimit = "已达调用上限，流程已暂停"
+    override val budgetStoppedDeadline = "已达时长上限，流程已暂停"
+    override val budgetNoticeCallLimit = "本轮已达调用上限，已停止追加工作。请检查现有结果后继续或重新发起任务。"
+    override val budgetNoticeDeadline = "本轮已达时长上限，已停止追加工作。请检查现有结果后继续或重新发起任务。"
     override val projectFiles = "项目文件"
     override val refresh = "刷新"
     override val menu = "菜单"
@@ -1888,13 +1924,31 @@ object EnStrings : Strings {
     override val defaultRole = "Default (no role card)"
     override val debateRoundsFmt = "%s rounds:"
     override val totalCountFmt = "%d total"
-    override val modeDescMention = "Members chat freely; @a member to get a direct answer. Good for quick questions."
+    override val modeDescMention = "One default responder; @a member to target them, or @all to broadcast."
     override val modeDescConductor = "A conductor breaks the task down, dispatches subtasks to members in parallel, then summarizes. Good for complex tasks."
-    override val modeDescRoundRobin = "Each question is answered by one member in turn; the starting speaker can be set. Good for sequential opinions."
-    override val modeDescParallel = "All members answer the same question at once; a summarizer merges conclusions. Good for brainstorming."
+    override val modeDescRoundRobin = "Each new question goes to the next member, not to every member in turn."
+    override val modeDescParallel = "Selected available members analyze read-only, then summarize. Busy members are explicitly skipped, not run later."
     override val modeDescPipeline = "Members process in a fixed order, each building on the previous result. Good for multi-step flows."
     override val modeDescDebate = "Pro and con sides debate for several rounds, then a judge summarizes. Good for weighing options."
-    override val modeDescAuto = "The host picks the best mode automatically. Use when unsure."
+    override val modeDescAuto = "The moderator picks the collaboration mode per task, preferring the fewest members needed."
+    override val advancedSectionLabel = "Advanced"
+    override val advancedModePlaceholder = "Choose an advanced mode…"
+    override val resourceSectionLabel = "Resource limits"
+    override val resourceDefaultsHint = "No limits by default. Limits apply only to this room and do not affect others; call counts exclude backend-internal tools and subagents."
+    override val maxConcurrentLabel = "Max concurrency"
+    override val maxAgentCallsLabel = "Max calls per flow"
+    override val maxFlowDurationLabel = "Max flow duration (minutes)"
+    override val maxRoundsLabel = "Max dispatch rounds"
+    override val relevanceFilterLabel = "Relevance filter"
+    override val relevanceFilterGlobal = "Follow global"
+    override val relevanceFilterOn = "On"
+    override val relevanceFilterOff = "Off"
+    override val budgetUsageFmt = "Agent calls %s/%s · concurrency limit %s"
+    override val unlimitedLabel = "Unlimited"
+    override val budgetStoppedCallLimit = "Call limit reached; flow paused"
+    override val budgetStoppedDeadline = "Time limit reached; flow paused"
+    override val budgetNoticeCallLimit = "The call limit was reached; no more work will be dispatched. Review existing results before continuing or starting a new task."
+    override val budgetNoticeDeadline = "The time limit was reached; no more work will be dispatched. Review existing results before continuing or starting a new task."
     override val projectFiles = "Project files"
     override val refresh = "Refresh"
     override val menu = "Menu"

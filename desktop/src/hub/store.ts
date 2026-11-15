@@ -1315,7 +1315,15 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const room = get().currentRoom;
         if (room && room.roomId === roomId) {
           const msg = String(params.message ?? "");
-          const next: ChatItem = { kind: "system", at: Date.now(), text: msg, author: "" };
+          const metaRaw = params.meta as { type?: unknown; reasonCode?: unknown } | undefined;
+          const meta =
+            metaRaw && metaRaw.type === "budget"
+              ? {
+                  type: "budget",
+                  ...(typeof metaRaw.reasonCode === "string" ? { reasonCode: metaRaw.reasonCode } : {}),
+                }
+              : undefined;
+          const next: ChatItem = { kind: "system", at: Date.now(), text: msg, author: "", ...(meta ? { meta } : {}) };
           set({ chatItems: [...get().chatItems, next] });
         }
         break;
@@ -2186,6 +2194,11 @@ export const useHubStore = create<State & Actions>((set, get) => {
       debateSides: parseDebateSides(o.debateSides),
       debateJudge: stringOrNull(o.debateJudge),
       debateRounds: numberOrNull(o.debateRounds),
+      maxRounds: numberOrNull(o.maxRounds),
+      relevanceFilter: typeof o.relevanceFilter === "boolean" ? o.relevanceFilter : null,
+      maxConcurrent: numberOrNull(o.maxConcurrent),
+      maxAgentCalls: numberOrNull(o.maxAgentCalls),
+      maxFlowDurationMs: numberOrNull(o.maxFlowDurationMs),
     };
   };
 
@@ -3019,13 +3032,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
     createRoom: async (name, memberIds, mode, config, memberRoles) => {
       try {
         const params: Record<string, unknown> = { name, sessionIds: memberIds, mode };
-        if (config?.conductorId) params.conductorId = config.conductorId;
-        if (config?.parallelSummarizerId) params.parallelSummarizerId = config.parallelSummarizerId;
-        if (config?.pipelineOrder?.length) params.pipelineOrder = config.pipelineOrder;
-        if (config?.debateSides?.length === 2) params.debateSides = config.debateSides;
-        if (config?.debateJudge) params.debateJudge = config.debateJudge;
-        if (config?.debateRounds != null) params.debateRounds = config.debateRounds;
-        if (memberRoles && Object.keys(memberRoles).length > 0) params.memberRoles = memberRoles;
+        for (const k of [
+          "conductorId",
+          "parallelSummarizerId",
+          "pipelineOrder",
+          "debateSides",
+          "debateJudge",
+          "debateRounds",
+          "maxRounds",
+          "relevanceFilter",
+          "maxConcurrent",
+          "maxAgentCalls",
+          "maxFlowDurationMs",
+        ] as const) {
+          if (config && Object.prototype.hasOwnProperty.call(config, k)) params[k] = config[k];
+        }
+        if (memberRoles !== undefined) params.memberRoles = memberRoles;
         const result = (await getOrCall("room.create", params)) as Record<string, unknown>;
         const room = parseRoom((result.room as Record<string, unknown>) ?? {});
         set({ rooms: [...get().rooms, room] });
@@ -3043,13 +3065,22 @@ export const useHubStore = create<State & Actions>((set, get) => {
           sessionIds: memberIds,
           mode,
         };
-        if (config?.conductorId) params.conductorId = config.conductorId;
-        if (config?.parallelSummarizerId) params.parallelSummarizerId = config.parallelSummarizerId;
-        if (config?.pipelineOrder?.length) params.pipelineOrder = config.pipelineOrder;
-        if (config?.debateSides?.length === 2) params.debateSides = config.debateSides;
-        if (config?.debateJudge) params.debateJudge = config.debateJudge;
-        if (config?.debateRounds != null) params.debateRounds = config.debateRounds;
-        if (memberRoles && Object.keys(memberRoles).length > 0) params.memberRoles = memberRoles;
+        for (const k of [
+          "conductorId",
+          "parallelSummarizerId",
+          "pipelineOrder",
+          "debateSides",
+          "debateJudge",
+          "debateRounds",
+          "maxRounds",
+          "relevanceFilter",
+          "maxConcurrent",
+          "maxAgentCalls",
+          "maxFlowDurationMs",
+        ] as const) {
+          if (config && Object.prototype.hasOwnProperty.call(config, k)) params[k] = config[k];
+        }
+        if (memberRoles !== undefined) params.memberRoles = memberRoles;
         const result = await getOrCall<Record<string, unknown>>("room.update", params);
         const updated = parseRoom((result.room as Record<string, unknown>) ?? {});
         if (updated.roomId) {

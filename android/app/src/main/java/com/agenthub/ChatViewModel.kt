@@ -370,6 +370,11 @@ data class RoomInfo(
     val debateSides: Pair<String, String>? = null,
     val debateJudge: String? = null,
     val debateRounds: Int? = null,
+    val maxRounds: Long? = null,
+    val relevanceFilter: Boolean? = null,
+    val maxConcurrent: Long? = null,
+    val maxAgentCalls: Long? = null,
+    val maxFlowDurationMs: Long? = null,
     val sensitivity: String = "shared",
     /** 内部房（如工单绑定房）：room.list 下发但默认不出现在群聊列表/搜索 */
     val internal: Boolean = false,
@@ -565,6 +570,15 @@ data class FlowProgress(
     val total: Int = 0,
 )
 
+data class FlowBudget(
+    val usedCalls: Long = 0,
+    val maxCalls: Long? = null,
+    val maxConcurrent: Long? = null,
+    val deadlineAt: Long? = null,
+    val stopped: Boolean = false,
+    val reason: String? = null,
+)
+
 data class FlowInfo(
     val roomId: String,
     val phase: String,
@@ -583,6 +597,7 @@ data class FlowInfo(
     val clarificationQuestions: List<String> = emptyList(),
     val missionId: String? = null,
     val failureMessage: String? = null,
+    val budget: FlowBudget? = null,
 )
 
 
@@ -3311,6 +3326,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private val ROOM_CONFIG_KEYS = setOf(
+        "conductorId", "parallelSummarizerId", "pipelineOrder", "debateSides",
+        "debateJudge", "debateRounds", "maxRounds", "relevanceFilter",
+        "maxConcurrent", "maxAgentCalls", "maxFlowDurationMs",
+    )
+
     data class RoomModeConfig(
         val conductorId: String? = null,
         val parallelSummarizerId: String? = null,
@@ -3319,6 +3340,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val debateJudge: String? = null,
         val debateRounds: Int? = null,
         val memberRoles: Map<String, String>? = null,
+        val maxRounds: Long? = null,
+        val relevanceFilter: Boolean? = null,
+        val maxConcurrent: Long? = null,
+        val maxAgentCalls: Long? = null,
+        val maxFlowDurationMs: Long? = null,
+        val clearKeys: Set<String> = emptySet(),
     )
 
     fun createRoom(name: String, memberIds: List<String>, mode: String, config: RoomModeConfig) {
@@ -3334,9 +3361,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     config.debateSides?.let { put("debateSides", buildJsonArray { add(it.first); add(it.second) }) }
                     config.debateJudge?.let { put("debateJudge", it) }
                     config.debateRounds?.let { put("debateRounds", it) }
-                    if (!config.memberRoles.isNullOrEmpty()) {
+                    config.maxRounds?.let { put("maxRounds", it) }
+                    config.relevanceFilter?.let { put("relevanceFilter", it) }
+                    config.maxConcurrent?.let { put("maxConcurrent", it) }
+                    config.maxAgentCalls?.let { put("maxAgentCalls", it) }
+                    config.maxFlowDurationMs?.let { put("maxFlowDurationMs", it) }
+                    for (k in config.clearKeys) {
+                        if (k in ROOM_CONFIG_KEYS) put(k, JsonNull)
+                    }
+                    config.memberRoles?.let { roles ->
                         put("memberRoles", buildJsonObject {
-                            config.memberRoles.forEach { (sid, persona) ->
+                            roles.forEach { (sid, persona) ->
                                 if (persona.isNotBlank()) put(sid, personaJsonValue(persona))
                             }
                         })
@@ -3390,9 +3425,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     config.debateSides?.let { put("debateSides", buildJsonArray { add(it.first); add(it.second) }) }
                     config.debateJudge?.let { put("debateJudge", it) }
                     config.debateRounds?.let { put("debateRounds", it) }
-                    if (!config.memberRoles.isNullOrEmpty()) {
+                    config.maxRounds?.let { put("maxRounds", it) }
+                    config.relevanceFilter?.let { put("relevanceFilter", it) }
+                    config.maxConcurrent?.let { put("maxConcurrent", it) }
+                    config.maxAgentCalls?.let { put("maxAgentCalls", it) }
+                    config.maxFlowDurationMs?.let { put("maxFlowDurationMs", it) }
+                    for (k in config.clearKeys) {
+                        if (k in ROOM_CONFIG_KEYS) put(k, JsonNull)
+                    }
+                    config.memberRoles?.let { roles ->
                         put("memberRoles", buildJsonObject {
-                            config.memberRoles.forEach { (sid, persona) ->
+                            roles.forEach { (sid, persona) ->
                                 if (persona.isNotBlank()) put(sid, personaJsonValue(persona))
                             }
                         })
@@ -3510,6 +3553,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             debateSides = debateSides,
             debateJudge = o["debateJudge"]?.jsonPrimitive?.content,
             debateRounds = o["debateRounds"]?.jsonPrimitive?.intOrNull,
+            maxRounds = o["maxRounds"]?.jsonPrimitive?.longOrNull,
+            relevanceFilter = o["relevanceFilter"]?.jsonPrimitive?.booleanOrNull,
+            maxConcurrent = o["maxConcurrent"]?.jsonPrimitive?.longOrNull,
+            maxAgentCalls = o["maxAgentCalls"]?.jsonPrimitive?.longOrNull,
+            maxFlowDurationMs = o["maxFlowDurationMs"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
             sensitivity = o["sensitivity"]?.jsonPrimitive?.contentOrNull ?: "shared",
             internal = o["internal"]?.jsonPrimitive?.booleanOrNull ?: false,
         )
@@ -4191,6 +4239,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 ?.map { it.jsonPrimitive.content } ?: emptyList(),
             missionId = obj["missionId"]?.jsonPrimitive?.contentOrNull,
             failureMessage = obj["failureMessage"]?.jsonPrimitive?.contentOrNull,
+            budget = (obj["budget"] as? JsonObject)?.let { b ->
+                FlowBudget(
+                    usedCalls = b["usedCalls"]?.jsonPrimitive?.longOrNull ?: 0,
+                    maxCalls = b["maxCalls"]?.jsonPrimitive?.longOrNull,
+                    maxConcurrent = b["maxConcurrent"]?.jsonPrimitive?.longOrNull,
+                    deadlineAt = b["deadlineAt"]?.jsonPrimitive?.longOrNull,
+                    stopped = b["stopped"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    reason = b["reason"]?.jsonPrimitive?.contentOrNull,
+                )
+            },
         )
     }
 
@@ -6337,7 +6395,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "room.notice" -> {
                 val p = obj["params"]!!.jsonObject
                 if (p["roomId"]!!.jsonPrimitive.content == currentRoom?.roomId) {
-                    chatItems.add(ChatItem.System(++itemSeq, p["message"]!!.jsonPrimitive.content))
+                    val meta = p["meta"] as? JsonObject
+                    val reasonCode = meta?.get("reasonCode")?.jsonPrimitive?.contentOrNull
+                    val text = if (meta?.get("type")?.jsonPrimitive?.contentOrNull == "budget" &&
+                        (reasonCode == "call-limit" || reasonCode == "deadline")) {
+                        "[room.budget:$reasonCode]"
+                    } else {
+                        p["message"]!!.jsonPrimitive.content
+                    }
+                    chatItems.add(ChatItem.System(++itemSeq, text))
                 }
             }
             "room.modeSelected" -> {

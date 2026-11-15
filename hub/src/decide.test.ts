@@ -112,7 +112,7 @@ describe("resolveDecideConfig", () => {
     assert.equal(d.explicitMention({ roomId: "r", text: "大家分头评估一下这个方案", members: m4 })?.mode, "parallel");
     // 『交叉复核/互相复核』显式扇出（词在句中也命中；词表含裸『复核』）
     assert.equal(d.explicitMention({ roomId: "r", text: "建议交叉复核一下这批改动", members: m4 })?.mode, "parallel");
-    assert.equal(d.explicitMention({ roomId: "r", text: "帮我复核下这个函数", members: m4 })?.mode, "parallel");
+    assert.equal(d.explicitMention({ roomId: "r", text: "帮我复核下这个函数", members: m4 }), undefined);
   });
 });
 
@@ -168,10 +168,13 @@ describe("explicit 全模式意图表", () => {
     });
     assert.notEqual(v?.mode, "pipeline");
   });
-  it("交叉复核/评审 → parallel", () => {
-    for (const text of ["帮我完成复核", "交叉复核一下这批改动", "评审这个方案"]) {
+  it("交叉复核/群体评审 → parallel；裸复核/评审不再扇出", () => {
+    for (const text of ["交叉复核一下这批改动", "大家评审一下这个方案"]) {
       const v = d.explicitMention({ roomId: "r", text, members });
       assert.equal(v?.mode, "parallel", `${text} via=${v?.reason}`);
+    }
+    for (const text of ["帮我完成复核", "评审这个方案", "请审议一下"]) {
+      assert.equal(d.explicitMention({ roomId: "r", text, members }), undefined, text);
     }
   });
   it("冲突时 conductor 优先于 parallel（编排词+讨论词）", () => {
@@ -195,5 +198,34 @@ describe("explicit 全模式意图表", () => {
       const v = d.explicitMention({ roomId: "r", text, members });
       assert.equal(v?.mode, want, `${text} via=${v?.reason}`);
     }
+  });
+});
+
+describe("保守不直派与泛化复核词", () => {
+  const d = new ModeDecider({});
+  const members = [
+    { sessionId: "s1", name: "coder" },
+    { sessionId: "s2", name: "tester" },
+    { sessionId: "s3", name: "reviewer" },
+  ];
+  it("否定/解释类输入不直派，交回主持人", () => {
+    for (const text of [
+      "不要拆分任务，只由主持人回答",
+      "解释一下 parallel 模式，不要执行",
+      "不要辩论，直接给结论",
+    ]) {
+      assert.equal(d.explicitMention({ roomId: "r", text, members }), undefined, text);
+    }
+  });
+  it("泛化审查/复核词不再单独触发全员 parallel", () => {
+    assert.equal(d.explicitMention({ roomId: "r", text: "请审查这段代码", members }), undefined);
+    assert.equal(d.explicitMention({ roomId: "r", text: "帮我复核下这个函数", members }), undefined);
+  });
+  it("明确讨论/编排意图不退化；@成员优先于不直派守卫", () => {
+    assert.equal(d.explicitMention({ roomId: "r", text: "大家讨论方案", members })?.mode, "parallel");
+    assert.equal(d.explicitMention({ roomId: "r", text: "分工实现这个功能", members })?.mode, "conductor");
+    assert.equal(d.explicitMention({ roomId: "r", text: "用流水线模式执行", members })?.mode, "pipeline");
+    assert.equal(d.explicitMention({ roomId: "r", text: "辩论一下这个方案", members })?.mode, "debate");
+    assert.equal(d.explicitMention({ roomId: "r", text: "@coder 不要执行，先看看", members })?.mode, "mention");
   });
 });

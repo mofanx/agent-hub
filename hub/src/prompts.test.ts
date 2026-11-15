@@ -101,7 +101,8 @@ describe("prompts 模板集中化", () => {
     assert.match(out, /指挥家派发给你的子任务（id: t1）：实现排序/);
     assert.match(out, /补充要求X/);
     assert.match(out, /"artifacts":\[\{"type":"file"/);
-    assert.match(out, /verifyCheckId/);
+    assert.match(out, /不会默认重复运行验证命令/);
+    assert.match(out, /隔离复跑/);
     // worker 侧不携带未结话题段
     assert.ok(!out.includes("未结话题"));
   });
@@ -137,6 +138,18 @@ describe("prompts 模板集中化", () => {
     });
     assert.match(last, /（未获得回复）/);
     assert.match(last, /请基于现有信息完成任务/);
+    const unlimited = helpResumePrompt({
+      taskId: "t1",
+      task: "起服务",
+      fromLabel: "用户",
+      question: "端口？",
+      answer: "用 8080",
+      remaining: null,
+    });
+    assert.equal(unlimited.includes("剩余"), false);
+    assert.match(unlimited, /复用当前后端已有的工具、子代理和已收到的答复/);
+    assert.match(unlimited, /具体阻塞/);
+    assert.match(unlimited, /artifact 报告 JSON/);
   });
 
   it("peerReviewTaskDescription 与 describeAutomaticCheck", () => {
