@@ -3640,8 +3640,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val items = scopeItems(key).toMutableList()
         val flowId = f.flowId.ifEmpty { "__live" }
         fun insert(item: ChatItem.Flow) {
+            // 时序屏障只认 server 域落库条目（historyIdOf!=null）与在途尾项——
+            // 本地占位（未回显用户气泡/Permission/Elicitation）at 是 client 时钟，
+            // 作屏障会把卡插到刚发送的用户消息之前
             val index = items.indexOfFirst {
-                (it.at > 0 && it.at > item.at) || (historyIdOf(it) == null &&
+                (it.at > 0 && it.at > item.at && historyIdOf(it) != null) || (historyIdOf(it) == null &&
                     (it is ChatItem.Assistant || it is ChatItem.Thought || it is ChatItem.Tool || it is ChatItem.Plan))
             }
             items.add(index.takeIf { it >= 0 } ?: items.size, item)
