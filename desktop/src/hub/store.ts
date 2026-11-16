@@ -378,6 +378,10 @@ let missionListSeq = 0;
 let roomOpenSeq = 0;
 let connectionEpoch = 0;
 const scopeWatermarks = new Map<string, number>();
+const scopePageCursors = new Map<string, { at: number; id: number }>();
+let historyLoadSeq = 0;
+let anchorHistoryLoadSeq = 0;
+let historyRecovery: { client: HubClient; epoch: number; promise: Promise<void> } | null = null;
 const scopeDrafts = new Map<string, Map<number, number>>();
 const scopeRevisions = new Map<string, number>();
 const advanceWatermark = (scope: string, id: string, histId: number) => {
@@ -547,6 +551,38 @@ export const useHubStore = create<State & Actions>((set, get) => {
   const MAX_HISTORY_CACHE = 20;
 
   const historyCacheKey = (scope: "session" | "room", id: string) => `${scope}:${id}`;
+
+  const pageCursorOf = (rows: Record<string, unknown>[]): { at: number; id: number } | null => {
+    let best: { at: number; id: number } | null = null;
+    for (const row of rows) {
+      if (typeof row.at !== "number" || typeof row.id !== "number") continue;
+      if (!best || row.at < best.at || (row.at === best.at && row.id < best.id)) {
+        best = { at: row.at, id: row.id };
+      }
+    }
+    return best;
+  };
+
+  const isActiveTimelineItem = (key: string, it: ChatItem): boolean => {
+    if (it.historyId != null && scopeDrafts.get(key)?.has(it.historyId)) return true;
+    if (it.kind === "user") {
+      if (it.historyId == null && it.deliveryTracked !== false) return true;
+      const s = it.sendStatus;
+      return s === "pending" || s === "sending" || s === "uncertain" || s === "failed";
+    }
+    if (it.kind === "assistant" || it.kind === "thought") return it.streaming === true;
+    if (it.kind === "tool") return !["completed", "failed", "cancelled", "done"].includes(it.status);
+    if (it.kind === "flow") {
+      return it.snapshot.phase !== "done" && it.snapshot.phase !== "cancelled";
+    }
+    if (it.kind === "decision") {
+      return it.meta.status === "pending";
+    }
+    if (it.kind === "process") {
+      return it.status === "running";
+    }
+    return false;
+  };
 
   const getHistoryCache = (scope: "session" | "room", id: string) => {
     return get().historyCache[historyCacheKey(scope, id)];
@@ -721,7 +757,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
-  const sameAuthor = (h: ChatItem, it: ChatItem): boolean =>
+  const sameAuthor = (h: Pick<ChatItem, "author">, it: Pick<ChatItem, "author">): boolean =>
     h.author === it.author ||
     (h.author ?? "").startsWith(`${it.author} (`) ||
     (it.author ?? "").startsWith(`${h.author} (`);
@@ -801,56 +837,35 @@ export const useHubStore = create<State & Actions>((set, get) => {
     seq: number,
   ): Promise<void> => {
     const epoch = connectionEpoch;
-    const stale = () => seq !== roomOpenSeq || get().client !== client || epoch !== connectionEpoch || !client.isConnected;
+    const key = `${scope}:${id}`;
+    const loadSeq = ++historyLoadSeq;
+    const stale = () => seq !== roomOpenSeq || get().client !== client || epoch !== connectionEpoch ||
+      !client.isConnected || loadSeq !== historyLoadSeq;
     const method = scope === "room" ? "room.history" : "session.history";
-    const maxHistId = scopeWatermarks.get(`${scope}:${id}`) ?? 0;
-    const cardIds: number[] = [];
-    if (maxHistId <= 0) {
-      const res = await client.call(method, { [idKey]: id, ifcAuthorized: true }, 30000);
+    const beforeItems = new Set(scopeItems(scope, id));
+    const requestItems = new Set([...scopeItems(scope, id), ...(scopeKeyNow() === key ? get().chatItems : [])]);
+    if (scopeKeyNow() === key && !get().historySearchContext) set({ historyLoading: true });
+    try {
+      const res = await client.call(method, { [idKey]: id, limit: 50, ifcAuthorized: true }, 30000);
       if (stale()) throw new Error("recovery_stale");
       const rows = historyRows(res);
-      applyHistoryRows(scope, id, rows);
+      const preserved = scopeItems(scope, id).filter((it) =>
+        !beforeItems.has(it) || isActiveTimelineItem(key, it));
+      scopeWatermarks.set(key, 0);
       rememberHistoryRows(scope, id, rows, true);
+      applyHistoryRows(scope, id, rows, {
+        existing: preserved,
+        replace: true,
+        requestItems,
+      });
+      const cursor = pageCursorOf(rows);
+      if (cursor) scopePageCursors.set(key, cursor);
+      else scopePageCursors.delete(key);
+      if (scopeKeyNow() === key && !get().historySearchContext) set({ historyHasMore: res.hasMore === true });
       await refreshKnownHistory(scope, id, client, stale, { cardIds: cardIdsOf(rows) });
-      return;
+    } finally {
+      if (!stale() && scopeKeyNow() === key && !get().historySearchContext) set({ historyLoading: false });
     }
-    let afterId = maxHistId;
-    for (;;) {
-      const rev = scopeRevisions.get(`${scope}:${id}`) ?? 0;
-      const res = await client.call(method, { [idKey]: id, afterId, limit: 500, ifcAuthorized: true }, 30000);
-      if (stale()) throw new Error("recovery_stale");
-      if (res.truncated === true) {
-        const before = new Set(scopeItems(scope, id));
-        const fullRows: Record<string, unknown>[] = [];
-        let cursor = 0;
-        for (;;) {
-          const full = await client.call(method, { [idKey]: id, afterId: cursor, limit: 500, ifcAuthorized: true }, 30000);
-          if (stale()) throw new Error("recovery_stale");
-          if (full.truncated === true) throw new Error("history_sync_truncated");
-          const batch = historyRows(full);
-          const lastId = batch.reduce((m, row) => typeof row.id === "number" ? Math.max(m, row.id) : m, cursor);
-          fullRows.push(...batch);
-          if (full.hasMore !== true) break;
-          if (lastId <= cursor) throw new Error("history_cursor_stalled");
-          cursor = lastId;
-        }
-        const live = scopeItems(scope, id).filter((it) => !before.has(it));
-        applyHistoryRows(scope, id, fullRows, { existing: live, liveFirst: true });
-        scopeWatermarks.set(`${scope}:${id}`, 0);
-        rememberHistoryRows(scope, id, fullRows, true);
-        cardIds.push(...cardIdsOf(fullRows));
-        break;
-      }
-      const rows = historyRows(res);
-      const rawLastId = rows.reduce((m, row) => typeof row.id === "number" ? Math.max(m, row.id) : m, afterId);
-      cardIds.push(...cardIdsOf(rows));
-      applyHistoryRows(scope, id, rows, { cardsCurrent: rev === (scopeRevisions.get(`${scope}:${id}`) ?? 0) });
-      rememberHistoryRows(scope, id, rows, true);
-      if (res.hasMore !== true) break;
-      if (rawLastId <= afterId) throw new Error("history_cursor_stalled");
-      afterId = rawLastId;
-    }
-    await refreshKnownHistory(scope, id, client, stale, { cardIds });
   };
 
   const historyRows = (res: Record<string, unknown>): Record<string, unknown>[] => {
@@ -859,7 +874,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   const scopeItems = (scope: "room" | "session", id: string): ChatItem[] =>
-    scopeKeyNow() === `${scope}:${id}` ? get().chatItems : getHistoryCache(scope, id) ?? [];
+    scopeKeyNow() === `${scope}:${id}` && !get().historySearchContext
+      ? get().chatItems : getHistoryCache(scope, id) ?? [];
 
   const cardIdsOf = (rows: Record<string, unknown>[]) => rows
     .filter((row) => row.kind === "flow" || row.kind === "decision")
@@ -867,19 +883,38 @@ export const useHubStore = create<State & Actions>((set, get) => {
 
   const applyHistoryRows = (
     scope: "room" | "session", id: string, rows: Record<string, unknown>[],
-    options: { cardsCurrent?: boolean; cache?: boolean; existing?: ChatItem[]; liveFirst?: boolean } = {},
+    options: { requestItems?: ReadonlySet<ChatItem>; cache?: boolean; existing?: ChatItem[]; liveFirst?: boolean; replace?: boolean } = {},
   ) => {
+    rememberHistoryRows(scope, id, rows, false);
+    const key = `${scope}:${id}`;
+    const changedById = new Map<number, ChatItem>();
+    if (options.requestItems) {
+      const current = [...scopeItems(scope, id), ...(scopeKeyNow() === key ? get().chatItems : [])];
+      for (const it of current) {
+        if (it.historyId != null && !options.requestItems.has(it)) changedById.set(it.historyId, it);
+      }
+    }
     const items = rows.map(entryToChatItem).filter((it): it is ChatItem => it !== null)
-      .filter((it) => options.cardsCurrent !== false || (it.kind !== "flow" && it.kind !== "decision"));
+      .map((it) => {
+        const cur = it.historyId != null ? changedById.get(it.historyId) : undefined;
+        return cur && it.kind !== "assistant" && it.kind !== "user" ? cur : it;
+      });
     const cids = new Set(items.map((i) => (i.kind === "user" ? i.clientMessageId : undefined)).filter(Boolean));
     const restoredBubbles = outbox
       .filter((i) => i.scopeKey === `${scope}:${id}` && i.origin === get().deliveryOrigin && i.hubId === get().deliveryHubId && i.bubble && !cids.has(i.bubble.clientMessageId))
       .map((i) => ({ ...i.bubble!, sendStatus: i.status === "sent" ? "sent" : i.status, ...(i.attachmentNames?.length ? { attachmentNames: i.attachmentNames } : {}) }) as ChatItem);
-    const existing = options.existing ?? scopeItems(scope, id);
+    const existing = options.existing ?? (options.cache === false && scopeKeyNow() === `${scope}:${id}`
+      ? get().chatItems : scopeItems(scope, id));
     const fresh = [...items, ...restoredBubbles];
     const merged = options.liveFirst ? mergeHistoryItems(existing, fresh) : mergeHistoryItems(fresh, existing);
-    if (options.cache !== false) setHistoryCache(scope, id, merged);
-    if (scopeKeyNow() === `${scope}:${id}`) set({ chatItems: merged });
+    if (options.cache !== false) setHistoryCache(scope, id, merged, { replace: options.replace });
+    if (scopeKeyNow() === `${scope}:${id}`) {
+      if (!get().historySearchContext || options.cache === false) set({ chatItems: merged });
+      else {
+        const byId = new Map(merged.filter((it) => it.historyId != null).map((it) => [it.historyId, it]));
+        set({ chatItems: get().chatItems.map((it) => it.historyId != null ? byId.get(it.historyId) ?? it : it) });
+      }
+    }
     return merged;
   };
 
@@ -901,19 +936,30 @@ export const useHubStore = create<State & Actions>((set, get) => {
     options: { cache?: boolean; cardIds?: number[] } = {},
   ) => {
     const key = `${scope}:${id}`;
-    const visibleIds = new Set(scopeItems(scope, id).map((it) => it.historyId));
-    for (const historyId of [...(scopeDrafts.get(key)?.keys() ?? [])]) {
+    const items = options.cache === false && scopeKeyNow() === key ? get().chatItems : scopeItems(scope, id);
+    const visibleIds = new Set(items.map((it) => it.historyId));
+    const mutableIds = new Set<number>();
+    for (const historyId of scopeDrafts.get(key)?.keys() ?? []) {
       if (!visibleIds.has(historyId)) { scopeDrafts.get(key)?.delete(historyId); continue; }
-      const res = await client.call(`${scope}.history`, { [`${scope}Id`]: id, entryIds: [historyId] }, 30000);
+      mutableIds.add(historyId);
+    }
+    for (const item of items) {
+      if (item.kind === "process" && item.status === "running" && item.historyId != null) mutableIds.add(item.historyId);
+    }
+    const entries = [...mutableIds];
+    for (let offset = 0; offset < entries.length; offset += 200) {
+      const entryIds = entries.slice(offset, offset + 200);
+      const requestItems = new Set([...scopeItems(scope, id), ...(scopeKeyNow() === key ? get().chatItems : [])]);
+      const res = await client.call(`${scope}.history`, { [`${scope}Id`]: id, entryIds }, 30000);
       if (stale()) throw new Error("recovery_stale");
-      const row = historyRows(res).find((r) => r.id === historyId);
-      if (!row) throw new Error("history_draft_unavailable");
-      applyHistoryRows(scope, id, [row], { cache: options.cache });
-      rememberHistoryRows(scope, id, [row], false);
+      const rows = historyRows(res);
+      if (entryIds.some((entryId) => !rows.some((row) => row.id === entryId))) throw new Error("history_draft_unavailable");
+      applyHistoryRows(scope, id, rows, { cache: options.cache, requestItems });
     }
     if (scope !== "room" || get().deliveryProtocol !== 1) return;
     const ids = [...new Set([
-      ...scopeItems(scope, id).filter((it) => it.kind === "flow" || it.kind === "decision")
+      ...[...items, ...(scopeKeyNow() === key && get().historySearchContext ? get().chatItems : [])]
+        .filter((it) => it.kind === "flow" || it.kind === "decision")
         .map((it) => it.historyId).filter((n): n is number => typeof n === "number" && n > 0),
       ...(options.cardIds ?? []),
     ])];
@@ -921,11 +967,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
       let applied = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         const rev = scopeRevisions.get(key) ?? 0;
+        const requestItems = new Set([...scopeItems(scope, id), ...(scopeKeyNow() === key ? get().chatItems : [])]);
         const res = await client.call("room.sync", { roomId: id, knownCardIds: ids.slice(offset, offset + 200), ifcAuthorized: true }, 30000);
         if (stale()) throw new Error("recovery_stale");
         if (!Array.isArray(res.cards)) throw new Error("history_cards_unavailable");
         if (rev !== (scopeRevisions.get(key) ?? 0)) continue;
-        applyHistoryRows(scope, id, res.cards as Record<string, unknown>[], { cache: options.cache });
+        applyHistoryRows(scope, id, res.cards as Record<string, unknown>[], { cache: options.cache, requestItems });
         applied = true;
         break;
       }
@@ -1003,6 +1050,17 @@ export const useHubStore = create<State & Actions>((set, get) => {
     for (const it of [...a, ...b]) {
       if (it.historyId != null) {
         const existing = byId.get(it.historyId);
+        if (existing?.kind === "assistant" && it.kind === "assistant" && (existing.streaming || it.streaming)) {
+          if (existing.streaming !== it.streaming) {
+            if (!it.streaming) byId.set(it.historyId, it);
+            continue;
+          }
+          if (existing.text.startsWith(it.text)) continue;
+          if (it.text.startsWith(existing.text)) {
+            byId.set(it.historyId, it);
+            continue;
+          }
+        }
         if (!existing || (it.at ?? 0) > (existing.at ?? 0)) {
           byId.set(it.historyId, it);
         }
@@ -1030,8 +1088,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
    */
   const ensureFlowCard = (flow: FlowInfo | null) => {
     if (!flow) return;
+    const roomId = get().currentRoom?.roomId;
+    if (!roomId) return;
     const flowId = flow.flowId || "__live";
-    const items = get().chatItems;
+    const items = scopeItems("room", roomId);
     if (items.some((it) => it.kind === "flow" && it.flowId === flowId)) return;
     const snapshot = { ...flow, flowId } as FlowCardSnapshot;
     const liveIdx = flow.flowId
@@ -1046,23 +1106,28 @@ export const useHubStore = create<State & Actions>((set, get) => {
         snapshot,
         author: "",
       };
-      set({ chatItems: mergeHistoryItems(next, []) });
+      applyHistoryRows("room", roomId, [], { existing: next });
       return;
     }
-    set({
-      chatItems: mergeHistoryItems([
+    applyHistoryRows("room", roomId, [], {
+      existing: [
         ...items,
         { kind: "flow", at: flow.startedAt ?? (Date.now() + serverOffset()), flowId, snapshot, author: "" },
-      ], []),
+      ],
     });
   };
 
-  const setHistoryCache = (scope: "session" | "room", id: string, items: ChatItem[]) => {
+  const setHistoryCache = (scope: "session" | "room", id: string, items: ChatItem[], opts: { replace?: boolean } = {}) => {
     const key = historyCacheKey(scope, id);
     const { historyCache, historyCacheKeys } = get();
-    const cached = historyCache[key] ?? [];
-    const merged = mergeHistoryItems(cached, items);
-    const next: Record<string, ChatItem[]> = { ...historyCache, [key]: merged };
+    const cached = opts.replace ? [] : (historyCache[key] ?? []);
+    const merged = mergeHistoryItems(items, cached);
+    const active = new Set(merged.filter((it) => isActiveTimelineItem(key, it)));
+    const stable = merged.filter((it) => !active.has(it))
+      .sort(compareTimeline).slice(-50);
+    const kept = new Set(stable);
+    const compacted = merged.filter((it) => active.has(it) || kept.has(it));
+    const next: Record<string, ChatItem[]> = { ...historyCache, [key]: compacted };
     const nextKeys = [key, ...historyCacheKeys.filter((k) => k !== key)];
     while (nextKeys.length > MAX_HISTORY_CACHE) {
       const removed = nextKeys.pop();
@@ -1116,6 +1181,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     delete seenCache[key];
     if (scope === "room") flowCache.delete(id);
     panelsCache.delete(key);
+    scopePageCursors.delete(key);
+    scopePageCursors.delete(`anchor:${key}`);
     set({
       historyCache,
       historyCacheKeys: get().historyCacheKeys.filter((k) => k !== key),
@@ -1163,8 +1230,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!text) continue;
       const kind = u.sessionUpdate === "agent_thought_chunk" ? "thought" : "assistant";
       const last = items[items.length - 1];
-      if (last?.kind === kind && last.author === author && last.streaming) {
-        items[items.length - 1] = { ...last, text: last.text + text, streaming: true, at: Date.now() };
+      if (last?.kind === kind && sameAuthor(last, { author }) && last.streaming) {
+        items[items.length - 1] = {
+          ...last, text: last.text + text, streaming: true, at: last.historyId == null ? Date.now() : last.at,
+        };
       } else {
         items.push({ kind, at: Date.now(), id: ++seq, text, author, streaming: true, birthHistoryId: maxHistIdSeen });
       }
@@ -1188,7 +1257,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     const items = get().chatItems;
     let changed = false;
     const next = items.map((it) => {
-      if ((it.kind === "assistant" || it.kind === "thought") && it.streaming && it.author === author) {
+      if ((it.kind === "assistant" || it.kind === "thought") && it.streaming && sameAuthor(it, { author })) {
         changed = true;
         const { streaming: _drop, ...rest } = it;
         return (it.kind === "assistant" && output ? { ...rest, replyText: output } : rest) as ChatItem;
@@ -1398,14 +1467,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
         // Hub 广播 {roomId, entry:{id,at,kind,author,text}}，meta JSON 在 entry.text
         const item = entryToChatItem((params.entry ?? params) as Record<string, unknown>);
         if (!item || (item.kind !== "process" && item.kind !== "flow")) break;
-        const items = [...get().chatItems];
+        const items = [...scopeItems("room", roomId)];
         const idx =
           item.kind === "process" && item.processId
             ? items.findIndex((it) => it.kind === "process" && it.processId === item.processId)
             : item.kind === "flow"
               ? items.findIndex((it) => it.kind === "flow" && it.flowId === item.flowId)
               : -1;
-        if (idx >= 0) items[idx] = { ...item, at: items[idx]!.at ?? item.at };
+        if (idx >= 0) items[idx] = {
+          ...item, at: items[idx]!.historyId == null ? item.at : items[idx]!.at ?? item.at,
+        };
         else {
           // 迟到补写卡（过程卡/flow 卡）按 at 锚定插入，越过尾部 at 更大项与在途流式条目；
           // 乐观 user 气泡按真实发送时刻比较（liveInsertKey），卡不插到已发消息之前
@@ -1416,7 +1487,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           }
           items.splice(insertAt, 0, item);
         }
-        set({ chatItems: items });
+        applyHistoryRows("room", roomId, [], { existing: items });
         break;
       }
       case "room.artifact": {
@@ -2667,6 +2738,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       activeTurns.clear();
       settledTurns.clear();
       scopeWatermarks.clear();
+      scopePageCursors.clear();
       scopeDrafts.clear();
       scopeRevisions.clear();
       deliveryProfile = null;
@@ -2753,10 +2825,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     reconnectRecovery: async () => {
-      set({ deliveryReady: false, connectError: null });
       const client = get().client;
       if (!client || !client.isConnected) return;
       const epoch = connectionEpoch;
+      if (historyRecovery?.client === client && historyRecovery.epoch === epoch) return historyRecovery.promise;
+      const job = { client, epoch, promise: Promise.resolve() };
+      job.promise = Promise.resolve().then(async () => {
+      set({ deliveryReady: false, connectError: null });
       const stale = () => get().client !== client || epoch !== connectionEpoch || !client.isConnected;
       set({ deliveryReady: false });
       const [info, sList, rList] = await Promise.all([
@@ -2781,6 +2856,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         scopeWatermarks.clear();
         scopeDrafts.clear();
         scopeRevisions.clear();
+        scopePageCursors.clear();
         flowCache.clear();
         panelsCache.clear();
         roomOpenSeq++;
@@ -2854,6 +2930,13 @@ export const useHubStore = create<State & Actions>((set, get) => {
       set({ deliveryReady: true, connectError: null });
       replayOutbox();
       void get().refreshAll();
+      });
+      historyRecovery = job;
+      try {
+        await job.promise;
+      } finally {
+        if (historyRecovery === job) historyRecovery = null;
+      }
     },
 
     refreshAll: async () => {
@@ -4028,16 +4111,47 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!client) return;
       const epoch = connectionEpoch;
       const seq = roomOpenSeq;
-      try {
-        const params: Record<string, unknown> = { [idKey]: id };
-        if (anchorAt != null && Number.isFinite(anchorAt)) params.anchorAt = anchorAt;
-        const result = await client.call(method, params, 30000);
+      const scope = method.startsWith("session") ? "session" : "room";
+      const revKey = `${scope}:${id}`;
+      if (historyRecovery?.client === client && historyRecovery.epoch === epoch) {
+        await historyRecovery.promise.catch(() => {});
         if (get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq) return;
+      }
+      const anchor = anchorAt != null;
+      const loadSeq = anchor ? ++anchorHistoryLoadSeq : ++historyLoadSeq;
+      const stale = () => get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq ||
+        loadSeq !== (anchor ? anchorHistoryLoadSeq : historyLoadSeq) ||
+        (scopeKeyNow() === revKey && anchor !== get().historySearchContext);
+      if (!anchor && get().historySearchContext && scopeKeyNow() === revKey) {
+        set({ chatItems: getHistoryCache(scope, id) ?? [], historySearchContext: false, historyHasMore: false });
+      }
+      const beforeItems = anchorAt == null ? new Set(scopeItems(scope, id)) : null;
+      if (scopeKeyNow() === revKey) set({ historyLoading: true, historySearchContext: anchor });
+      try {
+        const params: Record<string, unknown> = { [idKey]: id, limit: anchorAt != null ? 25 : 50 };
+        if (anchorAt != null && Number.isFinite(anchorAt)) params.anchorAt = anchorAt;
+        const requestItems = new Set([...scopeItems(scope, id), ...(scopeKeyNow() === revKey ? get().chatItems : [])]);
+        const result = await client.call(method, params, 30000);
+        if (stale()) return;
         const entries = historyRows(result);
-        const scope = method.startsWith("session") ? "session" : "room";
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
-        const merged = applyHistoryRows(scope, id, entries, { cache: anchorAt == null });
+        if (!anchor) scopeWatermarks.set(revKey, 0);
+        rememberHistoryRows(scope, id, entries, !anchor);
+        const merged = !anchor
+          ? applyHistoryRows(scope, id, entries, {
+              existing: (beforeItems ? scopeItems(scope, id).filter((it) =>
+                !beforeItems.has(it) || isActiveTimelineItem(revKey, it)) : []),
+              liveFirst: false,
+              replace: true,
+              cache: true,
+              requestItems,
+            })
+          : applyHistoryRows(scope, id, entries, {
+              existing: [],
+              cache: false,
+              requestItems,
+            });
         const maxLiveId = merged.reduce(
           (m, it) => ("id" in it && typeof it.id === "number" ? Math.max(m, it.id) : m),
           0,
@@ -4050,12 +4164,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
             historySearchContext: anchorAt != null,
           });
         }
-        rememberHistoryRows(scope, id, entries, anchorAt == null);
+        const cursorKey = anchorAt == null ? revKey : `anchor:${revKey}`;
+        const cursor = pageCursorOf(entries);
+        if (cursor) scopePageCursors.set(cursorKey, cursor);
+        else scopePageCursors.delete(cursorKey);
         await refreshKnownHistory(scope, id, client,
-          () => get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq,
+          stale,
           { cache: anchorAt == null, cardIds: cardIdsOf(entries) });
         get().syncBusyIds().catch(() => {});
-      } catch {}
+      } catch {
+      } finally {
+        if (!stale() && scopeKeyNow() === revKey) set({ historyLoading: false });
+      }
     },
 
     // 过程区条目白名单：与 android fetchProcessItems 对齐，滤掉 assistant/error/process 卡等无关 kind
@@ -4099,33 +4219,39 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!client?.isConnected) return;
       const epoch = connectionEpoch;
       const seq = roomOpenSeq;
-      const stale = () => get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq;
-      const items = get().chatItems;
-      const oldest = items.find((it) => it.historyId != null);
-      if (oldest?.at == null) return;
+      const anchor = get().historySearchContext;
+      const loadSeq = anchor ? anchorHistoryLoadSeq : historyLoadSeq;
+      const stale = () => get().client !== client || epoch !== connectionEpoch || seq !== roomOpenSeq ||
+        anchor !== get().historySearchContext || loadSeq !== (anchor ? anchorHistoryLoadSeq : historyLoadSeq);
+      const revKey = `${method.startsWith("session") ? "session" : "room"}:${id}`;
+      const cursorKey = get().historySearchContext ? `anchor:${revKey}` : revKey;
+      const before = scopePageCursors.get(cursorKey);
+      if (before == null) return;
       set({ historyLoading: true });
       try {
-        const result = await client.call(method, { [idKey]: id, before: oldest.at, beforeId: oldest.historyId, limit: 50 }, 30000);
+        const scopeEarly = method.startsWith("session") ? "session" : "room";
+        const requestItems = new Set([...scopeItems(scopeEarly, id), ...(scopeKeyNow() === revKey ? get().chatItems : [])]);
+        const result = await client.call(method, { [idKey]: id, before: before.at, beforeId: before.id, limit: 50 }, 30000);
         if (stale()) return;
         const entries = historyRows(result);
-        const more = entries
-          .map((it) => entryToChatItem(it as Record<string, unknown>))
-          .filter((it): it is ChatItem => it !== null);
-        const scope = method.startsWith("session") ? "session" : "room";
+        const scope = scopeEarly;
         const currentId =
           scope === "session" ? get().currentSession?.sessionId : get().currentRoom?.roomId;
-        const latest = get().chatItems;
-        const existingIds = new Set(latest.map((it) => it.historyId).filter((x) => x != null));
-        const deduped = more.filter((it) => it.historyId == null || !existingIds.has(it.historyId));
-        const nextItems = [...deduped, ...latest];
+        applyHistoryRows(scope, id, entries, {
+          requestItems,
+          cache: !get().historySearchContext,
+        });
         if (currentId === id) {
-          set({ chatItems: nextItems, historyHasMore: result.hasMore === true, historyLoading: false });
-        }
-        if (!get().historySearchContext) {
-          setHistoryCache(scope, id, nextItems);
+          set({ historyHasMore: result.hasMore === true });
         }
         rememberHistoryRows(scope, id, entries, false);
+        const nextCursor = pageCursorOf(entries);
+        if (nextCursor) scopePageCursors.set(cursorKey, nextCursor);
+        else scopePageCursors.delete(cursorKey);
+        await refreshKnownHistory(scope, id, client, stale,
+          { cache: !get().historySearchContext, cardIds: cardIdsOf(entries) });
       } catch {
+      } finally {
         if (!stale()) set({ historyLoading: false });
       }
     },

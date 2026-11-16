@@ -511,10 +511,14 @@ internal class DeliveryOutbox(
 
 internal class DeliveryRecovery(
     private val rpc: suspend (String, JsonObject) -> JsonObject,
-    private val applyRows: (String, List<JsonObject>, Boolean, Boolean) -> Unit,
+    private val applyRows: (String, List<JsonObject>, Boolean, Boolean, Set<Any>) -> Unit,
     private val applyRoom: (String, JsonObject) -> Unit,
     private val knownCards: (String) -> List<Long>,
     private val beforeReset: (String) -> Unit,
+    private val afterReset: (String) -> Unit = {},
+    private val onTail: (String, JsonObject) -> Unit = { _, _ -> },
+    private val mutableEntries: (String) -> List<Long> = { emptyList() },
+    private val captureItems: (String) -> Set<Any> = { emptySet() },
 ) {
     private class State {
         val mutex = Mutex()
@@ -529,6 +533,7 @@ internal class DeliveryRecovery(
     fun changed(key: String) { states.getOrPut(key) { State() }.revision++ }
     fun cursor(key: String) = states[key]?.cursor ?: 0L
     fun retainDrafts(key: String, ids: Set<Long>) { states[key]?.drafts?.retainAll(ids) }
+    fun isDraftId(key: String, id: Long) = states[key]?.drafts?.contains(id) == true
 
     private fun rows(response: JsonObject, field: String = "entries"): List<JsonObject> =
         (response[field] as? JsonArray)?.map { it.jsonObject } ?: error("history_sync_invalid")
@@ -549,94 +554,66 @@ internal class DeliveryRecovery(
         }
     }
 
-    suspend fun recover(key: String, protocol: Int, valid: () -> Boolean): JsonObject? {
+    suspend fun recover(key: String, protocol: Int, refreshHistory: Boolean = true, valid: () -> Boolean): JsonObject? {
         val scope = key.substringBefore(':')
         val id = key.substringAfter(':', "")
         require(scope in setOf("room", "session") && id.isNotBlank())
         val state = states.getOrPut(key) { State() }
         return state.mutex.withLock {
+        try {
             fun checkCurrent() {
                 if (!valid() || states[key] !== state) throw CancellationException("recovery_stale")
             }
-            fun params(cursor: Long? = null) = buildJsonObject {
+            fun tailParams() = buildJsonObject {
                 put("${scope}Id", id)
-                put("limit", 500)
-                if (cursor != null) put("afterId", cursor)
+                put("limit", 50)
+                put("ifcAuthorized", true)
             }
             val cards = mutableSetOf<Long>()
-            fun apply(batch: List<JsonObject>, reset: Boolean, revision: Int) {
+            fun apply(batch: List<JsonObject>, reset: Boolean, revision: Int, requestItems: Set<Any>) {
                 batch.filter { (it["kind"] as? JsonPrimitive)?.contentOrNull in setOf("flow", "decision") }
                     .forEach { cards.add(rowId(it)) }
-                applyRows(key, batch, reset, revision == state.revision)
+                applyRows(key, batch, reset, revision == state.revision, requestItems)
             }
             checkCurrent()
-            if (state.cursor == 0L) {
+            if (refreshHistory) {
+                beforeReset(key)
                 val revision = state.revision
-                val response = rpc("$scope.history", params())
+                val requestItems = captureItems(key)
+                val response = rpc("$scope.history", tailParams())
                 checkCurrent()
+                onTail(key, response)
                 val batch = rows(response)
-                val max = batch.maxOfOrNull { rowId(it) } ?: 0L
-                apply(batch, false, revision)
+                apply(batch, true, revision, requestItems)
                 remember(key, batch)
-                state.cursor = if (state.cursor == 0L) max else minOf(state.cursor, max)
-            }
-            while (true) {
-                checkCurrent()
-                val cursor = state.cursor
-                val revision = state.revision
-                val response = rpc("$scope.history", params(cursor))
-                checkCurrent()
-                if ((response["truncated"] as? JsonPrimitive)?.booleanOrNull == true) {
-                    if (cursor == 0L) error("history_sync_truncated")
-                    beforeReset(key)
-                    val full = mutableListOf<JsonObject>()
-                    var after = 0L
-                    while (true) {
-                        val page = rpc("$scope.history", params(after))
-                        checkCurrent()
-                        if ((page["truncated"] as? JsonPrimitive)?.booleanOrNull == true) error("history_sync_truncated")
-                        val batch = rows(page)
-                        val last = batch.maxOfOrNull { rowId(it) } ?: after
-                        full.addAll(batch)
-                        if ((page["hasMore"] as? JsonPrimitive)?.booleanOrNull != true) break
-                        if (last <= after) error("history_cursor_stalled")
-                        after = last
-                    }
-                    state.cursor = 0L
-                    state.drafts.clear()
-                    apply(full, true, revision)
-                    remember(key, full, advance = true)
-                    break
+                state.cursor = batch.maxOfOrNull { rowId(it) } ?: 0L
+                val pinned = (state.drafts.toSet() + mutableEntries(key)).distinct()
+                for (ids in pinned.chunked(200)) {
+                    val revision = state.revision
+                    val requestItems = captureItems(key)
+                    val response = rpc("$scope.history", buildJsonObject {
+                        put("${scope}Id", id)
+                        put("entryIds", JsonArray(ids.map { JsonPrimitive(it) }))
+                    })
+                    checkCurrent()
+                    val batch = rows(response)
+                    if (!batch.map { rowId(it) }.containsAll(ids)) error("history_draft_unavailable")
+                    apply(batch, false, revision, requestItems)
+                    remember(key, batch)
                 }
-                val batch = rows(response)
-                val last = batch.maxOfOrNull { rowId(it) } ?: cursor
-                apply(batch, false, revision)
-                remember(key, batch, advance = true)
-                if ((response["hasMore"] as? JsonPrimitive)?.booleanOrNull != true) break
-                if (last <= cursor) error("history_cursor_stalled")
             }
-            for (ids in state.drafts.toList().chunked(200)) {
-                val revision = state.revision
-                val response = rpc("$scope.history", buildJsonObject {
-                    put("${scope}Id", id)
-                    put("entryIds", JsonArray(ids.map { JsonPrimitive(it) }))
-                })
-                checkCurrent()
-                val batch = rows(response)
-                if (!batch.map { rowId(it) }.containsAll(ids)) error("history_draft_unavailable")
-                apply(batch, false, revision)
-                remember(key, batch)
-            }
-            val ids = (knownCards(key) + cards).distinct().filter { it > 0 }
+            val ids = if (refreshHistory) (knownCards(key) + cards).distinct().filter { it > 0 } else emptyList()
             if (scope != "room") {
+                if (!refreshHistory) return@withLock null
                 for (chunk in ids.chunked(200)) {
                     val revision = state.revision
+                    val requestItems = captureItems(key)
                     val response = rpc("$scope.history", buildJsonObject {
                         put("${scope}Id", id)
                         put("entryIds", JsonArray(chunk.map { JsonPrimitive(it) }))
                     })
                     checkCurrent()
-                    apply(rows(response), false, revision)
+                    apply(rows(response), false, revision, requestItems)
                 }
                 return@withLock null
             }
@@ -645,6 +622,7 @@ internal class DeliveryRecovery(
                 var applied = false
                 for (attempt in 0 until 3) {
                     val revision = state.revision
+                    val requestItems = captureItems(key)
                     val response = rpc(if (protocol == 1) "room.sync" else "room.flow", buildJsonObject {
                         put("roomId", id)
                         put("ifcAuthorized", true)
@@ -654,7 +632,7 @@ internal class DeliveryRecovery(
                     if (revision != state.revision) continue
                     if (response["flow"] == null) error("history_snapshot_invalid")
                     applyRoom(key, response)
-                    if (protocol == 1) apply(rows(response, "cards"), false, revision)
+                    if (protocol == 1) apply(rows(response, "cards"), false, revision, requestItems)
                     snapshot = response
                     applied = true
                     break
@@ -662,6 +640,9 @@ internal class DeliveryRecovery(
                 if (!applied) error("recovery_snapshot_stale")
             }
             snapshot
+        } finally {
+            if (refreshHistory && states[key] === state) afterReset(key)
+        }
         }
     }
 }

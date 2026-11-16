@@ -30,8 +30,8 @@ function extractDecls(sourceFile: string, names: string[]): string {
 }
 
 const screenSnippet =
-  extractDecls(path.join(DESKTOP_SRC, "screens/ChatScreen.tsx"), ["itemKey", "FlowCardBody", "FlowTaskItem", "FlowCard", "FLOW_PHASE_LABEL_KEYS"]) +
-  "\nmodule.exports = { itemKey, FlowCardBody, FlowTaskItem, FlowCard, FLOW_PHASE_LABEL_KEYS };\n";
+  extractDecls(path.join(DESKTOP_SRC, "screens/ChatScreen.tsx"), ["itemKey", "FlowCardBody", "FlowTaskItem", "FlowCard", "FLOW_PHASE_LABEL_KEYS", "visibleFlowTasks", "previewLongBody", "LONG_BODY_PREVIEW"]) +
+  "\nmodule.exports = { itemKey, FlowCardBody, FlowTaskItem, FlowCard, FLOW_PHASE_LABEL_KEYS, visibleFlowTasks, previewLongBody };\n";
 const screenJs = ts.transpileModule(screenSnippet, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, jsxFactory: "h" },
 }).outputText;
@@ -601,4 +601,155 @@ test("导航 target 无 dispatch:展开详情但不自动取过程", async () =>
   await settle(rt);
   assert.ok(findByClass(rt.tree, "flow-task-detail"), "详情展开");
   assert.equal(rt.fetchCalls.length, 0, "缺 dispatch 不自动取过程");
+});
+
+test("visibleFlowTasks:500 任务默认 20+running+waitinguser+nav+前二 failed=25,+20→45", () => {
+  const { mod } = fresh();
+  const tasks = Array.from({ length: 500 }, (_, i) => ({
+    ...baseTask,
+    id: `t${i}`,
+    status: i === 300 ? "running" : i === 350 || i === 360 || i === 370 ? "failed" : "done",
+    waitingFor: i === 400 ? "user" : undefined,
+  }));
+  const v1 = mod.visibleFlowTasks(tasks, 20, "t450");
+  assert.equal(v1.length, 25);
+  assert.ok(v1.some((t: any) => t.id === "t300"));
+  assert.ok(v1.some((t: any) => t.id === "t350"));
+  assert.ok(v1.some((t: any) => t.id === "t360"));
+  assert.ok(!v1.some((t: any) => t.id === "t370"), "第三个 failed 不包含");
+  assert.ok(v1.some((t: any) => t.id === "t400"));
+  assert.ok(v1.some((t: any) => t.id === "t450"));
+  const v2 = mod.visibleFlowTasks(tasks, 40, "t450");
+  assert.equal(v2.length, 45);
+});
+
+test("visibleFlowTasks:1000 全 failed 默认 20;错误 target 不强塞;新 flow 重置", () => {
+  const { mod } = fresh();
+  const failed = Array.from({ length: 1000 }, (_, i) => ({ ...baseTask, id: `f${i}`, status: "failed" }));
+  assert.equal(mod.visibleFlowTasks(failed, 20, null).length, 20);
+  const mixed = Array.from({ length: 30 }, (_, i) => ({ ...baseTask, id: `m${i}`, status: "done" }));
+  mixed[25]!.status = "running";
+  const v = mod.visibleFlowTasks(mixed, 20, "nonexistent");
+  assert.equal(v.filter((t: any) => t.id === "m25").length, 1);
+  assert.ok(!v.some((t: any) => t.id === "nonexistent"));
+});
+
+test("previewLongBody:>12000 截断不劈 surrogate pair", () => {
+  const { mod } = fresh();
+  const ascii = "a".repeat(13000);
+  const p1 = mod.previewLongBody(ascii);
+  assert.equal(p1.truncated, true);
+  assert.equal(p1.preview.length, 12000);
+  const emoji = "x".repeat(11999) + "\u{1F600}" + "tail";
+  const p2 = mod.previewLongBody(emoji);
+  assert.equal(p2.truncated, true);
+  assert.ok(!/[\uD800-\uDBFF]$/.test(p2.preview.slice(-1)), "不得以高位代理结尾");
+  const short = "short";
+  const p3 = mod.previewLongBody(short);
+  assert.equal(p3.preview, short);
+  assert.equal(p3.truncated, false);
+});
+
+const CHAT_SCREEN_TSX = path.join(DESKTOP_SRC, "screens/ChatScreen.tsx");
+
+function sliceBetween(sourceFile: string, startMarker: string, endMarker: string): string {
+  const text = fs.readFileSync(sourceFile, "utf8");
+  const a = text.indexOf(startMarker);
+  const b = text.indexOf(endMarker, a + startMarker.length);
+  if (a < 0 || b <= a) throw new Error(`slice boundaries missing: ${startMarker} -> ${endMarker}`);
+  return text.slice(a, b);
+}
+
+function runFragment(fragment: string, sandboxExtra: Record<string, unknown>, exportName: string) {
+  const js = ts.transpileModule(fragment + `\nmodule.exports = { ${exportName} };\n`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const sandbox: Record<string, unknown> = { module: { exports: {} }, exports: {}, ...sandboxExtra };
+  vm.createContext(sandbox);
+  vm.runInContext(js, sandbox);
+  return (sandbox.module as any).exports[exportName] as (...args: any[]) => any;
+}
+
+function fakeScroller() {
+  const makeEl = (top: number, height: number) => ({
+    isConnected: true,
+    getBoundingClientRect: () => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100 }),
+  });
+  const loadButton = makeEl(-100, 20);
+  const dateSep = makeEl(30, 40);
+  const message = makeEl(60, 40);
+  const root = {
+    scrollTop: 0,
+    getBoundingClientRect: () => ({ top: 10, bottom: 500, height: 490, left: 0, right: 800, width: 800 }),
+    querySelectorAll: (sel: string) => {
+      if (sel === ".chat-column > .message") return [message];
+      if (sel === ".chat-column > *") return [loadButton, dateSep, message];
+      throw new Error(`unexpected selector: ${sel}`);
+    },
+  };
+  return { root, loadButton, dateSep, message };
+}
+
+test("capturePageAnchor:首个可见 .message 行+viewport offset+scrollTop;date-sep 不被选中", () => {
+  const { root, dateSep, message } = fakeScroller();
+  const pageAnchorRef = { current: null as any };
+  const fragment = sliceBetween(CHAT_SCREEN_TSX, "const capturePageAnchor = () => {", "const loadEarlier =");
+  const capture = runFragment(fragment, { messagesRef: { current: root }, pageAnchorRef }, "capturePageAnchor");
+  capture();
+  assert.equal(pageAnchorRef.current.el, message, "锚定首个可见 message 而非 date-sep/load-earlier");
+  assert.equal(pageAnchorRef.current.offset, 50, "offset=rect.top-rootTop=60-10");
+  assert.equal(pageAnchorRef.current.scrollTop, 0, "记录请求时 scrollTop");
+  dateSep.isConnected = false;
+  assert.equal(pageAnchorRef.current.el.isConnected, true, "date-sep 移除后锚点仍连接");
+  const oldAnchor = { current: null as any };
+  runFragment(fragment.replace('".chat-column > .message"', '".chat-column > *"'),
+    { messagesRef: { current: root }, pageAnchorRef: oldAnchor }, "capturePageAnchor")();
+  assert.notEqual(oldAnchor.current.el, message, "旧通配选择器会选中 date-sep（RED 对照）");
+});
+
+test("loadEarlier:getState 读当前 flags/scope;loading 阻断;hasMore 控制;参数精确", () => {
+  const fragment = sliceBetween(CHAT_SCREEN_TSX, "const loadEarlier =", "const onMessagesScroll =");
+  let captureCalls = 0;
+  const rpcCalls: unknown[][] = [];
+  const currentState: any = {
+    historyLoading: true,
+    historyHasMore: true,
+    currentRoom: { roomId: "r1" },
+    currentSession: null,
+    loadMoreHistory: (...args: unknown[]) => { rpcCalls.push(args); },
+  };
+  const staleStore: any = {
+    historyLoading: false,
+    historyHasMore: true,
+    currentRoom: { roomId: "r1" },
+    currentSession: null,
+    loadMoreHistory: (...args: unknown[]) => { rpcCalls.push(["stale", ...args]); },
+  };
+  const loadEarlier = runFragment(fragment, {
+    useHubStore: { getState: () => currentState },
+    capturePageAnchor: () => { captureCalls++; },
+    store: staleStore,
+  }, "loadEarlier");
+  loadEarlier();
+  assert.equal(captureCalls, 0, "historyLoading=true 阻断 capture");
+  assert.equal(rpcCalls.length, 0, "historyLoading=true 阻断 RPC（即便旧快照 false）");
+  currentState.historyLoading = false;
+  currentState.currentRoom = { roomId: "r2" };
+  loadEarlier();
+  assert.equal(captureCalls, 1);
+  assert.deepEqual(rpcCalls, [["room.history", "roomId", "r2"]], "RPC 用当前 room r2");
+  currentState.historyHasMore = false;
+  loadEarlier();
+  assert.equal(captureCalls, 1, "hasMore=false 不再 capture");
+  assert.equal(rpcCalls.length, 1, "hasMore=false 不再 RPC");
+  const legacy = runFragment(fragment.replace("useHubStore.getState()", "store"), {
+    useHubStore: { getState: () => currentState },
+    capturePageAnchor: () => { captureCalls++; },
+    store: staleStore,
+  }, "loadEarlier");
+  currentState.historyLoading = true;
+  currentState.historyHasMore = true;
+  const before = captureCalls;
+  legacy();
+  assert.equal(captureCalls, before + 1, "旧 store 快照会绕过 loading（RED 对照）");
 });

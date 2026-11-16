@@ -7,6 +7,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
+test("Android MissionDraftCards 仅在 isLast 块渲染一次", () => {
+  const ui = fs.readFileSync(path.join(root, "android/app/src/main/java/com/agenthub/ui/ChatScreen.kt"), "utf8");
+  const start = ui.indexOf("MissionDraftCards(item.text");
+  assert.ok(start > 0, "MissionDraftCards 调用点存在");
+  const before = ui.slice(Math.max(0, start - 120), start);
+  assert.match(before, /if \(item\.isLast\)/, "须以 item.isLast 守卫");
+  const count = (ui.match(/MissionDraftCards\(item\.text/g) || []).length;
+  assert.equal(count, 1, "每个 MessageBlock 只允许一处调用");
+});
+
 test("Android 任务产物标签换行并限制单行，避免窄标签撑出整屏空白", () => {
   const ui = fs.readFileSync(path.join(root, "android/app/src/main/java/com/agenthub/ui/ChatScreen.kt"), "utf8");
   const start = ui.indexOf("if (task.artifacts.isNotEmpty())", ui.indexOf("private fun FlowTaskRow("));
@@ -21,9 +31,12 @@ const cases = [
   "context_and_busy", "codec", "bounds_and_snapshot", "attachment_tombstone",
   "receipt_cleanup_failure", "lifecycle_and_fast_worker", "expiry_and_protocol",
   "recovery_watermarks", "recovery_reset_and_draft", "recovery_fences",
+  "recovery_tail_reset_order", "recovery_refresh_false", "recovery_tail_stale_no_callback",
   "viewmodel_context", "viewmodel_payload", "session_cards",
   "attention_identity", "attention_recovery", "attention_limits",
   "viewmodel_anchor", "stream_scope", "timeline",
+  "recovery_mutable_entries", "recovery_dedupe_draft150", "recovery_cursor_isolation",
+  "recovery_loadmore_viewseq", "recovery_concurrent_afterreset", "recovery_compact_completed_local", "recovery_race_tail_process_done", "recovery_race_targeted_entryids", "recovery_race_initial_anchor",
 ];
 
 function cachedJar(group: string, name: string, version: string): string | undefined {
@@ -107,7 +120,7 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
   const java = process.env.JAVA_HOME
     ? path.join(process.env.JAVA_HOME, "bin", process.platform === "win32" ? "java.exe" : "java") : "java";
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "hub-android-outbox-"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  if (!process.env.KEEP_BRIDGE) t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const runtime = jars.slice(0, 7).join(path.delimiter);
   const output = path.join(directory, "out");
   const strings = path.join(directory, "Strings.kt");
@@ -133,27 +146,152 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
     section("    private fun withLiveItems(", "    private fun handleEvent("),
     section("    private data class StreamRun(", "    private val streamRuns"),
     section("    private fun queueChunk(", "    private fun applyUpdate("),
+    section("    private fun isActiveChatItem(", "    private fun updateScopeItems("),
+    section("    private fun historyIdOf(", "    private fun sameHistoryItem("),
+    section("    private fun sameChatAuthor(", "    private fun dedupeTail("),
   ].join("\n");
-  const timelineOrder = section("        val merged =", "        updateScopeItems(key, combined)");
+  const phiStart = vm.indexOf("private fun parseHistoryItem(");
+  const assistantArm = vm.slice(vm.indexOf('"assistant" ->', phiStart), vm.indexOf('"system" ->', phiStart)).trim();
+  assert.ok(assistantArm.includes("LOST_REPLY_PLACEHOLDER") && assistantArm.includes("ChatItem.Assistant(itemId, text, author, at = at)"), "assistant arm 真实源码提取");
+  const timelineOrder = section("        val merged =", "        if (anchor) {");
   const cacheProperty = vm.match(/private val chatListCache = .+/)?.[0];
   const cacheKey = vm.match(/chatListCache\.getOrPut\(([^)]+)\)/)?.[1];
   assert.ok(cacheProperty && cacheKey);
   const timelineBridge = `
 data class ChatListItem(val at: Long)
+internal class TimelineHub {
+    val isConnected = true
+    var responder: suspend (String, JsonObject) -> JsonObject = { _, _ -> error("no_history_stub") }
+    suspend fun call(method: String, params: JsonObject): JsonObject = responder(method, params)
+    suspend fun call(method: String): JsonObject = responder(method, buildJsonObject {})
+}
+
 internal class TimelineBridge {
     val chatItems = mutableListOf<ChatItem>()
     var itemSeq = 5000L
-    fun scopeKey(): String? = "room:r1"
+    var historyViewSeq = 0L
+    var historyHasMore = false
+    var anchorScopeKey: String? = null
+    val historyPageCursors = mutableMapOf<String, Pair<Long, Long>>()
+    val historyMoreCache = mutableMapOf<String, Boolean>()
+    fun scopeKey(): String? = liveScope
     fun inScope(sid: String) = sid == "s1"
     fun sessionName(sid: String) = "worker"
-    fun scopeItems(key: String): List<ChatItem> = chatItems.toList()
-    fun updateScopeItems(key: String, items: List<ChatItem>) { chatItems.clear(); chatItems.addAll(items) }
+    ${section("    private fun scopeItems(", "    private fun isActiveChatItem(")}
+    ${section("    private fun updateScopeItems(", "    private fun trimChatCache(")}
     fun ensure(f: FlowInfo) = ensureFlowCard(f)
     fun finish(output: String) = finalizeReply("s1", output)
     ${section("    private fun ensureFlowCard(", "    private suspend fun refreshArtifacts(")}
     ${cacheProperty}
     ${section("    private fun historyIdOf(", "    private fun sameHistoryItem(")}
+    ${section("    private fun sameChatAuthor(", "    private fun dedupeTail(")}
     ${section("    private fun dedupeTail(", "    private fun loadHistory(")}
+    ${section("    private fun isActiveChatItem(", "    private fun compactCacheItems(")}
+    ${section("    private fun compactCacheItems(", "    private fun updateScopeItems(")}
+    ${section("    private fun sameHistoryItem(", "    private fun applyRecoveredRows(")}
+    ${section("    private fun applyRecoveredRows(", "    private fun applyRecoveryRoom(")}
+    ${section("    private fun loadHistory(", "    val processItems")}
+    ${section("    private data class StreamRun(", "    private val streamRuns")}
+    ${section("    private fun withLiveItems(", "    private fun handleEvent(")}
+    ${section("    private fun queueChunk(", "    private fun applyUpdate(")}
+    private val streamRuns = mutableListOf<StreamRun>()
+    var streamFlushJob: Job? = null
+    fun shouldShowInRoom(sid: String) = true
+    fun chunk(text: String) = queueChunk("s1", "m", text)
+    fun flush() = flushStreamChunks()
+    val chatCache = mutableMapOf<String, List<ChatItem>>()
+    val chatCacheKeys = ArrayDeque<String>()
+    fun trimChatCache() {}
+    var connectionWanted = true
+    fun currentConnection(epoch: Int, generation: Int) =
+        epoch == profileEpoch && generation == missionConnectionGeneration && connectionWanted && hub.isConnected
+    val recoveryResetBase = mutableMapOf<String, Set<ChatItem>>()
+    val deliveryRecords = mutableListOf<DeliveryRecord>()
+    var deliveryError: String? = null
+    var roomOpenSeq = 0
+    var deliveryProtocol = 1
+    var missionConnectionGeneration = 1
+    var profileEpoch = 1
+    var historyLoading = false
+    var streamingTail: Pair<String, Long>? = null
+    val busyIds = mutableSetOf<String>()
+    fun isStreamingTail(id: Long) = streamingTail?.second == id && busyIds.contains(streamingTail?.first)
+    var currentRoom: RoomInfo? = RoomInfo("r1")
+    var liveScope = "room:r1"
+    var currentSession: SessionInfo? = null
+    val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    val hub = TimelineHub()
+    val deliveryRecovery = DeliveryRecovery(
+        { method, params -> hub.call(method, params) },
+        { key, rows, reset, cardsCurrent, requestItems -> applyRecoveredRows(key, rows, reset, cardsCurrent, requestItems = requestItems) }, { _, _ -> },
+        { key -> historyReadItems(key).filter { it is ChatItem.Flow || it is ChatItem.Decision || it is ChatItem.Elicitation }
+            .mapNotNull { historyIdOf(it) }.distinct() },
+        { key -> recoveryResetBase[key] = scopeItems(key).toSet() },
+        { key -> recoveryResetBase.remove(key) },
+        { key, response -> rememberHistoryPage(key, response) },
+        { key -> scopeItems(key).filter { it is ChatItem.Process && it.status == "running" }.mapNotNull { historyIdOf(it) } },
+        { key -> historyReadItems(key).toSet() },
+    )
+    fun isDraftId(key: String, id: Long) = deliveryRecovery.isDraftId(key, id)
+    fun exitHistoryAnchor() { anchorScopeKey = null }
+    suspend fun syncBusyIds() {}
+    var deliveryOrigin = ORIGIN
+    var deliveryHubId = "h1"
+    var lang = "zh"
+    val LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]"
+    val deliveredRecords = mutableListOf<DeliveryRecord>()
+    fun recordDelivery(record: DeliveryRecord) { deliveredRecords.add(record) }
+    fun parseFlow(o: JsonObject?, id: String): FlowInfo? = o?.let {
+        FlowInfo(it["flowId"]!!.jsonPrimitive.content, it["missionId"]?.jsonPrimitive?.contentOrNull,
+            it["mode"]!!.jsonPrimitive.content, it["phase"]!!.jsonPrimitive.content,
+            it["clarificationId"]?.jsonPrimitive?.contentOrNull,
+            (it["tasks"] as? JsonArray).orEmpty().map { t ->
+                FlowTask(t.jsonObject["waitingFor"]?.jsonPrimitive?.contentOrNull, t.jsonObject["waitingHelpId"]?.jsonPrimitive?.contentOrNull)
+            })
+    }
+    fun parseHistoryItem(o: JsonObject, itemId: Long, roomId: String? = null): ChatItem? {
+        val kind = o["kind"]?.jsonPrimitive?.content ?: return null
+        val author = o["author"]?.jsonPrimitive?.content ?: ""
+        val text = o["text"]?.jsonPrimitive?.content ?: ""
+        val at = o["at"]?.jsonPrimitive?.longOrNull ?: 0L
+        return when (kind) {
+            ${assistantArm}
+            "user" -> ChatItem.User(itemId, at, historyId = if (itemId < 0) -itemId else null)
+            "system" -> ChatItem.System(itemId)
+            "tool" -> {
+                val meta = try { Json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
+                ChatItem.Tool(itemId, at, toolCallId = meta?.get("toolCallId")?.jsonPrimitive?.content ?: "",
+                    status = meta?.get("status")?.jsonPrimitive?.content ?: "completed",
+                    title = meta?.get("title")?.jsonPrimitive?.content ?: "tool", author = author)
+            }
+            "plan" -> ChatItem.Plan(itemId, at)
+            "process" -> {
+                val meta = try { Json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
+                ChatItem.Process(itemId, at = at,
+                    processId = meta?.get("processId")?.jsonPrimitive?.content ?: "",
+                    status = meta?.get("status")?.jsonPrimitive?.content ?: "")
+            }
+            "flow" -> {
+                val meta = try { Json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
+                ChatItem.Flow(itemId, meta?.get("flowId")?.jsonPrimitive?.content ?: "",
+                    parseFlow(meta, roomId ?: "") ?: FlowInfo("", null, "", "", null, emptyList()), author, at)
+            }
+            "decision" -> {
+                val meta = try { Json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
+                ChatItem.Decision(itemId, meta?.get("requestId")?.jsonPrimitive?.content ?: "",
+                    meta?.get("status")?.jsonPrimitive?.content ?: "",
+                    decisionId = meta?.get("decisionId")?.jsonPrimitive?.content ?: "",
+                    decisionType = meta?.get("decisionType")?.jsonPrimitive?.content ?: "",
+                    answerLabel = meta?.get("answerLabel")?.jsonPrimitive?.content)
+            }
+            else -> null
+        }
+    }
+    ${section("    private suspend fun recoverScope(", "    private suspend fun recoveryRpc(").replace(/^private /, "")}
+    fun close() = viewModelScope.cancel()
+    fun loadHistoryPub(method: String, idKey: String, id: String, anchorAt: Long?): Job = loadHistory(method, idKey, id, anchorAt)
+    fun compactCacheItemsPub(key: String, items: List<ChatItem>) = compactCacheItems(key, items)
+    fun isActiveChatItemPub(it: ChatItem, key: String) = isActiveChatItem(it, key)
     fun order(incoming: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
         ${timelineOrder}
         return combined
@@ -181,7 +319,7 @@ internal class TimelineBridge {
     throw error;
   }
   assert.deepEqual(result.split(/\r?\n/).filter((line) => line.startsWith("PASS ")).map((line) => line.slice(5)), cases);
-  assert.match(result, /^RESULT cases=24$/m);
+  assert.match(result, /^RESULT cases=36$/m);
   t.diagnostic(result.trim());
 });
 
@@ -193,13 +331,16 @@ interface Strings {
   val connectionPolicyRejected: String
   val connectionInvalidAddress: String
   val deliveryAttachmentFmt: String
+  val lostReply: String
 }
+fun stringsFor(lang: String): Strings = ZhStrings
 object ZhStrings : Strings {
   override val connectFailed = "connection"
   override val connectionAuthFailed = "auth"
   override val connectionPolicyRejected = "policy"
   override val connectionInvalidAddress = "config"
   override val deliveryAttachmentFmt = "\\nAttachment: %s\\n%s"
+  override val lostReply = "lost"
 }
 `;
 
@@ -207,6 +348,7 @@ const bridgeFixture = String.raw`
 import com.agenthub.*
 import com.agenthub.ui.Strings
 import com.agenthub.ui.ZhStrings
+import com.agenthub.ui.stringsFor
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import java.io.File
@@ -215,6 +357,7 @@ internal data class FlowTask(val waitingFor: String?, val waitingHelpId: String?
 internal data class FlowInfo(val flowId: String, val missionId: String?, val mode: String, val phase: String,
     val clarificationId: String?, val tasks: List<FlowTask>, val startedAt: Long = 0)
 internal data class RoomInfo(val roomId: String, val members: List<Pair<String, String>> = listOf("s1" to "worker"))
+internal data class SessionInfo(val sessionId: String)
 internal data class Attachment(val mimeType: String, val base64: String, val name: String, val localPath: String? = null)
 internal sealed class ChatItem {
     abstract val id: Long
@@ -226,16 +369,18 @@ internal sealed class ChatItem {
     data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = 0) : ChatItem()
     data class User(override val id: Long, override val at: Long = 0, val historyId: Long? = null,
         val historyAt: Long? = null, val clientMessageId: String? = null, val sendStatus: String? = null) : ChatItem()
-    data class System(override val id: Long) : ChatItem()
+    data class System(override val id: Long, override val text: String = "", override val at: Long = 0) : ChatItem()
     data class Error(override val id: Long) : ChatItem()
-    data class Tool(override val id: Long, override val at: Long = 0, val toolCallId: String = "") : ChatItem()
+    data class Tool(override val id: Long, override val at: Long = 0, val toolCallId: String = "", val status: String = "completed", val title: String = "", override val author: String = "") : ChatItem()
     data class Plan(override val id: Long, override val at: Long = 0, val entries: List<String> = emptyList()) : ChatItem()
     data class Process(override val id: Long, override val at: Long = 0,
-        val turnStartAt: Long = 0, val turnEndAt: Long = 0, val processId: String = "") : ChatItem()
+        val turnStartAt: Long = 0, val turnEndAt: Long = 0, val processId: String = "", val status: String = "") : ChatItem()
     data class Flow(override val id: Long, val flowId: String, val snapshot: FlowInfo,
         override val author: String = "", override val at: Long = 0) : ChatItem()
     data class Permission(override val id: Long, val requestId: String) : ChatItem()
-    data class Decision(override val id: Long, val requestId: String) : ChatItem()
+    data class Decision(override val id: Long, val requestId: String, val status: String = "",
+        val decisionId: String = "", val decisionType: String = "", val answerLabel: String? = null) : ChatItem()
+    data class Elicitation(override val id: Long, val requestId: String, val answered: String? = null) : ChatItem()
 }
 object Base64 {
     const val DEFAULT = 0
@@ -254,12 +399,18 @@ internal class NativeBridge {
     var anchorScopeKey: String? = null
     var liveScope = "room:r1"
     var historyHasMore = true
+    var historyViewSeq = 0L
+    val historyPageCursors = mutableMapOf<String, Pair<Long, Long>>()
+    val historyMoreCache = mutableMapOf<String, Boolean>()
     val chatItems = mutableListOf<ChatItem>()
     val chatCache = mutableMapOf<String, List<ChatItem>>()
+    val deliveryRecords = mutableListOf<DeliveryRecord>()
     var itemSeq = 5000L
     private val streamRuns = mutableListOf<StreamRun>()
     private var streamFlushJob: Job? = null
     private var streamingTail: Pair<String, Long>? = null
+    val busyIds = mutableSetOf<String>()
+    fun isStreamingTail(id: Long) = streamingTail?.second == id && busyIds.contains(streamingTail?.first)
     fun scopeKey(): String? = liveScope
     fun sameHistoryItem(a: ChatItem, b: ChatItem) = a.id == b.id
     fun inScope(sid: String) = sid == "s1"
@@ -280,16 +431,17 @@ internal class NativeBridge {
     val calls = mutableListOf<String>()
     var snapshot: JsonObject = snap(null)
     val attachAllowedExt = setOf("txt", "md")
+    private val deliveryRecovery get() = recovery
     private val recovery = DeliveryRecovery(
         { method, _ ->
             calls.add(method)
             if (method == "room.sync") snapshot
             else buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
-        }, { _, _, _, _ -> }, { _, _ -> }, { emptyList() }, { },
+        }, { _, _, _, _, _ -> }, { _, _ -> }, { emptyList() }, { },
     )
     fun currentConnection(epoch: Int, generation: Int) =
         hub.isConnected && profileEpoch == epoch && missionConnectionGeneration == generation
-    suspend fun recoverScope(key: String) = recovery.recover(key, 1) { hub.isConnected }
+    suspend fun recoverScope(key: String, refreshHistory: Boolean = true) = recovery.recover(key, 1, refreshHistory) { hub.isConnected }
     fun parseFlow(o: JsonObject?, id: String): FlowInfo? = o?.let {
         FlowInfo(it["flowId"]!!.jsonPrimitive.content, it["missionId"]?.jsonPrimitive?.contentOrNull,
             it["mode"]!!.jsonPrimitive.content, it["phase"]!!.jsonPrimitive.content,
@@ -322,7 +474,7 @@ suspend fun verifyViewModelContext() {
     check(b.check(rec("a")) == "busy" && b.calls.isEmpty())
     b.deliveryReady = true
     check(b.check(rec("a")) == null)
-    check(b.calls.first() == "room.history" && b.calls.last() == "room.sync")
+    check(b.calls.first() == "room.sync" && b.calls.none { it == "room.history" || it == "session.history" })
     b.snapshot = snap("working")
     check(b.check(rec("a")) == "context")
     val active = intent(rec("a"), "active")
@@ -386,6 +538,18 @@ fun accepted() = buildJsonObject { put("deliveryStatus", "accepted"); put("histo
 fun status(value: String) = buildJsonObject { put("deliveryStatus", value) }
 fun hrow(id: Long, text: String = "row-$id", draft: Int = 0) = buildJsonObject {
     put("id", id); put("at", id); put("kind", "assistant"); put("author", "worker"); put("text", text); put("draft", draft)
+}
+fun prow(id: Long, processId: String, status: String, at: Long = 100L) = buildJsonObject {
+    put("id", id); put("at", at); put("kind", "process")
+    put("text", buildJsonObject { put("processId", processId); put("status", status) }.toString())
+}
+fun frow(id: Long, flowId: String, phase: String = "done", at: Long = 100L) = buildJsonObject {
+    put("id", id); put("at", at); put("kind", "flow")
+    put("text", buildJsonObject { put("flowId", flowId); put("mode", "conductor"); put("phase", phase) }.toString())
+}
+fun drow(id: Long, requestId: String, status: String = "answered", at: Long = 100L) = buildJsonObject {
+    put("id", id); put("at", at); put("kind", "decision")
+    put("text", buildJsonObject { put("requestId", requestId); put("status", status); put("decisionId", "d-$requestId") }.toString())
 }
 fun cid(params: JsonObject) = params["clientMessageId"]!!.jsonPrimitive.content
 internal fun rec(id: String, target: String = "r1", binary: Boolean = false) = DeliveryRecord(
@@ -691,40 +855,43 @@ fun main() = runBlocking {
         }
     }
     scenario("recovery_watermarks") {
-        val requests = mutableListOf<Long>()
+        val requests = mutableListOf<JsonObject>()
         val applied = mutableMapOf<Long, JsonObject>()
         var synchronized = false
+        var resets = 0
+        val tail = (101L..150L).map { hrow(it) }
         val recovery = DeliveryRecovery(
             { method, p ->
                 if (method == "room.sync") {
-                    check(applied.keys.containsAll((101L..150L).toList()))
+                    check(applied.keys.containsAll(tail.map { it["id"]!!.jsonPrimitive.long }))
                     synchronized = true
                     buildJsonObject { put("mode", "conductor"); put("flow", JsonNull); put("cards", JsonArray(emptyList())) }
                 } else {
-                    val after = p["afterId"]!!.jsonPrimitive.long
-                    requests.add(after)
-                    val batch = (101L..150L).filter { it > after }.take(2)
-                    buildJsonObject {
-                        put("entries", JsonArray(batch.map { hrow(it) })); put("hasMore", batch.lastOrNull()?.let { it < 150L } ?: false)
-                    }
+                    requests.add(p)
+                    check(p["afterId"] == null && p["limit"]!!.jsonPrimitive.long == 50L)
+                    buildJsonObject { put("entries", JsonArray(tail)); put("hasMore", true) }
                 }
             },
-            { _, rows, reset, _ -> if (reset) applied.clear(); rows.forEach { applied[it["id"]!!.jsonPrimitive.long] = it } },
-            { _, _ -> }, { emptyList() }, { error("unexpected reset") },
+            { _, rows, reset, _, _ -> if (reset) applied.clear(); rows.forEach { applied[it["id"]!!.jsonPrimitive.long] = it } },
+            { _, _ -> }, { emptyList() }, { resets++ },
         )
         recovery.remember("room:r1", listOf(hrow(100)), baseline = true)
         recovery.changed("room:r1")
         recovery.remember("room:r1", listOf(hrow(150)))
         check(recovery.cursor("room:r1") == 100L)
         recovery.recover("room:r1", 1) { true }
-        check(requests.first() == 100L && requests.last() == 148L)
+        check(requests.size == 1 && resets == 1)
         check(applied.keys.size == 50 && recovery.cursor("room:r1") == 150L && synchronized)
     }
     scenario("recovery_reset_and_draft") {
-        val requests = mutableListOf<Long>()
+        val requests = mutableListOf<JsonObject>()
         val applied = mutableMapOf<Long, JsonObject>()
         var resets = 0
         var draftReads = 0
+        val tailRows = listOf(
+            hrow(1), hrow(2, "partial", 1),
+            buildJsonObject { put("id", 3); put("at", 3); put("kind", "flow"); put("text", "working"); put("draft", 0) },
+        )
         val recovery = DeliveryRecovery(
             { method, p ->
                 if (method == "room.sync") buildJsonObject {
@@ -740,26 +907,17 @@ fun main() = runBlocking {
                         hrow(2, "final").forEach { (k, v) -> put(k, v) }; put("at", 10000)
                     }))) }
                 } else {
-                    val after = p["afterId"]!!.jsonPrimitive.long
-                    requests.add(after)
-                    when (after) {
-                        999L -> buildJsonObject { put("entries", JsonArray(emptyList())); put("truncated", true) }
-                        0L -> buildJsonObject { put("entries", JsonArray(listOf(hrow(1), hrow(2, "partial", 1)))); put("hasMore", true) }
-                        2L -> buildJsonObject {
-                            put("entries", JsonArray(listOf(buildJsonObject {
-                                put("id", 3); put("at", 3); put("kind", "flow"); put("text", "working"); put("draft", 0)
-                            }))); put("hasMore", false)
-                        }
-                        else -> error("bad cursor")
-                    }
+                    requests.add(p)
+                    check(p["afterId"] == null && p["limit"]!!.jsonPrimitive.long == 50L)
+                    buildJsonObject { put("entries", JsonArray(tailRows)); put("hasMore", false) }
                 }
             },
-            { _, rows, reset, _ -> if (reset) { applied.clear(); resets++ }; rows.forEach { applied[it["id"]!!.jsonPrimitive.long] = it } },
+            { _, rows, reset, _, _ -> if (reset) { applied.clear(); resets++ }; rows.forEach { applied[it["id"]!!.jsonPrimitive.long] = it } },
             { _, _ -> }, { emptyList() }, { },
         )
         recovery.remember("room:r1", listOf(hrow(999)), baseline = true)
         recovery.recover("room:r1", 1) { true }
-        check(requests == listOf(999L, 0L, 2L) && resets == 1 && recovery.cursor("room:r1") == 3L)
+        check(requests.size == 1 && resets == 1 && recovery.cursor("room:r1") == 3L)
         check(draftReads == 1 && applied[2]!!["text"]!!.jsonPrimitive.content == "final")
         check(applied[3]!!["text"]!!.jsonPrimitive.content == "done")
     }
@@ -770,7 +928,7 @@ fun main() = runBlocking {
         var changes = 0
         val stale = DeliveryRecovery(
             { _, _ -> entered = true; gate.await(); buildJsonObject { put("entries", JsonArray(listOf(hrow(100)))) } },
-            { _, _, _, _ -> changes++ }, { _, _ -> changes++ }, { emptyList() }, { },
+            { _, _, _, _, _ -> changes++ }, { _, _ -> changes++ }, { emptyList() }, { },
         )
         val pending = async { stale.recover("room:r1", 1) { valid } }
         until { entered }; valid = false; gate.complete(Unit)
@@ -789,36 +947,101 @@ fun main() = runBlocking {
                     attempts++
                     if (attempts < 3) recovery.changed("room:r1")
                     buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
-                } else buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                } else buildJsonObject { put("entries", JsonArray(listOf(hrow(100)))); put("hasMore", false) }
             },
-            { _, _, _, _ -> }, { _, _ -> snapshots++ }, { emptyList() }, { },
+            { _, _, _, _, _ -> }, { _, _ -> snapshots++ }, { emptyList() }, { },
         )
         recovery.remember("room:r1", listOf(hrow(100)), baseline = true)
         recovery.recover("room:r1", 1) { true }
         check(attempts == 3 && snapshots == 1 && recovery.cursor("room:r1") == 100L)
         val first = CompletableDeferred<Unit>()
         var loading = false
-        val cursors = mutableListOf<Long>()
         val merged = mutableSetOf<Long>()
+        val tail = (301L..350L).map { hrow(it) }
         val concurrent = DeliveryRecovery(
             { _, p ->
-                if (p["afterId"] == null) {
-                    loading = true; first.await()
-                    buildJsonObject { put("entries", JsonArray((1L..100L).map { hrow(it) })) }
-                } else {
-                    val after = p["afterId"]!!.jsonPrimitive.long; cursors.add(after)
-                    buildJsonObject { put("entries", JsonArray((101L..350L).filter { it > after }.map { hrow(it) })); put("hasMore", false) }
-                }
+                check(p["afterId"] == null && p["limit"]!!.jsonPrimitive.long == 50L)
+                loading = true; first.await()
+                buildJsonObject { put("entries", JsonArray(tail)); put("hasMore", true) }
             },
-            { _, rows, _, _ -> rows.forEach { merged.add(it["id"]!!.jsonPrimitive.long) } },
+            { _, rows, _, _, _ -> rows.forEach { merged.add(it["id"]!!.jsonPrimitive.long) } },
             { _, _ -> }, { emptyList() }, { },
         )
         val cold = async { concurrent.recover("session:s1", 1) { true } }
         until { loading }
         concurrent.remember("session:s1", (151L..350L).map { hrow(it) }, baseline = true)
         first.complete(Unit); cold.await()
-        check(cursors.first() == 100L && merged.containsAll((101L..350L).toList()))
+        check(merged.containsAll(tail.map { it["id"]!!.jsonPrimitive.long }))
         check(concurrent.cursor("session:s1") == 350L)
+    }
+    scenario("recovery_tail_reset_order") {
+        val order = mutableListOf<String>()
+        var tailResponded = false
+        val recovery = DeliveryRecovery(
+            { method, _ ->
+                order.add("rpc:$method")
+                if (method == "room.sync") buildJsonObject {
+                    put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList()))
+                } else {
+                    tailResponded = true
+                    buildJsonObject { put("entries", JsonArray((100L..149L).map { hrow(it) })); put("hasMore", true) }
+                }
+            },
+            { _, rows, reset, _, _ -> order.add("apply:\${rows.size}:$reset") },
+            { _, _ -> }, { emptyList() },
+            { order.add("beforeReset") }, { order.add("afterReset") },
+            onTail = { _, resp -> order.add("onTail:" + ((resp["entries"] as? JsonArray)?.size ?: -1).toString()) },
+        )
+        recovery.recover("room:r1", 1) { true }
+        check(order.first() == "beforeReset" && order.indexOf("rpc:room.history") > order.indexOf("beforeReset"))
+        check(order.contains("onTail:50") && order.last() == "afterReset")
+        check(tailResponded)
+        var leaked = true
+        val failing = DeliveryRecovery(
+            { _, _ -> error("boom") },
+            { _, _, _, _, _ -> }, { _, _ -> }, { emptyList() },
+            { }, { leaked = false },
+        )
+        runCatching { failing.recover("room:r1", 1) { true } }
+        check(!leaked) { "失败路径也须 afterReset 清理 capture" }
+    }
+    scenario("recovery_refresh_false") {
+        val methods = mutableListOf<String>()
+        var syncParams: JsonObject? = null
+        val recovery = DeliveryRecovery(
+            { method, p ->
+                methods.add(method)
+                if (method == "room.sync") { syncParams = p; buildJsonObject {
+                    put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList()))
+                } } else error("refreshHistory=false 不得发 history: $method")
+            },
+            { _, rows, _, _, _ -> check(rows.isEmpty()) { "false 仅允许空 cards 批次" } },
+            { _, _ -> }, { listOf(7L) }, { },
+        )
+        val snap = recovery.recover("room:r1", 1, false) { true }
+        check(snap != null && methods == listOf("room.sync"))
+        check((syncParams?.get("knownCardIds") as? JsonArray)?.size == 0) { "false 用空 knownCardIds" }
+        check(recovery.recover("session:s1", 1, false) { true } == null) { "session false 直接 null" }
+    }
+    scenario("recovery_tail_stale_no_callback") {
+        val gate = CompletableDeferred<Unit>()
+        var entered = false
+        var valid = true
+        var tailCalls = 0
+        var onTailCalls = 0
+        val recovery = DeliveryRecovery(
+            { method, _ ->
+                if (method == "room.history") { entered = true; tailCalls++; gate.await()
+                    buildJsonObject { put("entries", JsonArray(listOf(hrow(100)))); put("hasMore", false) }
+                } else buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+            },
+            { _, _, _, _, _ -> }, { _, _ -> }, { emptyList() }, { }, { },
+            onTail = { _, _ -> onTailCalls++ },
+        )
+        val pending = async { recovery.recover("room:r1", 1) { valid } }
+        until { entered }; valid = false; gate.complete(Unit)
+        check(runCatching { pending.await() }.exceptionOrNull() is CancellationException)
+        check(onTailCalls == 0 && tailCalls == 1) { "stale 响应不得触发 onTail/二次 tail" }
     }
     scenario("viewmodel_context") { verifyViewModelContext() }
     scenario("viewmodel_payload") { verifyViewModelPayload() }
@@ -833,12 +1056,12 @@ fun main() = runBlocking {
                     buildJsonObject { put("entries", JsonArray(listOf(decision))) }
                 } else buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
             },
-            { _, rows, _, _ -> if (rows.any { it["text"]?.jsonPrimitive?.content == "answered" }) refreshed = true },
+            { _, rows, _, _, _ -> if (rows.any { it["text"]?.jsonPrimitive?.content == "answered" }) refreshed = true },
             { _, _ -> error("session must not request room state") }, { listOf(12) }, { },
         )
         recovery.remember("session:s1", listOf(hrow(100)), baseline = true)
         recovery.recover("session:s1", 1) { true }
-        check(refreshed && recovery.cursor("session:s1") == 100L)
+        check(refreshed && recovery.cursor("session:s1") == 0L)
     }
     scenario("attention_identity") {
         fun targets(batch: Long = 1, help: String = "h1", origin: String = ORIGIN, hub: String = "h1") =
@@ -988,7 +1211,494 @@ fun main() = runBlocking {
         check((b.chatItems[0] as ChatItem.Assistant).replyText == "firstsecond")
         check((b.chatItems[2] as ChatItem.Assistant).replyText == "next")
     }
-    check(count == 24)
+    scenario("recovery_mutable_entries") {
+        val entryIdCalls = mutableListOf<Set<Long>>()
+        val recovery = DeliveryRecovery(
+            { method, p ->
+                val ids = p["entryIds"]?.jsonArray?.map { it.jsonPrimitive.long }?.toSet()
+                if (ids != null) entryIdCalls.add(ids)
+                if (method.endsWith("history") && p["entryIds"] != null) buildJsonObject {
+                    put("entries", JsonArray(ids!!.map { hrow(it) })); put("hasMore", false)
+                } else if (method == "room.sync") buildJsonObject {
+                    put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList()))
+                } else buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+            },
+            { _, _, _, _, _ -> }, { _, _ -> }, { _ -> emptyList() },
+            { }, { }, { _, _ -> }, { _ -> listOf(77L) },
+        )
+        recovery.remember("room:r1", listOf(hrow(150, "draft", 1)), baseline = true)
+        recovery.recover("room:r1", 1) { true }
+        check(entryIdCalls.any { it.contains(150L) && it.contains(77L) }) { "mutableEntries 与 drafts 合并 entryIds: \$entryIdCalls" }
+    }
+    scenario("recovery_dedupe_draft150") {
+        for (persistedAuthor in listOf("worker", "worker (Codex)")) {
+            val b = TimelineBridge()
+            try {
+                b.liveScope = "room:r1"
+                b.chatItems.clear()
+                val futureAt = System.currentTimeMillis() + 600000
+                b.deliveryRecovery.remember("room:r1", listOf(buildJsonObject {
+                    put("id", 150); put("at", futureAt); put("kind", "assistant"); put("author", persistedAuthor); put("text", "partial"); put("draft", 1)
+                }), baseline = true)
+                b.chatItems.add(ChatItem.Assistant(-150, "partial", persistedAuthor, at = futureAt))
+                fun draftRow(text: String, draft: Int, author: String = persistedAuthor) = buildJsonObject {
+                    put("id", 150); put("at", futureAt); put("kind", "assistant"); put("author", author); put("text", text); put("draft", draft)
+                }
+                val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+                val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+                var gated = false
+                var tailCalls = 0
+                b.hub.responder = { method, params ->
+                    when {
+                        method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                        method.endsWith("history") -> {
+                            tailCalls++
+                            if (params["entryIds"] == null && !gated) { gated = true; entered.complete(Unit); gate.await() }
+                            val ids = params["entryIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.longOrNull } ?: emptyList()
+                            val rows = if (ids.isNotEmpty()) ids.map { draftRow("partial", 1) } else listOf(draftRow("partial", 1))
+                            buildJsonObject { put("entries", JsonArray(rows)); put("hasMore", false) }
+                        }
+                        else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                    }
+                }
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.coroutineScope {
+                        val job = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { b.recoverScope("room:r1") }
+                        entered.await()
+                        check(tailCalls >= 1) { "baseline tail RPC 在途" }
+                        b.chunk("more")
+                        b.flush()
+                        val during = b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }
+                        check(during.text == "partialmore" && during.at == futureAt) { "draft 追加保持 server.at: \${during.text}@\${during.at}" }
+                        gate.complete(Unit)
+                        job.await()
+                    }
+                }
+                val kept = b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }
+                check(kept.text == "partialmore" && kept.at == futureAt) { "迟到 draft1 不覆盖更长 live: \${kept.text}@\${kept.at}" }
+                b.finish("")
+                check((b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }).replyText != null) { "finalize 标记完成" }
+                b.hub.responder = { method, params ->
+                    when {
+                        method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                        method.endsWith("history") -> {
+                            val ids = params["entryIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.longOrNull } ?: emptyList()
+                            val rows = if (ids.isNotEmpty()) ids.map { draftRow("partial", 1) } else listOf(draftRow("partial", 1))
+                            buildJsonObject { put("entries", JsonArray(rows)); put("hasMore", false) }
+                        }
+                        else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                    }
+                }
+                kotlinx.coroutines.runBlocking { b.recoverScope("room:r1") }
+                val afterDraft = b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }
+                check(afterDraft.text == "partialmore" && afterDraft.replyText != null) { "迟到 draft1 不得复活已完成: \${afterDraft.text}" }
+                b.hub.responder = { method, params ->
+                    when {
+                        method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                        method.endsWith("history") -> {
+                            val ids = params["entryIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.longOrNull } ?: emptyList()
+                            val rows = if (ids.isNotEmpty()) ids.map { draftRow("partial", 0) } else listOf(draftRow("partial", 0))
+                            buildJsonObject { put("entries", JsonArray(rows)); put("hasMore", false) }
+                        }
+                        else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                    }
+                }
+                kotlinx.coroutines.runBlocking { b.recoverScope("room:r1") }
+                val shortFinal = b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }
+                check(shortFinal.text == "partial") { "draft0 短 prefix 也权威采纳: \${shortFinal.text}" }
+                b.hub.responder = { method, params ->
+                    when {
+                        method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                        method.endsWith("history") -> {
+                            val ids = params["entryIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.longOrNull } ?: emptyList()
+                            val rows = if (ids.isNotEmpty()) ids.map { draftRow("canonical-final", 0) } else listOf(draftRow("canonical-final", 0))
+                            buildJsonObject { put("entries", JsonArray(rows)); put("hasMore", false) }
+                        }
+                        else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                    }
+                }
+                kotlinx.coroutines.runBlocking { b.recoverScope("room:r1") }
+                check(b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }.text == "canonical-final") { "draft0 非 prefix canonical 权威" }
+            } finally { b.close() }
+        }
+        val b = TimelineBridge()
+        try {
+            b.liveScope = "room:r1"
+            b.chatItems.clear()
+            val futureAt = System.currentTimeMillis() + 600000
+            b.chatCache["room:r1"] = (950L..999L).map { ChatItem.Assistant(it, "n\$it", "worker", at = it, replyText = "n\$it") }
+            b.anchorScopeKey = "room:r1"
+            b.deliveryRecovery.remember("room:r1", listOf(buildJsonObject {
+                put("id", 150); put("at", futureAt); put("kind", "assistant"); put("author", "worker"); put("text", "partial"); put("draft", 1)
+            }))
+            b.chatItems.add(ChatItem.Assistant(-150, "partialmore", "worker", at = futureAt))
+            b.historyPageCursors["anchor:room:r1"] = (futureAt + 1) to 151
+            b.historyHasMore = true
+            val normalBefore = b.chatCache["room:r1"]!!.toList()
+            fun anchorDraftRow(text: String, draft: Int) = buildJsonObject {
+                put("id", 150); put("at", futureAt); put("kind", "assistant"); put("author", "worker"); put("text", text); put("draft", draft)
+            }
+            b.hub.responder = { method, p ->
+                when {
+                    method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    p["before"] != null -> buildJsonObject {
+                        put("entries", JsonArray(listOf(hrow(149), anchorDraftRow("partial", 1)))); put("hasMore", false)
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            b.loadMoreHistory()
+            kotlinx.coroutines.runBlocking { until { !b.historyLoading } }
+            check(b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }.text == "partialmore") { "anchor 页旧 draft1 不覆盖 partialmore" }
+            check(b.chatItems.any { it is ChatItem.Assistant && it.id == -149L }) { "anchor 页旧行前插" }
+            check(b.chatItems.none { it is ChatItem.Assistant && it.id in 950L..999L }) { "anchor 窗口不被 normal 尾页换掉" }
+            check(b.chatCache["room:r1"] == normalBefore) { "anchor 分页不动 normal cache" }
+            b.historyPageCursors["anchor:room:r1"] = futureAt to 150
+            b.historyHasMore = true
+            b.hub.responder = { method, p ->
+                when {
+                    method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    p["before"] != null -> buildJsonObject {
+                        put("entries", JsonArray(listOf(anchorDraftRow("partial", 0)))); put("hasMore", false)
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            b.loadMoreHistory()
+            kotlinx.coroutines.runBlocking { until { !b.historyLoading } }
+            check(b.chatItems.filterIsInstance<ChatItem.Assistant>().single { it.id == -150L }.text == "partial") { "anchor 页 draft0 短 prefix 权威" }
+            check(b.chatCache["room:r1"] == normalBefore) { "draft0 页仍不动 normal cache" }
+        } finally { b.close() }
+    }
+
+    scenario("recovery_cursor_isolation") {
+        val b = TimelineBridge()
+        val beforeParams = mutableListOf<Pair<Long, Long>>()
+        try {
+            b.hub.responder = { method, p ->
+                when {
+                    method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    p["anchorAt"] != null -> buildJsonObject {
+                        put("entries", JsonArray((475L..524L).map { hrow(it) })); put("hasMore", true)
+                    }
+                    p["before"] != null -> {
+                        beforeParams.add(p["before"]!!.jsonPrimitive.long to p["beforeId"]!!.jsonPrimitive.long)
+                        buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                    }
+                    method.endsWith("history") -> buildJsonObject {
+                        put("entries", JsonArray((950L..999L).map { hrow(it) })); put("hasMore", true)
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            kotlinx.coroutines.runBlocking { b.recoverScope("room:r1") }
+            val normalCursor = b.historyPageCursors["room:r1"]
+            check(normalCursor == (950L to 950L)) { "normal 游标来自 raw 尾页: $normalCursor" }
+            kotlinx.coroutines.runBlocking { b.loadHistoryPub("room.history", "roomId", "r1", 1000).join() }
+            val anchorCursor = b.historyPageCursors["anchor:room:r1"]
+            check(anchorCursor == (475L to 475L)) { "anchor 游标独立: $anchorCursor" }
+            check(b.historyPageCursors["room:r1"] == (950L to 950L)) { "anchor 不污染 normal 游标" }
+            b.loadMoreHistory()
+            kotlinx.coroutines.runBlocking { until { !b.historyLoading } }
+            check(beforeParams.any { it == (475L to 475L) }) { "anchor loadMore 用 anchor 游标: \$beforeParams" }
+            check(b.historyPageCursors["anchor:room:r1"] == null) { "空页清除 anchor 游标" }
+        } finally { b.close() }
+    }
+    scenario("recovery_loadmore_viewseq") {
+        val b = TimelineBridge()
+        val staleGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        try {
+            b.anchorScopeKey = "room:r1"
+            b.historyPageCursors["anchor:room:r1"] = 475L to 475L
+            b.historyHasMore = true
+            val enteredPage = kotlinx.coroutines.CompletableDeferred<Unit>()
+            b.hub.responder = { method, p ->
+                when {
+                    method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    p["before"] != null -> {
+                        enteredPage.complete(Unit)
+                        staleGate.await()
+                        buildJsonObject { put("entries", JsonArray((350L..399L).map { hrow(it) })); put("hasMore", true) }
+                    }
+                    p["anchorAt"] != null -> buildJsonObject {
+                        put("entries", JsonArray((400L..449L).map { hrow(it) })); put("hasMore", true)
+                    }
+                    method.endsWith("history") -> buildJsonObject {
+                        put("entries", JsonArray((950L..999L).map { hrow(it) })); put("hasMore", true)
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            b.loadMoreHistory()
+            kotlinx.coroutines.runBlocking { enteredPage.await() }
+            kotlinx.coroutines.runBlocking { b.loadHistoryPub("room.history", "roomId", "r1", 1000).join() }
+            staleGate.complete(Unit)
+            kotlinx.coroutines.runBlocking { until { !b.historyLoading } }
+            val staleCursor = b.historyPageCursors["anchor:room:r1"]
+            check(staleCursor == (400L to 400L)) { "迟到旧页不得改写 anchor 游标: $staleCursor" }
+        } finally { b.close() }
+    }
+    scenario("recovery_concurrent_afterreset") {
+        val order = mutableListOf<String>()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var entered = 0
+        val firstEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val recovery = DeliveryRecovery(
+            { method, _ ->
+                if (method.endsWith("history") && entered == 0) { entered++; firstEntered.complete(Unit); gate.await() }
+                if (method == "room.sync") buildJsonObject {
+                    put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList()))
+                } else buildJsonObject { put("entries", JsonArray((100L..149L).map { hrow(it) })); put("hasMore", false) }
+            },
+            { _, _, _, _, _ -> }, { _, _ -> }, { _ -> emptyList() },
+            { order.add("beforeReset") }, { order.add("afterReset") }, { _, _ -> },
+        )
+        kotlinx.coroutines.runBlocking {
+            val j1 = async { recovery.recover("room:r1", 1) { true } }
+            firstEntered.await()
+            val j2 = async { recovery.recover("room:r1", 1) { true } }
+            gate.complete(Unit)
+            j1.await(); j2.await()
+        }
+        val secondBefore = order.withIndex().firstOrNull { it.index > 0 && it.value == "beforeReset" }?.index ?: -1
+        val firstAfter = order.indexOf("afterReset")
+        check(firstAfter in 1 until secondBefore) { "首个 recover 的 afterReset 须在锁内先于第二个 beforeReset: \$order" }
+    }
+    scenario("recovery_compact_completed_local") {
+        val b = TimelineBridge()
+        try {
+            b.liveScope = "room:r1"
+            b.chatItems.clear()
+            repeat(120) { i ->
+                b.chatItems.add(ChatItem.Assistant((1000 + i).toLong(), "done-\$i", "worker", at = (1000 + i).toLong(), replyText = "done-\$i"))
+                b.chatItems.add(ChatItem.Tool((2000 + i).toLong(), at = (2000 + i).toLong(), status = "completed"))
+            }
+            b.chatItems.add(ChatItem.Assistant(1L, "stream-tail", "worker", at = 10))
+            b.streamingTail = "s1" to 1L
+            b.busyIds.add("s1")
+            b.chatItems.add(ChatItem.Thought(6L, "think-tail", "worker", at = 11))
+            b.streamingTail = "s1" to 6L
+            b.chatItems.add(ChatItem.User(2L, at = 12, sendStatus = "sending", clientMessageId = "cm-1"))
+            b.chatItems.add(ChatItem.Flow(3L, "f-active", FlowInfo("f-active", null, "conductor", "working", null, emptyList()), "worker", at = 13))
+            b.chatItems.add(ChatItem.Decision(4L, "req-p", status = "pending", decisionId = "d-p", decisionType = "permission"))
+            b.chatItems.add(ChatItem.Process(5L, at = 14, processId = "p-run", status = "running"))
+            b.chatItems.add(ChatItem.Tool(7L, at = 15, status = "in_progress", toolCallId = "tc-1"))
+            b.chatItems.add(ChatItem.Tool(9L, at = 9, status = "queued", toolCallId = "tc-9"))
+            b.chatItems.add(ChatItem.Elicitation(8L, "req-e", answered = null))
+            b.deliveryRecovery.remember("room:r1", listOf(hrow(150, "draft-partial", 1)), baseline = true)
+            b.chatItems.add(ChatItem.Assistant(-150, "draft-partial", "worker", at = 16))
+            val compacted = b.compactCacheItemsPub("room:r1", b.chatItems.toList())
+            val nonActive = compacted.count {
+                !b.isActiveChatItemPub(it, "room:r1") &&
+                    !(it is ChatItem.Assistant && b.isDraftId("room:r1", -it.id))
+            }
+            check(nonActive == 50) { "非活跃项恰 50: \$nonActive" }
+            check(compacted.count { b.isActiveChatItemPub(it, "room:r1") } >= 8) { "全部 active 保留: \${compacted.size - nonActive}" }
+            check(compacted.any { it is ChatItem.Flow && it.flowId == "f-active" }) { "active flow 保留" }
+            check(compacted.any { it is ChatItem.Decision && it.status == "pending" }) { "pending decision 保留" }
+            check(compacted.any { it is ChatItem.Process && it.status == "running" }) { "running process 保留" }
+            check(compacted.any { it is ChatItem.User && it.clientMessageId == "cm-1" }) { "sending user 保留" }
+            check(compacted.any { it is ChatItem.Assistant && it.id == 1L }) { "streaming assistant 保留" }
+            check(compacted.any { it is ChatItem.Thought && it.id == 6L }) { "streaming thought 保留" }
+            check(compacted.any { it is ChatItem.Tool && it.id == 7L }) { "in_progress tool 保留" }
+            check(compacted.any { it is ChatItem.Tool && it.id == 9L }) { "未知非终态 queued tool 保留" }
+            check(compacted.any { it is ChatItem.Elicitation && it.requestId == "req-e" }) { "unanswered elicitation 保留" }
+            check(compacted.any { it is ChatItem.Assistant && it.id == -150L }) { "draft pinned 保留" }
+            check(!compacted.any { it is ChatItem.Tool && it.status == "completed" && it.id == 2000L }) { "最老 completed tool 被裁" }
+            b.chatCache["room:r1"] = compacted
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            b.hub.responder = { method, params ->
+                when {
+                    method == "room.sync" -> buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    method.endsWith("history") -> {
+                        entered.complete(Unit)
+                        gate.await()
+                        val ids = params["entryIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.longOrNull } ?: emptyList()
+                        val rows = if (ids.isNotEmpty()) ids.map { if (it == 150L) hrow(150, "draft-partial", 1) else hrow(it) }
+                            else (500L..549L).map { hrow(it) }
+                        buildJsonObject { put("entries", JsonArray(rows)); put("hasMore", false) }
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.coroutineScope {
+                    val job = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { b.recoverScope("room:r1") }
+                    entered.await()
+                    check(b.recoveryResetBase.containsKey("room:r1")) { "beforeReset 真实捕获 resetBase" }
+                    b.chatItems.add(ChatItem.Assistant(9001L, "rpc-live", "worker", at = 9500, replyText = "rpc-live"))
+                    gate.complete(Unit)
+                    job.await()
+                }
+            }
+            check(b.chatItems.any { it is ChatItem.Assistant && it.id == 9001L }) { "RPC 期间新完成项保留" }
+            check(b.chatItems.none { it is ChatItem.Assistant && it.id in 1000L..1119L }) { "reset 后旧 completed 本地项不复活" }
+            check(!b.recoveryResetBase.containsKey("room:r1")) { "afterReset 清理 resetBase" }
+            check(b.chatItems.size <= 70) { "reset 后 cache 受控: \${b.chatItems.size}" }
+        } finally { b.close() }
+    }
+    scenario("recovery_race_tail_process_done") {
+        val b = TimelineBridge()
+        try {
+            b.liveScope = "room:r1"
+            b.chatItems.clear()
+            b.chatItems.add(ChatItem.Process(-103, at = 103, processId = "p-103", status = "running", turnStartAt = 90, turnEndAt = 0))
+            b.chatItems.add(ChatItem.Flow(-101, "f-101", FlowInfo("f-101", null, "conductor", "done", null, emptyList()), at = 101))
+            b.chatItems.add(ChatItem.Decision(-102, "req-102", "answered", decisionId = "d-102"))
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val tailGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val syncGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val followupEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var gated = false
+            var followupSignaled = false
+            b.hub.responder = { method, params ->
+                when {
+                    method == "room.sync" -> {
+                        if (!gated) { gated = true; entered.complete(Unit); tailGate.await() }
+                        else { if (!followupSignaled) { followupSignaled = true; followupEntered.complete(Unit) }; syncGate.await() }
+                        buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    }
+                    method.endsWith("history") -> {
+                        if (!gated) { gated = true; entered.complete(Unit); tailGate.await() }
+                        else { if (!followupSignaled) { followupSignaled = true; followupEntered.complete(Unit) }; syncGate.await() }
+                        val rows = if (params["entryIds"] != null) listOf(prow(103, "p-103", "done", 103))
+                            else listOf(prow(103, "p-103", "running", 103), frow(101, "f-101", "done", 101), drow(102, "req-102", "answered", 102))
+                        buildJsonObject { put("entries", JsonArray(rows)); put("hasMore", false) }
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.coroutineScope {
+                    val job = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { b.recoverScope("room:r1") }
+                    entered.await()
+                    val idx = b.chatItems.indexOfFirst { it is ChatItem.Process && it.processId == "p-103" }
+                    b.chatItems[idx] = (b.chatItems[idx] as ChatItem.Process).copy(status = "done", turnEndAt = 105)
+                    b.deliveryRecovery.changed("room:r1")
+                    tailGate.complete(Unit)
+                    followupEntered.await()
+                    val mid = b.chatItems.filterIsInstance<ChatItem.Process>().single { it.processId == "p-103" }
+                    check(mid.status == "done") { "tail 应用后 process 保持 done: \${mid.status}" }
+                    check(b.chatItems.any { it is ChatItem.Flow && it.flowId == "f-101" }) { "terminal flow 不丢" }
+                    check(b.chatItems.any { it is ChatItem.Decision && it.requestId == "req-102" }) { "decision 不丢" }
+                    syncGate.complete(Unit)
+                    job.await()
+                }
+            }
+            check(b.chatItems.filterIsInstance<ChatItem.Process>().single { it.processId == "p-103" }.status == "done") { "最终 process done" }
+        } finally { b.close() }
+    }
+    scenario("recovery_race_targeted_entryids") {
+        val b = TimelineBridge()
+        try {
+            b.liveScope = "room:r1"
+            b.chatItems.clear()
+            b.chatItems.add(ChatItem.Process(-103, at = 103, processId = "p-103", status = "running", turnStartAt = 90, turnEndAt = 0))
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val entryGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val syncGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val syncEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var entryCalls = 0
+            b.hub.responder = { method, params ->
+                when {
+                    method == "room.sync" -> {
+                        syncEntered.complete(Unit)
+                        syncGate.await()
+                        buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    }
+                    method.endsWith("history") -> {
+                        if (params["entryIds"] != null) {
+                            entryCalls++
+                            if (entryCalls == 1) { entered.complete(Unit); entryGate.await() }
+                            buildJsonObject { put("entries", JsonArray(listOf(prow(103, "p-103", "running", 103)))); put("hasMore", false) }
+                        } else {
+                            buildJsonObject { put("entries", JsonArray(listOf(prow(103, "p-103", "running", 103)))); put("hasMore", false) }
+                        }
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.coroutineScope {
+                    val job = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { b.recoverScope("room:r1") }
+                    entered.await()
+                    val idx = b.chatItems.indexOfFirst { it is ChatItem.Process && it.processId == "p-103" }
+                    b.chatItems[idx] = (b.chatItems[idx] as ChatItem.Process).copy(status = "done", turnEndAt = 105)
+                    b.deliveryRecovery.changed("room:r1")
+                    entryGate.complete(Unit)
+                    syncEntered.await()
+                    check(b.chatItems.filterIsInstance<ChatItem.Process>().single { it.processId == "p-103" }.status == "done") { "entryIds 校准期间 process 保持 done" }
+                    syncGate.complete(Unit)
+                    job.await()
+                }
+            }
+            check(b.chatItems.filterIsInstance<ChatItem.Process>().single { it.processId == "p-103" }.status == "done") { "最终 process done" }
+        } finally { b.close() }
+    }
+    scenario("recovery_race_initial_anchor") {
+        val b = TimelineBridge()
+        try {
+            b.liveScope = "room:r1"
+            b.chatItems.clear()
+            b.chatItems.add(ChatItem.Process(-50, at = 90, processId = "p-50", status = "running", turnStartAt = 40, turnEndAt = 0))
+            b.chatItems.add(ChatItem.Assistant(999, "normal-only", "worker", at = 999))
+            check(b.chatItems.any { it is ChatItem.Assistant && it.id == 999L }) { "前置：normal-only 999 存在" }
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val anchorGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val followupEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val followupGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var phase = 0
+            b.hub.responder = { method, params ->
+                when {
+                    method == "room.sync" -> {
+                        if (phase == 2) { followupEntered.complete(Unit); followupGate.await() }
+                        buildJsonObject { put("flow", JsonNull); put("mode", "conductor"); put("cards", JsonArray(emptyList())) }
+                    }
+                    params["anchorAt"] != null -> {
+                        if (phase == 0) {
+                            phase = 1
+                            entered.complete(Unit)
+                            anchorGate.await()
+                            phase = 2
+                        }
+                        buildJsonObject {
+                            put("entries", JsonArray(listOf(prow(50, "p-50", "running", 90), frow(51, "f-51", "done", 96)))); put("hasMore", false)
+                        }
+                    }
+                    method.endsWith("history") -> {
+                        if (phase == 2) { followupEntered.complete(Unit); followupGate.await() }
+                        buildJsonObject {
+                            put("entries", JsonArray(listOf(prow(50, "p-50", "done", 90)))); put("hasMore", false)
+                        }
+                    }
+                    else -> buildJsonObject { put("entries", JsonArray(emptyList())); put("hasMore", false) }
+                }
+            }
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.coroutineScope {
+                    val job = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { b.loadHistoryPub("room.history", "roomId", "r1", 200) }
+                    entered.await()
+                    val idx = b.chatItems.indexOfFirst { it is ChatItem.Process && it.processId == "p-50" }
+                    if (idx >= 0) b.chatItems[idx] = (b.chatItems[idx] as ChatItem.Process).copy(status = "done", turnEndAt = 105)
+                    else b.chatItems.add(ChatItem.Process(-50, at = 90, processId = "p-50", status = "done", turnStartAt = 40, turnEndAt = 105))
+                    b.deliveryRecovery.changed("room:r1")
+                    anchorGate.complete(Unit)
+                    followupEntered.await()
+                    val win50 = b.chatItems.filterIsInstance<ChatItem.Process>().singleOrNull { it.processId == "p-50" }
+                    check(win50?.status == "done") { "anchor 窗口 process 保持 done: \${win50?.status}" }
+                    check(b.chatItems.any { it is ChatItem.Flow && it.flowId == "f-51" }) { "anchor 页 terminal flow 存在" }
+                    check(b.chatItems.none { it is ChatItem.Assistant && it.id == 999L }) { "anchor 窗口不含 normal-only 999" }
+                    followupGate.complete(Unit)
+                    job.await()
+                }
+            }
+            check(b.chatCache["room:r1"]?.any { it is ChatItem.Assistant && it.id == 999L } == true) { "normal cache 保留 999" }
+            check(b.chatCache["room:r1"]?.any { it is ChatItem.Process && it.processId == "p-50" } == true) { "normal cache 保留 p-50" }
+            check(b.chatCache["room:r1"]?.none { it is ChatItem.Flow && it.flowId == "f-51" } == true) { "anchor 页 f-51 不污染 normal cache" }
+        } finally { b.close() }
+    }
+    check(count == 36)
     println("RESULT cases=$count")
 }
 `;

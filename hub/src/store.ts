@@ -339,8 +339,24 @@ export class Store {
         const h = this.prep(
             `DELETE FROM history WHERE id IN (
               SELECT id FROM (
-                SELECT id, ROW_NUMBER() OVER (PARTITION BY scope, scope_id ORDER BY id DESC) AS rn
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY scope, scope_id ORDER BY at DESC, id DESC) AS rn
                 FROM history
+                WHERE COALESCE(draft, 0) <> 1
+                  AND NOT CASE
+                    WHEN kind = 'flow' AND json_valid(text) THEN
+                      CASE WHEN json_type(text) = 'object'
+                        THEN COALESCE(json_extract(text, '$.phase'), '') NOT IN ('done', 'cancelled')
+                        ELSE 0 END
+                    WHEN kind = 'decision' AND json_valid(text) THEN
+                      CASE WHEN json_type(text) = 'object'
+                        THEN COALESCE(json_extract(text, '$.status'), '') = 'pending'
+                        ELSE 0 END
+                    WHEN kind = 'process' AND json_valid(text) THEN
+                      CASE WHEN json_type(text) = 'object'
+                        THEN COALESCE(json_extract(text, '$.status'), '') = 'running'
+                        ELSE 0 END
+                    ELSE 0
+                  END
               ) WHERE rn > ?)`,
           )
           .run(HISTORY_PRUNE_KEEP);
@@ -708,41 +724,40 @@ export class Store {
     }
   }
 
-  /** 非终态编排卡条目（phase 非 done/cancelled），供启动时的孤儿卡收尾；只扫最近若干条避免全表加载 */
-  findUnfinishedFlowCards(): { id: number; scopeId: string; at: number; text: string }[] {
+  /** 非终态编排卡条目（phase 非 done/cancelled），供启动时的孤儿卡收尾；keyset 分页避免全表加载 */
+  findUnfinishedFlowCards(beforeId = 0): { id: number; scopeId: string; at: number; text: string }[] {
     try {
-      const rows = this.prep(
-          "SELECT id, scope_id AS scopeId, at, text FROM history WHERE scope = 'room' AND kind = 'flow' ORDER BY id DESC LIMIT ?",
+      return this.prep(
+          `SELECT id, scope_id AS scopeId, at, text FROM history
+           WHERE scope = 'room' AND kind = 'flow' AND (? = 0 OR id < ?)
+             AND CASE WHEN json_valid(text) THEN
+               CASE WHEN json_type(text) = 'object'
+                 THEN COALESCE(json_extract(text, '$.phase'), '') NOT IN ('done', 'cancelled')
+                 ELSE 0 END
+               ELSE 0 END
+           ORDER BY id DESC LIMIT ?`,
         )
-        .all(ORPHAN_CARD_SCAN_LIMIT) as { id: number; scopeId: string; at: number; text: string }[];
-      return rows.filter((r) => {
-        try {
-          const phase = String((JSON.parse(r.text) as Record<string, unknown>).phase ?? "");
-          return phase !== "done" && phase !== "cancelled";
-        } catch {
-          return false;
-        }
-      });
+        .all(beforeId, beforeId, ORPHAN_CARD_SCAN_LIMIT) as { id: number; scopeId: string; at: number; text: string }[];
     } catch (err) {
       logWarn("store", `findUnfinishedFlowCards failed: ${String(err)}`);
       return [];
     }
   }
 
-  /** 未决决策卡条目（kind='decision' 且 meta.status='pending'），供启动时的过期收尾；只扫最近若干条避免全表加载 */
-  findPendingDecisionCards(): { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[] {
+  /** 未决决策卡条目（kind='decision' 且 meta.status='pending'），供启动时的过期收尾；keyset 分页避免全表加载 */
+  findPendingDecisionCards(beforeId = 0): { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[] {
     try {
-      const rows = this.prep(
-          "SELECT id, scope, scope_id AS scopeId, at, text FROM history WHERE kind = 'decision' ORDER BY id DESC LIMIT ?",
+      return this.prep(
+          `SELECT id, scope, scope_id AS scopeId, at, text FROM history
+           WHERE kind = 'decision' AND (? = 0 OR id < ?)
+             AND CASE WHEN json_valid(text) THEN
+               CASE WHEN json_type(text) = 'object'
+                 THEN COALESCE(json_extract(text, '$.status'), '') = 'pending'
+                 ELSE 0 END
+               ELSE 0 END
+           ORDER BY id DESC LIMIT ?`,
         )
-        .all(ORPHAN_CARD_SCAN_LIMIT) as { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[];
-      return rows.filter((r) => {
-        try {
-          return String((JSON.parse(r.text) as Record<string, unknown>).status ?? "") === "pending";
-        } catch {
-          return false;
-        }
-      });
+        .all(beforeId, beforeId, ORPHAN_CARD_SCAN_LIMIT) as { id: number; scope: "session" | "room"; scopeId: string; at: number; text: string }[];
     } catch (err) {
       logWarn("store", `findPendingDecisionCards failed: ${String(err)}`);
       return [];

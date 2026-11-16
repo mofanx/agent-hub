@@ -177,23 +177,29 @@ export function sweepOrphanFlowCards(deps: {
   liveFlowId: (roomId: string) => string | undefined;
   broadcast: (method: string, params: Record<string, unknown>) => void;
 }): void {
-  for (const row of deps.store.findUnfinishedFlowCards()) {
-    let meta: Record<string, unknown>;
-    try {
-      meta = JSON.parse(row.text) as Record<string, unknown>;
-    } catch {
-      continue;
+  let beforeId = 0;
+  while (true) {
+    const rows = deps.store.findUnfinishedFlowCards(beforeId);
+    if (rows.length === 0) break;
+    beforeId = rows[rows.length - 1]!.id;
+    for (const row of rows) {
+      let meta: Record<string, unknown>;
+      try {
+        meta = JSON.parse(row.text) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const liveId = deps.liveFlowId(row.scopeId) ?? "";
+      if (liveId && liveId === meta.flowId) continue;
+      meta.phase = "cancelled";
+      meta.finishedAt = Date.now();
+      const text = JSON.stringify(meta);
+      deps.store.updateEntry(row.id, text);
+      deps.broadcast("room.process", {
+        roomId: row.scopeId,
+        entry: { id: row.id, at: row.at, kind: "flow", author: "", text },
+      });
     }
-    const liveId = deps.liveFlowId(row.scopeId) ?? "";
-    if (liveId && liveId === meta.flowId) continue;
-    meta.phase = "cancelled";
-    meta.finishedAt = Date.now();
-    const text = JSON.stringify(meta);
-    deps.store.updateEntry(row.id, text);
-    deps.broadcast("room.process", {
-      roomId: row.scopeId,
-      entry: { id: row.id, at: row.at, kind: "flow", author: "", text },
-    });
   }
 }
 
@@ -228,6 +234,10 @@ export function makeFlowCardSync(
   };
 
   const finalize = (roomId: string, c: TrackedCard): void => {
+    if (deps.store.entryAt(c.rowId) === undefined) {
+      cards.delete(roomId);
+      return;
+    }
     let meta: Record<string, unknown> = {};
     try {
       meta = JSON.parse(c.text) as Record<string, unknown>;
@@ -256,7 +266,7 @@ export function makeFlowCardSync(
     if (tracked && tracked.flowId !== flowId) finalize(roomId, tracked);
 
     const room = deps.rooms.get(roomId);
-    const text = JSON.stringify(toCardSnapshot(flow, room?.mode ?? ""));
+    const text = JSON.stringify(toCardSnapshot(flow, typeof flow.mode === "string" ? flow.mode : room?.mode ?? ""));
     const hash = createHash("sha1").update(text, "utf8").digest("hex");
     // 落库 at 用 append 时刻：flow.startedAt 是语义锚点（已随快照序列化进 text 供归位），
     // 拿它当排序键会让卡插到触发它的用户消息之前（at/id 倒置）
@@ -264,19 +274,34 @@ export function makeFlowCardSync(
 
     const afterFinalize = cards.get(roomId);
     if (afterFinalize && afterFinalize.flowId === flowId) {
-      if (hash === afterFinalize.hash) return;
-      deps.store.updateEntry(afterFinalize.rowId, text);
-      cards.set(roomId, { ...afterFinalize, hash, text });
-      emit(roomId, afterFinalize, text);
-      return;
+      if (deps.store.entryAt(afterFinalize.rowId) === undefined) {
+        cards.delete(roomId);
+      } else {
+        if (hash === afterFinalize.hash) return;
+        deps.store.updateEntry(afterFinalize.rowId, text);
+        cards.set(roomId, { ...afterFinalize, hash, text });
+        emit(roomId, afterFinalize, text);
+        return;
+      }
     }
 
     // 重启恢复：Flow 已带 cardRowId → 原位覆写；否则新建条目
     const restored = deps.cardRowId(roomId);
-    if (restored !== undefined) {
+    const restoredRow = restored !== undefined
+      ? deps.store.readEntries("room", roomId, [restored])[0]
+      : undefined;
+    let restoredFlowId: unknown;
+    if (restoredRow?.kind === "flow") {
+      try {
+        restoredFlowId = (JSON.parse(restoredRow.text) as Record<string, unknown>).flowId;
+      } catch {
+        restoredFlowId = undefined;
+      }
+    }
+    if (restored !== undefined && restoredRow !== undefined && restoredFlowId === flowId) {
       deps.store.updateEntry(restored, text);
       // 原位覆写不改 at：信封与追踪状态须沿用该行实际存储 at，不能冒用 append 时刻
-      const storedAt = deps.store.entryAt(restored) ?? at;
+      const storedAt = restoredRow.at;
       cards.set(roomId, { flowId, rowId: restored, hash, at: storedAt, text });
       emit(roomId, { rowId: restored, at: storedAt }, text);
       return;

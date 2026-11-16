@@ -143,7 +143,7 @@
   min-height: 0;
   overflow-y: auto;
   position: relative;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .chat-column {
@@ -2820,3 +2820,15 @@ div.turn-tail {
 .attachment-cell.previewable { cursor: pointer; }
 .attach-preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 200; }
 .attach-preview-body { max-width: 80vw; max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 1rem; font-size: 0.75rem; white-space: pre-wrap; }
+
+.load-earlier {
+  display: block;
+  margin: 4px auto 8px;
+  padding: 4px 14px;
+  border: 1px solid var(--border, #444);
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}

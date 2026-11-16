@@ -210,6 +210,10 @@ export function ChatScreen() {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [replyHelp, setReplyHelp] = useState<{ helpId: string; name: string; taskId: string; question: string } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const stickyBottomRef = useRef(true);
+  const pageAnchorRef = useRef<{ el: Element; offset: number; scrollTop: number } | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scopeIdRef = useRef("");
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -302,17 +306,48 @@ export function ChatScreen() {
     });
   }, [matchPositions]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    stickyBottomRef.current = true;
+    pageAnchorRef.current = null;
+    if (scrollTimerRef.current) { clearTimeout(scrollTimerRef.current); scrollTimerRef.current = null; }
+    setIsAtBottom(true);
     store.refreshBusy();
     initialScrolledRef.current = false;
   }, [store.currentRoom?.roomId, store.currentSession?.sessionId]);
 
+  useEffect(() => () => {
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+  }, []);
+
+  scopeIdRef.current = store.currentRoom?.roomId ?? store.currentSession?.sessionId ?? "";
+
   useEffect(() => {
     if (store.chatItems.length === 0) return;
     if (initialScrolledRef.current) return;
+    if (store.historyLoading) return;
     bottomRef.current?.scrollIntoView({ behavior: "auto" });
     initialScrolledRef.current = true;
-  }, [store.chatItems.length]);
+  }, [store.chatItems.length, store.historyLoading]);
+
+  useLayoutEffect(() => {
+    const anchor = pageAnchorRef.current;
+    if (!anchor || !anchor.el.isConnected) { pageAnchorRef.current = null; return; }
+    const el = messagesRef.current;
+    if (!el) return;
+    const rootTop = el.getBoundingClientRect().top;
+    el.scrollTop += (anchor.el.getBoundingClientRect().top - rootTop) - anchor.offset;
+    anchor.scrollTop = el.scrollTop;
+    if (!store.historyLoading) pageAnchorRef.current = null;
+  }, [store.chatItems, store.historyLoading]);
+
+  const lastChatText = (() => {
+    const last = store.chatItems[store.chatItems.length - 1];
+    return last && "text" in last ? last.text : "";
+  })();
+  useEffect(() => {
+    if (!stickyBottomRef.current || pageAnchorRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [store.chatItems.length, lastChatText]);
 
   useEffect(() => {
     if (chatSearchMatchIndex < 0) return;
@@ -436,27 +471,54 @@ export function ChatScreen() {
   }, [input]);
 
   const scrollToBottom = () => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    stickyBottomRef.current = true;
+    pageAnchorRef.current = null;
     setIsAtBottom(true);
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
+  };
+
+  const capturePageAnchor = () => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const rootRect = el.getBoundingClientRect();
+    const rootTop = rootRect.top;
+    const rootBottom = rootRect.bottom;
+    for (const child of Array.from(el.querySelectorAll(".chat-column > .message"))) {
+      const r = child.getBoundingClientRect();
+      if (r.height <= 0 || r.bottom <= rootTop + 2 || r.top >= rootBottom - 2) continue;
+      pageAnchorRef.current = { el: child, offset: r.top - rootTop, scrollTop: el.scrollTop };
+      return;
+    }
+  };
+
+  const loadEarlier = () => {
+    const current = useHubStore.getState();
+    if (!current.historyHasMore || current.historyLoading) return;
+    capturePageAnchor();
+    const method = current.currentRoom ? "room.history" : "session.history";
+    const idKey = current.currentRoom ? "roomId" : "sessionId";
+    const id = current.currentRoom?.roomId ?? current.currentSession?.sessionId;
+    if (id) current.loadMoreHistory(method, idKey, id);
   };
 
   const onMessagesScroll = useMemo(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scopeAtSchedule = scopeIdRef.current;
     return () => {
-      if (timer) return;
-      timer = setTimeout(() => {
-        timer = null;
-        const el = messagesRef.current;
-        if (!el) return;
-        const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop <= 60;
+      const el = messagesRef.current;
+      if (el) {
+        const atBottomNow = el.scrollHeight - el.clientHeight - el.scrollTop <= 60;
+        stickyBottomRef.current = atBottomNow;
+        if (pageAnchorRef.current && store.historyLoading && el.scrollTop !== pageAnchorRef.current.scrollTop) capturePageAnchor();
+      }
+      if (scrollTimerRef.current) return;
+      scrollTimerRef.current = setTimeout(() => {
+        scrollTimerRef.current = null;
+        if (scopeIdRef.current !== scopeAtSchedule) return;
+        const elNow = messagesRef.current;
+        if (!elNow) return;
+        const atBottom = elNow.scrollHeight - elNow.clientHeight - elNow.scrollTop <= 60;
         setIsAtBottom(atBottom);
-        if (!store.historyHasMore || store.historyLoading) return;
-        if (el.scrollTop <= 40) {
-          const method = store.currentRoom ? "room.history" : "session.history";
-          const idKey = store.currentRoom ? "roomId" : "sessionId";
-          const id = store.currentRoom?.roomId ?? store.currentSession?.sessionId;
-          if (id) store.loadMoreHistory(method, idKey, id);
-        }
+        if (elNow.scrollTop <= 40) loadEarlier();
       }, 200);
     };
   }, [store.historyHasMore, store.historyLoading, store.currentRoom, store.currentSession]);
@@ -1130,6 +1192,11 @@ export function ChatScreen() {
                   <div className="mission-nav-hint mission-nav-missing">{S.missionNavMissingFlow}</div>
                 ) : null
               )}
+              {store.historyHasMore && !store.historyLoading && (
+                <button type="button" className="load-earlier" onClick={loadEarlier}>
+                  {S.loadEarlierHistory}
+                </button>
+              )}
               {store.historyLoading && (
                 <div className="history-loading">{S.loadMoreHistory}</div>
               )}
@@ -1793,6 +1860,15 @@ function dateLabel(S: Strings, at: number | undefined): string {
   return d.toLocaleDateString();
 }
 
+const LONG_BODY_PREVIEW = 12000;
+function previewLongBody(text: string): { preview: string; truncated: boolean } {
+  if (text.length <= LONG_BODY_PREVIEW) return { preview: text, truncated: false };
+  let end = LONG_BODY_PREVIEW;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return { preview: text.slice(0, end), truncated: true };
+}
+
 /** markdown HTML 渲染缓存：key=lang:highlight，按 item 对象身份弱引用，条目移除自动 GC */
 const mdHtmlCache = new WeakMap<ChatItem, { key: string; html: string }>();
 
@@ -1831,6 +1907,7 @@ const ChatMessage = memo(function ChatMessage({
   const S = stringsFor(lang);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [selectOpen, setSelectOpen] = useState(false);
+  const [bodyExpanded, setBodyExpanded] = useState(false);
   const currentMatchClass = isCurrentMatch ? "current-match" : "";
 
   const canQuote = item.kind === "user" || item.kind === "assistant" || item.kind === "thought";
@@ -1915,11 +1992,24 @@ const ChatMessage = memo(function ChatMessage({
 
   // 已渲染条目的 markdown HTML 缓存：item 对象在 setState 批量中保持同一引用，
   // 未变条目直接命中，marked 只对新增/变化文本跑一次
-  const markdownHtml = (item: ChatItem & { text: string }) => {
-    const key = `${lang}:${highlight ?? ""}`;
+  const bodyText = item.kind === "user" || item.kind === "assistant" ? item.text : "";
+  const previewable =
+    (item.kind === "user" || item.kind === "assistant") &&
+    !(item.kind === "assistant" && item.streaming) &&
+    bodyText.length > LONG_BODY_PREVIEW;
+  const { preview: bodyPreview } = previewLongBody(bodyText);
+  const searchBeyondPreview =
+    previewable &&
+    !!highlight &&
+    bodyText.toLowerCase().includes(highlight.toLowerCase()) &&
+    !bodyPreview.toLowerCase().includes(highlight.toLowerCase());
+  const showFullBody = bodyExpanded || searchBeyondPreview;
+  const markdownHtml = (item: ChatItem & { text: string }, textOverride?: string, cacheTag = "") => {
+    const key = `${lang}:${highlight ?? ""}:${cacheTag}`;
     const hit = mdHtmlCache.get(item);
     if (hit && hit.key === key) return hit.html;
-    const html = highlight ? highlightHtml(renderMarkdown(item.text, S), highlight) : renderMarkdown(item.text, S);
+    const src = textOverride ?? item.text;
+    const html = highlight ? highlightHtml(renderMarkdown(src, S), highlight) : renderMarkdown(src, S);
     mdHtmlCache.set(item, { key, html });
     return html;
   };
@@ -1956,7 +2046,13 @@ const ChatMessage = memo(function ChatMessage({
                 {S.quoteLineFmt.replace("%s", item.quoteAuthor).replace("%s", item.quoteText?.slice(0, 80) ?? "")}
               </div>
             )}
-            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
+            <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item, showFullBody || !previewable ? undefined : bodyPreview, showFullBody ? "f" : "p") }} />
+            {previewable && !showFullBody && (
+              <button type="button" className="body-expand" onClick={() => setBodyExpanded(true)}>{S.expandMessageBody}</button>
+            )}
+            {previewable && showFullBody && bodyExpanded && !searchBeyondPreview && (
+              <button type="button" className="body-expand" onClick={() => setBodyExpanded(false)}>{S.collapseMessageBody}</button>
+            )}
             {item.missionId && <div className="mission-tag">{S.missionDrivenTag}</div>}
           </div>
           {attachmentsEl}
@@ -1979,7 +2075,15 @@ const ChatMessage = memo(function ChatMessage({
             {item.streaming ? (
               <div className="text stream-plain" onClick={onTextClick}>{item.text}</div>
             ) : (
-              <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item) }} />
+              <>
+                <div className="text" onClick={onTextClick} dangerouslySetInnerHTML={{ __html: markdownHtml(item, showFullBody || !previewable ? undefined : bodyPreview, showFullBody ? "f" : "p") }} />
+                {previewable && !showFullBody && (
+                  <button type="button" className="body-expand" onClick={() => setBodyExpanded(true)}>{S.expandMessageBody}</button>
+                )}
+                {previewable && showFullBody && bodyExpanded && !searchBeyondPreview && (
+                  <button type="button" className="body-expand" onClick={() => setBodyExpanded(false)}>{S.collapseMessageBody}</button>
+                )}
+              </>
             )}
             <MissionDraftCards text={item.text} sourceId={item.historyId ? `history:${item.historyId}` : undefined} />
             {usageText}
@@ -2760,6 +2864,8 @@ function DecisionCard({ meta }: { meta: DecisionMeta }) {
 /** 常驻进度条：钉在顶栏与消息区之间，仅 flow 活跃时存在；点主区定位卡片，点箭头展开任务列表 */
 function FlowStrip({ flow, onLocate }: { flow: FlowView; onLocate: () => boolean }) {
   const store = useHubStore();
+  const navTS = store.missionExecutionTarget;
+  const navTargetTaskId = navTS != null && navTS.flowId === flow.flowId && navTS.roomId === store.currentRoom?.roomId ? navTS.taskId : null;
   const S = stringsFor(store.lang);
   const [expanded, setExpanded] = useState(false);
   const { progress, tasks, phase } = flow;
@@ -2801,18 +2907,34 @@ function FlowStrip({ flow, onLocate }: { flow: FlowView; onLocate: () => boolean
       </div>
       {expanded && (
         <div className="flow-strip-tasks">
-          <FlowCardBody flow={flow} showRetry={phase === "awaiting-retry"} />
+          <FlowCardBody key={flow.flowId ?? ""} flow={flow} showRetry={phase === "awaiting-retry"} targetTaskId={navTargetTaskId} />
         </div>
       )}
     </div>
   );
 }
 
+function visibleFlowTasks(tasks: FlowTask[], count: number, targetTaskId?: string | null): FlowTask[] {
+  if (tasks.length <= count) return tasks;
+  const firstTwoFailed = new Set(
+    tasks.filter((t) => t.status === "failed").slice(0, 2).map((t) => t.id),
+  );
+  return tasks.filter(
+    (t, i) =>
+      i < count ||
+      t.status === "running" ||
+      t.waitingFor === "user" ||
+      t.id === targetTaskId ||
+      firstTwoFailed.has(t.id),
+  );
+}
+
 /** 验收清单 + 完成摘要 + 任务列表 + supplements，FlowPanel 与 FlowCard 共用 */
-function FlowCardBody({ flow, showRetry }: { flow: FlowView; showRetry: boolean }) {
+function FlowCardBody({ flow, showRetry, targetTaskId }: { flow: FlowView; showRetry: boolean; targetTaskId?: string | null }) {
   const store = useHubStore();
   const S = stringsFor(store.lang);
   const { progress, tasks, phase } = flow;
+  const [shownTasks, setShownTasks] = useState(20);
   return (
     <>
       {flow.acceptanceCriteria && flow.acceptanceCriteria.length > 0 && (
@@ -2849,9 +2971,21 @@ function FlowCardBody({ flow, showRetry }: { flow: FlowView; showRetry: boolean 
         </div>
       )}
       <div className="flow-tasks">
-        {tasks.map((t) => (
-          <FlowTaskItem key={`${flow.flowId ?? ""}:${t.id}`} task={t} showRetry={showRetry} flowId={flow.flowId ?? ""} />
-        ))}
+        {(() => {
+          const visibleTasks = visibleFlowTasks(tasks, shownTasks, targetTaskId);
+          return (
+            <>
+              {visibleTasks.map((t) => (
+                <FlowTaskItem key={`${flow.flowId ?? ""}:${t.id}`} task={t} showRetry={showRetry} flowId={flow.flowId ?? ""} />
+              ))}
+              {visibleTasks.length < tasks.length && (
+                <button type="button" className="flow-tasks-more" onClick={() => setShownTasks((n) => n + 20)}>
+                  {S.showMoreTasks}
+                </button>
+              )}
+            </>
+          );
+        })()}
       </div>
       {flow.supplements && flow.supplements.length > 0 && (
         <div className="flow-supplements">
@@ -2890,6 +3024,7 @@ function FlowCard({
   const collapsed = choice ?? terminal;
   const navT = store.missionExecutionTarget;
   const navHit = navT != null && navT.flowId === item.flowId && navT.roomId === store.currentRoom?.roomId;
+  const navTargetTaskId = navHit ? navT?.taskId ?? null : null;
   useEffect(() => {
     if (navHit) setChoice(false);
   }, [navHit ? navT?.nonce : 0]);
@@ -3013,7 +3148,7 @@ function FlowCard({
                   {flow.goal}
                 </div>
               )}
-              <FlowCardBody flow={flow} showRetry={showRetry} />
+              <FlowCardBody key={flow.flowId ?? ""} flow={flow} showRetry={showRetry} targetTaskId={navTargetTaskId} />
               {(canAbort || showRetry) && (
                 <div className="flow-card-actions">
                   {canAbort && (

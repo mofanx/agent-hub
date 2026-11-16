@@ -800,6 +800,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val recoveryResetBase = mutableMapOf<String, Set<ChatItem>>()
     private var anchorScopeKey: String? = null
     private val historyMoreCache = mutableMapOf<String, Boolean>()
+    private val historyPageCursors = mutableMapOf<String, Pair<Long, Long>>()
+    private var historyViewSeq = 0L
     internal val attentionItems = mutableStateListOf<AttentionTarget>()
     var showAttentionManager by mutableStateOf(false)
     var attentionRequestId by mutableStateOf<String?>(null)
@@ -2050,6 +2052,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             chatItems.clear()
             chatCache.clear()
             historyMoreCache.clear()
+            historyPageCursors.clear()
             chatCacheKeys.clear()
             flowCache.clear()
             panelsCache.clear()
@@ -2178,6 +2181,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         fileRefToInsert = null
         chatCache.clear()
         historyMoreCache.clear()
+        historyPageCursors.clear()
         chatCacheKeys.clear()
         scopeSeen.clear()
         flowCache.clear()
@@ -3480,6 +3484,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         panelsCache.remove(key)
         recoveryResetBase.remove(key)
         historyMoreCache.remove(key)
+        historyPageCursors.remove(key)
+        historyPageCursors.remove("anchor:$key")
         if (scope == "room") {
             flowCache.remove(id)
             HubService.dropRoomAttention(id)
@@ -3807,8 +3813,33 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun scopeItems(key: String): List<ChatItem> =
         if (scopeKey() == key && anchorScopeKey != key) chatItems.toList() else chatCache[key].orEmpty()
 
+    private fun historyReadItems(key: String): List<ChatItem> =
+        scopeItems(key) + if (scopeKey() == key && anchorScopeKey == key) chatItems else emptyList()
+
+    private fun isActiveChatItem(it: ChatItem, key: String = ""): Boolean = when (it) {
+        is ChatItem.User -> it.sendStatus in setOf("pending", "sending", "uncertain", "failed") ||
+            (historyIdOf(it) == null && it.clientMessageId != null &&
+                deliveryRecords.none { r -> r.clientMessageId == it.clientMessageId && r.scopeKey == key })
+        is ChatItem.Flow -> it.snapshot.phase !in setOf("done", "cancelled")
+        is ChatItem.Decision -> it.status == "pending"
+        is ChatItem.Process -> it.status == "running"
+        is ChatItem.Assistant -> isStreamingTail(it.id) || (it.id > 0 && it.replyText == null)
+        is ChatItem.Thought -> isStreamingTail(it.id)
+        is ChatItem.Tool -> it.status !in setOf("completed", "failed", "cancelled", "done")
+        is ChatItem.Elicitation -> it.answered == null
+        else -> false
+    }
+
+    private fun compactCacheItems(key: String, items: List<ChatItem>): List<ChatItem> {
+        fun pinned(it: ChatItem) = historyIdOf(it)?.let { id -> deliveryRecovery.isDraftId(key, id) } == true
+        val stable = items.filter { !isActiveChatItem(it, key) && !pinned(it) }
+            .sortedWith(compareBy<ChatItem> { it.at }.thenBy { historyIdOf(it) ?: Long.MAX_VALUE })
+            .takeLast(50).toSet()
+        return items.filter { it in stable || isActiveChatItem(it, key) || pinned(it) }
+    }
+
     private fun updateScopeItems(key: String, items: List<ChatItem>) {
-        chatCache[key] = items
+        chatCache[key] = compactCacheItems(key, items)
         chatCacheKeys.remove(key)
         chatCacheKeys.addFirst(key)
         trimChatCache()
@@ -3831,6 +3862,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             panelsCache.remove(evicted)
             scopeSeen.remove(evicted)
             historyMoreCache.remove(evicted)
+            historyPageCursors.remove(evicted)
+            historyPageCursors.remove("anchor:$evicted")
+            recoveryResetBase.remove(evicted)
             if (::deliveryRecovery.isInitialized) deliveryRecovery.forget(evicted)
         }
     }
@@ -3904,16 +3938,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun applyRecoveredRows(key: String, rows: List<JsonObject>, reset: Boolean, cardsCurrent: Boolean) {
-        val previous = scopeItems(key)
+    private fun parseRecoveredRows(key: String, rows: List<JsonObject>, previous: List<ChatItem>, cardsCurrent: Boolean, requestItems: Set<Any>? = null): List<ChatItem> {
         val roomId = key.takeIf { it.startsWith("room:") }?.substringAfter(':')
-        val incoming = rows.mapNotNull { row ->
+        return rows.mapNotNull { row ->
             val id = (row["id"] as? JsonPrimitive)?.longOrNull ?: return@mapNotNull null
             val parsed = parseHistoryItem(row, -id, roomId) ?: return@mapNotNull null
             val original = previous.find { sameHistoryItem(it, parsed) }
+            if (original != null && requestItems != null && !requestItems.contains(original) &&
+                parsed !is ChatItem.Assistant && parsed !is ChatItem.User) return@mapNotNull original
             when {
-                !cardsCurrent && (parsed is ChatItem.Flow || parsed is ChatItem.Decision) -> original ?: parsed
+                requestItems == null && !cardsCurrent && (parsed is ChatItem.Flow || parsed is ChatItem.Decision) -> original ?: parsed
                 parsed is ChatItem.User && original is ChatItem.User -> original.copy(historyId = id, historyAt = parsed.at, at = parsed.at)
+                parsed is ChatItem.Assistant && original is ChatItem.Assistant -> {
+                    val pid = historyIdOf(parsed)
+                    if (pid != null && pid == historyIdOf(original)) {
+                        val pDraft = (row["draft"] as? JsonPrimitive)?.intOrNull == 1
+                        val oDraft = original.replyText == null &&
+                            (deliveryRecovery.isDraftId(key, pid) || streamingTail?.second == original.id)
+                        when {
+                            !pDraft -> parsed
+                            !oDraft -> original.copy(replyText = original.replyText ?: original.text)
+                            else -> {
+                                if (parsed.text.startsWith(original.text) || original.text.startsWith(parsed.text)) {
+                                    if (parsed.text.length >= original.text.length) parsed else original
+                                } else if (parsed.at >= original.at) parsed else original
+                            }
+                        }
+                    } else parsed
+                }
                 parsed is ChatItem.Decision && parsed.decisionType == "elicitation" -> {
                     val elicitation = previous.filterIsInstance<ChatItem.Elicitation>().find { it.requestId == parsed.requestId }
                     elicitation?.copy(id = -id, answered = if (parsed.status == "pending") elicitation.answered else parsed.answerLabel ?: parsed.status) ?: parsed
@@ -3921,12 +3973,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 else -> parsed
             }
         }
+    }
+
+    private fun applyRecoveredRows(key: String, rows: List<JsonObject>, reset: Boolean, cardsCurrent: Boolean, requestItems: Set<Any>? = null, anchor: Boolean = false) {
+        val previous = if (anchor) chatItems.toList() else scopeItems(key)
+        val incoming = parseRecoveredRows(key, rows, previous, cardsCurrent, requestItems)
         val base = if (reset) {
             val before = recoveryResetBase.remove(key).orEmpty()
             val owned = deliveryRecords.filter {
                 it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == key
             }.map { it.clientMessageId }.toSet()
-            previous.filter { it !in before || (it is ChatItem.User && it.clientMessageId in owned) }
+            previous.filter {
+                it !in before || isActiveChatItem(it, key) ||
+                    (historyIdOf(it)?.let { id -> deliveryRecovery.isDraftId(key, id) } == true) ||
+                    (it is ChatItem.User && it.clientMessageId in owned)
+            }
         } else previous
         val tail = base.filter { old -> incoming.none {
             sameHistoryItem(old, it) || (old is ChatItem.Permission && it is ChatItem.Decision && old.requestId == it.requestId)
@@ -3960,7 +4021,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 else item.at
             if (at <= 0) Long.MAX_VALUE else at
         }.thenBy { historyIdOf(it) ?: Long.MAX_VALUE })
-        updateScopeItems(key, combined)
+        if (anchor) {
+            chatItems.clear()
+            chatItems.addAll(combined)
+        } else {
+            updateScopeItems(key, combined)
+        }
         deliveryRecords.filter {
             it.origin == deliveryOrigin && it.hubId == deliveryHubId && it.scopeKey == key
         }.forEach { recordDelivery(it) }
@@ -3989,27 +4055,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun recoverScope(key: String): JsonObject? {
+    private suspend fun recoverScope(key: String, refreshHistory: Boolean = true): JsonObject? {
         val generation = missionConnectionGeneration
         val epoch = profileEpoch
+        val seq = roomOpenSeq
+        val viewSeq = historyViewSeq
+        val ownsLoading = refreshHistory && scopeKey() == key && anchorScopeKey != key
+        if (ownsLoading) historyLoading = true
         val visible = scopeItems(key) + if (anchorScopeKey == key && scopeKey() == key) chatItems else emptyList()
         deliveryRecovery.retainDrafts(key, visible.mapNotNull { historyIdOf(it) }.toSet())
-        return deliveryRecovery.recover(key, deliveryProtocol) { currentConnection(epoch, generation) }
+        try {
+            return deliveryRecovery.recover(key, deliveryProtocol, refreshHistory) {
+                currentConnection(epoch, generation) && (!refreshHistory || roomOpenSeq == seq)
+            }
+        } finally {
+            if (ownsLoading && historyViewSeq == viewSeq && scopeKey() == key && anchorScopeKey != key) {
+                historyLoading = false
+            }
+        }
     }
 
     private suspend fun recoveryRpc(method: String, params: JsonObject): JsonObject {
         val generation = missionConnectionGeneration
         val epoch = profileEpoch
         val result = hub.call(method, params)
-        if (currentConnection(epoch, generation) && method in setOf("room.history", "session.history") &&
-            params["afterId"] == null && params["before"] == null && params["anchorAt"] == null) {
-            val kind = method.substringBefore('.')
-            val id = (params[if (kind == "room") "roomId" else "sessionId"] as? JsonPrimitive)?.contentOrNull
-            val key = "$kind:$id"
-            val more = (result["hasMore"] as? JsonPrimitive)?.booleanOrNull == true
-            historyMoreCache[key] = more
-            if (scopeKey() == key && anchorScopeKey != key) historyHasMore = more
-        }
+        check(currentConnection(epoch, generation)) { "recovery_stale" }
         return result
     }
 
@@ -4032,7 +4102,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val target = record.scopeKey.substringAfter(':')
         if (record.method == "room.message") {
             val room = rooms.find { it.roomId == target } ?: return "context"
-            val snapshot = recoverScope(record.scopeKey) ?: return "context"
+            val snapshot = recoverScope(record.scopeKey, false) ?: return "context"
             if (!valid()) throw CancellationException("delivery_stale")
             val expectedState = (record.params["expectedFlowState"] as? JsonPrimitive)?.contentOrNull ?: return "context"
             val expectedMode = (record.params["expectedRoomMode"] as? JsonPrimitive)?.contentOrNull ?: return "context"
@@ -4057,7 +4127,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }) return "busy"
             }
         } else {
-            recoverScope(record.scopeKey)
+            recoverScope(record.scopeKey, false)
             val list = hub.call("session.list")["sessions"] as? JsonArray ?: return "sync"
             if (!valid()) throw CancellationException("delivery_stale")
             val session = list.map { it.jsonObject }.find {
@@ -4084,7 +4154,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val key = scopeKey() ?: return
         flushStreamChunks()
         saveComposition()
-        if (anchorScopeKey != key) chatCache[key] = chatItems.toList()
+        if (anchorScopeKey != key) chatCache[key] = compactCacheItems(key, chatItems.toList())
         panelsCache[key] = ScopePanels(
             currentArtifacts.toList(),
             currentEvents.toList(),
@@ -4663,12 +4733,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             at = at,
         )
 
+    // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
+    private fun sameChatAuthor(a: String, b: String): Boolean =
+        a == b || a.startsWith("$b (") || b.startsWith("$a (")
+
     private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
         fun sameWindow(h: ChatItem, t: ChatItem): Boolean =
             h.at == 0L || t.at == 0L || kotlin.math.abs(h.at - t.at) <= 300_000L
-        // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
-        fun sameAuthor(h: ChatItem, t: ChatItem): Boolean =
-            h.author == t.author || h.author.startsWith("${t.author} (") || t.author.startsWith("${h.author} (")
+
         // 时间门控：仅 live 副本不晚于持久化版本（残副本场景）才按指纹吞并，
         // 更晚到达的同文本/同前缀回复视为新回合保留
         fun earlierLive(h: ChatItem, t: ChatItem): Boolean =
@@ -4681,7 +4753,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         // 同域比较：已回显气泡用 historyAt（server 域）套窗；未回显气泡 client at
                         // 与 server at 跨时钟域，300s 窗在偏移下失效——按指纹吞并（重复发送回显后自愈）
-                        val fp = sameAuthor(it, t) && (it.text == t.text || it.text.endsWith(t.text))
+                        val fp = sameChatAuthor(it.author, t.author) && (it.text == t.text || it.text.endsWith(t.text))
                         val ha = t.historyAt
                         if (ha != null) fp && kotlin.math.abs(it.at - ha) <= 300_000L else fp
                     } }
@@ -4691,15 +4763,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // 指纹级匹配不限 300s 窗口但带时间门控：同作者 + live 不晚于持久化 +
                     // 全文相等或互为前缀（含持久化截断为前缀）；已定稿 replyText 与落库条目
                     // 是同一条——断线/迟到恢复时 client at 可大于 server at，不再受时间门控
-                    hist.none { it is ChatItem.Assistant && sameAuthor(it, t) && (t.replyText != null || earlierLive(it, t)) && (it.text == (t.replyText ?: t.text) || it.text.startsWith(t.replyText ?: t.text) || (t.replyText ?: t.text).startsWith(it.text)) }
+                    hist.none { it is ChatItem.Assistant && sameChatAuthor(it.author, t.author) && (t.replyText != null || earlierLive(it, t)) && (it.text == (t.replyText ?: t.text) || it.text.startsWith(t.replyText ?: t.text) || (t.replyText ?: t.text).startsWith(it.text)) }
                 is ChatItem.Thought ->
-                    hist.none { it is ChatItem.Thought && sameAuthor(it, t) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
+                    hist.none { it is ChatItem.Thought && sameChatAuthor(it.author, t.author) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
                 is ChatItem.Tool ->
                     hist.none { it is ChatItem.Tool && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId }
                 is ChatItem.Plan ->
-                    hist.none { it is ChatItem.Plan && sameAuthor(it, t) && it.entries == t.entries }
+                    hist.none { it is ChatItem.Plan && sameChatAuthor(it.author, t.author) && it.entries == t.entries }
                 is ChatItem.Error ->
-                    hist.none { it is ChatItem.Error && sameWindow(it, t) && sameAuthor(it, t) && it.text == t.text }
+                    hist.none { it is ChatItem.Error && sameWindow(it, t) && sameChatAuthor(it.author, t.author) && it.text == t.text }
                 is ChatItem.Process ->
                     hist.none { it is ChatItem.Process && t.processId.isNotEmpty() && it.processId == t.processId }
                 is ChatItem.Flow ->
@@ -4714,10 +4786,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val author = sessionName(sid)
         val indices = chatItems.indices.filter {
             val item = chatItems[it]
-            item is ChatItem.Assistant && item.id > 0 && item.author == author && item.replyText == null
+            item is ChatItem.Assistant && item.replyText == null && sameChatAuthor(item.author, author) &&
+                (item.id > 0 || deliveryRecovery.isDraftId(scopeKey() ?: "", -item.id))
         }
         val text = output?.takeIf { it.isNotBlank() } ?: indices.joinToString("") { chatItems[it].text }
         indices.forEach { chatItems[it] = (chatItems[it] as ChatItem.Assistant).copy(replyText = text) }
+    }
+
+    private fun historyPageCursor(rows: List<JsonObject>): Pair<Long, Long>? {
+        var bestAt = Long.MAX_VALUE
+        var bestId = Long.MAX_VALUE
+        rows.forEach { row ->
+            val at = (row["at"] as? JsonPrimitive)?.longOrNull ?: return@forEach
+            val rid = (row["id"] as? JsonPrimitive)?.longOrNull ?: return@forEach
+            if (at < bestAt || (at == bestAt && rid < bestId)) { bestAt = at; bestId = rid }
+        }
+        return if (bestAt != Long.MAX_VALUE) bestAt to bestId else null
+    }
+
+    private fun rememberHistoryPage(key: String, response: JsonObject, anchor: Boolean = false) {
+        val cursorKey = if (anchor) "anchor:$key" else key
+        val rows = (response["entries"] as? JsonArray)?.map { it.jsonObject } ?: emptyList()
+        val cursor = historyPageCursor(rows)
+        if (cursor != null) historyPageCursors[cursorKey] = cursor else historyPageCursors.remove(cursorKey)
+        val more = (response["hasMore"] as? JsonPrimitive)?.booleanOrNull == true
+        if (!anchor) historyMoreCache[key] = more
+        if (scopeKey() == key && (anchorScopeKey == key) == anchor) historyHasMore = more
     }
 
     private fun loadHistory(method: String, idKey: String, id: String, anchorAt: Long? = null): Job {
@@ -4729,6 +4823,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val scopeAtStart = scopeKey()
         val seqAtStart = roomOpenSeq
         val genAtStart = missionConnectionGeneration
+        val viewSeq = ++historyViewSeq
+        historyLoading = true
         return viewModelScope.launch {
             try {
                 if (anchorAt == null) {
@@ -4738,41 +4834,48 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val params = buildJsonObject {
                     put(idKey, id)
                     put("anchorAt", anchorAt)
+                    put("limit", 25)
                     put("ifcAuthorized", true)
                 }
+                val requestItems = historyReadItems(key).toSet()
                 val result = hub.call(method, params)
-                if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
+                if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart || historyViewSeq != viewSeq) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
-                historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
                 val rows = entries.map { it.jsonObject }
-                if (anchorScopeKey != key) chatCache[key] = chatItems.toList()
+                if (anchorScopeKey != key) chatCache[key] = compactCacheItems(key, chatItems.toList())
                 anchorScopeKey = key
-                val items = rows.mapNotNull { row ->
-                    val hid = row["id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
-                    parseHistoryItem(row, -hid, if (method == "room.history") id else null)
-                }
+                val items = parseRecoveredRows(key, rows, historyReadItems(key), true, requestItems)
                 chatItems.clear()
                 chatItems.addAll(items)
                 deliveryRecovery.remember(key, rows)
+                rememberHistoryPage(key, result, true)
                 recoverScope(key)
                 syncBusyIds()
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 if (missionConnectionGeneration == genAtStart) deliveryError = "sync"
+            } finally {
+                if (scopeKey() == scopeAtStart && roomOpenSeq == seqAtStart && missionConnectionGeneration == genAtStart && historyViewSeq == viewSeq) {
+                    historyLoading = false
+                }
             }
         }
     }
 
     fun loadMoreHistory() {
         if (historyLoading || !historyHasMore) return
-        val oldest = chatItems.filter { historyIdOf(it) != null && (it !is ChatItem.User || it.historyAt != null) }
-            .minWithOrNull(compareBy<ChatItem> { (it as? ChatItem.User)?.historyAt ?: it.at }.thenBy { historyIdOf(it) }) ?: return
-        val oldestAt = (oldest as? ChatItem.User)?.historyAt ?: oldest.at
-        if (oldestAt == 0L) return
+        val scopeKeyNow = scopeKey() ?: return
+        val cursorKey = if (anchorScopeKey == scopeKeyNow) "anchor:$scopeKeyNow" else scopeKeyNow
+        val cursor = historyPageCursors[cursorKey] ?: return
+        val beforeAt = cursor.first
+        val beforeId = cursor.second
+        if (beforeAt == 0L) return
         historyLoading = true
         val scopeAtStart = scopeKey()
         val seqAtStart = roomOpenSeq
         val genAtStart = missionConnectionGeneration
+        val viewSeq = historyViewSeq
+        val anchorMode = anchorScopeKey == scopeKeyNow
         viewModelScope.launch {
             try {
                 val (method, idKey, id) = when {
@@ -4780,33 +4883,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     currentSession != null -> Triple("session.history", "sessionId", currentSession!!.sessionId)
                     else -> return@launch
                 }
+                val requestItems = historyReadItems(scopeAtStart ?: return@launch).toSet()
                 val result = hub.call(method, buildJsonObject {
                     put(idKey, id)
-                    put("before", JsonPrimitive(oldestAt))
-                    put("beforeId", JsonPrimitive(historyIdOf(oldest)!!))
+                    put("before", JsonPrimitive(beforeAt))
+                    put("beforeId", JsonPrimitive(beforeId))
                     put("limit", 50)
                 })
-                if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart) return@launch
+                if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart || historyViewSeq != viewSeq) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
-                historyHasMore = result["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
                 val key = scopeAtStart ?: return@launch
                 val rows = entries.map { it.jsonObject }
-                if (anchorScopeKey == key) {
-                    val items = rows.mapNotNull { row ->
-                        val hid = row["id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
-                        parseHistoryItem(row, -hid, if (method == "room.history") id else null)
-                    }
-                    chatItems.addAll(0, items.filter { item -> chatItems.none { sameHistoryItem(it, item) } })
-                } else {
-                    historyMoreCache[key] = historyHasMore
-                    applyRecoveredRows(key, rows, false, false)
-                }
+                rememberHistoryPage(key, result, anchorMode)
+                applyRecoveredRows(key, rows, false, false, requestItems = requestItems, anchor = anchorMode)
                 deliveryRecovery.remember(key, rows)
-                recoverScope(key)
+                recoverScope(key, false)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             } finally {
-                if (scopeKey() == scopeAtStart && roomOpenSeq == seqAtStart && missionConnectionGeneration == genAtStart) {
+                if (scopeKey() == scopeAtStart && roomOpenSeq == seqAtStart && missionConnectionGeneration == genAtStart && historyViewSeq == viewSeq) {
                     historyLoading = false
                 }
             }
@@ -6286,7 +6381,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } finally {
             if (scopeKey() == key) {
                 val latest = chatItems.toList()
-                chatCache[key] = latest
+                chatCache[key] = compactCacheItems(key, latest)
                 chatItems.clear()
                 chatItems.addAll(window.map { item -> latest.find {
                     sameHistoryItem(it, item) || (it is ChatItem.Decision && item is ChatItem.Permission && it.requestId == item.requestId)
@@ -6628,7 +6723,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (text.isEmpty()) continue
             val last = chatItems.lastOrNull()
             if (run.kind == "t") {
-                if (last is ChatItem.Thought && last.author == author && streamingTail?.second == last.id) {
+                if (last is ChatItem.Thought && sameChatAuthor(last.author, author) && streamingTail?.second == last.id) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
                     streamingTail = run.sessionId to last.id
                 } else {
@@ -6637,7 +6732,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     streamingTail = run.sessionId to id
                 }
             } else {
-                if (last is ChatItem.Assistant && last.author == author && streamingTail?.second == last.id && last.replyText == null) {
+                val draftTail = last is ChatItem.Assistant && last.id < 0 && last.replyText == null &&
+                    deliveryRecovery.isDraftId(scopeKey() ?: "", -last.id)
+                if (last is ChatItem.Assistant && sameChatAuthor(last.author, author) && last.replyText == null &&
+                    (streamingTail?.second == last.id || draftTail)) {
                     chatItems[chatItems.lastIndex] = last.copy(text = last.text + text)
                     streamingTail = run.sessionId to last.id
                 } else {
@@ -6842,14 +6940,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         debugInstance = this
         deliveryRecovery = DeliveryRecovery(
             rpc = ::recoveryRpc,
-            applyRows = ::applyRecoveredRows,
+            applyRows = { key, rows, reset, cardsCurrent, requestItems -> applyRecoveredRows(key, rows, reset, cardsCurrent, requestItems) },
             applyRoom = ::applyRecoveryRoom,
-            knownCards = { key ->
-                val visible = scopeItems(key) + if (scopeKey() == key && anchorScopeKey == key) chatItems else emptyList()
-                visible.filter { it is ChatItem.Flow || it is ChatItem.Decision || it is ChatItem.Elicitation }
-                    .mapNotNull { historyIdOf(it) }.distinct()
-            },
+            knownCards = { key -> historyReadItems(key)
+                .filter { it is ChatItem.Flow || it is ChatItem.Decision || it is ChatItem.Elicitation }
+                .mapNotNull { historyIdOf(it) }.distinct() },
             beforeReset = { key -> recoveryResetBase[key] = scopeItems(key).toSet() },
+            afterReset = { key -> recoveryResetBase.remove(key) },
+            onTail = { key, response -> rememberHistoryPage(key, response) },
+            mutableEntries = { key ->
+                scopeItems(key).filter { it is ChatItem.Process && it.status == "running" }
+                    .mapNotNull { historyIdOf(it) }
+            },
+            captureItems = { key -> historyReadItems(key).toSet() },
         )
         delivery = DeliveryOutbox(
             scope = viewModelScope,

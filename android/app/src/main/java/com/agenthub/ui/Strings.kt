@@ -332,6 +332,8 @@ interface Strings {
     val authorMe: String
     val fileLabel: String
     val loadMoreHistory: String
+    val loadEarlierHistory: String
+    val showMoreTasks: String
     val jumpToBottom: String
     val dateToday: String
     val dateYesterday: String
@@ -1046,6 +1048,8 @@ object ZhStrings : Strings {
     override val authorMe = "我"
     override val fileLabel = "文件"
     override val loadMoreHistory = "加载更多历史…"
+    override val loadEarlierHistory = "加载更早消息"
+    override val showMoreTasks = "显示更多子任务"
     override val jumpToBottom = "跳转到最下方"
     override val dateToday = "今天"
     override val dateYesterday = "昨天"
@@ -1768,6 +1772,8 @@ object EnStrings : Strings {
     override val authorMe = "me"
     override val fileLabel = "File"
     override val loadMoreHistory = "Load more history…"
+    override val loadEarlierHistory = "Load earlier messages"
+    override val showMoreTasks = "Show more subtasks"
     override val jumpToBottom = "Jump to bottom"
     override val dateToday = "Today"
     override val dateYesterday = "Yesterday"

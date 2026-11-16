@@ -1104,6 +1104,18 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             }
                         }
                     }
+                    if (vm.historyHasMore && !vm.historyLoading) {
+                        item(key = "load-earlier-history") {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                TextButton(onClick = { vm.loadMoreHistory() }) {
+                                    Text(S.loadEarlierHistory, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
                 }
                 if (!isAtBottom && vm.chatItems.isNotEmpty()) {
                     FilledIconButton(
@@ -2176,7 +2188,7 @@ private fun MessageBlock(
                     )
                 }
             }
-            MissionDraftCards(item.text, vm, item.originalId.takeIf { it < 0 }?.let { "history:${-it}" })
+            if (item.isLast) MissionDraftCards(item.text, vm, item.originalId.takeIf { it < 0 }?.let { "history:${-it}" })
             if (item.isLast && item.usage != null) {
                 Text(
                     item.usage.format(S),
@@ -3129,6 +3141,14 @@ private fun formatElapsed(start: Long, end: Long, S: Strings): String {
     return S.elapsedHourFmt.format(m / 60, m % 60)
 }
 
+private fun visibleFlowTasks(tasks: List<FlowTask>, count: Int, targetTaskId: String? = null): List<FlowTask> {
+    if (tasks.size <= count) return tasks
+    val firstTwoFailed = tasks.filter { it.status == "failed" }.take(2).map { it.id }.toSet()
+    return tasks.filterIndexed { i, t ->
+        i < count || t.status == "running" || t.waitingFor == "user" || t.id == targetTaskId || t.id in firstTwoFailed
+    }
+}
+
 /** 编排消息卡：锚定在房史流中；vm.flow.flowId 匹配时走实时数据，否则渲染内嵌快照 */
 @Composable
 private fun FlowCardBlock(
@@ -3144,8 +3164,10 @@ private fun FlowCardBlock(
     val terminal = flow.phase == "done" || flow.phase == "cancelled"
     // 折叠默认：进行中展开、终态折叠；用户手动选择后按 flowId 记忆（-1 未选/0 展开/1 折叠）
     var collapsedChoice by rememberSaveable(item.flowId) { mutableStateOf(-1) }
+    var shownTasks by remember(flow.flowId.ifEmpty { item.flowId }) { mutableStateOf(20) }
     val navT = vm.missionExecutionTarget
     val navHit = ChatViewModel.missionFlowNavMatch(navT, vm.currentRoom?.roomId, flow.flowId.ifEmpty { item.flowId })
+    val navTargetTaskId = if (navHit) navT?.taskId else null
     LaunchedEffect(if (navHit) navT?.nonce else 0L) { if (navHit) collapsedChoice = 0 }
     val collapsed = if (collapsedChoice >= 0) collapsedChoice == 1 else terminal
     // 进行中卡片每秒刷新耗时
@@ -3416,10 +3438,14 @@ private fun FlowCardBlock(
                 Spacer(Modifier.height(6.dp))
                 val flowKey = flow.flowId.ifEmpty { item.flowId.ifEmpty { "__live" } }
                 Column {
-                    flow.tasks.forEach { task ->
+                    val visibleTasks = visibleFlowTasks(flow.tasks, shownTasks, navTargetTaskId)
+                    visibleTasks.forEach { task ->
                         key(flowKey, task.id) {
                             FlowTaskRow(task, flowKey, showRetry, vm, flow.roomId) { vm.retryTask(task.id) }
                         }
+                    }
+                    if (visibleTasks.size < flow.tasks.size) {
+                        TextButton(onClick = { shownTasks += 20 }) { Text(S.showMoreTasks) }
                     }
                 }
                 if (flow.supplements.isNotEmpty()) {
@@ -4732,12 +4758,14 @@ private fun FlowProgressStrip(
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Column(
-                        Modifier
-                            .heightIn(max = 280.dp)
-                            .verticalScroll(rememberScrollState()),
-                    ) {
-                        flow.tasks.forEach { FlowStripTaskRow(it) }
+                    key(flow.flowId) {
+                        LazyColumn(
+                            Modifier
+                                .heightIn(max = 280.dp)
+                                .fillMaxWidth(),
+                        ) {
+                            items(flow.tasks, key = { t -> "${flow.flowId}:${t.id}" }) { t -> FlowStripTaskRow(t) }
+                        }
                     }
                 }
             }

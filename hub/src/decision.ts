@@ -405,28 +405,34 @@ export function sweepPendingDecisions(deps: {
   broadcast: (method: string, params: Record<string, unknown>) => void;
 }): number {
   let swept = 0;
-  for (const row of deps.store.findPendingDecisionCards()) {
-    let meta: Record<string, unknown>;
-    try {
-      meta = JSON.parse(row.text) as Record<string, unknown>;
-    } catch {
-      continue;
+  let beforeId = 0;
+  while (true) {
+    const rows = deps.store.findPendingDecisionCards(beforeId);
+    if (rows.length === 0) break;
+    beforeId = rows[rows.length - 1]!.id;
+    for (const row of rows) {
+      let meta: Record<string, unknown>;
+      try {
+        meta = JSON.parse(row.text) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      meta.status = "expired";
+      const text = JSON.stringify(meta);
+      deps.store.updateEntry(row.id, text);
+      const entry = {
+        id: row.id,
+        at: row.at,
+        kind: "decision",
+        author: String(meta.requestedBy ?? ""),
+        text,
+      };
+      deps.broadcast("decision.update", { scope: row.scope, id: row.scopeId, entry });
+      if (row.scope === "room") {
+        deps.broadcast("room.process", { roomId: row.scopeId, entry });
+      }
+      swept++;
     }
-    meta.status = "expired";
-    const text = JSON.stringify(meta);
-    deps.store.updateEntry(row.id, text);
-    const entry = {
-      id: row.id,
-      at: row.at,
-      kind: "decision",
-      author: String(meta.requestedBy ?? ""),
-      text,
-    };
-    deps.broadcast("decision.update", { scope: row.scope, id: row.scopeId, entry });
-    if (row.scope === "room") {
-      deps.broadcast("room.process", { roomId: row.scopeId, entry });
-    }
-    swept++;
   }
   return swept;
 }

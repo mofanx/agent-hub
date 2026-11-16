@@ -2588,6 +2588,120 @@ describe("collab-e2e", () => {
     }
   });
 
+  it("长回复完成时按 at/id 留存：旧id的新完成稿重开不丢，之后仍受5000上限约束", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-final-retention-"));
+    let store = new Store(dir);
+    try {
+      const completed = store.beginReplyDraft("room", "r1", { at: 1, kind: "assistant", author: "worker", text: "partial" });
+      const active = store.beginReplyDraft("room", "r1", { at: 2, kind: "assistant", author: "worker", text: "still running" });
+      const ordinary: number[] = [];
+      for (let i = 0; i < 5100; i++) {
+        ordinary.push(store.append("room", "r1", { at: 100 + i, kind: "assistant", author: "worker", text: `m${i}` }));
+      }
+      const completedAt = Date.now() + 600_000;
+      store.completeReplyDraft(completed, "final artifact", completedAt);
+      store.close();
+      store = new Store(dir);
+      const rows = store.read("room", "r1", 10000);
+      assert.equal(rows.length, 5001, "最新5000普通行 + 一条仍在途草稿");
+      assert.deepEqual(new Set(rows.filter((r) => r.id !== active).map((r) => r.id)),
+        new Set([...ordinary.slice(-4999), completed]));
+      const last = store.read("room", "r1", 50).at(-1)!;
+      assert.equal(last.id, completed, "旧 rowId 的完成回复仍是最新一条");
+      assert.equal(last.at, completedAt);
+      assert.equal(last.text, "final artifact");
+      const newer: number[] = [];
+      for (let i = 0; i < 5000; i++) {
+        newer.push(store.append("room", "r1", { at: completedAt + 1 + i, kind: "assistant", author: "worker", text: `after${i}` }));
+      }
+      store.close();
+      store = new Store(dir);
+      const later = store.read("room", "r1", 10000);
+      assert.equal(later.length, 5001);
+      assert.ok(!later.some((r) => r.id === completed), "完成稿并非永久保护，5000条更新记录后可裁剪");
+      assert.equal(later.find((r) => r.id === active)?.draft, 1);
+      assert.deepEqual(new Set(later.filter((r) => r.id !== active).map((r) => r.id)), new Set(newer));
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("编排卡留存：真实重开 Store + 超5000历史后 cardRowId 存活且恢复同id/at", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-flowcard-"));
+    let store = new Store(dir);
+    try {
+      const h = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+      );
+      wireFlowCards(h, store, h.broadcasts);
+      await h.manager.handle(h.room, "长任务留存验证", {});
+      await h.done(
+        "s1",
+        '```json\n{"goal":"长任务留存验证","tasks":[{"id":"t1","to":"coder","task":"执行长任务"}]}\n```',
+      );
+      await tick();
+      assert.equal(h.flow()?.phase, "working");
+      const entry0 = flowCardEntries(h.broadcasts)[0]!;
+      const cardRowId = h.manager.flowCardRowId(h.room.roomId);
+      assert.ok(cardRowId !== undefined, "working flow 应已登记 cardRowId");
+
+      for (let i = 0; i < 5100; i++) {
+        store.append("room", h.room.roomId, {
+          at: Date.now() + i,
+          kind: "assistant",
+          author: "coder",
+          text: `out-${i}`,
+        });
+      }
+      const state = h.manager.exportRuntime();
+      store.close();
+      store = new Store(dir);
+      const rowsAfterReopen = store.read("room", h.room.roomId, 10000);
+      const flowRows = rowsAfterReopen.filter((e) => e.kind === "flow");
+      assert.equal(flowRows.length, 1, "prune 不得裁掉未完成 flow 卡");
+      assert.equal(flowRows[0]!.id, entry0.id, "cardRowId 行 id 不变");
+      assert.equal(flowRows[0]!.at, entry0.at, "cardRowId 行 at 不变");
+      assert.equal(rowsAfterReopen.length, 5001, "5000 普通 + 1 保护卡");
+
+      const h2 = makeHarness(
+        [
+          { sessionId: "s1", name: "leader" },
+          { sessionId: "s2", name: "coder" },
+        ],
+        { conductorId: "s1" },
+      );
+      h2.rooms.import(JSON.parse(JSON.stringify(h.room)));
+      wireFlowCards(h2, store, h2.broadcasts);
+      await h2.manager.importRuntime(state as Record<string, unknown>);
+      assert.ok(
+        h2.manager.flowCardRowId(h.room.roomId) !== undefined,
+        "重开后 cardRowId 仍存在",
+      );
+      const rows2 = store.read("room", h.room.roomId, 10000).filter((e) => e.kind === "flow");
+      assert.equal(rows2.length, 1, "恢复不产生第二张卡");
+      assert.equal(rows2[0]!.id, entry0.id);
+      assert.equal(rows2[0]!.at, entry0.at);
+      const restored = flowCardEntries(h2.broadcasts);
+      assert.ok(restored.length > 0, "恢复应有卡更新广播");
+      assert.ok(
+        restored.every((e) => e.id === entry0.id && e.at === entry0.at),
+        "恢复继续覆写同一条目",
+      );
+      assert.equal(h2.prompts.length, 0, "failclosed 不自动再派发");
+      const meta = JSON.parse(rows2[0]!.text) as Record<string, unknown>;
+      assert.equal(meta.phase, "awaiting-retry", "有外发痕迹的运行中 flow 恢复降级 awaiting-retry");
+      assert.equal(meta.flowId, JSON.parse(entry0.text).flowId);
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("编排卡：运行中重启降级 awaiting-retry 并定稿快照", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-flowcard-"));
     const store = new Store(dir);

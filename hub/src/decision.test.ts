@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -20,6 +20,7 @@ import {
   type DecisionMeta,
 } from "./decision.js";
 import { Store } from "./store.js";
+import { makeFlowCardSync, sweepOrphanFlowCards } from "./flow-card.js";
 
 function tmpStore(): Store {
   return new Store(fs.mkdtempSync(path.join(os.tmpdir(), "hub-dec-")));
@@ -446,4 +447,216 @@ describe("listPending", () => {
       store.close();
     }
   });
+});
+
+test("prune 保留5000普通历史且豁免未完成flow/decision/draft/running process", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-ret-"));
+  let store = new Store(dir);
+  t.after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const prot: number[] = [];
+  prot.push(store.append("room", "r1", { at: 1, kind: "flow", author: "", text: JSON.stringify({ flowId: "fw", phase: "working" }) }));
+  prot.push(store.append("room", "r1", { at: 2, kind: "flow", author: "", text: JSON.stringify({ flowId: "fr", phase: "awaiting-retry" }) }));
+  prot.push(store.append("room", "r1", { at: 3, kind: "decision", author: "", text: JSON.stringify({ decisionId: "pd", status: "pending" }) }));
+  prot.push(store.beginReplyDraft("room", "r1", { at: 4, kind: "assistant", author: "w", text: "draft-done-later" }));
+  prot.push(store.append("room", "r1", { at: 5, kind: "process", author: "", text: JSON.stringify({ processId: "pr1", status: "running" }) }));
+  const draftKeep = store.beginReplyDraft("room", "r1", { at: 6, kind: "assistant", author: "w", text: "draft-keep" });
+  const malformed = ["{bad", "null", "[1,2]", '"str"'];
+  const ordinaryIDs: number[] = [];
+  for (let i = 0; i < 5100; i++) {
+    const kind = i % 25 === 0 ? "flow" : i % 25 === 1 ? "decision" : i % 25 === 2 ? "process" : "assistant";
+    const text = kind === "flow" ? (i % 7 === 0 ? malformed[i % malformed.length]! : JSON.stringify({ flowId: `f${i}`, phase: "done" }))
+      : kind === "decision" ? (i % 7 === 0 ? malformed[(i + 1) % malformed.length]! : JSON.stringify({ decisionId: `d${i}`, status: "answered" }))
+      : kind === "process" ? (i % 7 === 0 ? malformed[(i + 2) % malformed.length]! : JSON.stringify({ processId: `p${i}`, status: "done" }))
+      : `n${i}`;
+    ordinaryIDs.push(store.append("room", "r1", { at: 100 + i, kind, author: "w", text }));
+  }
+  store.append("session", "r1", { at: 1, kind: "assistant", author: "w", text: "s1" });
+  store.append("session", "r1", { at: 2, kind: "assistant", author: "w", text: "s2" });
+  store.close();
+  store = new Store(dir);
+  const rows = store.read("room", "r1", 10000);
+  const ids = new Set(rows.map((r) => r.id));
+  const keptOrdinary = ordinaryIDs.filter((id) => ids.has(id));
+  const expectedOrdinary = new Set(ordinaryIDs.slice(ordinaryIDs.length - 5000));
+  assert.deepEqual(new Set(keptOrdinary), expectedOrdinary, "恰好保留最新5000普通行");
+  for (const pid of [...prot, draftKeep]) assert.ok(ids.has(pid), `保护行 ${pid} 应保留`);
+  assert.equal(rows.length, 5006, "6 保护 + 最新5000 普通");
+  const protRows = rows.filter((r) => [...prot, draftKeep].includes(r.id));
+  assert.deepEqual(protRows.map((r) => r.at).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6], "保护行 id/at 不变");
+  assert.equal(store.read("session", "r1", 100).length, 2, "另一 scope_id 不受影响");
+  store.updateEntry(prot[0]!, JSON.stringify({ flowId: "fw", phase: "done" }));
+  store.updateEntry(prot[1]!, JSON.stringify({ flowId: "fr", phase: "cancelled" }));
+  store.updateEntry(prot[2]!, JSON.stringify({ decisionId: "pd", status: "expired" }));
+  store.updateEntry(prot[4]!, JSON.stringify({ processId: "pr1", status: "done" }));
+  store.completeReplyDraft(prot[3]!, "draft-final", 0);
+  store.close();
+  store = new Store(dir);
+  const rows3 = store.read("room", "r1", 10000);
+  const ids3 = new Set(rows3.map((r) => r.id));
+  for (const pid of [prot[0]!, prot[1]!, prot[2]!, prot[4]!]) assert.ok(!ids3.has(pid), `旧终态行 ${pid} 被裁`);
+  assert.ok(ids3.has(prot[3]!), "completeReplyDraft 后 at=NOW 仍足够新被保留");
+  assert.ok(ids3.has(draftKeep), "仍 draft1 的行继续豁免");
+  assert.equal(rows3.length, 5001, "5000 普通 + 1 仍 draft");
+  const keptOrdinary3 = new Set([...ordinaryIDs.slice(-4999), prot[3]!]);
+  const actualOrdinary3 = new Set(rows3.map((r) => r.id).filter((id) => ![draftKeep].includes(id)));
+  assert.deepEqual(actualOrdinary3, keptOrdinary3, "普通集合=最新4999普通+刚完成draft行");
+});
+
+test("sweep 孤儿flow/pending decision keyset 分页扫完全部批次", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-sweep-"));
+  let store = new Store(dir);
+  t.after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const flowText = (id: string, phase = "working") => JSON.stringify({ flowId: id, phase });
+  const orphanRooms: string[] = [];
+  for (let i = 0; i < 501; i++) {
+    store.append("room", "r1", { at: i + 1, kind: "flow", author: "", text: flowText(`orphan-${i}`) });
+  }
+  store.append("room", "rX", { at: 1, kind: "flow", author: "", text: flowText("orphan-x") });
+  for (let i = 0; i < 500; i++) {
+    const rid = `rL${i}`;
+    orphanRooms.push(rid);
+    store.append("room", rid, { at: i + 1, kind: "flow", author: "", text: flowText(`live-${rid}`) });
+  }
+  for (let i = 0; i < 600; i++) {
+    store.append("room", "r1", { at: 9000 + i, kind: "flow", author: "", text: flowText(`done-${i}`, "done") });
+  }
+  const snap = () => {
+    const m = new Map<string, string>();
+    for (const rid of ["r1", "rX", ...orphanRooms]) {
+      m.set(rid, store.read("room", rid, 10000).map((r) => `${r.id}@${r.at}`).join(","));
+    }
+    return m;
+  };
+  const before = snap();
+  const broadcasts: { method: string; params: Record<string, unknown> }[] = [];
+  sweepOrphanFlowCards({
+    store,
+    liveFlowId: (roomId) => (roomId.startsWith("rL") ? `live-${roomId}` : undefined),
+    broadcast: (method, params) => broadcasts.push({ method, params }),
+  });
+  assert.deepEqual(snap(), before, "sweep 不改任何行 id/at 且不新增行");
+  const r1rows = store.read("room", "r1", 10000);
+  const cancelled = r1rows.filter((r) => {
+    try { const m = JSON.parse(r.text) as { flowId?: string; phase?: string }; return m.flowId?.startsWith("orphan-") && m.phase === "cancelled"; } catch { return false; }
+  });
+  assert.equal(cancelled.length, 501, "r1 全部 501 孤儿 cancelled");
+  const xrow = store.read("room", "rX", 100).find((r) => { try { return (JSON.parse(r.text) as { flowId?: string }).flowId === "orphan-x"; } catch { return false; } });
+  assert.equal((JSON.parse(xrow!.text) as { phase?: string }).phase, "cancelled", "首批全 skip 后第二批仍扫到 rX 孤儿");
+  const liveOk = orphanRooms.every((rid) => {
+    const row = store.read("room", rid, 10)[0];
+    try { const m = JSON.parse(row!.text) as { flowId?: string; phase?: string }; return m.flowId === `live-${rid}` && m.phase === "working"; } catch { return false; }
+  });
+  assert.ok(liveOk, "500 个 live 卡原样 working");
+  for (let i = 0; i < 501; i++) {
+    const scope = i % 2 === 0 ? "room" : "session";
+    const sid = scope === "room" ? "r1" : "s1";
+    store.append(scope, sid, { at: i + 1, kind: "decision", author: "", text: JSON.stringify({ decisionId: `pd-${i}`, status: "pending", requestedBy: "x" }) });
+  }
+  for (let i = 0; i < 600; i++) {
+    store.append("room", "r1", { at: 20000 + i, kind: "decision", author: "", text: JSON.stringify({ decisionId: `dn-${i}`, status: "approved" }) });
+  }
+  const dSnap = () => ["room:r1", "session:s1"].map((k) => {
+    const [s, id] = k.split(":") as ["room" | "session", string];
+    return store.read(s, id, 10000).map((r) => `${r.id}@${r.at}`).join(",");
+  });
+  const dBefore = dSnap();
+  const dBroadcasts: { method: string; params: Record<string, unknown> }[] = [];
+  const swept = sweepPendingDecisions({ store, broadcast: (method, params) => dBroadcasts.push({ method, params }) });
+  assert.equal(swept, 501, "501 pending 全部 swept");
+  assert.equal(dBroadcasts.filter((b) => b.method === "decision.update").length, 501);
+  assert.equal(dBroadcasts.filter((b) => b.method === "room.process").length, 251, "room scope pending 251 个");
+  assert.deepEqual(dSnap(), dBefore, "decision sweep 不改任何行 id/at");
+  for (const [s, id] of [["room", "r1"], ["session", "s1"]] as const) {
+    const pending = store.read(s, id, 10000).filter((r) => {
+      try { return (JSON.parse(r.text) as { status?: string }).status === "pending"; } catch { return false; }
+    });
+    assert.equal(pending.length, 0, `${s}:${id} 无 pending 残留`);
+  }
+});
+
+test("flow card sync 边界防御：tracked/restored 缺行与异己行不复用", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-fc-"));
+  let store = new Store(dir);
+  t.after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const mkSync = (rowId: () => number | undefined, setId: (id: number) => void, roomMode = "") =>
+    makeFlowCardSync({
+      store,
+      rooms: { get: () => (roomMode ? { mode: roomMode } : undefined) } as never,
+      broadcast: () => {},
+      cardRowId: rowId,
+      setCardRowId: (_r, id) => setId(id),
+    });
+  const flow = { flowId: "f-track", phase: "working", tasks: [], progress: { done: 0, running: 1, pending: 0, failed: 0, total: 1 }, startedAt: 1000 };
+
+  let trackedId: number | undefined;
+  const syncT = mkSync(() => trackedId, (id) => { trackedId = id; });
+  syncT("rT", flow);
+  const firstRow = trackedId!;
+  assert.ok(store.entryAt(firstRow) !== undefined);
+  store.deleteHistory("room", "rT");
+  syncT("rT", flow);
+  assert.notEqual(trackedId, firstRow, "tracked 行被清后不得沿用旧 id");
+  assert.ok(store.entryAt(trackedId!) !== undefined, "新 tracked 行真实存在");
+  assert.equal(store.read("room", "rT", 100).length, 1);
+  syncT("rT", { ...flow, phase: "done" });
+  assert.equal(store.read("room", "rT", 100).length, 1, "重建后更新不重复 append");
+  assert.equal(trackedId, store.read("room", "rT", 100)[0]!.id);
+
+  const legalRow = store.append("room", "rL", { at: 7000, kind: "flow", author: "", text: JSON.stringify(flow) });
+  let legalId: number | undefined = legalRow;
+  const syncL = mkSync(() => legalId, (id) => { legalId = id; });
+  const beforeL = store.read("room", "rL", 100).length;
+  syncL("rL", { ...flow, phase: "reviewing" });
+  assert.equal(legalId, legalRow, "合法 cardRowId 保持同 id");
+  assert.equal(store.read("room", "rL", 100).length, beforeL, "合法恢复不新增行");
+  const legalMeta = JSON.parse(store.read("room", "rL", 100).find((r) => r.id === legalRow)!.text) as Record<string, unknown>;
+  assert.equal(legalMeta.phase, "reviewing", "原位覆写生效");
+
+  const foreignRow = store.append("session", "sF", { at: 8000, kind: "flow", author: "", text: JSON.stringify(flow) });
+  const foreignText = store.read("session", "sF", 100).find((r) => r.id === foreignRow)!.text;
+  let fId: number | undefined = foreignRow;
+  const syncF = mkSync(() => fId, (id) => { fId = id; });
+  syncF("rF", flow);
+  assert.notEqual(fId, foreignRow, "异 scope 行不得复用");
+  assert.ok(store.entryAt(fId!) !== undefined);
+  assert.equal(store.read("session", "sF", 100).find((r) => r.id === foreignRow)!.text, foreignText, "异 scope 原行不被覆写");
+
+  const kindRow = store.append("room", "rK", { at: 8100, kind: "assistant", author: "w", text: "not-a-card" });
+  let kId: number | undefined = kindRow;
+  const syncK = mkSync(() => kId, (id) => { kId = id; });
+  syncK("rK", flow);
+  assert.notEqual(kId, kindRow, "非 flow 行不得复用");
+  assert.equal(store.read("room", "rK", 100).find((r) => r.id === kindRow)!.text, "not-a-card", "原行不被覆写");
+
+  const misRow = store.append("room", "rM", { at: 8200, kind: "flow", author: "", text: JSON.stringify({ ...flow, flowId: "other" }) });
+  let mId: number | undefined = misRow;
+  const syncM = mkSync(() => mId, (id) => { mId = id; });
+  syncM("rM", flow);
+  assert.notEqual(mId, misRow, "flowId 不匹配不得复用");
+  assert.equal((JSON.parse(store.read("room", "rM", 100).find((r) => r.id === misRow)!.text) as { flowId?: string }).flowId, "other", "原行不被覆写");
+
+  const flowConductor = { ...flow, flowId: "f-mode", mode: "conductor" };
+  let modeId: number | undefined;
+  const syncMode2 = mkSync(() => modeId, (id) => { modeId = id; }, "parallel");
+  syncMode2("rMode2", flowConductor);
+  const modeMeta = JSON.parse(store.read("room", "rMode2", 100).at(-1)!.text) as Record<string, unknown>;
+  assert.equal(modeMeta.mode, "conductor", "快照 mode 优先 flow.mode 而非 room.mode");
+
+  let finBroadcasts = 0;
+  let finId: number | undefined;
+  const syncFin = makeFlowCardSync({
+    store,
+    rooms: { get: () => undefined } as never,
+    broadcast: () => { finBroadcasts++; },
+    cardRowId: () => finId,
+    setCardRowId: (_r, id) => { finId = id; },
+  });
+  syncFin("rFin", flow);
+  const finRow = finId!;
+  assert.ok(store.entryAt(finRow) !== undefined);
+  store.deleteHistory("room", "rFin");
+  finBroadcasts = 0;
+  syncFin("rFin", undefined);
+  assert.equal(store.read("room", "rFin", 100).length, 0, "清史后 finalize 不得复活行");
+  assert.equal(finBroadcasts, 0, "缺行 finalize 不得广播幽灵 id");
 });

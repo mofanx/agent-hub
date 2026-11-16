@@ -58,6 +58,8 @@ export interface Strings {
   copy: string;
   selectText: string;
   quoting: string;
+  expandMessageBody: string;
+  collapseMessageBody: string;
   copied: string;
   modelListTitle: string;
   modelCurrentLabel: string;
@@ -485,6 +487,8 @@ export interface Strings {
   memberModelsLabel: string;
   modelFallback: string;
   loadMoreHistory: string;
+  loadEarlierHistory: string;
+  showMoreTasks: string;
   backToBottom: string;
   helpAskFmt: string;
   helpNeededFallback: string;
@@ -822,6 +826,8 @@ const zh: Strings = {
   copy: "复制",
   selectText: "选取文字",
   quoting: "引用",
+  expandMessageBody: "展开全文",
+  collapseMessageBody: "收起",
   copied: "已复制",
   modelListTitle: "可选模型",
   modelCurrentLabel: "当前",
@@ -1247,6 +1253,8 @@ const zh: Strings = {
   memberModelsLabel: "成员模型",
   modelFallback: "模型",
   loadMoreHistory: "加载更多历史…",
+  loadEarlierHistory: "加载更早消息",
+  showMoreTasks: "显示更多子任务",
   backToBottom: "回到底部",
   helpAskFmt: "@%s 在任务 %s 向你求助：",
   helpNeededFallback: "需要你的回复",
@@ -1584,6 +1592,8 @@ const en: Strings = {
   copy: "Copy",
   selectText: "Select text",
   quoting: "Quote",
+  expandMessageBody: "Show full message",
+  collapseMessageBody: "Collapse",
   copied: "Copied",
   modelListTitle: "Available models",
   modelCurrentLabel: "Current",
@@ -2009,6 +2019,8 @@ const en: Strings = {
   memberModelsLabel: "Member models",
   modelFallback: "Model",
   loadMoreHistory: "Loading more history…",
+  loadEarlierHistory: "Load earlier messages",
+  showMoreTasks: "Show more subtasks",
   backToBottom: "Back to bottom",
   helpAskFmt: "@%s asked for your help in task %s:",
   helpNeededFallback: "Your reply is needed",
