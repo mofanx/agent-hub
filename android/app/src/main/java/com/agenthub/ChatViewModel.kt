@@ -150,8 +150,8 @@ sealed class ChatItem {
         override val author: String = "",
         override val at: Long = java.lang.System.currentTimeMillis(),
     ) : ChatItem()
-    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = java.lang.System.currentTimeMillis(), val replyText: String? = null) : ChatItem()
-    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = java.lang.System.currentTimeMillis()) : ChatItem()
+    data class Assistant(override val id: Long, override val text: String, override val author: String, val usage: TokenUsage? = null, override val at: Long = java.lang.System.currentTimeMillis(), val replyText: String? = null, val birthHistoryId: Long = 0L) : ChatItem()
+    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = java.lang.System.currentTimeMillis(), val birthHistoryId: Long = 0L) : ChatItem()
     data class Tool(
         override val id: Long,
         val toolCallId: String,
@@ -2055,6 +2055,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             historyPageCursors.clear()
             chatCacheKeys.clear()
             flowCache.clear()
+            latestServerAt = 0
+            latestServerAtAt = 0
+            maxHistIdSeen = 0
             panelsCache.clear()
             scopeSeen.clear()
             deliveryRecovery.clear()
@@ -2813,7 +2816,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         pendingPromoteDraftFromHistoryId = 0
         if (produced || !inScope(sid)) return
         chatItems.add(ChatItem.Assistant(++itemSeq,
-            "```mission\n{\"goal\":\"\",\"acceptanceCriteria\":[]}\n```", sessionName(sid)))
+            "```mission\n{\"goal\":\"\",\"acceptanceCriteria\":[]}\n```", sessionName(sid), birthHistoryId = maxHistIdSeen))
     }
 
     fun promoteMission(
@@ -3719,7 +3722,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     flowId,
                     f,
                     prev.author,
-                    f.startedAt.takeIf { it > 0 } ?: prev.at,
+                    prev.at,
                 ))
                 updateScopeItems(key, items)
                 return
@@ -3732,10 +3735,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 f,
                 "",
                 // 兜底 at 取时间线最大落库 at+1（server 域尾部锚定）——client 时钟占位会
-                // 在设备钟慢于 hub 时插到历史中间
-                f.startedAt.takeIf { it > 0 }
-                    ?: (items.mapNotNull { i -> i.at.takeIf { it > 0 } }.maxOrNull()?.plus(1)
-                        ?: System.currentTimeMillis()),
+                // 在设备钟慢于 hub 时插到历史中间；f.startedAt 是语义锚点（快照内仍携带），
+                // 落库 at 按 append 时刻，live 归位键与之一致
+                items.filter { historyIdOf(it) != null && it.at > 0 }.maxOfOrNull { it.at }
+                    ?.plus(1) ?: System.currentTimeMillis(),
             )
         )
         updateScopeItems(key, items)
@@ -3833,7 +3836,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun compactCacheItems(key: String, items: List<ChatItem>): List<ChatItem> {
         fun pinned(it: ChatItem) = historyIdOf(it)?.let { id -> deliveryRecovery.isDraftId(key, id) } == true
         val stable = items.filter { !isActiveChatItem(it, key) && !pinned(it) }
-            .sortedWith(compareBy<ChatItem> { it.at }.thenBy { historyIdOf(it) ?: Long.MAX_VALUE })
+            .sortedWith(compareBy<ChatItem> { normAtOf(it) }.thenBy { historyIdOf(it) ?: Long.MAX_VALUE })
             .takeLast(50).toSet()
         return items.filter { it in stable || isActiveChatItem(it, key) || pinned(it) }
     }
@@ -3883,6 +3886,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             deliveryFiles.remove(record.clientMessageId)
         }
         if (record.origin != deliveryOrigin || record.hubId != deliveryHubId) return
+        record.historyId?.let { if (it > maxHistIdSeen) maxHistIdSeen = it }
         val items = scopeItems(record.scopeKey).toMutableList()
         val index = items.indexOfFirst { it is ChatItem.User && it.clientMessageId == record.clientMessageId }
         val previous = items.getOrNull(index) as? ChatItem.User
@@ -3995,7 +3999,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 过程卡 at<=0 时用 turnEndAt/turnStartAt 归位——否则晚到的执行过程排尾部而非汇总前
         // 在途条目（流式/刚完成未合并 historyId）at 是回合开始时刻而非完成时刻，
         // 按其 at 排序会把 at 更大的迟到落库卡钉在流式结论之后——在途条目恒置尾键
-        val merged = incoming + dedupeTail(incoming, tail)
+        val merged = incoming + dedupeTail(key, incoming, tail)
         // 未回显气泡的落库锚：ACK 已回 historyId 但回显未到时，气泡真实位=下一个更大
         // historyId 落库条目的 at（钳制后 at/id 同向，user.id < 其触发卡 id 恒成立）——
         // 先到的 process/flow/decision 卡不再把气泡压到半尾之下
@@ -4005,22 +4009,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return persistedAsc.firstOrNull { (historyIdOf(it) ?: -1) > h }?.at?.takeIf { it > 0 }
         }
         val combined = merged.sortedWith(compareBy<ChatItem> { item ->
-            // 乐观用户气泡：at=record.createdAt 是客户端时钟——与落库条目的 server 域 at 混排
-            // 在设备时钟偏移时会沉到历史中间且越陷越深；未回显占位恒置半尾键 MAX_VALUE-1
-            // （已落库 < 未合并气泡 < 在途卡），回显 copy(at=server at) 后归真实时序位
+            // 未落库条目（含 client 时钟 at 的卡片）与 draft=1 回复行一律置尾哨兵：
+            // 与落库条目的 server 域 (at,id) 序混排会在时钟偏移/回合进行中插到时间线中段；
+            // 已 ACK 未回显的气泡仍锚到其真实落库位（下一个更大 historyId 行的 at）
             val unmergedUser = item is ChatItem.User && item.clientMessageId != null && item.historyAt == null
-            val inFlight = historyIdOf(item) == null &&
-                (item is ChatItem.Assistant || item is ChatItem.Thought ||
-                    item is ChatItem.Tool || item is ChatItem.Plan)
-            val anchored = if (unmergedUser) anchorAtOf(item as ChatItem.User) else null
+            val isDraft = item is ChatItem.Assistant &&
+                historyIdOf(item)?.let { deliveryRecovery.isDraftId(key, it) } == true
+            val anchored = if (unmergedUser) anchorAtOf(item) else null
             val at = if (anchored != null) anchored
-                else if (unmergedUser) Long.MAX_VALUE - 1
-                else if (inFlight) Long.MAX_VALUE
+                else if (historyIdOf(item) == null || isDraft) Long.MAX_VALUE
                 else if (item is ChatItem.Process && item.at <= 0)
                     item.turnEndAt.takeIf { it > 0 } ?: item.turnStartAt
-                else item.at
+                else normAtOf(item)
             if (at <= 0) Long.MAX_VALUE else at
-        }.thenBy { historyIdOf(it) ?: Long.MAX_VALUE })
+        }.thenBy {
+            if (it is ChatItem.Assistant &&
+                historyIdOf(it)?.let { id -> deliveryRecovery.isDraftId(key, id) } == true)
+                Long.MAX_VALUE else (historyIdOf(it) ?: Long.MAX_VALUE - 1)
+        })
         if (anchor) {
             chatItems.clear()
             chatItems.addAll(combined)
@@ -4567,6 +4573,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val author = o["author"]!!.jsonPrimitive.content
         val text = o["text"]!!.jsonPrimitive.content
         val at = o["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+        noteServerAt(at)
+        (o["id"] as? JsonPrimitive)?.longOrNull?.let { if (it > maxHistIdSeen) maxHistIdSeen = it }
         return when (kind) {
             "user" -> ChatItem.User(itemId, text, at = at,
                 clientMessageId = (o["clientMessageId"] as? JsonPrimitive)?.contentOrNull,
@@ -4688,8 +4696,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun upsertDecisionEntry(entry: JsonObject) {
         val eid = entry["id"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+        eid?.let { if (it > maxHistIdSeen) maxHistIdSeen = it }
         val author = entry["author"]?.jsonPrimitive?.contentOrNull ?: ""
         val at = entry["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+        noteServerAt(at)
         val meta = try {
             Json.parseToJsonElement(entry["text"]?.jsonPrimitive?.content ?: "").jsonObject
         } catch (_: Exception) {
@@ -4737,14 +4747,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun sameChatAuthor(a: String, b: String): Boolean =
         a == b || a.startsWith("$b (") || b.startsWith("$a (")
 
-    private fun dedupeTail(hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
+    private fun dedupeTail(key: String, hist: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
         fun sameWindow(h: ChatItem, t: ChatItem): Boolean =
-            h.at == 0L || t.at == 0L || kotlin.math.abs(h.at - t.at) <= 300_000L
+            h.at == 0L || t.at == 0L || kotlin.math.abs(h.at - normAtOf(t)) <= 300_000L
+        fun draftRow(h: ChatItem) =
+            h is ChatItem.Assistant && historyIdOf(h)?.let { deliveryRecovery.isDraftId(key, it) } == true
 
         // 时间门控：仅 live 副本不晚于持久化版本（残副本场景）才按指纹吞并，
-        // 更晚到达的同文本/同前缀回复视为新回合保留
-        fun earlierLive(h: ChatItem, t: ChatItem): Boolean =
-            h.at <= 0L || t.at <= 0L || t.at <= h.at
+        // 更晚到达的同文本/同前缀回复视为新回合保留；draft 行豁免（它就是 live 流的
+        // 落库形态）；带出生水位的 live 项只许"出生后落库"的行吞并——老行不可能是回显
+        fun earlierLive(h: ChatItem, t: ChatItem): Boolean {
+            if (draftRow(h)) return true
+            val b = birthOf(t)
+            if (b > 0) return (historyIdOf(h) ?: 0L) > b
+            return h.at <= 0L || t.at <= 0L || normAtOf(t) <= h.at
+        }
         return tail.filter { t ->
             when (t) {
                 is ChatItem.User ->
@@ -6232,12 +6249,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopCurrent() {
-        val targets = currentRoom?.members?.map { it.first }?.filter { busyIds.contains(it) }
+        val room = currentRoom
+        val targets = room?.members?.map { it.first }?.filter { busyIds.contains(it) }
             ?: listOfNotNull(currentSession?.sessionId?.takeIf { busyIds.contains(it) })
         targets.forEach { sid ->
             viewModelScope.launch {
                 try {
                     hub.call("session.cancel", buildJsonObject { put("sessionId", sid) })
+                } catch (_: Exception) {
+                }
+            }
+        }
+        // 编排进行中（含回合间隙零 busy 成员的瞬间）按房粒度取消 flow，
+        // 成员 cancel 只杀在途回合，conductor 仍可能续派
+        if (room != null && flow?.let {
+            it.roomId == room.roomId && it.phase !in setOf("done", "cancelled")
+        } == true) {
+            viewModelScope.launch {
+                try {
+                    hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
                 } catch (_: Exception) {
                 }
             }
@@ -6473,6 +6503,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         it.text.contains("```mission")
                 })
                 refreshAll()
+                scheduleTailRecover()
             }
             "prompt.error" -> {
                 val p = obj["params"]!!.jsonObject
@@ -6486,6 +6517,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         ChatItem.Error(++itemSeq, p["message"]!!.jsonPrimitive.content, sessionName(sid))
                     )
                 }
+                scheduleTailRecover()
             }
             "room.notice" -> {
                 val p = obj["params"]!!.jsonObject
@@ -6584,7 +6616,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "room" -> p["id"]?.jsonPrimitive?.contentOrNull == currentRoom?.roomId
                     else -> true
                 }
-                if (relevant) memberStatus[member] = status
+                if (relevant) {
+                    memberStatus[member] = status
+                    // hidden 成员回合（flow worker/编排内部）的 session.generating 被 hub 抑制广播，
+                    // member.status 是唯一必达忙态信号——据此驱动 busyIds 让停止按钮可用
+                    if (inScope(member)) {
+                        if (status == "generating") {
+                            if (!busyIds.contains(member)) busyIds.add(member)
+                        } else {
+                            busyIds.remove(member)
+                            clearStreamingTailIfIdle(member)
+                        }
+                    }
+                }
             }
             "member.quota" -> {
                 val p = obj["params"]!!.jsonObject
@@ -6680,6 +6724,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 仍在接收流式 chunk 的尾部 item（sessionId to itemId）；busyIds 离组即自愈，无需显式清理 */
     private var streamingTail: Pair<String, Long>? = null
+    private var tailRecoverJob: kotlinx.coroutines.Job? = null
+    private var latestServerAt = 0L
+    private var latestServerAtAt = 0L
+    private var maxHistIdSeen = 0L
+    private fun noteServerAt(at: Long) {
+        if (at > latestServerAt) { latestServerAt = at; latestServerAtAt = System.currentTimeMillis() }
+    }
+    private fun serverOffset() = latestServerAt - latestServerAtAt
+    private fun isClientStamped(it: ChatItem) = when (it) {
+        is ChatItem.Flow, is ChatItem.Process -> false
+        is ChatItem.User -> it.historyAt == null
+        else -> historyIdOf(it) == null
+    }
+    private fun normAtOf(it: ChatItem) =
+        if (it.at > 0 && isClientStamped(it)) it.at + serverOffset() else it.at
+    private fun birthOf(it: ChatItem) = when (it) {
+        is ChatItem.Assistant -> it.birthHistoryId
+        is ChatItem.Thought -> it.birthHistoryId
+        else -> 0L
+    }
+    private fun scheduleTailRecover() {
+        val key = scopeKey() ?: return
+        tailRecoverJob?.cancel()
+        tailRecoverJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(400)
+            runCatching { recoverScope(key) }
+        }
+    }
     /** 会话升级工单起草挂起：prompt.done/error 时若无 mission 块产出，注入空模板草稿卡兜底 */
     private var pendingPromoteDraftSid: String? = null
     private var pendingPromoteDraftFromSeq: Long = -1
@@ -6715,9 +6787,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val runs = streamRuns.toList()
         streamRuns.clear()
         for (run in runs) {
-            // 80ms 窗口内可能已切换会话/房间：scope 校验与事件入口一致，防止缓冲写进新 scope 的 chatItems
+            // 80ms 窗口内可能已切换会话/房间：scope 校验与事件入口一致，防止缓冲写进新 scope 的 chatItems；
+            // busy 离组（done/error/取消）后到达的迟到 chunk 丢弃——否则在已定稿尾部再造幽灵条
             if (run.scopeKey != scopeKey() || run.epoch != profileEpoch || run.generation != missionConnectionGeneration ||
-                !inScope(run.sessionId) || !shouldShowInRoom(run.sessionId)) continue
+                !inScope(run.sessionId) || !shouldShowInRoom(run.sessionId) || !busyIds.contains(run.sessionId)) continue
             val author = sessionName(run.sessionId)
             val text = run.text.toString()
             if (text.isEmpty()) continue
@@ -6728,7 +6801,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     streamingTail = run.sessionId to last.id
                 } else {
                     val id = ++itemSeq
-                    chatItems.add(ChatItem.Thought(id, text, author))
+                    chatItems.add(ChatItem.Thought(id, text, author, birthHistoryId = maxHistIdSeen))
                     streamingTail = run.sessionId to id
                 }
             } else {
@@ -6740,7 +6813,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     streamingTail = run.sessionId to last.id
                 } else {
                     val id = ++itemSeq
-                    chatItems.add(ChatItem.Assistant(id, text, author))
+                    chatItems.add(ChatItem.Assistant(id, text, author, birthHistoryId = maxHistIdSeen))
                     streamingTail = run.sessionId to id
                 }
             }

@@ -149,6 +149,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -3229,6 +3230,8 @@ private fun FlowCardBlock(
                 Text(
                     "${if (collapsed) "▸" else "▾"} $title",
                     style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 if (phaseLabel.isNotEmpty()) {
                     Spacer(Modifier.width(6.dp))
@@ -3258,22 +3261,35 @@ private fun FlowCardBlock(
                         )
                     }
                 }
-                Spacer(Modifier.weight(1f))
-                flow.budget?.let { b ->
-                    Text(
-                        S.budgetUsageFmt.format(b.usedCalls.toString(), b.maxCalls?.toString() ?: S.unlimitedLabel, b.maxConcurrent?.toString() ?: S.unlimitedLabel) +
-                            if (b.stopped) " · " + (if (b.reason == "deadline") S.budgetStoppedDeadline else S.budgetStoppedCallLimit) else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                val headMeta = buildString {
+                    flow.budget?.let { b ->
+                        append(
+                            S.budgetUsageFmt.format(b.usedCalls.toString(), b.maxCalls?.toString() ?: S.unlimitedLabel, b.maxConcurrent?.toString() ?: S.unlimitedLabel) +
+                                if (b.stopped) " · " + (if (b.reason == "deadline") S.budgetStoppedDeadline else S.budgetStoppedCallLimit) else "",
+                        )
+                    }
+                    if (flow.tasks.isNotEmpty()) {
+                        if (isNotEmpty()) append(" · ")
+                        append(
+                            S.flowProgressFmt.format(progress.done, progress.total, progress.running, progress.pending) +
+                                if (progress.failed > 0) S.flowProgressFailed.format(progress.failed) else "",
+                        )
+                    }
                 }
-                if (flow.tasks.isNotEmpty()) {
-                    Text(
-                        S.flowProgressFmt.format(progress.done, progress.total, progress.running, progress.pending) +
-                            if (progress.failed > 0) S.flowProgressFailed.format(progress.failed) else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    if (headMeta.isNotEmpty()) {
+                        Text(
+                            headMeta,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.End,
+                        )
+                    }
                 }
             }
             flow.goal?.takeIf { it.isNotBlank() }?.let {
