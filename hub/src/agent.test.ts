@@ -702,6 +702,95 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+  it("ackTimeoutAction=extend：ack 到点不杀转 stall 续等，迟到输出正常定稿", async () => {
+    let resolve!: (r: acp.PromptResponse) => void;
+    const { hub, agentConn, events } = setup({
+      promptHandler: () =>
+        new Promise<acp.PromptResponse>((r) => {
+          resolve = r;
+        }),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first", {
+        ackTimeoutMs: 60,
+        ackTimeoutAction: "extend",
+        stallMs: 400,
+      });
+      // ack 到点：不判死不发 prompt.error，降级发一条 session.stall 进度提示
+      const stallEv = await waitFor(
+        () => events.find((e) => e.method === "session.stall"),
+        500,
+      );
+      assert.ok(stallEv, "ack 到点应发 session.stall 降级提示");
+      assert.equal(hub.isBusy("s1"), true, "extend 不杀回合");
+      assert.equal(
+        events.some((e) => e.method === "prompt.error"),
+        false,
+        "降级阶段不得判超时",
+      );
+      // stall 预算内迟到输出 → 正常定稿
+      await agentConn.client.notify("session/update", {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "late" },
+        },
+      });
+      resolve({ stopReason: "end_turn" });
+      const done = await waitFor(() =>
+        events.find((e) => e.method === "prompt.done"),
+      );
+      if (done.method === "prompt.done") {
+        assert.equal(done.params.output, "late");
+      }
+      assert.equal(hub.isBusy("s1"), false);
+      assert.equal(events.some((e) => e.method === "prompt.error"), false);
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("ackTimeoutAction=extend：stall 预算内仍零输出最终按 ack 判死", async () => {
+    const { hub, agentConn, events } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first", {
+        ackTimeoutMs: 60,
+        ackTimeoutAction: "extend",
+        stallMs: 200,
+      });
+      await waitFor(
+        () => events.find((e) => e.method === "session.stall"),
+        500,
+      );
+      assert.equal(hub.isBusy("s1"), true, "ack 到点降级不杀");
+      const errEv = await waitFor(
+        () => events.find((e) => e.method === "prompt.error"),
+        1000,
+      );
+      const p = errEv.params as {
+        stage?: string;
+        idleMs?: number;
+        message?: unknown;
+      };
+      assert.equal(p.stage, "ack", "零输出判死仍是 ack 阶段");
+      assert.ok((p.idleMs ?? 0) >= 200, "应以 stall 预算为存活线");
+      assert.match(
+        String(p.message),
+        /0\.2s/,
+        "消息应反映实际等待的 stall 预算而非 ack 预算",
+      );
+      assert.equal(hub.isBusy("s1"), false);
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
   it("busy 排队时发出 session.notice 提示事件", async () => {
     const { hub, agentConn, events } = setup({
       promptHandler: () => new Promise<acp.PromptResponse>(() => {}),

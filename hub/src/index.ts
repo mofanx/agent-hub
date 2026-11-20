@@ -166,12 +166,12 @@ function sessionLostReplyNote(sessionId: string): string | undefined {
   const entries = store.read("session", sessionId);
   const action = lostReplyAction(entries[entries.length - 1], LOST_REPLY_PLACEHOLDER, false);
   if (action === "append") {
-    store.append("session", sessionId, {
+    broadcastEntry("session", sessionId, store.append("session", sessionId, {
       at: Date.now(),
       kind: "assistant",
       author: displayName,
       text: LOST_REPLY_PLACEHOLDER,
-    });
+    }));
     return LOST_REPLY_NOTE;
   }
   if (action === "repeat") return LOST_REPLY_NOTE;
@@ -188,12 +188,12 @@ function roomLostReplyNote(roomId: string): string | undefined {
     roomModeManager.hasActiveFlow(roomId),
   );
   if (action === "append") {
-    store.append("room", roomId, {
+    broadcastEntry("room", roomId, store.append("room", roomId, {
       at: Date.now(),
       kind: "assistant",
       author: room.name,
       text: LOST_REPLY_PLACEHOLDER,
-    });
+    }));
     return LOST_REPLY_NOTE;
   }
   if (action === "repeat") return LOST_REPLY_NOTE;
@@ -742,7 +742,7 @@ const roomModeManager = new RoomModeManager(
   },
   undefined,
   isolatedChecks,
-  // auto 决策回合 ACK 预算：只兜"无输出卡死"，默认 20s 超时走 fail-open self 兜底
+  // auto 决策回合 ACK 预算：到点降级转 stall 续等（extend），真卡死仍由 stall 判死走 fail-open self 兜底
   (() => {
     const v = Number(process.env.HUB_AUTO_DECIDE_TIMEOUT_MS ?? 20_000);
     return Number.isFinite(v) && v > 0 ? v : 0;
@@ -768,14 +768,14 @@ const missionManager = new MissionManager({
   roomIdForTurn: (sessionId) => roomModeManager.roomIdForTurn(sessionId),
   dispatch: async (room, text, options) => {
     if (options?.note) {
-      store.append("room", room.roomId, {
+      broadcastEntry("room", room.roomId, store.append("room", room.roomId, {
         at: Date.now(),
         kind: "user",
         author: "我",
         text,
         // 工单派发条目打 missionId 标：房史中与真人输入可区分
         ...(options.missionId ? { missionId: options.missionId } : {}),
-      });
+      }));
     }
     return roomModeManager.handle(room, text, { ...options, bypassFilter: true });
   },
@@ -999,21 +999,21 @@ const scheduler = new Scheduler(
     if (task.targetType === "room") {
       const room = rooms.get(task.targetId);
       if (!room) throw new Error(`unknown room: ${task.targetId}`);
-      store.append("room", room.roomId, {
+      broadcastEntry("room", room.roomId, store.append("room", room.roomId, {
         at: Date.now(),
         kind: "user",
         author: "定时任务",
         text: `[${task.name}] ${task.message}`,
-      });
+      }));
       await roomModeManager.handle(room, task.message, {});
       persistState();
     } else {
-      store.append("session", task.targetId, {
+      broadcastEntry("session", task.targetId, store.append("session", task.targetId, {
         at: Date.now(),
         kind: "user",
         author: "定时任务",
         text: task.message,
-      });
+      }));
       await agentOps.prompt(task.targetId, [{ type: "text", text: task.message }]);
     }
   },
@@ -1216,6 +1216,8 @@ function listAllSessions(): {
 type TurnDraft = {
   sessionDraftId?: number | undefined;
   roomDraftId?: number | undefined;
+  /** room 草稿所在房：定稿广播按记录房发信封（turn 清理后 roomIdForSessionTurn 已不可查） */
+  roomId?: string | undefined;
   /** 最近一次进度回调的全文（节流期间暂存，flush/中断收尾时补写尾部增量） */
   lastText?: string | undefined;
   lastWriteAt?: number | undefined;
@@ -1350,7 +1352,10 @@ function writeTurnDraft(sessionId: string, draft: TurnDraft): void {
         author: displayName,
         text,
       });
-      if (id > 0) draft.roomDraftId = id;
+      if (id > 0) {
+        draft.roomDraftId = id;
+        draft.roomId = roomId;
+      }
     } else {
       store.updateReplyDraft(draft.roomDraftId, text);
     }
@@ -1400,9 +1405,11 @@ function interruptTurnDrafts(sessionId: string, minAt = 0): void {
   if (draft.lastText) writeTurnDraft(sessionId, draft);
   if (draft.sessionDraftId !== undefined) {
     store.interruptReplyDraft(draft.sessionDraftId, atFloor);
+    broadcastEntry("session", sessionId, draft.sessionDraftId);
   }
   if (draft.roomDraftId !== undefined) {
     store.interruptReplyDraft(draft.roomDraftId, atFloor);
+    if (draft.roomId) broadcastEntry("room", draft.roomId, draft.roomDraftId);
   }
 }
 
@@ -1426,9 +1433,11 @@ function onTurnEnd(
     if (draft?.lastText) writeTurnDraft(sessionId, draft);
     if (draft?.sessionDraftId !== undefined) {
       store.interruptReplyDraft(draft.sessionDraftId, atFloor);
+      broadcastEntry("session", sessionId, draft.sessionDraftId);
     }
     if (draft?.roomDraftId !== undefined) {
       store.interruptReplyDraft(draft.roomDraftId, atFloor);
+      if (draft.roomId) broadcastEntry("room", draft.roomId, draft.roomDraftId);
     }
     roomModeManager.endDecidingTurn(sessionId);
     return;
@@ -1436,13 +1445,14 @@ function onTurnEnd(
   if (text.trim()) {
     if (draft?.sessionDraftId !== undefined) {
       store.completeReplyDraft(draft.sessionDraftId, text, atFloor);
+      broadcastEntry("session", sessionId, draft.sessionDraftId);
     } else if (opLedger.commit(`reply:${sessionId}:${t0}:session`, "assistant")) {
-      store.append("session", sessionId, {
+      broadcastEntry("session", sessionId, store.append("session", sessionId, {
         at: Math.max(Date.now(), atFloor),
         kind: "assistant",
         author: displayName,
         text,
-      });
+      }));
     }
     // 只有群聊回合才写入 room 历史，单聊回复不泄漏到群聊
     const roomId = roomIdForSessionTurn(sessionId);
@@ -1451,24 +1461,28 @@ function onTurnEnd(
       if (roomModeManager.isStaleTurnCommit(sessionId, roomId)) {
         if (draft?.roomDraftId !== undefined) {
           store.interruptReplyDraft(draft.roomDraftId, atFloor);
+          broadcastEntry("room", draft.roomId ?? roomId, draft.roomDraftId);
         }
       } else if (draft?.roomDraftId !== undefined) {
         store.completeReplyDraft(draft.roomDraftId, text, atFloor);
+        broadcastEntry("room", draft.roomId ?? roomId, draft.roomDraftId);
       } else if (opLedger.commit(`reply:${sessionId}:${t0}:room:${roomId}`, "assistant")) {
-        store.append("room", roomId, {
+        broadcastEntry("room", roomId, store.append("room", roomId, {
           at: Math.max(Date.now(), atFloor),
           kind: "assistant",
           author: displayName,
           text,
-        });
+        }));
       }
     }
   } else {
     if (draft?.sessionDraftId !== undefined) {
       store.interruptReplyDraft(draft.sessionDraftId, atFloor);
+      broadcastEntry("session", sessionId, draft.sessionDraftId);
     }
     if (draft?.roomDraftId !== undefined) {
       store.interruptReplyDraft(draft.roomDraftId, atFloor);
+      if (draft.roomId) broadcastEntry("room", draft.roomId, draft.roomDraftId);
     }
   }
   roomModeManager.endDecidingTurn(sessionId);
@@ -1654,19 +1668,19 @@ function onAgentEvent(event: HubEvent): void {
         typeof event.params.stage === "string" ? event.params.stage : undefined;
       const idleMs =
         typeof event.params.idleMs === "number" ? event.params.idleMs : undefined;
-      store.append("session", sessionId, {
+      broadcastEntry("session", sessionId, store.append("session", sessionId, {
         at: Date.now(),
         kind: "error",
         author,
         text: message,
         ...(stage ? { stage } : {}),
         ...(idleMs != null ? { idleMs } : {}),
-      });
+      }));
       if (errorRoomId && !roomModeManager.isHiddenSession(sessionId)) {
         // 失败条目带 flow/task 关联：客户端可把错误归到编排卡定位，而非孤立红点
         const flowId = roomModeManager.flowIdForTurn(sessionId, errorRoomId);
         const taskId = roomModeManager.taskIdForTurn(sessionId, errorRoomId);
-        store.append("room", errorRoomId, {
+        broadcastEntry("room", errorRoomId, store.append("room", errorRoomId, {
           at: Date.now(),
           kind: "error",
           author,
@@ -1675,19 +1689,19 @@ function onAgentEvent(event: HubEvent): void {
           ...(idleMs != null ? { idleMs } : {}),
           ...(flowId ? { flowId } : {}),
           ...(taskId ? { taskId } : {}),
-        });
+        }));
       }
       if (!missionManager.nativeMissionForSession(sessionId)) roomModeManager.onPromptError(sessionId, message);
       missionManager.onTurnError(sessionId, errorRoomId, message, turnContext);
       persistState();
     }
   } else if (event.method === "room.notice") {
-    store.append("room", event.params.roomId, {
+    broadcastEntry("room", event.params.roomId, store.append("room", event.params.roomId, {
       at: Date.now(),
       kind: "system",
       author: "",
       text: event.params.message,
-    });
+    }));
   } else if (event.method === "session.stall" && sessionId) {
     // 成员静默进度提示：房回合→room.notice；单聊→session 史系统条
     const idleMs = Number((event.params as { idleMs?: unknown }).idleMs ?? 0);
@@ -1695,21 +1709,21 @@ function onAgentEvent(event: HubEvent): void {
     const stallMsg = `⏳ @${displayNameFor(sessionId)} 处理中已 ${Math.round(idleMs / 1000)}s…`;
     if (stallRoomId) broadcastRoomNotice(stallRoomId, stallMsg);
     else
-      store.append("session", sessionId, {
+      broadcastEntry("session", sessionId, store.append("session", sessionId, {
         at: Date.now(),
         kind: "system",
         author: "",
         text: stallMsg,
-      });
+      }));
   } else if (event.method === "session.notice" && sessionId) {
     // 单聊侧提示（如 busy 排队）：落 session 史为 system 条目，
     // 客户端经历史同步可见；kind=system 不影响 turn 游标
-    store.append("session", sessionId, {
+    broadcastEntry("session", sessionId, store.append("session", sessionId, {
       at: Date.now(),
       kind: "system",
       author: "",
       text: event.params.message,
-    });
+    }));
   } else if (event.method === "session.update" && sessionId) {
     const update = (event.params as Record<string, unknown> | undefined)?.update;
     if (update !== undefined && !turnEnds.has(sessionId)) {
@@ -1748,12 +1762,12 @@ function broadcastRoomNotice(roomId: string, message: string, meta?: unknown): v
     (last?.kind === "process" && tail.at(-2)?.kind === "system" && tail.at(-2)?.text === message)
   );
   if (wrote) {
-    store.append("room", roomId, {
+    broadcastEntry("room", roomId, store.append("room", roomId, {
       at: Date.now(),
       kind: "system",
       author: "",
       text: message,
-    });
+    }));
   }
   broadcast({
     method: "room.notice",
@@ -1795,7 +1809,7 @@ function broadcastRoomNotice(roomId: string, message: string, meta?: unknown): v
     if (id < 0) return;
     broadcast({
       method: "room.process",
-      params: { roomId, entry: { id, at, kind: "process", author, text } },
+      params: { roomId, entry: { id, at: store.entryAt(id) ?? at, kind: "process", author, text } },
     } as HubEvent);
   }
 }
@@ -1850,6 +1864,31 @@ function send(ws: WebSocket, msg: unknown): void {
     warnBufferThrottled(ws, "response still queued");
   }
   ws.send(JSON.stringify(msg));
+}
+
+/** 落库条目实时下发：room 复用 room.process 信封（kind 任意，客户端按 kind 归位/去重），
+ *  session 用 session.entry {scope,id,entry} 形态；draft=1 行不广播（半成品由 recover 拉取归位）。
+ *  发送端自身也会收到回显：靠 clientMessageId/dedupeTail 现有机制去重。 */
+function broadcastEntry(scope: "room" | "session", scopeId: string, rowId: number): void {
+  if (rowId <= 0) return;
+  const item = store.entry(rowId);
+  if (!item || item.draft) return;
+  // 已有 dedicated live 事件的行不二次下发：error（prompt.error 全域）、room 域 system（room.notice）
+  if (item.kind === "error" || (scope === "room" && item.kind === "system")) return;
+  const entry = {
+    id: item.id,
+    at: item.at,
+    kind: item.kind,
+    author: item.author,
+    text: item.text,
+    ...(item.clientMessageId ? { clientMessageId: item.clientMessageId } : {}),
+    ...(item.missionId ? { missionId: item.missionId } : {}),
+  };
+  broadcast(
+    scope === "room"
+      ? ({ method: "room.process", params: { roomId: scopeId, entry } } as HubEvent)
+      : ({ method: "session.entry", params: { scope: "session", id: scopeId, entry } } as HubEvent),
+  );
 }
 
 function sessionBackend(sessionId: string): ModelBackend | undefined {
@@ -1917,14 +1956,14 @@ async function handleRoomSlash(
   quote?: { author: string; text: string },
 ): Promise<unknown> {
   // 记录用户的 slash 指令本身（mode/bypass/stop 均记入房史）
-  store.append("room", room.roomId, {
+  broadcastEntry("room", room.roomId, store.append("room", room.roomId, {
     at: Date.now(),
     kind: "user",
     author: "我",
     text: quote
       ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${rawText}`
       : rawText,
-  });
+  }));
 
   if (slash.command === "bypass" || slash.command === "mode") {
     return handleRoomModeSlash(room, slash, modeSlashDeps);
@@ -2179,12 +2218,12 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       if (req.params?.fresh === true) {
         const s = await cloneSessionWithName(source, newName, { fresh: true });
         // /new 断点条目：客户端据此渲染边界，携带来源会话引用
-        store.append("session", s.sessionId, {
+        broadcastEntry("session", s.sessionId, store.append("session", s.sessionId, {
           at: Date.now(),
           kind: "system",
           author: "",
           text: `已开启新会话（来源：${source.name} · ${source.sessionId}）`,
-        });
+        }));
         return {
           ...s,
           agent: connection.agent,
@@ -2489,12 +2528,12 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       }
       // 群聊 /new（fresh）断点条目：标注来源房间，供客户端渲染会话边界
       if (fresh) {
-        store.append("room", room.roomId, {
+        broadcastEntry("room", room.roomId, store.append("room", room.roomId, {
           at: Date.now(),
           kind: "system",
           author: "",
           text: `已开启新会话（来源：${source.name} · ${source.roomId}）`,
-        });
+        }));
       }
       persistState();
       return { room: enrichRoom(room) };
@@ -3318,14 +3357,14 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       }
 
       const dispatch = async () => {
-        store.append("room", roomId, {
+        broadcastEntry("room", roomId, store.append("room", roomId, {
           at: Date.now(),
           kind: "user",
           author: "我",
           text: quote
             ? `（引用 ${quote.author}: ${quote.text.slice(0, 100)}）${historyText}`
             : historyText,
-        });
+        }));
         // silent-repro 等文本监听任务的唤醒源：仅真实用户消息到达这里，
         // 任务产出不经此路径，room.message 事件天然不会自激；
         // 已 @ 成员的消息走正常派发，不再触发静默复现（防同一份报障双重执行）
@@ -3378,7 +3417,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         throw new Error("client_message_context_changed");
       }
       const fingerprint = stableFingerprint({ ...(req.params as Record<string, unknown>), clientMessageId: undefined });
-      return runClientMessage(
+      const result = await runClientMessage(
         store,
         {
           key: `room.message:${roomId}:${clientMsgId}`,
@@ -3447,6 +3486,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           return result as unknown as Record<string, unknown>;
         },
       );
+      if (typeof result.historyId === "number") broadcastEntry("room", roomId, result.historyId);
+      return result;
     }
     case "prompt.send": {
       const sessionId = String(req.params?.sessionId ?? "");
@@ -3498,17 +3539,17 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
       };
 
       if (!clientMsgId) {
-        store.append("session", sessionId, {
+        broadcastEntry("session", sessionId, store.append("session", sessionId, {
           at: Date.now(),
           kind: "user",
           author: "我",
           text: historyText,
-        });
+        }));
         return dispatchBody();
       }
 
       const fingerprint = stableFingerprint({ ...(req.params as Record<string, unknown>), clientMessageId: undefined });
-      return runClientMessage(
+      const result = await runClientMessage(
         store,
         {
           key: `prompt.send:${sessionId}:${clientMsgId}`,
@@ -3519,6 +3560,8 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         },
         dispatchBody,
       );
+      if (typeof result.historyId === "number") broadcastEntry("session", sessionId, result.historyId);
+      return result;
     }
     case "session.cancel": {
       const sid = String(req.params?.sessionId ?? "");

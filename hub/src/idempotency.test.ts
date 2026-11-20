@@ -548,7 +548,7 @@ test("index prompt.send/room.message 提取：同 key 改 payload 冲突/控制�
       route: (_id: string, _text: string) => ({ targets: [], mentioned: [] }),
       missionDraftGuidanceFor: () => "GUIDE_MARK",
     },
-    persistState() {}, broadcast() {},
+    persistState() {}, broadcast() {}, broadcastEntry() {},
     memberStatusOf: () => "online" as const,
     parseRetryCommand: (txt: string) => (/^(?:retry|重试)(?:\s|$)/i.test(txt) ? { taskIds: [] } : null),
     helpAnswerIntent,
@@ -621,7 +621,7 @@ function guardedRoom(t: { after: (fn: () => void) => void }) {
   const run = compileIndexCase(extractIndexCaseBody("room.message"), {
     store, runClientMessage, stableFingerprint: JSON.stringify,
     parseSlash: () => null, HUB_SLASH_COMMANDS: new Set(), handleRoomSlash: () => ({}),
-    roomLostReplyNote: () => null, persistState() {}, broadcast() {},
+    roomLostReplyNote: () => null, persistState() {}, broadcast() {}, broadcastEntry() {},
     memberStatusOf: () => "online" as const,
     parseRetryCommand: () => null, helpAnswerIntent,
     CANCEL_TEXT: /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i,
@@ -807,7 +807,7 @@ test("index room.message：sent 中死会话以 offline 标记回包（sent 不�
   const run = compileIndexCase(extractIndexCaseBody("room.message"), {
     store, runClientMessage, stableFingerprint: JSON.stringify,
     parseSlash: () => null, HUB_SLASH_COMMANDS: new Set(), handleRoomSlash: () => ({}),
-    roomLostReplyNote: () => null, persistState() {}, broadcast() {},
+    roomLostReplyNote: () => null, persistState() {}, broadcast() {}, broadcastEntry() {},
     memberStatusOf: (sid: string) => (sid === "s2" ? "offline" : "online"),
     parseRetryCommand: () => null, helpAnswerIntent,
     CANCEL_TEXT: /^(?:停止|取消|终止|中断|停下|别做了|stop|cancel|abort)$/i,

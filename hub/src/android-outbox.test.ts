@@ -145,6 +145,7 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
     section("    private fun attachTextLike(", "    var attachError"),
     section("    private fun withLiveItems(", "    private fun handleEvent("),
     section("    private data class StreamRun(", "    private val streamRuns"),
+    section("    private var tailRecoverJob", "    private var pendingPromoteDraftSid"),
     section("    private fun queueChunk(", "    private fun applyUpdate("),
     section("    private fun isActiveChatItem(", "    private fun updateScopeItems("),
     section("    private fun historyIdOf(", "    private fun sameHistoryItem("),
@@ -193,6 +194,7 @@ internal class TimelineBridge {
     ${section("    private fun loadHistory(", "    val processItems")}
     ${section("    private data class StreamRun(", "    private val streamRuns")}
     ${section("    private fun withLiveItems(", "    private fun handleEvent(")}
+    ${section("    private var tailRecoverJob", "    private var pendingPromoteDraftSid")}
     ${section("    private fun queueChunk(", "    private fun applyUpdate(")}
     private val streamRuns = mutableListOf<StreamRun>()
     var streamFlushJob: Job? = null
@@ -214,7 +216,7 @@ internal class TimelineBridge {
     var profileEpoch = 1
     var historyLoading = false
     var streamingTail: Pair<String, Long>? = null
-    val busyIds = mutableSetOf<String>()
+    val busyIds = mutableSetOf("s1")
     fun isStreamingTail(id: Long) = streamingTail?.second == id && busyIds.contains(streamingTail?.first)
     var currentRoom: RoomInfo? = RoomInfo("r1")
     var liveScope = "room:r1"
@@ -293,6 +295,7 @@ internal class TimelineBridge {
     fun compactCacheItemsPub(key: String, items: List<ChatItem>) = compactCacheItems(key, items)
     fun isActiveChatItemPub(it: ChatItem, key: String) = isActiveChatItem(it, key)
     fun order(incoming: List<ChatItem>, tail: List<ChatItem>): List<ChatItem> {
+        val key = liveScope
         ${timelineOrder}
         return combined
     }
@@ -365,8 +368,9 @@ internal sealed class ChatItem {
     open val text: String = ""
     open val author: String = ""
     data class Assistant(override val id: Long, override val text: String, override val author: String,
-        override val at: Long = 0, val replyText: String? = null) : ChatItem()
-    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = 0) : ChatItem()
+        override val at: Long = 0, val replyText: String? = null, val birthHistoryId: Long = 0) : ChatItem()
+    data class Thought(override val id: Long, override val text: String, override val author: String, override val at: Long = 0,
+        val birthHistoryId: Long = 0) : ChatItem()
     data class User(override val id: Long, override val at: Long = 0, val historyId: Long? = null,
         val historyAt: Long? = null, val clientMessageId: String? = null, val sendStatus: String? = null) : ChatItem()
     data class System(override val id: Long, override val text: String = "", override val at: Long = 0) : ChatItem()
@@ -409,7 +413,7 @@ internal class NativeBridge {
     private val streamRuns = mutableListOf<StreamRun>()
     private var streamFlushJob: Job? = null
     private var streamingTail: Pair<String, Long>? = null
-    val busyIds = mutableSetOf<String>()
+    val busyIds = mutableSetOf("s1")
     fun isStreamingTail(id: Long) = streamingTail?.second == id && busyIds.contains(streamingTail?.first)
     fun scopeKey(): String? = liveScope
     fun sameHistoryItem(a: ChatItem, b: ChatItem) = a.id == b.id
@@ -1200,7 +1204,7 @@ fun main() = runBlocking {
         b.chatItems.addAll(listOf(ChatItem.User(-100, at = 1000), ChatItem.Assistant(-200, "summary", "worker", 3000)))
         val f = FlowInfo("f1", null, "conductor", "working", null, emptyList(), 2000)
         b.ensure(f)
-        check(b.chatItems.map { it.at } == listOf(1000L, 2000L, 3000L)) { "late flow appended after summary" }
+        check(b.chatItems.map { it.at } == listOf(1000L, 3000L, 3001L)) { "late flow anchored at persisted tail" }
         b.chatItems.clear()
         b.chatItems.addAll(listOf(ChatItem.Assistant(1, "first", "worker", 100), ChatItem.Assistant(2, "second", "worker", 110)))
         b.finish("firstsecond")

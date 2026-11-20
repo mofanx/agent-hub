@@ -945,6 +945,40 @@ describe("openTopics 编排注入与归档", () => {
     assert.equal(prompts[1]?.sessionId, "host");
   });
 
+  it("auto 决策 prompt 携带 ack 降级 opts（ackTimeoutAction=extend）", async () => {
+    const rooms = new RoomManager();
+    const autoRoom = rooms.create(
+      "auto-ext",
+      [
+        { sessionId: "host", name: "host" },
+        { sessionId: "worker", name: "worker" },
+      ],
+      "auto",
+      { conductorId: "host" },
+    );
+    const calls: { sessionId: string; opts?: Record<string, unknown> }[] = [];
+    const manager = new RoomModeManager(
+      {
+        prompt: async (sessionId, _content, opts) => {
+          calls.push({ sessionId, opts: opts as Record<string, unknown> });
+        },
+        isBusy: () => false,
+        cancel: async () => {},
+      },
+      rooms,
+      () => {},
+      undefined,
+      undefined,
+      50,
+      3000,
+    );
+    await manager.handle(autoRoom, "评估一下这个方案");
+    const decide = calls.find((c) => c.sessionId === "host")?.opts;
+    assert.equal(decide?.ackTimeoutMs, 50);
+    assert.equal(decide?.ackTimeoutAction, "extend");
+    assert.equal(decide?.stallMs, 3000);
+  });
+
   it("auto 规则快通道：self 应答通知标注决策来源", async () => {
     const rooms = new RoomManager();
     const autoRoom = rooms.create(

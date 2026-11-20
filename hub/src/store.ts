@@ -638,6 +638,17 @@ export class Store {
     }
   }
 
+  entry(rowId: number): HistoryItem | undefined {
+    try {
+      const row = this.prep(
+        "SELECT id, at, kind, author, text, draft, client_message_id AS clientMessageId, mission_id AS missionId FROM history WHERE id = ?",
+      ).get(rowId) as HistoryItem | undefined;
+      return row ? normalizeItems([row])[0] : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   append(scope: "session" | "room", id: string, entry: HistoryEntry): number {
     try {
       // 调用方给的 at 是语义锚点（事件时刻/flow 起点），但落库 at 必须不早于已有

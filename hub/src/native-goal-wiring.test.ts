@@ -42,7 +42,7 @@ function fixture() {
     extractTaskResult: () => ({ artifacts: [] }),
     promptDoneInternalOutput: (p: any) => p.output,
     fireEventTasks: () => {}, persistState: () => {}, logError: () => {},
-    broadcast: () => {}, toPublicHubEvent: (e: unknown) => e,
+    broadcast: () => {}, broadcastEntry: () => {}, toPublicHubEvent: (e: unknown) => e,
   };
   vm.createContext(sandbox);
   const js = ts.transpileModule(

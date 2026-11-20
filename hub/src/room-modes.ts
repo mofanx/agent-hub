@@ -2857,11 +2857,14 @@ export class RoomModeManager {
     this.autoDecisions.set(room.roomId, autoCtx);
     const prompt = this.buildAutoPrompt(room, text, options);
     this.notice({ roomId: room.roomId, message: "🎛️ 自动模式：主持人正在决策…" });
-    // 决策回合专属 ACK 预算：只兜"无输出卡死"，超时走 prompt.error→fail-open self 现行兜底
+    // 决策回合专属 ACK 预算：到点不杀，降级转 stall 预算续等（extend）——
+    // "后端慢但活着"的决策不该在 20s 处决，真卡死由 stall 判死走 fail-open self 现行兜底
     const decideOpts =
       this.autoDecideTimeoutMs > 0 || this.autoDecideStallMs > 0
         ? {
-            ...(this.autoDecideTimeoutMs > 0 ? { ackTimeoutMs: this.autoDecideTimeoutMs } : {}),
+            ...(this.autoDecideTimeoutMs > 0
+              ? { ackTimeoutMs: this.autoDecideTimeoutMs, ackTimeoutAction: "extend" as const }
+              : {}),
             ...(this.autoDecideStallMs > 0 ? { stallMs: this.autoDecideStallMs } : {}),
           }
         : undefined;

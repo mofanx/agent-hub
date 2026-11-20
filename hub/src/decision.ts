@@ -352,7 +352,7 @@ export class DecisionCenter {
   private push(t: Tracked): void {
     const entry = {
       id: t.rowId,
-      at: t.meta.at,
+      at: this.deps.store.entryAt(t.rowId) ?? t.meta.at,
       kind: "decision",
       author: t.meta.requestedBy,
       text: JSON.stringify(t.meta),

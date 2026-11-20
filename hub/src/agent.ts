@@ -13,6 +13,11 @@ import { goalCapabilities, goalUpdate, type GoalAction, type GoalCapabilities, t
 export type PromptOpts = {
   queueIfBusy?: boolean;
   ackTimeoutMs?: number;
+  /**
+   * ACK 预算到点行为：kill=判死回收（默认）；extend=降级转 stall 预算继续等——
+   * "后端慢但活着"的回合不该在 ACK 点处决，真卡死由 stall 预算兜底（如 auto 决策回合）
+   */
+  ackTimeoutAction?: "kill" | "extend";
   /** mid-turn 静默预算 per-call 覆盖（如 auto 决策回合放宽）：未设走全局 turnStallTimeoutMs */
   stallMs?: number;
 };
@@ -145,7 +150,8 @@ export type HubEvent =
   | { method: "room.notice"; params: { roomId: string; message: string } }
   | { method: "session.notice"; params: { sessionId: string; message: string } }
   | { method: "session.stall"; params: { sessionId: string; idleMs: number } }
-  | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string } } }
+  | { method: "room.process"; params: { roomId: string; entry: { id: number; at: number; kind: string; author: string; text: string; clientMessageId?: string; missionId?: string } } }
+  | { method: "session.entry"; params: { scope: "session"; id: string; entry: { id: number; at: number; kind: string; author: string; text: string; clientMessageId?: string; missionId?: string } } }
   | { method: "room.artifact"; params: { roomId: string; artifact?: unknown } }
   | { method: "session.artifact"; params: { sessionId: string } }
   | { method: "room.blackboardUpdate"; params: { roomId: string; blackboard: { id: string; from: string; text: string; detail: string; at: number }[] } }
@@ -245,6 +251,8 @@ type SessionEntry = {
   turnEpoch?: number;
   /** 本回合是否已发过一次 session.stall 进度提示（每回合至多一条） */
   stallNotified?: boolean;
+  /** ACK 预算耗尽后已降级转 stall 预算继续等（ackTimeoutAction:"extend" 生效后置位） */
+  ackExtended?: boolean;
   /** stall 判疑已告警并处于回收宽限期（宽限内再静默才杀） */
   stallWarned?: boolean;
   activeToolIds?: Set<string> | undefined;
@@ -1743,6 +1751,7 @@ export class AcpAgent {
     entry.turnGotUpdate = false;
     entry.stallNotified = false;
     entry.stallWarned = false;
+    entry.ackExtended = false;
     entry.activeToolIds = undefined;
     entry.lastActivityAt = Date.now();
     const epoch = (entry.turnEpoch ?? 0) + 1;
@@ -1762,6 +1771,7 @@ export class AcpAgent {
     // agent 流出一段内容后挂死同样会被回收，不再永久 busy 吞掉后续排队消息。
     // 挂起的 permission/elicitation 属"等待用户答复"活跃态，轮询续命不误判。
     const ackTimeoutMs = opts?.ackTimeoutMs ?? promptAckTimeoutMs;
+    const ackTimeoutAction = opts?.ackTimeoutAction ?? "kill";
     const stallMs = opts?.stallMs ?? turnStallTimeoutMs;
     const armWatchdog = (ms: number) => {
       clearTimeout(entry.watchdog);
@@ -1778,14 +1788,14 @@ export class AcpAgent {
           (entry.activeToolIds?.size ?? 0) > 0;
         if (interactive) {
           // 等待用户答复期间续命：以当前阶段预算为轮询间隔
-          const poll = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
+          const poll = entry.turnGotUpdate || entry.ackExtended ? stallMs : ackTimeoutMs;
           if (poll > 0) armWatchdog(poll);
           return;
         }
         const idle = Date.now() - (entry.lastActivityAt ?? 0);
         // 静默进度提示：超阈值先吐一条 session.stall（每回合一次，不杀回合），
         // 用户不再从 180s 超时报错才反推发生过静默
-        const killBudget = entry.turnGotUpdate ? stallMs : ackTimeoutMs;
+        const killBudget = entry.turnGotUpdate || entry.ackExtended ? stallMs : ackTimeoutMs;
         if (stallNoticeMs > 0 && !entry.stallNotified) {
           // tick 早于阈值（定时器抖动）：若杀预算比提示先到则放行走 kill 分支，否则按差额重臂——不得饿死短预算回合
           if (idle < stallNoticeMs) {
@@ -1808,10 +1818,27 @@ export class AcpAgent {
           }
         }
         if (!entry.turnGotUpdate) {
-          // ACK 阶段：<=0 与旧语义一致立即判超时
-          if (ackTimeoutMs > 0 && idle < ackTimeoutMs) {
-            armWatchdog(ackTimeoutMs - idle);
+          // ACK 阶段：<=0 与旧语义一致立即判超时；extend 降级后用 stall 预算作存活线
+          const ackBudget = entry.ackExtended ? stallMs : ackTimeoutMs;
+          if (ackBudget > 0 && idle < ackBudget) {
+            armWatchdog(ackBudget - idle);
             return;
+          }
+          // extend 降级：ack 到点不杀不发 error，记一条 session.stall 提示后转 stall 预算续等——
+          // 决策类回合"慢优于作废"，真卡死仍由 stall 判死走 prompt.error 兜底
+          if (!entry.ackExtended && ackTimeoutAction === "extend" && stallMs > 0) {
+            entry.ackExtended = true;
+            if (!entry.stallNotified) {
+              entry.stallNotified = true;
+              this.emit({
+                method: "session.stall",
+                params: { sessionId, idleMs: idle },
+              });
+            }
+            if (idle < stallMs) {
+              armWatchdog(stallMs - idle);
+              return;
+            }
           }
         } else {
           // stall 阶段：<=0 关闭
@@ -1835,7 +1862,7 @@ export class AcpAgent {
         const err = new Error(
           stage === "stall"
             ? `agent ${this.name} went silent for ${Math.round(idle / 1000)}s mid-turn — treating as stalled`
-            : `agent ${this.name} produced no output within ${ackTimeoutMs / 1000}s — request may have been rejected at transport level`,
+            : `agent ${this.name} produced no output within ${(entry.ackExtended ? stallMs : ackTimeoutMs) / 1000}s — request may have been rejected at transport level`,
         );
         const waiter = this.promptOnceWaiters.get(sessionId);
         if (waiter) {
