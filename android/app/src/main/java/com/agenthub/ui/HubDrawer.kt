@@ -316,7 +316,16 @@ private fun ProfileDrawerItem(
                     )
                     if (!active && badge?.connected == true) {
                         DropdownMenuItem(
-                            text = { Text(LocalStrings.current.disconnectLink) },
+                            text = {
+                                Column {
+                                    Text(LocalStrings.current.disconnectLink)
+                                    Text(
+                                        LocalStrings.current.disconnectLinkHint,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            },
                             onClick = {
                                 expanded = false
                                 onDisconnectLink()

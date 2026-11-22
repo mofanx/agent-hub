@@ -11,6 +11,7 @@ const cases = [
   "select_cap_mru", "reconcile_starts_links", "active_excluded_and_swapped",
   "reconcile_removes_stale", "sync_badge_flow", "event_decision_badge",
   "disconnect_keeps_badge", "token_change_rebuilds", "close_all",
+  "dead_link_yields", "dead_link_refill", "dead_link_revives",
 ];
 
 function cachedJar(group: string, name: string, version: string): string | undefined {
@@ -80,7 +81,7 @@ test("Android HubLinkManager: real JVM source with fake WebSockets", { timeout: 
     throw error;
   }
   assert.deepEqual(result.split(/\r?\n/).filter((line) => line.startsWith("PASS ")).map((line) => line.slice(5)), cases);
-  assert.match(result, /^RESULT cases=9$/m);
+  assert.match(result, /^RESULT cases=12$/m);
   t.diagnostic(result.trim());
 });
 
@@ -148,12 +149,14 @@ suspend fun until(predicate: () -> Boolean) {
 }
 suspend fun flush() { repeat(5) { yield() } }
 
-internal class Env(context: CoroutineContext, maxLinks: Int = 3) {
+internal class Env(context: CoroutineContext, maxLinks: Int = 3, deadThreshold: Int = 5, deadCooldownMs: Long = 120_000) {
     val scope = CoroutineScope(context.minusKey(Job) + SupervisorJob() + EmptyCoroutineContext)
     val sockets = mutableListOf<FakeWS>()
+    var now = 0L
     val manager = HubLinkManager(scope, {
         HubClient(scope, { req, l -> FakeWS(req, l).also { sockets.add(it) } })
-    }, maxLinks = maxLinks, staggerMs = 0, retryMs = 60_000)
+    }, maxLinks = maxLinks, staggerMs = 0, retryMs = 60_000,
+        deadThreshold = deadThreshold, deadCooldownMs = deadCooldownMs, nowMs = { now })
 
     fun target(key: String) = LinkTarget(key, "wss://fixture.invalid/$key", "pub-$key", "origin-$key")
 
@@ -345,6 +348,77 @@ fun main() = runBlocking {
             check(env.manager.size == 0)
             until { env.sockets.all { it.canceled > 0 } }
             check(env.manager.badges.value.isEmpty())
+        } finally { env.dispose() }
+    }
+
+    case("dead_link_yields") {
+        // selectLinkKeys：dead 集排尾让位
+        check(selectLinkKeys(listOf("a","b","c","d"), null, listOf("a","b","c","d"), 2, dead = setOf("a")) == listOf("b","c"))
+        val env = Env(coroutineContext, deadThreshold = 2, deadCooldownMs = 60_000)
+        try {
+            val targets = listOf(env.target("dead"), env.target("m1"), env.target("m2"), env.target("m3"))
+            val mru = listOf("dead", "m1", "m2", "m3")
+            env.manager.reconcile(targets, null, mru)
+            until { env.sockets.size == 3 }
+            check(env.manager.link("m3") == null) { "m3 应在等位" }
+            // dead 连败 2 次（每次 fail 后 client 退避自重连产生新 socket）达阈值断路
+            env.sockets[0].fail()
+            until { env.sockets.size >= 4 }
+            env.sockets.last().fail()
+            until { (env.manager.link("dead")?.losses ?: 0) >= 2 }
+            env.manager.reconcile(targets, null, mru)
+            until { env.manager.link("dead") == null }
+            until { env.manager.link("m3") != null }
+            check(env.manager.size == 3)
+        } finally { env.dispose() }
+    }
+
+    case("dead_link_refill") {
+        val env = Env(coroutineContext, deadThreshold = 1, deadCooldownMs = 50)
+        try {
+            val targets = listOf(env.target("dead"), env.target("m1"), env.target("m2"), env.target("m3"))
+            val mru = listOf("dead", "m1", "m2", "m3")
+            env.manager.reconcile(targets, null, mru)
+            until { env.sockets.size == 3 }
+            env.sockets[0].fail()
+            until { (env.manager.link("dead")?.losses ?: 0) >= 1 }
+            env.manager.reconcile(targets, null, mru)
+            until { env.manager.link("dead") == null && env.manager.link("m3") != null }
+            // 冷却过期 → dead 重新入选（MRU 首位）→ 连接成功 → 连败归零、徽章 connected
+            env.now += 100
+            val socketCount = env.sockets.size
+            env.manager.reconcile(targets, null, mru)
+            until { env.manager.link("dead") != null }
+            until { env.sockets.size > socketCount } // 新链路的 connect 协程产出新 socket
+            val ws = env.sockets.last()
+            ws.open()
+            env.sync("dead", ws, hubHandler("hub-dead"))
+            check(env.manager.link("dead")?.connected == true)
+            check(env.manager.link("dead")?.losses == 0)
+        } finally { env.dispose() }
+    }
+
+    case("dead_link_revives") {
+        // 冷却到期探针自主复活：不依赖用户切 profile / 手动 reconcile
+        val env = Env(coroutineContext, deadThreshold = 1, deadCooldownMs = 50)
+        try {
+            val targets = listOf(env.target("dead"), env.target("m1"), env.target("m2"), env.target("m3"))
+            val mru = listOf("dead", "m1", "m2", "m3")
+            env.manager.reconcile(targets, null, mru)
+            until { env.sockets.size == 3 }
+            env.sockets[0].fail()
+            until { (env.manager.link("dead")?.losses ?: 0) >= 1 }
+            env.manager.reconcile(targets, null, mru)
+            until { env.manager.link("dead") == null && env.manager.link("m3") != null }
+            // 不手动 reconcile：deadUntil=50ms 到期后探针自触发对账，dead 自动重建
+            env.now += 100
+            val socketCount = env.sockets.size
+            until { env.manager.link("dead") != null }
+            until { env.sockets.size > socketCount }
+            val ws = env.sockets.last()
+            ws.open()
+            env.sync("dead", ws, hubHandler("hub-dead"))
+            check(env.manager.link("dead")?.connected == true && env.manager.link("dead")?.losses == 0)
         } finally { env.dispose() }
     }
 

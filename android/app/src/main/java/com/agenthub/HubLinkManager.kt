@@ -40,6 +40,7 @@ internal class HubLink(
     val flowRevisions = mutableMapOf<String, Int>()
     val decisions = mutableMapOf<String, JsonObject>()
     var decisionRevision = 0
+    var losses = 0
     var syncJob: Job? = null
     var retryJob: Job? = null
 }
@@ -57,17 +58,21 @@ internal data class LinkBadge(
     val connected: Boolean,
 )
 
-/** profiles → 非活跃链路选择：活跃 profile 不占名额，超限按 MRU 取前 maxLinks */
+/** profiles → 非活跃链路选择：活跃 profile 不占名额；连败死链（dead 集）排尾让位，
+ *  其余按 MRU 取前 maxLinks。名额够时死链仍入选（无需让位）。 */
 internal fun selectLinkKeys(
     profileKeys: List<String>,
     activeKey: String?,
     mru: List<String>,
     maxLinks: Int,
+    dead: Set<String> = emptySet(),
 ): List<String> {
     val candidates = profileKeys.filter { it != activeKey }
     if (candidates.size <= maxLinks) return candidates
     val rank = mru.withIndex().associate { it.value to it.index }
-    return candidates.sortedBy { rank[it] ?: Int.MAX_VALUE }.take(maxLinks)
+    return candidates.sortedWith(
+        compareBy({ if (it in dead) 1 else 0 }, { rank[it] ?: Int.MAX_VALUE }),
+    ).take(maxLinks)
 }
 
 /**
@@ -80,17 +85,37 @@ internal class HubLinkManager(
     private val maxLinks: Int = DEFAULT_MAX_LINKS,
     private val staggerMs: Long = 250,
     private val retryMs: Long = 30_000,
+    private val deadThreshold: Int = DEAD_THRESHOLD,
+    private val deadCooldownMs: Long = DEAD_COOLDOWN_MS,
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private val links = LinkedHashMap<String, HubLink>()
     private var destroyed = false
     private val _badges = MutableStateFlow<Map<String, LinkBadge>>(emptyMap())
     val badges = _badges.asStateFlow()
     private var networkId: Long? = null
+    /** 连败冷却：key → 降权截止时刻（断路器；过期后自然回填重试） */
+    private val deadUntil = mutableMapOf<String, Long>()
+    private var deadProbeJob: Job? = null
+    private var lastReconcile: Triple<List<LinkTarget>, String?, List<String>>? = null
+
+    /** 死链自主复活：探针挂在最早冷却到期点（有死链才armed，无常驻定时器）。
+     *  到期重放最近 reconcile 参数——死态过期即重新参选，不等用户切 profile。 */
+    private fun armDeadProbe() {
+        val expiry = deadUntil.values.filter { it > nowMs() }.minOrNull()
+        deadProbeJob?.cancel()
+        deadProbeJob = if (expiry == null || destroyed) null else scope.launch {
+            delay(expiry - nowMs())
+            if (!destroyed) lastReconcile?.let { (t, a, m) -> reconcile(t, a, m) }
+        }
+    }
 
     /** 网络变化扇出：service 的 NetworkReconnectMonitor 回调转发到每条链路 */
     fun onNetworkChanged(id: Long?) {
         networkId = id
         links.values.forEach { it.client.onNetworkChanged(id) }
+        // 网络恢复即重放对账：未到期死链保持降权，已到期的立刻回填
+        lastReconcile?.let { (t, a, m) -> reconcile(t, a, m) }
     }
 
     val size: Int get() = links.size
@@ -99,7 +124,9 @@ internal class HubLinkManager(
     /** 目标集合对账：多余/配置变更链路关闭，缺失链路错峰启动（活跃 profile 不占名额） */
     fun reconcile(targets: List<LinkTarget>, activeKey: String?, mru: List<String>) {
         if (destroyed) return
-        val keep = selectLinkKeys(targets.map { it.key }, activeKey, mru, maxLinks).toSet()
+        lastReconcile = Triple(targets, activeKey, mru)
+        val dead = deadUntil.filterValues { it > nowMs() }.keys
+        val keep = selectLinkKeys(targets.map { it.key }, activeKey, mru, maxLinks, dead).toSet()
         val wanted = LinkedHashMap<String, LinkTarget>()
         for (t in targets) if (t.key in keep) wanted[t.key] = t
         for (key in links.keys.toList()) {
@@ -107,6 +134,7 @@ internal class HubLinkManager(
             val target = wanted[key]
             if (target == null || target.url != link.url ||
                 target.publicToken != link.publicToken || target.origin != link.origin) {
+                if (target != null) deadUntil.remove(key) // 配置已变更：新配置重新计失败
                 closeLink(key)
             }
         }
@@ -115,10 +143,13 @@ internal class HubLinkManager(
             if (links.containsKey(key)) continue
             startLink(target, index++)
         }
+        armDeadProbe()
     }
 
     fun closeAll() {
         destroyed = true
+        deadProbeJob?.cancel()
+        deadProbeJob = null
         for (key in links.keys.toList()) closeLink(key)
     }
 
@@ -147,7 +178,7 @@ internal class HubLinkManager(
         links[target.key] = link
         fun current() = !destroyed && links[target.key] === link
         client.onEvent = { obj -> if (current()) handleLinkEvent(link, obj) }
-        client.onClosed = { if (current()) onLinkDisconnected(link) }
+        client.onClosed = { if (current()) onLinkDisconnected(link, countLoss = true) }
         networkId?.let { client.onNetworkChanged(it) }
         // 错峰启动防重连风暴：同批链路按序间隔 staggerMs；各 client 自身仍有独立退避
         scope.launch {
@@ -157,6 +188,8 @@ internal class HubLinkManager(
                 onOpen = {
                     if (current()) {
                         link.connected = true
+                        link.losses = 0
+                        deadUntil.remove(target.key)
                         publishBadges()
                         scope.launch {
                             try {
@@ -166,17 +199,26 @@ internal class HubLinkManager(
                         syncLink(link)
                     }
                 },
-                onFailure = { if (current()) onLinkDisconnected(link) })
+                onFailure = { if (current()) onLinkDisconnected(link, countLoss = false) })
         }
     }
 
-    private fun onLinkDisconnected(link: HubLink) {
+    private fun onLinkDisconnected(link: HubLink, countLoss: Boolean) {
         if (destroyed) return
         link.connected = false
         link.ready = false
         link.generation++
         link.syncJob?.cancel()
         link.retryJob?.cancel()
+        // 连败计数只走 onClosed（loss 一次一计；onFailure 是同事件的重复通知）；
+        // 终态（auth 失败等不再重连）直接断路，连败达阈值进入冷却降权
+        if (countLoss) {
+            link.losses++
+            if (link.client.state.terminal || link.losses >= deadThreshold) {
+                deadUntil[link.key] = nowMs() + deadCooldownMs
+                armDeadProbe()
+            }
+        }
         publishBadges()
     }
 
@@ -289,5 +331,7 @@ internal class HubLinkManager(
 
     companion object {
         const val DEFAULT_MAX_LINKS = 3
+        const val DEAD_THRESHOLD = 5
+        const val DEAD_COOLDOWN_MS = 120_000L
     }
 }
