@@ -67,3 +67,24 @@ test("markdown file pill escapes quotes in path", () => {
   assert.doesNotMatch(out, /data-path="[^"]*</);
   assert.match(out, /data-path="a&quot;&lt;b&gt;/);
 });
+
+test("markdown allows data:image inline images", () => {
+  const out = renderMarkdown("![a](data:image/png;base64,iVBOR)", labels);
+  assert.match(out, /<img src="data:image\/png;base64,iVBOR"/);
+});
+
+test("markdown still blocks data:text/html in images and links", () => {
+  const img = renderMarkdown("![a](data:text/html;base64,PHN2Zz4=)", labels);
+  assert.doesNotMatch(img, /<img src="data:/);
+  const link = renderMarkdown("[x](data:text/html,<svg>)", labels);
+  assert.doesNotMatch(link, /href="data:/);
+});
+
+test("markdown allows svg data uri in img but blocks it in link href", () => {
+  const img = renderMarkdown("![m](data:image/svg+xml;base64,PHN2Zz4=)", labels);
+  assert.match(img, /<img src="data:image\/svg\+xml/);
+  const svg = renderMarkdown("[x](data:image/svg+xml,<svg onload=alert(1)>)", labels);
+  assert.doesNotMatch(svg, /href="data:/);
+  const png = renderMarkdown("[x](data:image/png;base64,iVBOR)", labels);
+  assert.doesNotMatch(png, /href="data:/);
+});

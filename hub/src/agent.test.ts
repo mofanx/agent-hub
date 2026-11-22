@@ -2152,6 +2152,37 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+  it("mid-turn 插话被拒且队列已满：notice 不谎称已转排队", async () => {
+    const { hub, agentConn, events } = setup({
+      agentCapabilities: { _meta: { "cognition.ai/midTurnPrompts": true } } as acp.AgentCapabilities,
+      promptHandler: (() => {
+        let call = 0;
+        return () => (++call === 1 ? new Promise<acp.PromptResponse>(() => {}) : Promise.reject(new Error("steer rejected")));
+      })(),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      for (let i = 0; i < 6; i++) {
+        await hub.promptContent("s1", [{ type: "text", text: `steer-${i}` }]);
+      }
+      await waitFor(() => {
+        const last = events.filter((e) => e.method === "session.notice").at(-1);
+        return last && String((last.params as { message?: unknown }).message).includes("已满") ? true : undefined;
+      });
+      const notices = events
+        .filter((e) => e.method === "session.notice")
+        .map((e) => String((e.params as { message?: unknown }).message));
+      const dropped = notices.at(-1)!;
+      assert.ok(dropped.includes("插话未送达"), `满队列丢弃提示应说明插话未送达: ${dropped}`);
+      assert.ok(dropped.includes("已满") && dropped.includes("丢弃"), `满队列提示应说明已满丢弃: ${dropped}`);
+      assert.ok(!dropped.includes("已转排队"), `丢弃不应谎称已转排队: ${dropped}`);
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
   it("无 midTurnPrompts 能力 → busy 仍走 followUp 队列", async () => {
     const { hub, agentConn, events, prompts } = setup({
       promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
