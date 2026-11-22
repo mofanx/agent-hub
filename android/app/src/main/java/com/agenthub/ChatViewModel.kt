@@ -1203,6 +1203,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (old.address != address) {
                 dropSlot(old.address)
                 HubService.dropLink(old.address)
+            } else if (old.token != token || old.publicToken != publicToken) {
+                dropSlot(address)
+                HubService.dropLink(address)
             }
         }
         profiles.removeAll { it.address == address }
@@ -2217,6 +2220,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var busyIds = listOf<String>()
         var currentSession: SessionInfo? = null
         var currentRoom: RoomInfo? = null
+        var screen = Screen.Sessions
         var flow: FlowInfo? = null
         var quote: Pair<String, String>? = null
         var helpReplyTo: String? = null
@@ -2326,6 +2330,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         slot.busyIds = busyIds.toList()
         slot.currentSession = currentSession
         slot.currentRoom = currentRoom
+        slot.screen = screen
         slot.flow = flow
         slot.quote = quote
         slot.helpReplyTo = helpReplyTo
@@ -2522,6 +2527,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         busyIds.addAll(slot.busyIds)
         currentSession = slot.currentSession
         currentRoom = slot.currentRoom
+        screen = slot.screen
         flow = slot.flow
         quote = slot.quote
         helpReplyTo = slot.helpReplyTo
@@ -5647,7 +5653,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun settleIdleLive(sid: String): Boolean {
         val author = sessionName(sid)
         fun settle(it: ChatItem): ChatItem = when {
-            historyIdOf(it) != null || !sameChatAuthor(it.author, author) -> it
+            historyIdOf(it) != null || it.author != author -> it
             it is ChatItem.Assistant && it.replyText == null -> it.copy(replyText = it.text)
             it is ChatItem.Tool && it.status !in setOf("completed", "failed", "cancelled", "done") -> it.copy(status = "done")
             else -> it
@@ -7029,11 +7035,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 val stoppable = p["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false
-                if (!stoppable) settleIdleLive(sid)
                 if (!inScope(sid)) return
                 if (stoppable) {
                     if (!busyIds.contains(sid)) busyIds.add(sid)
                 } else {
+                    settleIdleLive(sid)
                     busyIds.remove(sid)
                     clearStreamingTailIfIdle(sid)
                     refreshAll()

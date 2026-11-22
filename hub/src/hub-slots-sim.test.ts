@@ -57,9 +57,10 @@ function makeVm() {
     deliveryOrigin: "",
     agentStatus: "offline",
     missions: [] as string[],
+    screen: "sessions" as string,
   };
-  const HUB_FIELDS = ["sessions","chatItems","busyIds","flow","subscribedRoomId","deliveryOrigin","agentStatus","missions"] as const;
-  const EMPTY: Obj = { sessions: [], chatItems: [], busyIds: [], flow: null, subscribedRoomId: null, deliveryOrigin: "", agentStatus: "offline", missions: [] };
+  const HUB_FIELDS = ["sessions","chatItems","busyIds","flow","subscribedRoomId","deliveryOrigin","agentStatus","missions","screen"] as const;
+  const EMPTY: Obj = { sessions: [], chatItems: [], busyIds: [], flow: null, subscribedRoomId: null, deliveryOrigin: "", agentStatus: "offline", missions: [], screen: "sessions" };
 
   const badgeOf = (key: string) => vm.hubBadges.get(key) ?? vm.hubBadges.set(key, { waitingFor: 0, pendingDecisions: 0, connected: false }).get(key)!;
   const refreshBadge = (key: string) => {
@@ -153,7 +154,22 @@ function makeVm() {
     if (key === vm.currentAddress) disconnectAll(); else disconnectLink(key);
   };
 
-  return { vm, connect, parkToSlot, slotBadgeEvent, disconnectProfile, disconnectLink, deleteProfile, deleteProfileBuggy, disconnectAll, badgeOf, serviceLinks, linkFor };
+  /** upsertProfile 镜像：换址丢旧槽+链；同址换 token/publicToken 亦丢（旧凭证链路作废） */
+  const upsertProfile = (old: { address: string; token: string } | null, address: string, token: string) => {
+    if (old != null) {
+      if (old.address !== address) { disconnectProfile(old.address); dropServiceLink(old.address); }
+      else if (old.token !== token) { disconnectProfile(address); dropServiceLink(address); }
+    }
+  };
+
+  /** settleIdleLive 镜像（修复后）：按精确 author 定稿 live 项（replyText=null→置定稿）。
+   *  缺陷版用 sameChatAuthor 宽松匹配（"devin" 命中 "devin (2)"），同房重名成员互伤。 */
+  const settleIdleLive = (items: { author: string; replyText: string | null; settled?: boolean }[], author: string, exact = true) => {
+    const match = (a: string) => exact ? a === author : (a === author || a.startsWith(`${author} (`) || author.startsWith(`${a} (`));
+    for (const it of items) if (it.replyText == null && match(it.author)) { it.replyText = it.author; it.settled = true; }
+  };
+
+  return { vm, connect, parkToSlot, slotBadgeEvent, disconnectProfile, disconnectLink, deleteProfile, deleteProfileBuggy, disconnectAll, badgeOf, serviceLinks, linkFor, upsertProfile, settleIdleLive };
 }
 
 test("切走再切回：槽位整槽回放，client 复用零握手零断开", () => {
@@ -240,6 +256,42 @@ test("删 profile 即断 service 侧链路：不残留至下次 reconcile", () =
   deleteProfile("hubB");
   assert.equal(linkB.disconnected, 1);
   assert.equal(serviceLinks.has("hubB"), false);
+});
+
+test("槽位回放恢复 screen：切回落在原房间而非列表页", () => {
+  const { vm, connect } = makeVm();
+  connect("hubA");
+  vm.screen = "room:r1"; // A hub 正在房间里
+  connect("hubB");
+  assert.equal(vm.screen, "sessions", "切走后场复位到列表页");
+  connect("hubA");
+  assert.equal(vm.screen, "room:r1", "切回 A 应回到原房间页");
+});
+
+test("settleIdleLive 精确匹配：同房重名成员定稿不互伤", () => {
+  const { settleIdleLive } = makeVm();
+  const items = [
+    { author: "devin", replyText: null as string | null },     // sidA 的在途回复
+    { author: "devin (2)", replyText: null as string | null }, // sidB 的在途回复
+  ];
+  settleIdleLive(items, "devin (2)", true); // sidB 转 idle——只定稿自己的
+  assert.equal(items[0]!.replyText, null, "精确匹配下 devin 的在途项不被 devin (2) 的 idle 定稿");
+  assert.notEqual(items[1]!.replyText, null);
+  const items2 = [
+    { author: "devin", replyText: null as string | null },
+    { author: "devin (2)", replyText: null as string | null },
+  ];
+  settleIdleLive(items2, "devin", false); // 缺陷基线：宽松匹配
+  assert.notEqual(items2[1]!.replyText, null, "缺陷基线：宽松匹配误伤 'devin (2)'");
+});
+
+test("upsertProfile 同址换 token 回收槽位+service 链路", () => {
+  const { vm, connect, linkFor, serviceLinks, upsertProfile } = makeVm();
+  connect("hubA"); connect("hubB");
+  linkFor("hubA").connect(); // A 休眠：槽位+service 链路均在
+  upsertProfile({ address: "hubA", token: "old" }, "hubA", "new"); // 同址换 token
+  assert.equal(vm.slots.has("hubA"), false, "旧凭证槽位作废");
+  assert.equal(serviceLinks.has("hubA"), false, "旧凭证 service 链路即回收");
 });
 
 test("同 profile 重连不建槽（full reset 路径）", () => {
