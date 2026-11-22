@@ -1961,6 +1961,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun connect(address: String, token: String, publicToken: String = "", name: String? = null) {
+        PerfTrace.mark("swap.start", "addr=$address")
         val profile = Triple(address, token, publicToken)
         // 换绑：旧 profile 压槽保活（socket 不断），目标有槽则整槽回放
         val prevKey = currentProfile?.address
@@ -1994,6 +1995,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             restored.badgeJob?.cancel()
             restored.badgeSyncJob?.cancel()
             restoreSlot(restored)
+            PerfTrace.mark("swap.ready", "addr=$address slot=true")
             hubBadges.remove(address)
             connecting = false
             connectionState = client.state
@@ -2014,6 +2016,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val url = buildWsUrl(address, token)
         client.connect(url, publicToken,
             onOpen = {
+                PerfTrace.mark("ws.open", "addr=$address")
                 if (epoch == profileEpoch && connectionWanted) {
                     val generation = ++missionConnectionGeneration
                     collectActiveEvents(client, epoch, generation)
@@ -2112,6 +2115,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     if (!syncRefreshAll(generation, epoch, ::adoptDeliveryInfo)) error("recovery_snapshot_unavailable")
                     if (!currentConnection(epoch, generation) || seq != warmupSeq) return@launch
+                    if (attempt == 0) PerfTrace.mark("swap.ready", "addr=${currentProfile?.address} slot=false sessions=${sessions.size} rooms=${rooms.size}")
                     val key = scopeKey()
                     if (key != null) {
                         val exists = if (key.startsWith("room:")) rooms.any { "room:${it.roomId}" == key }
@@ -2805,8 +2809,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     ): Boolean = coroutineScope {
         fun valid() = currentConnection(epoch, generation)
         if (!valid()) return@coroutineScope false
+        val infoReq = async { runCatching { hubCall("agent.info") } }
+        val connReq = async { runCatching { hubCall("connection.list") } }
         try {
-            val info = hubCall("agent.info")
+            val info = infoReq.await().getOrThrow()
             if (!valid()) return@coroutineScope false
             onInfo(info)
             val ntfy = info["ntfy"] as? JsonObject
@@ -2821,7 +2827,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return@coroutineScope false
         }
         try {
-            val cResult = hubCall("connection.list")
+            val cResult = connReq.await().getOrThrow()
             if (!valid()) return@coroutineScope false
             val cList = cResult["connections"]?.jsonArray ?: JsonArray(emptyList())
                 connections.clear()
@@ -2875,7 +2881,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
                 }
-                syncBusyIdsFromList(sessions)
+                syncBusyIdsFromList(sessions, settle = true)
                 sessionsReady = true
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -4085,11 +4091,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openChat(session: SessionInfo, anchorAt: Long? = null, readOnly: Boolean = false, onOpened: (() -> Unit)? = null) {
+        PerfTrace.mark("open.start", "scope=session:${session.sessionId} offline=${session.offline}")
         roomOpenSeq++
         missionExecutionTarget = null
         if (session.offline && !readOnly) {
-            resumeSession(session, autoOpen = true)
-            return
+            val seq = roomOpenSeq
+            viewModelScope.launch {
+                try {
+                    val updated = resumeOne(session)
+                    if (updated == null) connectError = stringsFor(lang).resumeFailed
+                    else if (updated.sessionId == session.sessionId && currentSession?.sessionId == session.sessionId) currentSession = updated
+                    else if (updated.sessionId != session.sessionId && seq == roomOpenSeq &&
+                        currentSession?.sessionId == session.sessionId) openChat(updated)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    connectError = e.message
+                }
+            }
         }
         val isSameSession = currentSession?.sessionId == session.sessionId
         saveCurrentScope()
@@ -4107,6 +4125,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             chatItems.clear()
             scopeKey()?.let { key -> chatCache[key]?.let { chatItems.addAll(it) } }
         }
+        PerfTrace.mark("open.paint", "scope=session:${session.sessionId} n=${chatItems.size}")
         restoreScopeCounts()
         fileRefToInsert = null
         historyHasMore = false
@@ -4134,25 +4153,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openRoom(room: RoomInfo, anchorAt: Long? = null, readOnly: Boolean = false, onOpened: (() -> Unit)? = null) {
+        PerfTrace.mark("open.start", "scope=room:${room.roomId}")
         val seq = ++roomOpenSeq
         if (!readOnly) missionExecutionTarget = null
         viewModelScope.launch {
             connectError = null
             try {
-                syncRefreshAll()
-                if (seq != roomOpenSeq) return@launch
-                val latestRoom = rooms.find { it.roomId == room.roomId } ?: room
-                if (!readOnly) {
-                    val toResume = latestRoom.members.mapNotNull { (sid, _) ->
-                        sessions.find { it.sessionId == sid && it.offline }
-                    }
-                    // 成员会话并发恢复：N×session/load 串行是进房慢的主因，sessionId 去重已在 hub 侧防重；
-                    // runCatching 防单成员失败经 awaitAll 取消兄弟协程拖垮整房恢复
-                    toResume.map { s -> async { runCatching { resumeOne(s) } } }.awaitAll()
-                    if (seq != roomOpenSeq) return@launch
-                    syncRefreshAll()
-                }
-                if (seq != roomOpenSeq) return@launch
                 val updatedRoom = rooms.find { it.roomId == room.roomId } ?: room
                 val isSameRoom = currentRoom?.roomId == updatedRoom.roomId
                 saveCurrentScope()
@@ -4181,7 +4187,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatSearchMatchIndex = -1
                 chatSearchMatchCount = 0
                 screen = Screen.Room
+                PerfTrace.mark("open.paint", "scope=room:${updatedRoom.roomId} n=${chatItems.size}")
                 val history = loadHistory("room.history", "roomId", updatedRoom.roomId, anchorAt)
+                refreshOpenedRoom(room.roomId, seq, readOnly)
                 syncBusyIdsFromList(sessions)
                 refreshArtifacts(updatedRoom.roomId)
                 refreshCurrentModel()
@@ -4191,6 +4199,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (seq == roomOpenSeq) onOpened?.invoke()
                 subscribeScope(room.roomId)
                 loadRoomMemory(room.roomId)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                connectError = e.message
+            }
+        }
+    }
+
+    private fun refreshOpenedRoom(roomId: String, seq: Int, readOnly: Boolean) {
+        viewModelScope.launch {
+            try {
+                syncRefreshAll()
+                if (seq != roomOpenSeq) return@launch
+                if (!readOnly) {
+                    val members = rooms.find { it.roomId == roomId }?.members.orEmpty()
+                    val toResume = members.mapNotNull { (sid, _) -> sessions.find { it.sessionId == sid && it.offline } }
+                    // 成员会话并发恢复：N×session/load 串行是进房慢的主因，sessionId 去重已在 hub 侧防重；
+                    // runCatching 防单成员失败经 awaitAll 取消兄弟协程拖垮整房恢复
+                    if (toResume.isNotEmpty()) {
+                        toResume.map { s -> async { runCatching { resumeOne(s) } } }.awaitAll()
+                        if (seq != roomOpenSeq) return@launch
+                        syncRefreshAll()
+                    }
+                }
+                if (seq != roomOpenSeq || currentRoom?.roomId != roomId) return@launch
+                rooms.find { it.roomId == roomId }?.let { currentRoom = it }
+                syncBusyIdsFromList(sessions)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 connectError = e.message
@@ -4651,7 +4685,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val session = list.map { it.jsonObject }.find {
                 (it["sessionId"] as? JsonPrimitive)?.contentOrNull == target
             } ?: return "context"
-            if ((session["offline"] as? JsonPrimitive)?.booleanOrNull == true) return "context"
             if ((session["busy"] as? JsonPrimitive)?.booleanOrNull == true) return "busy"
         }
         return if (deliveryReady) null else "busy"
@@ -5008,9 +5041,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     )
 
     private suspend fun resumeOne(session: SessionInfo): SessionInfo? {
-        val result = hubCall("session.resume", buildJsonObject {
-            put("sessionId", session.sessionId)
-        })
+        val result = try {
+            hubCall("session.resume", buildJsonObject { put("sessionId", session.sessionId) })
+        } catch (e: Exception) {
+            PerfTrace.mark("resume.done", "sid=${session.sessionId} ok=false")
+            throw e
+        }
+        PerfTrace.mark("resume.done", "sid=${session.sessionId} ok=${result["resumed"]?.jsonPrimitive?.content}")
         return if (result["resumed"]?.jsonPrimitive?.content?.toBoolean() == true) {
             val newSessionId = result["sessionId"]?.jsonPrimitive?.content
             if (newSessionId != null && newSessionId != session.sessionId) {
@@ -5274,6 +5311,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (b > 0) return (historyIdOf(h) ?: 0L) > b
             return h.at <= 0L || t.at <= 0L || normAtOf(t) <= h.at
         }
+        fun absorbedByProcess(t: ChatItem): Boolean = historyIdOf(t) == null && hist.any {
+            it is ChatItem.Process && sameChatAuthor(it.author, t.author) &&
+                birthOf(t).let { b -> if (b > 0) (historyIdOf(it) ?: 0L) > b else it.at >= normAtOf(t) }
+        }
         return tail.filter { t ->
             when (t) {
                 is ChatItem.User ->
@@ -5293,11 +5334,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // 全文相等或互为前缀（含持久化截断为前缀）；已定稿 replyText 与落库条目
                     // 是同一条——断线/迟到恢复时 client at 可大于 server at，不再受时间门控
                     hist.none { it is ChatItem.Assistant && sameChatAuthor(it.author, t.author) && (t.replyText != null || earlierLive(it, t)) && (it.text == (t.replyText ?: t.text) || it.text.startsWith(t.replyText ?: t.text) || (t.replyText ?: t.text).startsWith(it.text)) }
-                is ChatItem.Thought ->
+                is ChatItem.Thought -> !absorbedByProcess(t) &&
                     hist.none { it is ChatItem.Thought && sameChatAuthor(it.author, t.author) && earlierLive(it, t) && (it.text == t.text || it.text.startsWith(t.text) || t.text.startsWith(it.text)) }
-                is ChatItem.Tool ->
-                    hist.none { it is ChatItem.Tool && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId }
-                is ChatItem.Plan ->
+                is ChatItem.Tool -> !absorbedByProcess(t) &&
+                    hist.none { it is ChatItem.Tool && t.toolCallId.isNotEmpty() && it.toolCallId == t.toolCallId && sameChatAuthor(it.author, t.author) }
+                is ChatItem.Plan -> !absorbedByProcess(t) &&
                     hist.none { it is ChatItem.Plan && sameChatAuthor(it.author, t.author) && it.entries == t.entries }
                 is ChatItem.Error ->
                     hist.none { it is ChatItem.Error && sameWindow(it, t) && sameChatAuthor(it.author, t.author) && it.text == t.text }
@@ -5358,6 +5399,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 if (anchorAt == null) {
                     recoverScope(key)
+                    PerfTrace.mark("open.history", "scope=$key n=${chatItems.size}")
                     return@launch
                 }
                 val params = buildJsonObject {
@@ -5589,7 +5631,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             .sortedBy { it.at }
     }
 
-    private fun syncBusyIdsFromList(list: List<SessionInfo>) {
+    private fun syncBusyIdsFromList(list: List<SessionInfo>, settle: Boolean = false) {
         val currentIds = currentRoom?.members?.map { it.first }?.toSet()
             ?: setOfNotNull(currentSession?.sessionId)
         if (currentIds.isEmpty()) return
@@ -5599,6 +5641,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         busyIds.removeAll { !busy.contains(it) && currentIds.contains(it) }
         streamingTail?.let { if (!busyIds.contains(it.first)) streamingTail = null }
         busy.forEach { if (!busyIds.contains(it)) busyIds.add(it) }
+        if (settle && (currentIds - busy).map { settleIdleLive(it) }.any { it }) scheduleTailRecover()
+    }
+
+    private fun settleIdleLive(sid: String): Boolean {
+        val author = sessionName(sid)
+        fun settle(it: ChatItem): ChatItem = when {
+            historyIdOf(it) != null || !sameChatAuthor(it.author, author) -> it
+            it is ChatItem.Assistant && it.replyText == null -> it.copy(replyText = it.text)
+            it is ChatItem.Tool && it.status !in setOf("completed", "failed", "cancelled", "done") -> it.copy(status = "done")
+            else -> it
+        }
+        var changed = false
+        for (i in chatItems.indices) {
+            val n = settle(chatItems[i])
+            if (n !== chatItems[i]) { chatItems[i] = n; changed = true }
+        }
+        for ((k, v) in chatCache.toList()) {
+            val nv = v.map(::settle)
+            if (nv.indices.any { nv[it] !== v[it] }) chatCache[k] = nv
+        }
+        if (streamingTail?.first == sid) streamingTail = null
+        return changed
     }
 
     private suspend fun syncBusyIds() {
@@ -5627,7 +5691,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
             }
-            syncBusyIdsFromList(sessionsList)
+            syncBusyIdsFromList(sessionsList, settle = true)
         } catch (_: Exception) {
         }
     }
@@ -6965,6 +7029,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 val stoppable = p["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false
+                if (!stoppable) settleIdleLive(sid)
                 if (!inScope(sid)) return
                 if (stoppable) {
                     if (!busyIds.contains(sid)) busyIds.add(sid)
@@ -6990,6 +7055,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 finalizeReply(sid, p["output"]?.jsonPrimitive?.contentOrNull)
+                settleIdleLive(sid)
                 busyIds.remove(sid)
                 clearStreamingTailIfIdle(sid)
                 val usage = parseTokenUsage(p["usage"] as? JsonObject)
@@ -7021,6 +7087,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val p = obj["params"]!!.jsonObject
                 val sid = p["sessionId"]!!.jsonPrimitive.content
                 finalizeReply(sid)
+                settleIdleLive(sid)
                 busyIds.remove(sid)
                 clearStreamingTailIfIdle(sid)
                 settlePromoteDraft(sid, false)
@@ -7357,7 +7424,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "tool_call_update" -> {
                 flushStreamChunks()
                 val id = u["toolCallId"]!!.jsonPrimitive.content
-                val idx = chatItems.indexOfLast { it is ChatItem.Tool && it.toolCallId == id }
+                val idx = chatItems.indexOfLast { it is ChatItem.Tool && it.toolCallId == id && sameChatAuthor(it.author, author) }
                 if (idx >= 0) {
                     val t = chatItems[idx] as ChatItem.Tool
                     chatItems[idx] = t.copy(

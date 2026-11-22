@@ -39,6 +39,8 @@ class DebugControl : BroadcastReceiver() {
                 put("flowTasks", vm.flow?.tasks?.size ?: 0)
                 put("deliveryError", vm.deliveryError ?: "")
                 put("deliveryRecords", vm.deliveryRecords.size)
+                put("deliveryReady", vm.deliveryReady)
+                put("hubConnected", vm.connectionState.name)
             })
             "rooms" -> log(buildJsonObject {
                 putJsonArray("rooms") {
@@ -110,6 +112,66 @@ class DebugControl : BroadcastReceiver() {
                 if (session == null) { Log.w(TAG, """{"error":"session_not_found"}"""); return }
                 vm.openChat(session, readOnly = true)
                 log(buildJsonObject { put("opened", session.sessionId) })
+            }
+            "open_session_rw" -> {
+                val sid = intent.getStringExtra("sessionId") ?: ""
+                val session = vm.sessions.find { it.sessionId == sid || it.name == sid }
+                if (session == null) { Log.w(TAG, """{"error":"session_not_found"}"""); return }
+                vm.openChat(session, readOnly = false)
+                log(buildJsonObject { put("opened", session.sessionId) })
+            }
+            "open_room_rw" -> {
+                val rid = intent.getStringExtra("roomId") ?: ""
+                val room = vm.rooms.find { it.roomId == rid || it.name == rid }
+                if (room == null) { Log.w(TAG, """{"error":"room_not_found","roomId":"$rid"}"""); return }
+                vm.openRoom(room, readOnly = false)
+                log(buildJsonObject { put("opened", room.roomId) })
+            }
+            "switch_profile" -> {
+                val addr = intent.getStringExtra("address") ?: ""
+                val p = vm.profiles.find { it.address == addr || it.address.contains(addr) }
+                if (p == null) { Log.w(TAG, """{"error":"profile_not_found","address":"$addr"}"""); return }
+                vm.switchProfile(p)
+                log(buildJsonObject { put("switched", p.address) })
+            }
+            "send_session" -> {
+                val text = intent.getStringExtra("text") ?: ""
+                if (text.isBlank()) { Log.w(TAG, """{"error":"blank_text"}"""); return }
+                if (vm.currentSession == null) { Log.w(TAG, """{"error":"no_session"}"""); return }
+                vm.sendPrompt(text)
+                log(buildJsonObject { put("sent", text.take(80)) })
+            }
+            "profiles" -> log(buildJsonObject {
+                put("current", vm.currentProfile?.address ?: "")
+                putJsonArray("profiles") {
+                    vm.profiles.forEach { p -> add(buildJsonObject { put("name", p.name); put("address", p.address) }) }
+                }
+            })
+            "timeline_all" -> {
+                val items = vm.chatItems.toList()
+                Log.i(TAG, buildJsonObject {
+                    put("scope", vm.currentRoom?.let { "room:${it.roomId}" } ?: vm.currentSession?.let { "session:${it.sessionId}" } ?: "")
+                    put("total", items.size)
+                }.toString())
+                items.chunked(30).forEachIndexed { ci, chunk ->
+                    Log.i(TAG, buildJsonObject {
+                        putJsonArray("items") {
+                            chunk.forEach { item ->
+                                add(buildJsonObject {
+                                    put("id", item.id); put("at", item.at)
+                                    put("kind", item.javaClass.simpleName)
+                                    put("historyId", when (item) {
+                                        is ChatItem.User -> item.historyId ?: 0L
+                                        is ChatItem.Assistant -> item.birthHistoryId
+                                        is ChatItem.Thought -> item.birthHistoryId
+                                        else -> 0L
+                                    })
+                                    put("text", item.text.take(24))
+                                })
+                            }
+                        }
+                    }.toString().let { "chunk=$ci " + it })
+                }
             }
             "find" -> {
                 vm.inChatSearchQuery = intent.getStringExtra("text") ?: ""

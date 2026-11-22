@@ -146,7 +146,7 @@ internal class HubLinkManager(
         }
         links[target.key] = link
         fun current() = !destroyed && links[target.key] === link
-        client.onEvent = { raw -> if (current()) handleLinkEvent(link, raw) }
+        client.onEvent = { obj -> if (current()) handleLinkEvent(link, obj) }
         client.onClosed = { if (current()) onLinkDisconnected(link) }
         networkId?.let { client.onNetworkChanged(it) }
         // 错峰启动防重连风暴：同批链路按序间隔 staggerMs；各 client 自身仍有独立退避
@@ -259,12 +259,7 @@ internal class HubLinkManager(
         }
     }
 
-    private fun handleLinkEvent(link: HubLink, raw: String) {
-        val obj = try {
-            Json.parseToJsonElement(raw).jsonObject
-        } catch (_: Exception) {
-            return
-        }
+    private fun handleLinkEvent(link: HubLink, obj: JsonObject) {
         when ((obj["method"] as? JsonPrimitive)?.contentOrNull) {
             "room.flowUpdate" -> {
                 val p = obj["params"] as? JsonObject ?: return

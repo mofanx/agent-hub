@@ -327,7 +327,7 @@ class HubService : Service() {
             stringsFor(prefs.getString("lang", "zh") ?: "zh")
         }.also { hub = it }
         fun current() = !isDestroyed && hub === client && activeProfile == profile
-        client.onEvent = { raw -> if (current()) handleEvent(raw) }
+        client.onEvent = { obj -> if (current()) handleEvent(obj) }
         client.onClosed = { if (current()) onDisconnected() }
         client.onNetworkChanged(networkMonitor?.currentNetworkId)
         client.connect(url, publicToken,
@@ -465,12 +465,7 @@ class HubService : Service() {
         publishHubBadges()
     }
 
-    private fun handleEvent(raw: String) {
-        val obj = try {
-            kotlinx.serialization.json.Json.parseToJsonElement(raw).jsonObject
-        } catch (_: Exception) {
-            return
-        }
+    private fun handleEvent(obj: JsonObject) {
         when ((obj["method"] as? JsonPrimitive)?.contentOrNull) {
             "room.flowUpdate" -> {
                 val p = obj["params"] as? JsonObject ?: return

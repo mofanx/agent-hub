@@ -73,7 +73,7 @@ class HubClient(
     val events = _events.asSharedFlow()
 
     var onClosed: (() -> Unit)? = null
-    var onEvent: ((String) -> Unit)? = null
+    var onEvent: ((JsonObject) -> Unit)? = null
     var onStateChanged: ((HubConnectionState) -> Unit)? = null
 
     private var url: String? = null
@@ -161,10 +161,10 @@ class HubClient(
                 }
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
+                val obj = try { json.parseToJsonElement(text).jsonObject } catch (e: Exception) { return }
                 actor {
                     if (webSocket != ws || gen != attemptGen) return@actor
-                    onEvent?.invoke(text)
-                    val obj = try { json.parseToJsonElement(text).jsonObject } catch (e: Exception) { return@actor }
+                    onEvent?.invoke(obj)
                     val id = (obj["id"] as? JsonPrimitive)?.intOrNull
                     if (id != null && pending.containsKey(id)) { pending.remove(id)?.complete(obj); return@actor }
                     val tailDone = emitTail?.isCompleted != false

@@ -53,7 +53,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         Notifier.ensureChannels(this)
-        if (Build.VERSION.SDK_INT >= 33) {
+        val prefs = getSharedPreferences("agent-hub", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 33 && savedInstanceState == null &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !prefs.getBoolean("notif_perm_asked", false)
+        ) {
+            prefs.edit().putBoolean("notif_perm_asked", true).apply()
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         handleConnectIntent(intent)
