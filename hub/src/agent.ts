@@ -256,6 +256,10 @@ type SessionEntry = {
   /** stall 判疑已告警并处于回收宽限期（宽限内再静默才杀） */
   stallWarned?: boolean;
   activeToolIds?: Set<string> | undefined;
+  /** mid-turn 插话在途请求：主回合定稿前须等其全部 settle */
+  steerInFlight?: Set<Promise<unknown>> | undefined;
+  /** 最近一次成功 steer 响应的 stopReason（主回合出错时兜底定稿用） */
+  lastSteerStopReason?: string | undefined;
 };
 
 export function stripLoneSurrogates(s: string): string {
@@ -314,6 +318,7 @@ const TURN_UPDATE_KINDS = new Set([
 ]);
 const OUTPUT_CAPTURE_LEN = 800;
 const AUTH_REQUIRED_CODE = acp.RequestError.authRequired().code;
+const METHOD_NOT_FOUND_CODE = -32601;
 let permissionBypass = process.env.HUB_PERMISSION_BYPASS === "1";
 
 export function sliceTextFile(
@@ -774,6 +779,9 @@ export class AcpAgent {
   private cachedConfigOptions: unknown[] | null = null;
   private sessionConfigOptions = new Map<string, unknown[]>();
   private supportsSessionFork = false;
+  private supportsMidTurnPrompts = false;
+  private supportsSessionClose = false;
+  private resumeUnsupported = false;
   /** steer-queue：busy 时 followUp FIFO（上限 5，溢出丢弃），finishTurn 后合并为单 turn drain */
   private followUps = new Map<string, Array<Record<string, unknown>[]>>();
   private readonly followUpLimit = 5;
@@ -877,9 +885,27 @@ export class AcpAgent {
     });
     console.log(`[agent] ${this.name} initialized:`, JSON.stringify(init));
     this.supportsSessionFork = init.agentCapabilities?.sessionCapabilities?.fork != null;
+    this.supportsMidTurnPrompts =
+      (init.agentCapabilities?._meta as Record<string, unknown> | undefined)?.["cognition.ai/midTurnPrompts"] === true;
+    this.supportsSessionClose = init.agentCapabilities?.sessionCapabilities?.close != null;
     this.nativeGoalCapabilities = goalCapabilities(init);
     this.supportsSteering = (init._meta?.steering as { supported?: unknown } | undefined)?.supported === true;
     this.authMethods = init.authMethods ?? [];
+
+    if (
+      this.localDevinAuth &&
+      this.authMethods.some((m) => ((m as { type?: string }).type ?? "agent") === "agent")
+    ) {
+      this.authInFlight = this.authenticateOnDemand()
+        .then(() => {
+          this.authEpoch++;
+        })
+        .catch((err) => {
+          this.authEpoch++;
+          logWarn("auth", `eager devin auth failed: ${String(err)}`);
+          this.authInFlight = null;
+        });
+    }
 
     this.ready = true;
     this.emit({
@@ -912,6 +938,7 @@ export class AcpAgent {
   }
 
   private async requestWithAuth<T>(send: () => Promise<T>): Promise<T> {
+    if (this.authInFlight) await this.authInFlight.catch(() => {});
     const epoch = this.authEpoch;
     try {
       return await send();
@@ -998,6 +1025,9 @@ export class AcpAgent {
     const wasReady = this.ready;
     this.ready = false;
     this.supportsSessionFork = false;
+    this.supportsMidTurnPrompts = false;
+    this.supportsSessionClose = false;
+    this.resumeUnsupported = false;
     this.ctx = null;
     this.conn = null;
     this.sessionConfigOptions.clear();
@@ -1656,49 +1686,57 @@ export class AcpAgent {
     return this.cachedConfigOptions;
   }
 
-  /** 恢复历史会话：优先 session/resume，回退 session/load */
+  /** 恢复历史会话：优先 session/resume（-32601 后记 resumeUnsupported 直走 load），回退 session/load */
   async resumeSession(sessionId: string, cwd: string, name: string): Promise<boolean> {
     await this.ensureStarted();
-    try {
-      const resp = await this.requestWithAuth(() =>
-        this.ctx!.request(acp.methods.agent.session.resume, {
-          sessionId,
-          cwd,
-          mcpServers: [],
-        }),
-      );
-      this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown }).configOptions);
-    } catch (err) {
-      if (this.wasAuthHandled(err) || this.isAuthRequired(err)) {
-        logWarn("agent", `resume ${sessionId} auth failed: ${String(err)}`);
-        throw err;
-      }
+    if (!this.resumeUnsupported) {
       try {
-        this.sessions.set(sessionId, {
-          cwd,
-          name,
-          busy: false,
-          stoppable: false,
-          turnText: "",
-          loading: true,
-        });
         const resp = await this.requestWithAuth(() =>
-          this.ctx!.request(acp.methods.agent.session.load, {
+          this.ctx!.request(acp.methods.agent.session.resume, {
             sessionId,
             cwd,
             mcpServers: [],
           }),
         );
-        this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown } | undefined)?.configOptions);
-        console.log(`[agent] resumed ${sessionId} via session/load`);
+        this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown }).configOptions);
+        this.sessions.set(sessionId, { cwd, name, busy: false, stoppable: false, turnText: "" });
+        return true;
       } catch (err) {
-        this.sessions.delete(sessionId);
-        this.followUps.delete(sessionId);
-        this.contextUsage.delete(sessionId);
-        logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
-        if (this.wasAuthHandled(err) || this.isAuthRequired(err)) throw err;
-        return false;
+        if (this.wasAuthHandled(err) || this.isAuthRequired(err)) {
+          logWarn("agent", `resume ${sessionId} auth failed: ${String(err)}`);
+          throw err;
+        }
+        if ((err as { code?: unknown }).code === METHOD_NOT_FOUND_CODE) {
+          this.resumeUnsupported = true;
+          logWarn("agent", `session/resume unsupported by agent, using session/load`);
+        }
       }
+    }
+    try {
+      this.sessions.set(sessionId, {
+        cwd,
+        name,
+        busy: false,
+        stoppable: false,
+        turnText: "",
+        loading: true,
+      });
+      const resp = await this.requestWithAuth(() =>
+        this.ctx!.request(acp.methods.agent.session.load, {
+          sessionId,
+          cwd,
+          mcpServers: [],
+        }),
+      );
+      this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown } | undefined)?.configOptions);
+      console.log(`[agent] resumed ${sessionId} via session/load`);
+    } catch (err) {
+      this.sessions.delete(sessionId);
+      this.followUps.delete(sessionId);
+      this.contextUsage.delete(sessionId);
+      logWarn("agent", `resume ${sessionId} failed: ${String(err)}`);
+      if (this.wasAuthHandled(err) || this.isAuthRequired(err)) throw err;
+      return false;
     }
     this.sessions.set(sessionId, { cwd, name, busy: false, stoppable: false, turnText: "" });
     return true;
@@ -1706,6 +1744,37 @@ export class AcpAgent {
 
   async prompt(sessionId: string, text: string, opts?: PromptOpts): Promise<void> {
     await this.promptContent(sessionId, [{ type: "text", text }], opts);
+  }
+
+  private enqueueFollowUp(sessionId: string, entry: SessionEntry, prompt: Array<Record<string, unknown>>): void {
+    const q = this.followUps.get(sessionId) ?? [];
+    if (q.length < this.followUpLimit) {
+      q.push(prompt);
+      this.followUps.set(sessionId, q);
+      logWarn("followUp", `queued #${q.length} for busy session ${entry.name}`);
+      this.emit({
+        method: "session.notice",
+        params: {
+          sessionId,
+          message: `成员忙碌，消息已排队（队列 ${q.length}/${this.followUpLimit}）`,
+        },
+      });
+    } else {
+      logWarn("followUp", `queue full (${this.followUpLimit}), dropping prompt for ${entry.name}`);
+      this.emit({
+        method: "session.notice",
+        params: {
+          sessionId,
+          message: `成员忙碌队列已满（${this.followUpLimit} 条），该消息已丢弃`,
+        },
+      });
+    }
+  }
+
+  private async waitSteers(entry: SessionEntry): Promise<void> {
+    if (entry.steerInFlight && entry.steerInFlight.size > 0) {
+      await Promise.allSettled([...entry.steerInFlight]);
+    }
   }
 
   async promptContent(
@@ -1721,28 +1790,34 @@ export class AcpAgent {
       // 房间编排路径传 queueIfBusy:false——竞态窗内宁抛不错误入 agent 层队列
       // （房侧 followUps 才是带 turnGuard 的正规队列）
       if (opts?.queueIfBusy === false) throw new Error(`session busy: ${entry.name}`);
-      const q = this.followUps.get(sessionId) ?? [];
-      if (q.length < this.followUpLimit) {
-        q.push(prompt);
-        this.followUps.set(sessionId, q);
-        logWarn("followUp", `queued #${q.length} for busy session ${entry.name}`);
+      // devin mid-turn 插话：busy 时直接再发 session/prompt 让 agent 在当前回合内 steering
+      if (this.supportsMidTurnPrompts && !entry.loading) {
+        const steerPrompt = prompt.map((p) =>
+          typeof p.text === "string" ? { ...p, text: stripLoneSurrogates(p.text) } : p,
+        );
+        const steerEpoch = entry.turnEpoch;
+        const steerReq = this.ctx!
+          .request(acp.methods.agent.session.prompt, { sessionId, prompt: steerPrompt })
+          .then((resp) => {
+            const sr = (resp as { stopReason?: unknown }).stopReason;
+            // 跨回合迟 resolve 的 stopReason 属旧回合，不得污染新回合兜底定稿
+            if (typeof sr === "string" && entry.turnEpoch === steerEpoch) entry.lastSteerStopReason = sr;
+            return resp;
+          })
+          .catch((err: unknown) => {
+            logWarn("steer", `mid-turn prompt rejected for ${entry.name}: ${String(err)} — fallback to followUp`);
+            this.enqueueFollowUp(sessionId, entry, prompt);
+          });
+        const set = (entry.steerInFlight ??= new Set());
+        set.add(steerReq);
+        void steerReq.finally(() => set.delete(steerReq));
         this.emit({
           method: "session.notice",
-          params: {
-            sessionId,
-            message: `成员忙碌，消息已排队（队列 ${q.length}/${this.followUpLimit}）`,
-          },
+          params: { sessionId, message: "已插话：消息已送达，正在当前回合内处理" },
         });
-      } else {
-        logWarn("followUp", `queue full (${this.followUpLimit}), dropping prompt for ${entry.name}`);
-        this.emit({
-          method: "session.notice",
-          params: {
-            sessionId,
-            message: `成员忙碌队列已满（${this.followUpLimit} 条），该消息已丢弃`,
-          },
-        });
+        return;
       }
+      this.enqueueFollowUp(sessionId, entry, prompt);
       return;
     }
     entry.busy = true;
@@ -1754,6 +1829,7 @@ export class AcpAgent {
     entry.ackExtended = false;
     entry.activeToolIds = undefined;
     entry.lastActivityAt = Date.now();
+    entry.lastSteerStopReason = undefined;
     const epoch = (entry.turnEpoch ?? 0) + 1;
     entry.turnEpoch = epoch;
     const isCurrentTurn = () =>
@@ -1897,7 +1973,9 @@ export class AcpAgent {
       sessionId,
       prompt,
     })
-      .then((resp) => {
+      .then(async (resp) => {
+        if (!isCurrentTurn()) return;
+        await this.waitSteers(entry).catch(() => {});
         if (!isCurrentTurn()) return;
         clearTimeout(entry.watchdog);
         entry.watchdog = undefined;
@@ -1920,8 +1998,18 @@ export class AcpAgent {
           }, turnSettleGraceMs),
         };
       })
-      .catch((err: unknown) => {
+      .catch(async (err: unknown) => {
         if (!isCurrentTurn()) return;
+        await this.waitSteers(entry).catch(() => {});
+        if (!isCurrentTurn()) return;
+        const steerSr = entry.lastSteerStopReason;
+        entry.lastSteerStopReason = undefined;
+        if (steerSr) {
+          clearTimeout(entry.watchdog);
+          entry.watchdog = undefined;
+          this.finishTurn(sessionId, steerSr, undefined);
+          return;
+        }
         clearTimeout(entry.watchdog);
         entry.watchdog = undefined;
         const wasActive = entry.busy || entry.stoppable;
@@ -2069,6 +2157,11 @@ export class AcpAgent {
     const entry = this.sessions.get(sessionId);
     if (entry) this.dropPendingSettle(entry);
     this.sessions.delete(sessionId);
+    if (this.supportsSessionClose && this.ctx) {
+      this.ctx
+        .request("session/close", { sessionId })
+        .catch((err) => logWarn("session.close", `close ${sessionId} failed: ${String(err)}`));
+    }
     this.permissionGrants.delete(sessionId);
     this.contextUsage.delete(sessionId);
     this.sessionConfigOptions.delete(sessionId);

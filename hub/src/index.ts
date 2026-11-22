@@ -37,7 +37,7 @@ import {
   clearQuotaReports,
   type ReportedQuota,
 } from "./quota.js";
-import { logError, logWarn } from "./logger.js";
+import { createStderrForwarder, logError, logWarn } from "./logger.js";
 import { discoverSkills } from "./skills.js";
 import {
   parseSlash,
@@ -51,6 +51,7 @@ import {
 import { Scheduler, parseSchedule, type ScheduledTask, type TaskLog } from "./scheduler.js";
 import { buildProcessMeta, newProcessId, TurnProcessRecorder, type ProcessCardMeta } from "./process-log.js";
 import { OperationLedger, dedupInflight } from "./op-ledger.js";
+import { createEnsureSessionLive, prewarmTargets } from "./session-live.js";
 import { runClientMessage, clientMessageStatus, clientMessageFlowState } from "./client-messages.js";
 import { DecisionCenter, sweepPendingDecisions, inferOptionScope, isRejectOption, type DecisionScope, type DecisionRequestParams } from "./decision.js";
 import { RelevanceFilter } from "./filter.js";
@@ -155,6 +156,7 @@ rooms.setMemberChannelResolver((sessionId) => {
 });
 for (const room of savedState.rooms) rooms.import(room);
 
+const HUB_STARTED_AT = Date.now();
 const LOST_REPLY_PLACEHOLDER = "[Hub 重启导致上条回复未完整保存]";
 const LOST_REPLY_NOTE = "上一条用户消息已处理，但回复因 Hub 重启未保存。请直接回答以下新消息，不要重复处理上一条：";
 
@@ -164,7 +166,7 @@ function sessionLostReplyNote(sessionId: string): string | undefined {
   const origin = originFor(meta);
   const displayName = origin ? `${baseName} (${origin})` : baseName;
   const entries = store.read("session", sessionId);
-  const action = lostReplyAction(entries[entries.length - 1], LOST_REPLY_PLACEHOLDER, false);
+  const action = lostReplyAction(entries[entries.length - 1], LOST_REPLY_PLACEHOLDER, agentOps.isBusy(sessionId), HUB_STARTED_AT);
   if (action === "append") {
     broadcastEntry("session", sessionId, store.append("session", sessionId, {
       at: Date.now(),
@@ -186,6 +188,7 @@ function roomLostReplyNote(roomId: string): string | undefined {
     entries[entries.length - 1],
     LOST_REPLY_PLACEHOLDER,
     roomModeManager.hasActiveFlow(roomId),
+    HUB_STARTED_AT,
   );
   if (action === "append") {
     broadcastEntry("room", roomId, store.append("room", roomId, {
@@ -527,6 +530,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
   const STDERR_TAIL_BYTES = 8 * 1024;
   const stderrTail: Buffer[] = [];
   let stderrTailLen = 0;
+  const forwardStderr = createStderrForwarder((s) => process.stderr.write(s));
   proc.stderr!.on("data", (chunk: Buffer) => {
     stderrTail.push(chunk);
     stderrTailLen += chunk.length;
@@ -534,8 +538,9 @@ async function startLocalAgent(connection: Connection): Promise<void> {
       stderrTailLen -= stderrTail[0]!.length;
       stderrTail.shift();
     }
-    process.stderr.write(chunk);
+    forwardStderr.push(chunk);
   });
+  proc.stderr!.on("end", () => forwardStderr.end());
 
   const localStream = acp.ndJsonStream(
     Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>,
@@ -701,10 +706,16 @@ async function resumeSessionById(sessionId: string) {
 }
 
 let missionReservesSession = (_sessionId: string): boolean => false;
+const ensureSessionLive = createEnsureSessionLive({
+  hasOwner: (sessionId) => owners.has(sessionId),
+  hasMeta: (sessionId) => sessionMetas.has(sessionId),
+  resumeSession: (sessionId) => dedupInflight(sessionResumes, sessionId, () => resumeSessionById(sessionId)),
+});
 const agentOps: AgentOps = {
   prompt: async (sessionId, content, opts) => {
     // async 包装：ownerOf 的同步 throw（agent 未连接）转为 rejected promise，
     // 使 sendPrompt/.catch 兜底可挂——否则同步逃逸导致 autoDecisions/turnGuards 悬挂
+    await ensureSessionLive(sessionId);
     const agent = ownerOf(sessionId);
     turnEnds.delete(sessionId);
     if (typeof content === "string") return agent.prompt(sessionId, content, opts);
@@ -4149,11 +4160,15 @@ wss.on("connection", (ws, req) => {
   }
   if (url.searchParams.get("via") === "gateway") relayedClients.add(ws);
   clients.add(ws);
+  const connectedAt = Date.now();
+  const clientIp = req.socket.remoteAddress ?? "";
   console.log(`[hub] client connected (${clients.size} total)`);
-  ws.on("close", () => {
+  ws.on("close", (code, reason) => {
     clients.delete(ws);
     relayedClients.delete(ws);
     clientSubs.delete(ws);
+    const lifetimeS = Math.round((Date.now() - connectedAt) / 1000);
+    console.log(`[hub] client disconnected (code=${code}, reason=${String(reason)}, ip=${clientIp}, lifetime=${lifetimeS}s, ${clients.size} total)`);
   });
   ws.on("message", async (raw) => {
     let req2: RequestMessage;
@@ -4238,5 +4253,10 @@ wss.on("listening", () => {
   }
   if (process.env.HUB_TUNNEL === "1") {
     startTunnel(PORT, TOKEN);
+  }
+  if (process.env.HUB_PREWARM !== "0") {
+    for (const c of prewarmTargets(store.listConnections(), sessionMetas.values())) {
+      ensureLocalAgent(c).catch((err) => logWarn("prewarm", String(err)));
+    }
   }
 });

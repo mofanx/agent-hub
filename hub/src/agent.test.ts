@@ -186,6 +186,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
     loadAuthGated?: boolean;
     loadStayGated?: boolean;
     localDevinAuth?: boolean;
+    authGate?: Promise<void>;
     onTurnEnd?: (
       sessionId: string,
       text: string,
@@ -203,6 +204,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
     const forkCalls: acp.ForkSessionRequest[] = [];
     const resumeCalls: acp.ResumeSessionRequest[] = [];
     const loadCalls: acp.LoadSessionRequest[] = [];
+    const closeCalls: unknown[] = [];
     const setConfigCalls: { sessionId: string; configId: string; value: unknown }[] = [];
     const order: string[] = [];
     const deferredResolvers: (() => void)[] = [];
@@ -224,10 +226,11 @@ describe("AcpAgent integration (in-memory stream)", () => {
           ...(options?.authMethods ? { authMethods: options.authMethods } : {}),
         };
       })
-      .onRequest(acp.methods.agent.authenticate, ({ params }) => {
+      .onRequest(acp.methods.agent.authenticate, async ({ params }) => {
         order.push("authenticate");
         authCalls.push(params);
         if (options?.failAuthenticate) throw new Error("login cancelled");
+        if (options?.authGate) await options.authGate;
         authenticated = true;
       })
       .onRequest(acp.methods.agent.session.new, async () => {
@@ -302,6 +305,11 @@ describe("AcpAgent integration (in-memory stream)", () => {
         prompts.push(params);
         return options?.promptHandler?.(params) ?? new Promise<acp.PromptResponse>(() => {});
       })
+      .onRequest("session/close", ({ params }) => {
+        order.push("session.close");
+        closeCalls.push(params);
+        return {};
+      })
       .connect(agentStream);
     const events: HubEvent[] = [];
     const hub = new AcpAgent(
@@ -316,7 +324,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       options?.localDevinAuth ?? false,
       options?.onTurnProgress,
     );
-    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, resumeCalls, loadCalls, setConfigCalls, order, deferredResolvers, seenClientCapabilities };
+    return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, resumeCalls, loadCalls, setConfigCalls, order, deferredResolvers, seenClientCapabilities, closeCalls };
   }
 
   it("elicitation request -> Hub event -> respond -> agent 收到 accept", async () => {
@@ -1606,6 +1614,38 @@ describe("AcpAgent integration (in-memory stream)", () => {
     agentConn.close();
   });
 
+  it("session/resume -32601 后置 resumeUnsupported，后续 resumeSession 直走 load", async () => {
+    const { hub, agentConn, resumeCalls, loadCalls } = setup({
+      resumeError: acp.RequestError.methodNotFound("session/resume"),
+    });
+    const ok1 = await hub.resumeSession("hist1", "/tmp", "旧会话");
+    assert.equal(ok1, true);
+    assert.equal(resumeCalls.length, 1, "首次仍尝试 session/resume");
+    assert.equal(loadCalls.length, 1, "首次回退 session/load");
+    const ok2 = await hub.resumeSession("hist2", "/tmp", "旧会话2");
+    assert.equal(ok2, true);
+    assert.equal(resumeCalls.length, 1, "-32601 后不再发 session/resume");
+    assert.equal(loadCalls.length, 2, "后续直接 session/load");
+    hub.close();
+    agentConn.close();
+  });
+
+  it("非 -32601 resume 失败不置 resumeUnsupported，仍重试 resume", async () => {
+    const { hub, agentConn, resumeCalls, loadCalls } = setup({
+      resumeError: acp.RequestError.internalError(),
+    });
+    const ok1 = await hub.resumeSession("hist1", "/tmp", "旧会话");
+    assert.equal(ok1, true);
+    assert.equal(resumeCalls.length, 1);
+    assert.equal(loadCalls.length, 1);
+    const ok2 = await hub.resumeSession("hist2", "/tmp", "旧会话2");
+    assert.equal(ok2, true);
+    assert.equal(resumeCalls.length, 2, "非 32601 不置标记，仍尝试 session/resume");
+    assert.equal(loadCalls.length, 2);
+    hub.close();
+    agentConn.close();
+  });
+
   it("fork 在 auth_required 后按需认证并重试成功", async () => {
     const { hub, agentConn, authCalls, forkCalls } = setup({
       authGated: true,
@@ -2009,6 +2049,181 @@ describe("AcpAgent integration (in-memory stream)", () => {
     const drained = received[1]!.split("\n\n");
     assert.equal(drained.length, 5, "仅前 5 条入队，溢出 2 条丢弃");
     resolvers[1]!({ stopReason: "end_turn" });
+  });
+
+  it("mid-turn 插话：busy 时直发 session/prompt 不排队，双 resolve 后单次 prompt.done", async () => {
+    const resolvers: Array<(r: acp.PromptResponse) => void> = [];
+    const { hub, agentConn, events, prompts } = setup({
+      agentCapabilities: { _meta: { "cognition.ai/midTurnPrompts": true } } as acp.AgentCapabilities,
+      promptHandler: () => new Promise<acp.PromptResponse>((r) => resolvers.push(r)),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await waitFor(() => (resolvers.length >= 1 ? resolvers.length : undefined));
+      await hub.promptContent("s1", [{ type: "text", text: "steer" }]);
+      await waitFor(() => (resolvers.length >= 2 ? resolvers.length : undefined));
+      assert.equal(prompts.length, 2, "steer 应立即发第 2 个 session/prompt");
+      assert.ok(events.some((e) => e.method === "session.notice" && String((e.params as { message?: unknown }).message).includes("插话")), "应发插话提示");
+      assert.equal(events.filter((e) => e.method === "session.notice" && String((e.params as { message?: unknown }).message).includes("排队")).length, 0, "不应走排队");
+      resolvers[0]!({ stopReason: "end_turn" } as acp.PromptResponse);
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 0, "steer 未 settle 前不应 prompt.done");
+      resolvers[1]!({ stopReason: "end_turn" } as acp.PromptResponse);
+      await waitFor(() => events.find((e) => e.method === "prompt.done"));
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 1, "恰好一次 turn end");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("mid-turn steer 跨回合迟 resolve：旧 stopReason 不污染新回合兜底", async () => {
+    const resolvers: Array<{ resolve: (r: acp.PromptResponse) => void; reject: (e: Error) => void }> = [];
+    const { hub, agentConn, events } = setup({
+      agentCapabilities: { _meta: { "cognition.ai/midTurnPrompts": true } } as acp.AgentCapabilities,
+      promptHandler: () => new Promise<acp.PromptResponse>((resolve, reject) => resolvers.push({ resolve, reject })),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await waitFor(() => (resolvers.length >= 1 ? true : undefined));
+      await hub.promptContent("s1", [{ type: "text", text: "steer" }]);
+      await waitFor(() => (resolvers.length >= 2 ? true : undefined));
+      await hub.cancel("s1");
+      await hub.prompt("s1", "second");
+      await waitFor(() => (resolvers.length >= 3 ? true : undefined));
+      // 旧回合 steer 在新回合期间迟 resolve——其 stopReason 属旧回合，不得被新回合引用
+      resolvers[1]!.resolve({ stopReason: "end_turn" } as acp.PromptResponse);
+      await new Promise((r) => setTimeout(r, 20));
+      resolvers[2]!.reject(new Error("turn boom"));
+      await waitFor(() => events.find((e) => e.method === "prompt.error"));
+      assert.equal(events.filter((e) => e.method === "prompt.done").length, 0, "旧 steerSr 不得被新回合用作定稿");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("mid-turn 插话被拒 → 回退 followUp 队列", async () => {
+    let call = 0;
+    const { hub, agentConn, events } = setup({
+      agentCapabilities: { _meta: { "cognition.ai/midTurnPrompts": true } } as acp.AgentCapabilities,
+      promptHandler: () => {
+        call++;
+        if (call === 1) return new Promise<acp.PromptResponse>(() => {});
+        return Promise.reject(new Error("steer rejected"));
+      },
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await hub.promptContent("s1", [{ type: "text", text: "steer" }]);
+      await waitFor(() => events.find((e) => e.method === "session.notice" && String((e.params as { message?: unknown }).message).includes("排队")));
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("无 midTurnPrompts 能力 → busy 仍走 followUp 队列", async () => {
+    const { hub, agentConn, events, prompts } = setup({
+      promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await waitFor(() => (prompts.length >= 1 ? true : undefined));
+      await hub.promptContent("s1", [{ type: "text", text: "second" }]);
+      await waitFor(() => events.find((e) => e.method === "session.notice"));
+      assert.equal(prompts.length, 1, "无能力不应发第 2 个 session/prompt");
+      assert.ok(events.some((e) => e.method === "session.notice" && String((e.params as { message?: unknown }).message).includes("排队")));
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("localDevinAuth + agent authMethod → initialize 后立即 authenticate，无 session 请求", async () => {
+    const { hub, agentConn, order, authCalls } = setup({
+      localDevinAuth: true,
+      authMethods: [{ id: "m1", name: "devin", type: "agent" } as acp.AuthMethod],
+    });
+    try {
+      await hub.ensureStarted();
+      await waitFor(() => (order.includes("authenticate") ? true : undefined));
+      assert.equal(order.filter((m) => m === "session.new" || m === "session.load" || m === "session.resume").length, 0, "eager auth 不应伴随 session 请求");
+      assert.equal(authCalls.length, 1);
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("eager auth 进行中 session/load 等待且不触发 auth-required 重试", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { hub, agentConn, order, authCalls, loadCalls, resumeCalls } = setup({
+      localDevinAuth: true,
+      authGate: gate,
+      authMethods: [{ id: "m1", name: "devin", type: "agent" } as acp.AuthMethod],
+      loadAuthGated: true,
+      resumeError: new Error("resume unsupported"),
+    });
+    try {
+      const started = hub.ensureStarted();
+      await waitFor(() => (order.includes("authenticate") ? true : undefined));
+      const loadP = hub.resumeSession("sX", "/tmp", "sx").catch((e) => e);
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(loadCalls.length + resumeCalls.length, 0, "auth 未完成前 session 请求不应发出");
+      release();
+      await started;
+      await loadP;
+      assert.equal(loadCalls.length, 1);
+      assert.equal(authCalls.length, 1, "等待 eager auth 后首试即成功，不应二次 authenticate");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("非 devin agent（localDevinAuth=false）→ 无 eager authenticate", async () => {
+    const { hub, agentConn, order } = setup({
+      authMethods: [{ id: "m1", name: "agent", type: "agent" } as acp.AuthMethod],
+    });
+    try {
+      await hub.ensureStarted();
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(order.includes("authenticate"), false, "非 devin 不应 eager auth");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("session/close：有能力时 dropSession 发 session/close，无能力不发", async () => {
+    const withCap = setup({
+      agentCapabilities: { sessionCapabilities: { close: {} } } as unknown as acp.AgentCapabilities,
+    });
+    try {
+      await withCap.hub.createSession("/tmp", "s");
+      withCap.hub.dropSession("s1");
+      await waitFor(() => (withCap.closeCalls.length >= 1 ? true : undefined));
+      assert.equal(withCap.closeCalls.length, 1);
+    } finally {
+      withCap.hub.close();
+      withCap.agentConn.close();
+    }
+    const noCap = setup({});
+    try {
+      await noCap.hub.createSession("/tmp", "s");
+      noCap.hub.dropSession("s1");
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(noCap.closeCalls.length, 0, "无 close 能力不应发 session/close");
+    } finally {
+      noCap.hub.close();
+      noCap.agentConn.close();
+    }
   });
 
 });

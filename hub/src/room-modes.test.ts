@@ -1458,6 +1458,92 @@ describe("followUp 逐项投递与归属", () => {
     assert.equal(h.calls.filter((c) => text(c.content).includes("TASK_B")).length, 0, "已删房队列不派发");
     assert.equal(h.calls.filter((c) => text(c.content).includes("TASK_C")).length, 1);
   });
+
+  it("unknown session drain 丢弃队列只告警一次；普通错误仍重入队", async () => {
+    const rooms = new RoomManager();
+    const busy = new Set<string>();
+    const events: { method: string; params: Record<string, unknown> }[] = [];
+    let promptAttempts = 0;
+    let rejectWith: Error | null = null;
+    const agent: AgentOps = {
+      prompt: async () => {
+        promptAttempts++;
+        if (rejectWith) throw rejectWith;
+      },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, (method, params) => events.push({ method, params }));
+    const room = rooms.create("gone", [{ sessionId: "s1", name: "coder" }, { sessionId: "s2", name: "other" }], "mention");
+
+    busy.add("s1");
+    await manager.handle(room, "@coder TASK_GONE", {});
+    assert.equal(promptAttempts, 0);
+
+    rejectWith = new Error("unknown session: s1");
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "old done");
+    await tick();
+    await tick();
+    assert.equal(promptAttempts, 1, "unknown session 只尝试派发一次");
+    const fu = (manager as unknown as { followUps: Map<string, unknown[]> }).followUps;
+    assert.equal(fu.get("s1")?.length ?? 0, 0, "队列已清空不再重试");
+    const goneNotices = events.filter((e) => e.method === "room.notice" && String(e.params.message ?? "").includes("会话未就绪"));
+    assert.equal(goneNotices.length, 1, "只发一条会话未就绪通知");
+    assert.equal(events.filter((e) => e.method === "room.notice" && String(e.params.message ?? "").includes("暂存待重试")).length, 0);
+
+    await manager.onPromptDone("s2", "other done");
+    await tick();
+    await tick();
+    assert.equal(promptAttempts, 1, "后续 drain 不再重发");
+
+    rejectWith = new Error("boom");
+    busy.add("s1");
+    await manager.handle(room, "@coder TASK_RETRY", {});
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "done2");
+    await tick();
+    await tick();
+    assert.equal(promptAttempts, 2, "普通错误仍尝试派发");
+    assert.ok((fu.get("s1")?.length ?? 0) > 0, "普通错误重入队待重试");
+    assert.ok(events.some((e) => e.method === "room.notice" && String(e.params.message ?? "").includes("暂存待重试")), "普通错误发暂存待重试通知");
+  });
+
+  it("session recreated drain 同按会话消亡处理：清队不重入队", async () => {
+    const rooms = new RoomManager();
+    const busy = new Set<string>();
+    const events: { method: string; params: Record<string, unknown> }[] = [];
+    let promptAttempts = 0;
+    let rejectWith: Error | null = null;
+    const agent: AgentOps = {
+      prompt: async () => {
+        promptAttempts++;
+        if (rejectWith) throw rejectWith;
+      },
+      isBusy: (sid) => busy.has(sid),
+      has: () => true,
+      cancel: async (sid) => { busy.delete(sid); },
+    };
+    const manager = new RoomModeManager(agent, rooms, (method, params) => events.push({ method, params }));
+    const room = rooms.create("gone2", [{ sessionId: "s1", name: "coder" }], "mention");
+
+    busy.add("s1");
+    await manager.handle(room, "@coder TASK_RECREATED", {});
+    assert.equal(promptAttempts, 0);
+
+    rejectWith = new Error("session recreated as s1-new");
+    busy.delete("s1");
+    await manager.onPromptDone("s1", "old done");
+    await tick();
+    await tick();
+    assert.equal(promptAttempts, 1, "recreated 只尝试派发一次");
+    const fu = (manager as unknown as { followUps: Map<string, unknown[]> }).followUps;
+    assert.equal(fu.get("s1")?.length ?? 0, 0, "recreated 清队不重试");
+    const goneNotices = events.filter((e) => e.method === "room.notice" && String(e.params.message ?? "").includes("会话未就绪"));
+    assert.equal(goneNotices.length, 1, "只发一条会话未就绪通知");
+    assert.equal(events.filter((e) => e.method === "room.notice" && String(e.params.message ?? "").includes("暂存待重试")).length, 0, "recreated 不发暂存待重试");
+  });
 });
 
 describe("cancelActive 归属与并发边界", () => {

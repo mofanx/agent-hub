@@ -1555,6 +1555,7 @@ test("纯实时完成的120条回复也受缓存窗口约束，重进不复活�
     if (hold) { waiting = true; return tail.promise; }
     return { entries: e.rows.slice(-50), hasMore: e.rows.length > 50 };
   });
+  await e.get().refreshAll();
   await e.get().openRoom(room);
   await until(() => waiting);
   try {

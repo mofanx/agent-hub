@@ -47,12 +47,13 @@ export type HistoryEntry = {
  * 返回 "append"（需写入占位符并提示）/ "repeat"（占位符已在末尾，只提示）/ undefined。
  */
 export function lostReplyAction(
-  last: Pick<HistoryEntry, "kind" | "text"> | undefined,
+  last: (Pick<HistoryEntry, "kind" | "text"> & { at?: number | undefined }) | undefined,
   placeholder: string,
   replyStillOpen: boolean,
+  startedAt?: number,
 ): "append" | "repeat" | undefined {
   if (!last || replyStillOpen) return undefined;
-  if (last.kind === "user") return "append";
+  if (last.kind === "user") return startedAt !== undefined && (last.at ?? 0) >= startedAt ? undefined : "append";
   if (last.kind === "assistant" && last.text === placeholder) return "repeat";
   return undefined;
 }

@@ -133,6 +133,8 @@ test("Android Outbox: actual Kotlin persistence and delivery state machine", { t
   fs.writeFileSync(attention, "package com.agenthub\nimport kotlinx.serialization.json.*\n" +
     "import kotlinx.coroutines.NonCancellable\nimport kotlinx.coroutines.withContext\n" +
     "import kotlinx.coroutines.sync.Mutex\nimport kotlinx.coroutines.sync.withLock\n" + pure);
+  const perfTrace = path.join(directory, "PerfTrace.kt");
+  fs.writeFileSync(perfTrace, "package com.agenthub\ninternal object PerfTrace { fun mark(event: String, extra: String = \"\") {} }\n");
   const vm = fs.readFileSync(path.join(root, "android/app/src/main/java/com/agenthub/ChatViewModel.kt"), "utf8");
   const section = (from: string, to: string) => {
     const a = vm.indexOf(from), b = vm.indexOf(to, a);
@@ -312,7 +314,7 @@ internal class TimelineBridge {
     "-jvm-target", "17", "-d", output,
     ...["HubClient.kt", "DeliveryOutbox.kt"].map((name) =>
       path.join(root, "android", "app", "src", "main", "java", "com", "agenthub", name)),
-    strings, fixture, bridge, attention], { encoding: "utf8", timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] });
+    strings, fixture, bridge, attention, perfTrace], { encoding: "utf8", timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] });
   let result: string;
   try {
     result = execFileSync(java, ["-cp", [output, runtime].join(path.delimiter), "TestKt"],

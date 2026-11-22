@@ -33,6 +33,10 @@ type SimItem = {
   birthHistoryId?: number;
   turnStartAt?: number;
   turnEndAt?: number;
+  toolCallId?: string;
+  processId?: string;
+  status?: string;
+  sendStatus?: string;
 };
 
 /** 客户端模拟器：scope 内维护 live 列表、draft 集合与 serverOffset/maxHistIdSeen */
@@ -81,8 +85,16 @@ function makeClient(opts?: { clockSkewMs?: number }) {
     if (id != null && id === historyIdOf(b)) return true;
     if (a.kind === "user" && b.kind === "user")
       return a.clientMessageId != null && a.clientMessageId === b.clientMessageId;
+    if (a.kind === "process" && b.kind === "process")
+      return !!a.processId && a.processId === b.processId;
     return false;
   };
+  const absorbedByProcess = (hist: SimItem[], t: SimItem) =>
+    historyIdOf(t) == null && hist.some((h) => {
+      if (h.kind !== "process" || !sameChatAuthor(h.author, t.author)) return false;
+      const b = birthOf(t);
+      return b > 0 ? (historyIdOf(h) ?? 0) > b : h.at >= normAtOf(t);
+    });
   const dedupeTail = (hist: SimItem[], tail: SimItem[]): SimItem[] =>
     tail.filter((t) => {
       switch (t.kind) {
@@ -104,8 +116,15 @@ function makeClient(opts?: { clockSkewMs?: number }) {
             const lt = t.replyText ?? t.text;
             return h.text === lt || h.text.startsWith(lt) || lt.startsWith(h.text);
           });
+        case "tool":
+          return !absorbedByProcess(hist, t) && !hist.some(
+            (h) => h.kind === "tool" && !!t.toolCallId && h.toolCallId === t.toolCallId &&
+              sameChatAuthor(h.author, t.author),
+          );
+        case "process":
+          return !hist.some((h) => h.kind === "process" && !!t.processId && h.processId === t.processId);
         case "thought":
-          return !hist.some(
+          return !absorbedByProcess(hist, t) && !hist.some(
             (h) =>
               h.kind === "thought" && sameChatAuthor(h.author, t.author) && earlierLive(h, t) &&
               (h.text === t.text || h.text.startsWith(t.text) || t.text.startsWith(h.text)),
@@ -130,9 +149,18 @@ function makeClient(opts?: { clockSkewMs?: number }) {
       base.historyAt = row.at;
       base.clientMessageId = row.clientMessageId;
     }
+    if (row.kind === "tool") {
+      try {
+        const data = JSON.parse(row.text);
+        base.toolCallId = data.toolCallId ?? "";
+        base.status = data.status ?? "completed";
+      } catch { base.toolCallId = ""; }
+    }
     if (row.kind === "process") {
       try {
         const meta = JSON.parse(row.text);
+        base.processId = meta.processId ?? "";
+        base.status = meta.status ?? "done";
         base.turnStartAt = meta.turnStartAt ?? 0;
         base.turnEndAt = meta.turnEndAt ?? 0;
       } catch { /* keep */ }
@@ -140,16 +168,62 @@ function makeClient(opts?: { clockSkewMs?: number }) {
     return base;
   };
 
-  /** applyRecoveredRows：incoming 为落库行；tail 为现有 live 项 */
-  const applyRows = (rows: Obj[]) => {
+  const isActive = (it: SimItem, owned: Set<string>): boolean => {
+    switch (it.kind) {
+      case "user":
+        return ["pending", "sending", "uncertain", "failed"].includes(it.sendStatus ?? "") ||
+          (historyIdOf(it) == null && it.clientMessageId != null && !owned.has(it.clientMessageId));
+      case "process": return it.status === "running";
+      case "assistant": return it.id > 0 && it.replyText == null;
+      case "tool": return !["completed", "failed", "cancelled", "done"].includes(it.status ?? "completed");
+      default: return false;
+    }
+  };
+  /** compactCacheItems：稳定项按 (normAt, historyId) 留最后 50，活跃/草稿项恒保留 */
+  const compact = (owned: Set<string> = new Set()) => {
+    const pinned = (it: SimItem) => historyIdOf(it) != null && drafts.has(historyIdOf(it)!);
+    const stable = new Set(items.filter((it) => !isActive(it, owned) && !pinned(it))
+      .map((it, i) => ({ it, i }))
+      .sort((a, b) => normAtOf(a.it) - normAtOf(b.it) ||
+        (historyIdOf(a.it) ?? MAX) - (historyIdOf(b.it) ?? MAX) || a.i - b.i)
+      .slice(-50).map((x) => x.it));
+    items = items.filter((it) => stable.has(it) || isActive(it, owned) || pinned(it));
+  };
+  /** applyUpdate tool_call_update：按 (author, toolCallId) 命中最后一条 live 工具 */
+  const toolUpdate = (author: string, toolCallId: string, status: string) => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const t = items[i]!;
+      if (t.kind === "tool" && t.toolCallId === toolCallId && sameChatAuthor(t.author, author)) {
+        items[i] = { ...t, status };
+        return;
+      }
+    }
+  };
+
+  /** applyRecoveredRows：incoming 为落库行；tail 为现有 live 项；reset 镜像 recoveryResetBase 过滤 */
+  const applyRows = (rows: Obj[], opts?: { reset?: boolean; before?: Set<SimItem>; owned?: Set<string> }) => {
     rows.forEach((r) => {
       if (r.id > maxHistIdSeen) maxHistIdSeen = r.id;
       noteServerAt(r.at);
       if (r.draft === 1) drafts.add(r.id);
       else if (r.draft === 0) drafts.delete(r.id);
     });
-    const incoming = rows.map(parseRow);
-    const tail = items.filter((old) => !incoming.some((it) => sameHistoryItem(old, it)));
+    const previous = items;
+    const incoming = rows.map((r) => {
+      const parsed = parseRow(r);
+      const original = previous.find((o) => sameHistoryItem(o, parsed));
+      if (parsed.kind === "user" && original?.kind === "user")
+        return { ...original, historyId: r.id, historyAt: parsed.at, at: parsed.at };
+      return parsed;
+    });
+    const owned = opts?.owned ?? new Set<string>();
+    const before = opts?.before ?? new Set<SimItem>();
+    const base = opts?.reset
+      ? previous.filter((it) => !before.has(it) || isActive(it, owned) ||
+        (historyIdOf(it) != null && drafts.has(historyIdOf(it)!)) ||
+        (it.kind === "user" && it.clientMessageId != null && owned.has(it.clientMessageId)))
+      : previous;
+    const tail = base.filter((old) => !incoming.some((it) => sameHistoryItem(old, it)));
     const merged = [...incoming, ...dedupeTail(incoming, tail)];
     const persistedAsc = merged
       .filter((it) => historyIdOf(it) != null)
@@ -194,6 +268,8 @@ function makeClient(opts?: { clockSkewMs?: number }) {
   return {
     drafts,
     applyRows,
+    compact,
+    toolUpdate,
     live,
     liveUser,
     clientNow,
@@ -280,7 +356,8 @@ test("模拟：已完成回复不被后续用户气泡压位", () => {
   c.applyRows(store.read("session", sid, 50).filter((r) => r.id === replyId || r.id === u2));
   // 断言回复在第二气泡之前（时间序 r1 < m2）
   const texts = c.texts();
-  assert.ok(texts.indexOf("r1") < texts.indexOf("m2"),
+  const m2 = c.items().findIndex((i) => i.clientMessageId === "c2");
+  assert.ok(m2 >= 0 && texts.indexOf("r1") < m2,
     `定稿回复必须排在后续气泡之前: ${JSON.stringify(texts)}`);
   assert.equal(c.items().filter((i) => i.text === "r1").length, 1);
 });
@@ -315,4 +392,94 @@ test("模拟：未落库卡类（Permission/System/Error）一律置尾，不插
   c.live({ kind: "system", author: "", text: "notice" });
   c.applyRows([row(60, { kind: "process", author: "A", at: 6000 })]);
   assert.deepEqual(c.kinds(), ["user", "assistant", "process", "permission", "system"]);
+});
+
+test("模拟：O5 回显气泡经 reset 恢复与缓存压缩后不丢（保留本地 id）", () => {
+  const { store } = mkStore();
+  const sid = "fa-1";
+  for (let i = 0; i < 12; i++) {
+    store.append("session", sid, { at: 1000 + i * 10, kind: "user", author: "我", text: `old${i}`, clientMessageId: `old${i}` });
+    store.append("session", sid, { at: 1001 + i * 10, kind: "thought", author: "A", text: `th${i}` });
+    store.append("session", sid, { at: 1002 + i * 10, kind: "tool", author: "A", text: JSON.stringify({ toolCallId: `tc${i}`, status: "completed" }) });
+    store.append("session", sid, { at: 1003 + i * 10, kind: "assistant", author: "A", text: `r${i}` });
+  }
+  const c = makeClient();
+  c.applyRows(store.read("session", sid, 50));
+  const bubble = c.liveUser("cmA");
+  bubble.sendStatus = "sending";
+  const hid = store.append("session", sid, { at: 2000, kind: "user", author: "我", text: bubble.text, clientMessageId: "cmA" });
+  bubble.historyId = hid;
+  bubble.sendStatus = "sent";
+  c.applyRows(store.read("session", sid, 50).filter((r) => r.id === hid));
+  const echoed = c.items().find((i) => i.clientMessageId === "cmA")!;
+  assert.equal(echoed.id, bubble.id, "回显合并保留本地气泡 id（id>0，historyId 在字段里）");
+  assert.equal(echoed.historyAt, 2000);
+  c.live({ kind: "thought", author: "A", text: "thinking" });
+  c.live({ kind: "assistant", author: "A", text: "part-0" });
+  c.compact(new Set());
+  assert.ok(c.items().some((i) => i.historyId === hid), "压缩后（投递记录已移除）气泡仍在");
+  store.append("session", sid, { at: 2001, kind: "thought", author: "A", text: "thinking" });
+  store.append("session", sid, { at: 2002, kind: "assistant", author: "A", text: "part-0 done" });
+  c.items().filter((i) => i.kind === "assistant" && i.id > 0).forEach((i) => { i.replyText = "part-0 done"; });
+  c.applyRows(store.read("session", sid, 50), { reset: true, before: new Set(c.items()), owned: new Set() });
+  const users = c.items().filter((i) => i.kind === "user" && i.clientMessageId === "cmA");
+  assert.equal(users.length, 1, "reset 后气泡恰一份");
+  assert.equal(users[0]!.id, bubble.id);
+  c.compact(new Set());
+  c.applyRows(store.read("session", sid, 50), { reset: true, before: new Set(c.items()), owned: new Set() });
+  const ids = c.items().map((i) => i.historyId ?? -i.id);
+  const tailIds = store.read("session", sid, 50).map((r) => r.id);
+  assert.deepEqual([...ids].sort((a, b) => a - b), [...tailIds].sort((a, b) => a - b), "重进后与服务端尾页一一对应");
+  assert.equal(new Set(ids).size, ids.length, "无重复");
+});
+
+test("模拟：replyText 已定稿的残缺 live 回复被其落库行吞并", () => {
+  const { store } = mkStore();
+  const sid = "s1";
+  store.append("session", sid, { at: 1000, kind: "user", author: "我", text: "q" });
+  const c = makeClient({ clockSkewMs: 5 * 60 * 1000 });
+  c.applyRows(store.read("session", sid, 50));
+  const partial = c.live({ kind: "assistant", author: "A", text: "part-0 part-1" });
+  partial.replyText = "part-0 part-1 part-2 done";
+  const rid = store.append("session", sid, { at: 1500, kind: "assistant", author: "A", text: "part-0 part-1 part-2 done" });
+  c.applyRows(store.read("session", sid, 50));
+  assert.deepEqual(c.texts(), ["q", "part-0 part-1 part-2 done"]);
+  assert.equal(c.items().at(-1)!.id, -rid, "存留的是落库行");
+});
+
+test("模拟：房间过程卡吞并同作者更早的 live 工具/思考，不吞其他成员", () => {
+  const { store } = mkStore();
+  const roomId = "r1";
+  store.append("room", roomId, { at: 1000, kind: "user", author: "我", text: "@fm1 @fm2 go" });
+  const c = makeClient();
+  c.applyRows(store.read("room", roomId, 50));
+  c.live({ kind: "thought", author: "fm1", text: "fm1 thinking" });
+  c.live({ kind: "tool", author: "fm1", text: "", toolCallId: "tc-1", status: "completed" });
+  c.live({ kind: "thought", author: "fm2", text: "fm2 thinking" });
+  c.live({ kind: "tool", author: "fm2", text: "", toolCallId: "tc-2", status: "completed" });
+  const at = c.clientNow() + 1000;
+  store.append("room", roomId, { at, kind: "process", author: "fm1 (devin)", text: JSON.stringify({ processId: "p-fm1", status: "done" }) });
+  c.applyRows(store.read("room", roomId, 50));
+  const left = c.items().filter((i) => i.id > 0).map((i) => `${i.kind}:${i.author}`);
+  assert.deepEqual(left, ["thought:fm2", "tool:fm2"], "仅 fm2 的 live 项存留");
+  assert.equal(c.items().filter((i) => i.kind === "process").length, 1);
+});
+
+test("模拟：tool_call_update 按 (author, toolCallId) 命中，不串改同 toolCallId 的其他成员", () => {
+  const { store } = mkStore();
+  const roomId = "r1";
+  store.append("room", roomId, { at: 1000, kind: "user", author: "我", text: "@fm1 @fm2 go" });
+  const c = makeClient();
+  c.applyRows(store.read("room", roomId, 50));
+  c.live({ kind: "tool", author: "fm1", text: "", toolCallId: "call_0", status: "pending" });
+  c.live({ kind: "tool", author: "fm2", text: "", toolCallId: "call_0", status: "pending" });
+  c.toolUpdate("fm2", "call_0", "completed");
+  const status = () => c.items().filter((i) => i.kind === "tool").map((i) => `${i.author}:${i.status}`);
+  assert.deepEqual(status(), ["fm1:pending", "fm2:completed"]);
+  c.toolUpdate("fm1", "call_0", "failed");
+  assert.deepEqual(status(), ["fm1:failed", "fm2:completed"]);
+  store.append("room", roomId, { at: 2000, kind: "tool", author: "fm1 (devin)", text: JSON.stringify({ toolCallId: "call_0", status: "failed" }) });
+  c.applyRows(store.read("room", roomId, 50).filter((r) => r.kind === "tool"));
+  const tools = c.items().filter((i) => i.kind === "tool").map((i) => `${i.id > 0 ? "live" : "row"}:${i.author}`);
+  assert.deepEqual(tools.sort(), ["live:fm2", "row:fm1 (devin)"], "fm1 落库行只吞 fm1 live 副本");
 });

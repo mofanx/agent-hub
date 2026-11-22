@@ -36,15 +36,29 @@ rl.on("line", (line) => {
   const p = (msg.params ?? {}) as Record<string, unknown>;
   switch (msg.method) {
     case "initialize":
-      send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+      send({
+        jsonrpc: "2.0", id: msg.id,
+        result: { protocolVersion: 1, agentCapabilities: { loadSession: true } },
+      });
+      return;
+    case "session/resume":
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
       return;
     case "session/new":
-    case "session/load":
       send({
         jsonrpc: "2.0", id: msg.id,
         result: { sessionId: String(p.sessionId ?? `fa-${++seq}`) },
       });
       return;
+    case "session/load": {
+      const wait = Number(process.env.FAKE_LOAD_MS ?? 0);
+      const reply = () => send({
+        jsonrpc: "2.0", id: msg.id,
+        result: { sessionId: String(p.sessionId ?? `fa-${++seq}`) },
+      });
+      if (wait > 0) setTimeout(reply, wait); else reply();
+      return;
+    }
     case "session/cancel":
       send({ jsonrpc: "2.0", id: msg.id, result: {} });
       return;
@@ -67,6 +81,51 @@ rl.on("line", (line) => {
       }
       if (text.includes("SILENT")) {
         HANG.add(msg.id); // 无任何外发信号地挂起
+        return;
+      }
+      if (text.includes("STREAM") || text.includes("LONG")) {
+        const long = text.includes("LONG");
+        const thoughtGap = long ? 400 : 200;
+        const msgGap = long ? 900 : 150;
+        const msgCount = long ? 20 : 10;
+        const finish = () => send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+        let tcId = "";
+        const step = (n: number) => {
+          if (n === 0) {
+            notify(sid, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking 1 " } });
+            setTimeout(() => step(1), thoughtGap);
+            return;
+          }
+          if (n === 1) {
+            notify(sid, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking 2 " } });
+            setTimeout(() => step(2), thoughtGap);
+            return;
+          }
+          if (n === 2) {
+            notify(sid, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking 3 " } });
+            setTimeout(() => step(3), thoughtGap);
+            return;
+          }
+          if (n === 3) {
+            tcId = `tc-${sid}-${++seq}`;
+            notify(sid, { sessionUpdate: "tool_call", toolCallId: tcId, title: "work", status: "pending", kind: "other" });
+            setTimeout(() => step(4), long ? 1500 : 500);
+            return;
+          }
+          if (n === 4) {
+            notify(sid, { sessionUpdate: "tool_call_update", toolCallId: tcId, status: "completed" });
+            setTimeout(() => step(5), msgGap);
+            return;
+          }
+          const k = n - 5;
+          if (k < msgCount) {
+            notify(sid, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `part-${k} ` } });
+            setTimeout(() => step(n + 1), msgGap);
+            return;
+          }
+          finish();
+        };
+        setTimeout(() => step(0), 50);
         return;
       }
       if (text.includes("主持人") || text.includes("指挥家") || text.includes("拆分")) {

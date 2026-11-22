@@ -800,6 +800,34 @@ describe("lostReplyAction", () => {
     assert.equal(lostReplyAction(undefined, PLACEHOLDER, false), undefined);
   });
 
+  it("仅当末条用户消息早于本进程启动时才判定为重启丢失", () => {
+    const startedAt = 1_000;
+    assert.equal(
+      lostReplyAction({ kind: "user", text: "第二条", at: 1_000 }, PLACEHOLDER, false, startedAt),
+      undefined,
+    );
+    assert.equal(
+      lostReplyAction({ kind: "user", text: "第二条", at: 2_000 }, PLACEHOLDER, false, startedAt),
+      undefined,
+    );
+    assert.equal(
+      lostReplyAction({ kind: "user", text: "旧消息", at: 999 }, PLACEHOLDER, false, startedAt),
+      "append",
+    );
+    assert.equal(
+      lostReplyAction({ kind: "assistant", text: PLACEHOLDER, at: 5_000 }, PLACEHOLDER, false, startedAt),
+      "repeat",
+    );
+    assert.equal(
+      lostReplyAction({ kind: "assistant", text: PLACEHOLDER, at: 1 }, PLACEHOLDER, false, startedAt),
+      "repeat",
+    );
+    assert.equal(
+      lostReplyAction({ kind: "user", text: "无启动时刻", at: 5_000 }, PLACEHOLDER, false),
+      "append",
+    );
+  });
+
   it("回复草稿在重启中断后保留为片段且幂等", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-store-"));
     const marker = "[Hub 重启中断了此回复；以上为已保存片段，未自动重试]";

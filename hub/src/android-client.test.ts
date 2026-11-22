@@ -11,7 +11,7 @@ const cases = [
   "handshake_cancel", "retry_handshake_kick", "stale_callbacks", "network_replace",
   "explicit_disconnect", "auth_policy", "manual_after_terminal", "invalid_config_and_factory_throw",
   "fast_factory", "send_false", "timeout_cleanup", "rpc_error_payload",
-  "event_order_and_generation", "scope_cancel_cleanup",
+  "event_order_and_generation", "scope_cancel_cleanup", "parsed_event_callback",
 ];
 
 function cachedJar(group: string, name: string, version: string): string | undefined {
@@ -66,7 +66,7 @@ test("Android HubClient: real JVM source with fake WebSockets", { timeout: 120_0
   const result = execFileSync(java, ["-cp", [output, runtime].join(path.delimiter), "TestKt"],
     { encoding: "utf8", timeout: 25_000, stdio: ["ignore", "pipe", "pipe"] });
   assert.deepEqual(result.split(/\r?\n/).filter((line) => line.startsWith("PASS ")).map((line) => line.slice(5)), cases);
-  assert.match(result, /^RESULT cases=14$/m);
+  assert.match(result, /^RESULT cases=15$/m);
   t.diagnostic(result.trim());
 });
 
@@ -396,6 +396,23 @@ fun main() = runBlocking {
             f.client.disconnect()
             until { socket.canceled > 0 }
             check(!f.client.isConnected)
+        }
+    }
+    case("parsed_event_callback") {
+        fixture(coroutineContext) { f ->
+            val socket = f.start()
+            val seen = mutableListOf<String>()
+            f.client.onEvent = { obj -> seen.add(obj["method"]!!.jsonPrimitive.content) }
+            socket.event("evt-a")
+            socket.event("evt-b")
+            until { seen.size >= 2 }
+            check(seen == listOf("evt-a", "evt-b"))
+            val before = seen.size
+            socket.listener.onMessage(socket, "this is not json{{{")
+            socket.listener.onMessage(socket, "[1,2,3]")
+            flush()
+            check(seen.size == before)
+            check(f.client.isConnected)
         }
     }
     println("RESULT cases=" + passed)

@@ -79,6 +79,11 @@ type PromptOptions = {
   decisionVia?: string | undefined;
 };
 
+/** 会话消亡类错误（删除/重建后旧 id 永久失效）：排队消息无处投递，清队而非重入队 */
+function isSessionGoneError(err: unknown): err is Error {
+  return err instanceof Error && /^(unknown session|session recreated)/.test(err.message);
+}
+
 function executionContinuation(text: string, paused = false): boolean {
   const value = text.trim().replace(/^(?:好的?|ok|行|可以)[，,。\s]*/i, "");
   if (/[?？]|讨论|解释|说明|分析|先别|不要|暂不|不执行|不推进|只看|仅看/i.test(value)) return false;
@@ -703,6 +708,12 @@ export class RoomModeManager {
     if (!q.length) this.followUps.delete(sessionId);
     this.sendPrompt(item.roomId, sessionId, item.content, item.opts).catch((err) => {
       logError("room-modes followUp drain", err);
+      if (isSessionGoneError(err)) {
+        this.followUps.delete(sessionId);
+        logWarn("room-modes followUp", `dropping queue for ${sessionId}: session gone`);
+        this.notice({ roomId: item.roomId, message: `⚠️ @${this.nameFor(item.roomId, sessionId)} 会话未就绪，排队消息已丢弃，请重新发送` });
+        return;
+      }
       if (err instanceof RoomBudgetExceededError || !this.rooms.get(item.roomId) ||
           (item.budgetId !== undefined && this.budgets.get(item.roomId)?.id !== item.budgetId) ||
           (item.flowId !== undefined && this.flowIdForRoom(item.roomId) !== item.flowId)) return;
