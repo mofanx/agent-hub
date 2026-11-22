@@ -777,7 +777,7 @@ fun parseConnectUri(raw: String): ConnProfile? {
 }
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
-    private val hub = HubClient(viewModelScope) { stringsFor(lang) }
+    private var hub = HubClient(viewModelScope) { stringsFor(lang) }
     private val prefs = app.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
     private var profileEpoch = 0
     private var connectionWanted = false
@@ -817,7 +817,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val backgroundPrefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "background_stop_reason" || key == "attention_status") viewModelScope.launch { refreshBackgroundStatus() }
     }
-    suspend fun hubCall(method: String, params: JsonObject): JsonObject = hub.call(method, params)
+    /** 统一 RPC 入口：换绑后旧 epoch 完成的应答直接作废，防跨 hub 串台 */
+    suspend fun hubCall(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject {
+        val epoch = profileEpoch
+        val result = hub.call(method, params)
+        if (epoch != profileEpoch) throw HubRpcException(JsonPrimitive("stale profile"))
+        return result
+    }
 
     val profiles = mutableStateListOf<ConnProfile>()
 
@@ -996,7 +1002,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val rid = subscribedRoomId ?: return
         viewModelScope.launch {
             try {
-                hub.call("client.subscribe", buildJsonObject {
+                hubCall("client.subscribe", buildJsonObject {
                     put("tier", "detail")
                     put("roomId", rid)
                     if (subscribedTaskIds.isNotEmpty()) put("taskIds", JsonArray(subscribedTaskIds.map { JsonPrimitive(it) }))
@@ -1012,7 +1018,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         subscribedRoomId = rid
         viewModelScope.launch {
             try {
-                val result = hub.call("client.subscribe", buildJsonObject {
+                val result = hubCall("client.subscribe", buildJsonObject {
                     put("tier", "detail")
                     rid?.let { put("roomId", it) }
                     if (subscribedTaskIds.isNotEmpty()) put("taskIds", JsonArray(subscribedTaskIds.map { JsonPrimitive(it) }))
@@ -1029,7 +1035,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadRoomMemory(roomId: String) {
         viewModelScope.launch {
             try {
-                val result = hub.call("room.memory", buildJsonObject { put("roomId", roomId); put("ifcAuthorized", true) })
+                val result = hubCall("room.memory", buildJsonObject { put("roomId", roomId); put("ifcAuthorized", true) })
                 val list = result["memories"]?.jsonArray ?: return@launch
                 roomMemories.clear()
                 for (m in list) {
@@ -1049,7 +1055,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteRoomMemory(roomId: String, id: Long) {
         viewModelScope.launch {
             try {
-                hub.call("room.memory.delete", buildJsonObject {
+                hubCall("room.memory.delete", buildJsonObject {
                     put("roomId", roomId)
                     put("id", id)
                     put("ifcAuthorized", true)
@@ -1166,17 +1172,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteProfile(p: ConnProfile) {
-        if (currentProfile == p) {
+        if (currentProfile?.address == p.address) {
             disconnect()
+        } else {
+            disconnectLink(p.address)
         }
         profiles.remove(p)
         persistProfiles()
     }
 
-    fun switchProfile(p: ConnProfile) {
-        if (currentProfile == p && (hub.isConnected || connectionState == HubConnectionState.Connecting)) return
-        connect(p.address, p.token, p.publicToken, p.name)
-    }
+    fun switchProfile(p: ConnProfile) = swapTo(p)
 
     fun upsertProfile(
         old: ConnProfile?,
@@ -1195,6 +1200,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         )
         if (old != null) {
             profiles.remove(old)
+            if (old.address != address) {
+                dropSlot(old.address)
+                HubService.dropLink(old.address)
+            }
         }
         profiles.removeAll { it.address == address }
         profiles.add(newProfile)
@@ -1281,6 +1290,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         eventJob?.cancel()
         networkMonitor?.close()
         prefs.unregisterOnSharedPreferenceChangeListener(backgroundPrefsListener)
+        dropAllSlots()
         hub.disconnect()
         super.onCleared()
     }
@@ -1350,7 +1360,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val generation = ++usageRefreshGeneration
         viewModelScope.launch {
             try {
-                val result = hub.call("session.contextUsage", buildJsonObject { put("sessionId", sessionId) })
+                val result = hubCall("session.contextUsage", buildJsonObject { put("sessionId", sessionId) })
                 if (generation != usageRefreshGeneration) return@launch
                 val stillCurrent = currentSession?.sessionId == sessionId || currentRoom?.activeSpeaker == sessionId
                 if (!stillCurrent) return@launch
@@ -1466,7 +1476,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val room = currentRoom
                 if (room != null) {
                     // 群聊：加载所有成员模型
-                    val result = hub.call("room.memberModels", buildJsonObject { put("roomId", room.roomId) })
+                    val result = hubCall("room.memberModels", buildJsonObject { put("roomId", room.roomId) })
                     val members = result["members"]?.jsonArray ?: emptyList()
                     roomMemberModels.clear()
                     for (m in members) {
@@ -1486,7 +1496,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val session = currentSession ?: return@launch
                     val backend = session.agent
                     if ((session.backendType ?: backend) == "devin") refreshBackendQuota()
-                    val result = hub.call("model.current", buildJsonObject {
+                    val result = hubCall("model.current", buildJsonObject {
                         put("backend", backend)
                         put("sessionId", session.sessionId)
                     })
@@ -1500,7 +1510,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             if (!hub.isConnected) return@launch
             try {
-                val r = hub.call("model.usage", buildJsonObject {
+                val r = hubCall("model.usage", buildJsonObject {
                     put("backend", "devin")
                     if (force) put("refresh", true)
                 })
@@ -1531,7 +1541,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "off", "false", "0" -> false
                     else -> null
                 }
-                val result = hub.call("permission.bypass", buildJsonObject {
+                val result = hubCall("permission.bypass", buildJsonObject {
                     if (enabled != null) put("enabled", enabled)
                 })
                 val bypass = result["bypass"]?.jsonPrimitive?.content?.toBoolean() ?: false
@@ -1544,7 +1554,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun requestModelSwitch(params: JsonObject): JsonObject {
-        val result = hub.call("model.set", params)
+        val result = hubCall("model.set", params)
         val errors = result["syncErrors"]?.jsonArray.orEmpty()
         if (result["set"]?.jsonPrimitive?.booleanOrNull != true || errors.isNotEmpty()) {
             error(errors.joinToString("; ") { it.jsonObject["error"]?.jsonPrimitive?.content.orEmpty() })
@@ -1624,7 +1634,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val backend = currentSession?.agent ?: "devin"
                     if ((currentSession?.backendType ?: backend) == "devin") refreshBackendQuota()
                     val sid = currentSession?.sessionId
-                    val result = hub.call("model.list", buildJsonObject {
+                    val result = hubCall("model.list", buildJsonObject {
                         put("backend", backend)
                         if (!sid.isNullOrBlank()) put("sessionId", sid)
                     })
@@ -1648,7 +1658,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadSessionConfigOptions(sessionId: String) {
         viewModelScope.launch {
             try {
-                val result = hub.call("session.configOptions", buildJsonObject {
+                val result = hubCall("session.configOptions", buildJsonObject {
                     put("sessionId", sessionId)
                 })
                 sessionConfigOptions.clear()
@@ -1662,7 +1672,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setSessionConfigOption(sessionId: String, configId: String, value: String) {
         viewModelScope.launch {
             try {
-                val result = hub.call("session.setConfigOption", buildJsonObject {
+                val result = hubCall("session.setConfigOption", buildJsonObject {
                     put("sessionId", sessionId)
                     put("configId", configId)
                     put("value", value)
@@ -1677,7 +1687,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun loadRoomMemberModels(roomId: String, initialFilter: String = "") {
         try {
-            val result = hub.call("room.memberModels", buildJsonObject { put("roomId", roomId) })
+            val result = hubCall("room.memberModels", buildJsonObject { put("roomId", roomId) })
             val members = result["members"]?.jsonArray ?: emptyList()
             roomMemberModels.clear()
             for (m in members) {
@@ -1713,7 +1723,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val backend = info.second
         if ((roomMemberTypes[sessionId] ?: backend) == "devin") refreshBackendQuota()
         try {
-            val result = hub.call("model.list", buildJsonObject {
+            val result = hubCall("model.list", buildJsonObject {
                 put("backend", backend)
                 put("sessionId", sessionId)
             })
@@ -1779,7 +1789,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val sid = if (currentRoom != null) selectedMemberSession else currentSession?.sessionId
                 val backend = sid?.let { roomMemberModels[it]?.second } ?: currentSession?.agent ?: "devin"
-                val result = hub.call("model.refresh", buildJsonObject {
+                val result = hubCall("model.refresh", buildJsonObject {
                     put("backend", backend)
                     if (!sid.isNullOrBlank()) put("sessionId", sid)
                 })
@@ -1856,17 +1866,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // 先停在途编排与成员回合，避免旧房间归档后仍写入幽灵回合
                     if (flow != null) {
                         try {
-                            hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
+                            hubCall("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
                         } catch (_: Exception) {}
                     }
                     for ((sid, _) in room.members) {
                         if (busyIds.contains(sid)) {
                             try {
-                                hub.call("session.cancel", buildJsonObject { put("sessionId", sid) })
+                                hubCall("session.cancel", buildJsonObject { put("sessionId", sid) })
                             } catch (_: Exception) {}
                         }
                     }
-                    val result = hub.call("room.clone", buildJsonObject {
+                    val result = hubCall("room.clone", buildJsonObject {
                         put("roomId", room.roomId)
                         put("newName", nextName(room.name, rooms.map { it.name }.toSet()))
                         put("fresh", true)
@@ -1879,7 +1889,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         listOf(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newRoom.name)))
                     openRoom(newRoom)
                     try {
-                        hub.call("room.archive", buildJsonObject {
+                        hubCall("room.archive", buildJsonObject {
                             put("roomId", room.roomId)
                             put("archived", true)
                         })
@@ -1894,13 +1904,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // 先停在途回合，避免旧会话归档后仍写入幽灵回合
                     if (session.busy || busyIds.contains(session.sessionId)) {
                         try {
-                            hub.call("session.cancel", buildJsonObject {
+                            hubCall("session.cancel", buildJsonObject {
                                 put("sessionId", session.sessionId)
                             })
                         } catch (_: Exception) {}
                     }
                     // session.clone fresh:true：新建空上下文会话并继承模型/config/persona，名字由服务端派生
-                    val result = hub.call("session.clone", buildJsonObject {
+                    val result = hubCall("session.clone", buildJsonObject {
                         put("sessionId", session.sessionId)
                         put("fresh", true)
                     })
@@ -1920,7 +1930,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         listOf(ChatItem.System(++itemSeq, S.newChatDoneFmt.format(newSession.name)))
                     openChat(newSession)
                     try {
-                        hub.call("session.archive", buildJsonObject {
+                        hubCall("session.archive", buildJsonObject {
                             put("sessionId", session.sessionId)
                             put("archived", true)
                         })
@@ -1952,7 +1962,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun connect(address: String, token: String, publicToken: String = "", name: String? = null) {
         val profile = Triple(address, token, publicToken)
-        resetConnection(clearSaved = savedHubConnection(getApplication()) != profile)
+        // 换绑：旧 profile 压槽保活（socket 不断），目标有槽则整槽回放
+        val prevKey = currentProfile?.address
+        if (prevKey != null && prevKey != address && connectionWanted) parkToSlot(prevKey)
+        var restored = slots.remove(address)
+        Log.i("agenthub", "connect to=$address prev=$prevKey slotReplay=${restored != null}")
+        if (restored != null && (prevKey == address || restored.client.state.terminal)) {
+            restored.badgeJob?.cancel()
+            restored.badgeSyncJob?.cancel()
+            restored.client.disconnect()
+            restored = null
+        }
+        val client = restored?.client ?: HubClient(viewModelScope) { stringsFor(lang) }
+        hub = client
+        resetConnection(clearSaved = savedHubConnection(getApplication()) != profile, disconnectHub = restored == null)
         deliveryOrigin = deliveryOriginFor(address, token, publicToken)
         delivery.select(deliveryOrigin)
         val epoch = profileEpoch
@@ -1965,38 +1988,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         connecting = true
         connectError = null
         var openedOnce = false
-        hub.onStateChanged = { state -> if (epoch == profileEpoch) connectionState = state }
-        hub.onClosed = {
-            if (epoch == profileEpoch) {
-                flushStreamChunks()
-                deliveryReady = false
-                delivery.pause()
-                missionConnectionGeneration++
-                historyLoading = false
-                recoveryJob?.cancel()
-                eventJob?.cancel()
-                eventJob = null
-                connecting = false
-                agentStatus = if (connectionWanted) "reconnecting" else "offline"
+        wireActiveCallbacks(client, epoch)
+        if (restored != null) {
+            // 槽位回放：字段灌回 + 徽章下线 + detail 重订阅 + 恢复追平休眠窗口
+            restored.badgeJob?.cancel()
+            restored.badgeSyncJob?.cancel()
+            restoreSlot(restored)
+            hubBadges.remove(address)
+            connecting = false
+            connectionState = client.state
+            val generation = ++missionConnectionGeneration
+            collectActiveEvents(client, epoch, generation)
+            saveProfile(address, token, publicToken, name)
+            startHubService()
+            agentStatus = "connected"
+            subscribedRoomId = null
+            if (restored.subscribedRoomId != null) subscribeScope(restored.subscribedRoomId)
+            else viewModelScope.launch {
+                runCatching { hubCall("client.subscribe", buildJsonObject { put("tier", "detail") }) }
             }
+            if (!client.isConnected) client.kickReconnect()
+            startDeliveryRecovery(epoch, generation)
+            return
         }
         val url = buildWsUrl(address, token)
-        hub.connect(url, publicToken,
+        client.connect(url, publicToken,
             onOpen = {
                 if (epoch == profileEpoch && connectionWanted) {
                     val generation = ++missionConnectionGeneration
-                    eventJob?.cancel()
-                    eventJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                        hub.events.collect {
-                            if (!currentConnection(epoch, generation)) return@collect
-                            try {
-                                handleEvent(it)
-                            } catch (e: Exception) {
-                                if (e is CancellationException) throw e
-                                Log.w("agenthub", "handleEvent dropped", e)
-                            }
-                        }
-                    }
+                    collectActiveEvents(client, epoch, generation)
                     connecting = false
                     connectError = null
                     saveProfile(address, token, publicToken, name)
@@ -2004,7 +2024,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     agentStatus = "connected"
                     viewModelScope.launch {
                         hubLocalOnly = runCatching {
-                            hub.call("hub.connectInfo")["localOnly"]?.jsonPrimitive?.booleanOrNull == true
+                            hubCall("hub.connectInfo")["localOnly"]?.jsonPrimitive?.booleanOrNull == true
                         }.getOrDefault(false)
                     }
                     if (!openedOnce) screen = Screen.Sessions
@@ -2139,9 +2159,501 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (deliveryReady) refreshAll() else startDeliveryRecovery()
     }
 
-    fun disconnect() = resetConnection(clearSaved = true)
+    // ———— 多 hub 槽位换绑 ————
+    /** 休眠 profile 徽章：attention/waitingFor/在线态摘要，不预渲染时间线 */
+    data class HubBadge(var waitingFor: Int = 0, var pendingDecisions: Int = 0, var connected: Boolean = false)
+    val hubBadges = mutableStateMapOf<String, HubBadge>()
 
-    private fun resetConnection(clearSaved: Boolean) {
+    /** service 后台链路徽章（HubService.hubBadges 汇入）：覆盖未驻槽 profile */
+    private val serviceBadges = mutableStateMapOf<String, LinkBadge>()
+
+    /** 徽章合并访问器：slot 实连徽章优先（live connected），缺省回退 service 链路；
+     *  活跃 profile 与"无信息"（无目标且离线）不出徽章——语义诚实。 */
+    fun badgeFor(address: String): HubBadge? {
+        hubBadges[address]?.let { return it }
+        if (address == currentProfile?.address) return null
+        val link = serviceBadges[address] ?: return null
+        val waitingFor = link.targets.count { it.kind == "flow" }
+        val pendingDecisions = link.targets.count { it.kind == "decision" }
+        if (waitingFor == 0 && pendingDecisions == 0 && !link.connected) return null
+        return HubBadge(waitingFor, pendingDecisions, link.connected)
+    }
+
+    /** 行点击入口：槽位换绑切换（socket 保活+快照回放，取代旧断连重连） */
+    fun swapTo(p: ConnProfile) {
+        if (currentProfile == p && (hub.isConnected || connectionState == HubConnectionState.Connecting)) return
+        connect(p.address, p.token, p.publicToken, p.name)
+    }
+
+    /** 显式断开非活跃 profile 的保活链路（槽位+service 后台链路；活跃走 disconnect()） */
+    fun disconnectLink(address: String) {
+        if (address == currentProfile?.address) return
+        dropSlot(address)
+        HubService.dropLink(address)
+    }
+
+    /** 非活跃 profile 的状态快照 + 保活 client（降级 tier:"global"）。
+     *  快照清单以 resetConnection 清空项为底稿，另收 hub 派生但未清项。 */
+    private inner class HubSlot(val key: String, var client: HubClient) {
+        var badgeJob: Job? = null
+        var badgeSyncJob: Job? = null
+        var badgeGen = 0
+        val badgeWaiting = mutableSetOf<String>()
+        val badgeDecisions = mutableSetOf<String>()
+        var sessions = listOf<SessionInfo>()
+        var rooms = listOf<RoomInfo>()
+        var roles = listOf<RoleInfo>()
+        var skills = listOf<SkillInfo>()
+        var connections = listOf<ConnectionInfo>()
+        var hubAgentTypes = listOf<String>()
+        var scheduledTasks = listOf<ScheduledTask>()
+        var taskLogs = listOf<TaskLog>()
+        var roomMemories = listOf<MemoryEntry>()
+        var chatItems = listOf<ChatItem>()
+        var busyIds = listOf<String>()
+        var currentSession: SessionInfo? = null
+        var currentRoom: RoomInfo? = null
+        var flow: FlowInfo? = null
+        var quote: Pair<String, String>? = null
+        var helpReplyTo: String? = null
+        var fileRefToInsert: String? = null
+        var currentArtifacts = listOf<ArtifactInfo>()
+        var currentEvents = listOf<EventInfo>()
+        var blackboard = listOf<BlackboardEntry>()
+        var newArtifactCount = 0
+        var newEventCount = 0
+        var newBlackboardCount = 0
+        var pendingAttachments = listOf<Attachment>()
+        var missions = listOf<Mission>()
+        var pendingDecisions = listOf<PendingDecision>()
+        var missionSupported = false
+        var missionChecked = false
+        var missionLoading = false
+        var missionError: String? = null
+        var missionFocusId: String? = null
+        var missionExecutionTarget: MissionExecutionTarget? = null
+        var missionNavMessage: String? = null
+        var decisionLoading = false
+        var chatCache = mapOf<String, List<ChatItem>>()
+        var chatCacheKeys = listOf<String>()
+        var historyMoreCache = mapOf<String, Boolean>()
+        var historyPageCursors = mapOf<String, Pair<Long, Long>>()
+        var scopeSeen = mapOf<String, ScopeSeen>()
+        var flowCache = mapOf<String, FlowInfo?>()
+        var panelsCache = mapOf<String, ScopePanels>()
+        var memberStatus = mapOf<String, String>()
+        var sessionUsage = mapOf<String, ContextUsage>()
+        var memberQuotas = mapOf<String, BackendQuota>()
+        var roomMemberModels = mapOf<String, Triple<String, String, String>>()
+        var roomMemberTypes = mapOf<String, String>()
+        var modelList = listOf<ModelInfo>()
+        var modelCurrent = ""
+        var backendQuota: BackendQuota? = null
+        var sessionConfigOptions = listOf<SessionConfigOption>()
+        var selectedMemberSession: String? = null
+        var drafts = mapOf<String, String>()
+        var attachmentDrafts = mapOf<String, List<Attachment>>()
+        var quoteDrafts = mapOf<String, Pair<String, String>>()
+        var replyDrafts = mapOf<String, String>()
+        var processItems = mapOf<String, List<ChatItem>>()
+        var processLoading = mapOf<String, Boolean>()
+        var processUnavailable = mapOf<String, Boolean>()
+        var processErrors = mapOf<String, String>()
+        var processFetchSeq = mapOf<String, Long>()
+        var processFetchFingerprints = mapOf<String, String>()
+        var fileTreeRoots = listOf<FileTreeRoot>()
+        var fileTreePath: String? = null
+        var fileTreeRootPath: String? = null
+        var fileTreeRootName: String? = null
+        var fileTreeNodes = listOf<FileTreeNode>()
+        var filePreview: FilePreview? = null
+        var searchGroups = listOf<SearchGroup>()
+        var searchResults = listOf<SearchHit>()
+        var selectedSearchGroup: SearchGroup? = null
+        var subscribedRoomId: String? = null
+        var subscribedTaskIds = setOf<String>()
+        var taskIdSubRoomId: String? = null
+        var deliveryReady = false
+        var deliveryError: String? = null
+        var deliveryOrigin = ""
+        var deliveryHubId: String? = null
+        var deliveryProtocol = 0
+        var deliveryMaxAgeMs = 24 * 3600_000L
+        var deliveryFiles = mapOf<String, List<Attachment>>()
+        var recoveryResetBase = mapOf<String, Set<ChatItem>>()
+        var preparingScopes = listOf<String>()
+        var anchorScopeKey: String? = null
+        var latestServerAt = 0L
+        var latestServerAtAt = 0L
+        var maxHistIdSeen = 0L
+        var streamingTail: Pair<String, Long>? = null
+        var pendingPromoteDraftSid: String? = null
+        var pendingPromoteDraftFromSeq = -1L
+        var pendingPromoteDraftFromHistoryId = 0L
+        var ntfyTopic: String? = null
+        var ntfyUrl = "https://ntfy.sh"
+        var agentStatus = "offline"
+        var hubLocalOnly = false
+    }
+
+    private val slots = mutableMapOf<String, HubSlot>()
+
+    /** 活跃 client + 全部休眠 client：网络变化扇出目标（休眠链也需重连信号） */
+    private fun allClients(): List<HubClient> = listOf(hub) + slots.values.map { it.client }
+
+    /** 当前活跃态压槽：快照字段 + client 降级徽章模式（socket 保活，global 层订阅） */
+    private fun parkToSlot(key: String) {
+        saveComposition()
+        flushStreamChunks()
+        val parked = hub
+        Log.i("agenthub", "parkToSlot $key items=${chatItems.size} connected=${parked.isConnected}")
+        val slot = slots.getOrPut(key) { HubSlot(key, parked) }
+        slot.client = parked
+        slot.sessions = sessions.toList()
+        slot.rooms = rooms.toList()
+        slot.roles = roles.toList()
+        slot.skills = skills.toList()
+        slot.connections = connections.toList()
+        slot.hubAgentTypes = hubAgentTypes.toList()
+        slot.scheduledTasks = scheduledTasks.toList()
+        slot.taskLogs = taskLogs.toList()
+        slot.roomMemories = roomMemories.toList()
+        slot.chatItems = chatItems.toList()
+        slot.busyIds = busyIds.toList()
+        slot.currentSession = currentSession
+        slot.currentRoom = currentRoom
+        slot.flow = flow
+        slot.quote = quote
+        slot.helpReplyTo = helpReplyTo
+        slot.fileRefToInsert = fileRefToInsert
+        slot.currentArtifacts = currentArtifacts.toList()
+        slot.currentEvents = currentEvents.toList()
+        slot.blackboard = blackboard.toList()
+        slot.newArtifactCount = newArtifactCount
+        slot.newEventCount = newEventCount
+        slot.newBlackboardCount = newBlackboardCount
+        slot.pendingAttachments = pendingAttachments.toList()
+        slot.missions = missions.toList()
+        slot.pendingDecisions = pendingDecisions.toList()
+        slot.missionSupported = missionSupported
+        slot.missionChecked = missionChecked
+        slot.missionLoading = missionLoading
+        slot.missionError = missionError
+        slot.missionFocusId = missionFocusId
+        slot.missionExecutionTarget = missionExecutionTarget
+        slot.missionNavMessage = missionNavMessage
+        slot.decisionLoading = decisionLoading
+        slot.chatCache = chatCache.toMap()
+        slot.chatCacheKeys = chatCacheKeys.toList()
+        slot.historyMoreCache = historyMoreCache.toMap()
+        slot.historyPageCursors = historyPageCursors.toMap()
+        slot.scopeSeen = scopeSeen.toMap()
+        slot.flowCache = flowCache.toMap()
+        slot.panelsCache = panelsCache.toMap()
+        slot.memberStatus = memberStatus.toMap()
+        slot.sessionUsage = sessionUsage.toMap()
+        slot.memberQuotas = memberQuotas.toMap()
+        slot.roomMemberModels = roomMemberModels.toMap()
+        slot.roomMemberTypes = roomMemberTypes.toMap()
+        slot.modelList = modelList.toList()
+        slot.modelCurrent = modelCurrent
+        slot.backendQuota = backendQuota
+        slot.sessionConfigOptions = sessionConfigOptions.toList()
+        slot.selectedMemberSession = selectedMemberSession
+        slot.drafts = drafts.toMap()
+        slot.attachmentDrafts = attachmentDrafts.toMap()
+        slot.quoteDrafts = quoteDrafts.toMap()
+        slot.replyDrafts = replyDrafts.toMap()
+        slot.processItems = processItems.toMap()
+        slot.processLoading = processLoading.toMap()
+        slot.processUnavailable = processUnavailable.toMap()
+        slot.processErrors = processErrors.toMap()
+        slot.processFetchSeq = processFetchSeq.toMap()
+        slot.processFetchFingerprints = processFetchFingerprints.toMap()
+        slot.fileTreeRoots = fileTreeRoots
+        slot.fileTreePath = fileTreePath
+        slot.fileTreeRootPath = fileTreeRootPath
+        slot.fileTreeRootName = fileTreeRootName
+        slot.fileTreeNodes = fileTreeNodes.toList()
+        slot.filePreview = filePreview
+        slot.searchGroups = searchGroups.toList()
+        slot.searchResults = searchResults.toList()
+        slot.selectedSearchGroup = selectedSearchGroup
+        slot.subscribedRoomId = subscribedRoomId
+        slot.subscribedTaskIds = subscribedTaskIds.toSet()
+        slot.taskIdSubRoomId = taskIdSubRoomId
+        slot.deliveryReady = deliveryReady
+        slot.deliveryError = deliveryError
+        slot.deliveryOrigin = deliveryOrigin
+        slot.deliveryHubId = deliveryHubId
+        slot.deliveryProtocol = deliveryProtocol
+        slot.deliveryMaxAgeMs = deliveryMaxAgeMs
+        slot.deliveryFiles = deliveryFiles.toMap()
+        slot.recoveryResetBase = recoveryResetBase.toMap()
+        slot.preparingScopes = preparingScopes.toList()
+        slot.anchorScopeKey = anchorScopeKey
+        slot.latestServerAt = latestServerAt
+        slot.latestServerAtAt = latestServerAtAt
+        slot.maxHistIdSeen = maxHistIdSeen
+        slot.streamingTail = streamingTail
+        slot.pendingPromoteDraftSid = pendingPromoteDraftSid
+        slot.pendingPromoteDraftFromSeq = pendingPromoteDraftFromSeq
+        slot.pendingPromoteDraftFromHistoryId = pendingPromoteDraftFromHistoryId
+        slot.ntfyTopic = ntfyTopic
+        slot.ntfyUrl = ntfyUrl
+        slot.agentStatus = agentStatus
+        slot.hubLocalOnly = hubLocalOnly
+        // 活跃侧写者全部停掉，防旧 hub 协程污染新槽
+        eventJob?.cancel(); eventJob = null
+        recoveryJob?.cancel()
+        tailRecoverJob?.cancel()
+        searchJob?.cancel()
+        streamFlushJob?.cancel()
+        processFetchJobs.values.forEach { it.cancel() }
+        processFetchJobs.clear()
+        // 降级：socket 保活，改订 global 层，事件只进徽章
+        val badge = HubBadge(connected = parked.isConnected)
+        badge.waitingFor = slot.badgeWaiting.size
+        badge.pendingDecisions = slot.badgeDecisions.size
+        hubBadges[key] = badge
+        parked.onStateChanged = { s ->
+            if (slots[key]?.client === parked) {
+                badge.connected = s == HubConnectionState.Connected
+                if (s == HubConnectionState.Connected) {
+                    slot.badgeGen++
+                    val gen = slot.badgeGen
+                    slot.badgeSyncJob = viewModelScope.launch {
+                        runCatching { parked.call("client.subscribe", buildJsonObject { put("tier", "global") }) }
+                        syncSlotBadge(key, slot, parked, badge, gen)
+                    }
+                }
+            }
+        }
+        parked.onClosed = { badge.connected = false }
+        slot.badgeJob = viewModelScope.launch {
+            parked.events.collect { obj ->
+                if (slots[key]?.client !== parked) return@collect
+                runCatching { slotBadgeEvent(key, slot, obj, badge) }
+            }
+        }
+        slot.badgeGen++
+        val gen = slot.badgeGen
+        slot.badgeSyncJob = viewModelScope.launch {
+            runCatching { parked.call("client.subscribe", buildJsonObject { put("tier", "global") }) }
+            syncSlotBadge(key, slot, parked, badge, gen)
+        }
+    }
+
+    /** 徽章数据回填：decision.list 待决 + room.list→room.flow waitingFor */
+    private suspend fun syncSlotBadge(key: String, slot: HubSlot, client: HubClient, badge: HubBadge, gen: Int) {
+        fun valid() = slots[key] === slot && slot.badgeGen == gen && client.isConnected
+        try {
+            val decisions = client.call("decision.list")["decisions"] as? JsonArray
+            if (!valid()) return
+            decisions?.forEach { v ->
+                val o = v.jsonObject
+                val did = o["decisionId"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                if (o["status"]?.jsonPrimitive?.contentOrNull == "pending") slot.badgeDecisions.add(did)
+                else slot.badgeDecisions.remove(did)
+            }
+            val roomsArr = client.call("room.list")["rooms"] as? JsonArray
+            if (!valid()) return
+            roomsArr?.forEach { v ->
+                val rid = v.jsonObject["roomId"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                val flowResp = runCatching {
+                    client.call("room.flow", buildJsonObject { put("roomId", rid) })
+                }.getOrNull() ?: return@forEach
+                if (!valid()) return
+                val waiting = (flowResp["flow"] as? JsonObject)
+                    ?.get("waitingFor")?.takeIf { it !is JsonNull } != null
+                if (waiting) slot.badgeWaiting.add(rid) else slot.badgeWaiting.remove(rid)
+            }
+            if (!valid()) return
+            badge.waitingFor = slot.badgeWaiting.size
+            badge.pendingDecisions = slot.badgeDecisions.size
+            badge.connected = client.isConnected
+        } catch (_: Exception) { }
+    }
+
+    /** 休眠 client 的 global 事件 → 徽章（绝不触活跃态） */
+    private fun slotBadgeEvent(key: String, slot: HubSlot, obj: JsonObject, badge: HubBadge) {
+        val m = obj["method"]?.jsonPrimitive?.contentOrNull
+        if (m == "room.flowUpdate" || m == "decision.update")
+            Log.i("agenthub", "slotBadgeEvent $key $m waiting=${badge.waitingFor} decisions=${badge.pendingDecisions}")
+        when (obj["method"]?.jsonPrimitive?.contentOrNull) {
+            "room.flowUpdate" -> {
+                val p = obj["params"]?.jsonObject ?: return
+                val rid = p["roomId"]?.jsonPrimitive?.contentOrNull ?: return
+                val waiting = (p["flow"] as? JsonObject)
+                    ?.get("waitingFor")?.takeIf { it !is JsonNull } != null
+                if (waiting) slot.badgeWaiting.add(rid) else slot.badgeWaiting.remove(rid)
+                badge.waitingFor = slot.badgeWaiting.size
+            }
+            "decision.update" -> {
+                val entry = obj["params"]?.jsonObject?.get("entry")?.jsonObject ?: return
+                val meta = runCatching {
+                    Json.parseToJsonElement(entry["text"]!!.jsonPrimitive.content).jsonObject
+                }.getOrNull() ?: return
+                val did = meta["decisionId"]?.jsonPrimitive?.contentOrNull ?: return
+                if (meta["status"]?.jsonPrimitive?.contentOrNull == "pending") slot.badgeDecisions.add(did)
+                else slot.badgeDecisions.remove(did)
+                badge.pendingDecisions = slot.badgeDecisions.size
+            }
+        }
+    }
+
+    /** 槽位整槽回放：字段灌回（免重载），恢复机件由调用方重挂 */
+    private fun restoreSlot(slot: HubSlot) {
+        Log.i("agenthub", "restoreSlot ${slot.key} items=${slot.chatItems.size} rooms=${slot.rooms.size} connected=${slot.client.isConnected}")
+        sessions.addAll(slot.sessions)
+        rooms.addAll(slot.rooms)
+        roles.addAll(slot.roles)
+        skills.addAll(slot.skills)
+        connections.addAll(slot.connections)
+        hubAgentTypes.addAll(slot.hubAgentTypes)
+        scheduledTasks.addAll(slot.scheduledTasks)
+        taskLogs.addAll(slot.taskLogs)
+        roomMemories.addAll(slot.roomMemories)
+        chatItems.addAll(slot.chatItems)
+        busyIds.addAll(slot.busyIds)
+        currentSession = slot.currentSession
+        currentRoom = slot.currentRoom
+        flow = slot.flow
+        quote = slot.quote
+        helpReplyTo = slot.helpReplyTo
+        fileRefToInsert = slot.fileRefToInsert
+        currentArtifacts.addAll(slot.currentArtifacts)
+        currentEvents.addAll(slot.currentEvents)
+        blackboard.addAll(slot.blackboard)
+        newArtifactCount = slot.newArtifactCount
+        newEventCount = slot.newEventCount
+        newBlackboardCount = slot.newBlackboardCount
+        pendingAttachments.addAll(slot.pendingAttachments)
+        missions.addAll(slot.missions)
+        pendingDecisions.addAll(slot.pendingDecisions)
+        missionSupported = slot.missionSupported
+        missionChecked = slot.missionChecked
+        missionLoading = slot.missionLoading
+        missionError = slot.missionError
+        missionFocusId = slot.missionFocusId
+        missionExecutionTarget = slot.missionExecutionTarget
+        missionNavMessage = slot.missionNavMessage
+        decisionLoading = slot.decisionLoading
+        chatCache.putAll(slot.chatCache)
+        chatCacheKeys.addAll(slot.chatCacheKeys)
+        historyMoreCache.putAll(slot.historyMoreCache)
+        historyPageCursors.putAll(slot.historyPageCursors)
+        scopeSeen.putAll(slot.scopeSeen)
+        flowCache.putAll(slot.flowCache)
+        panelsCache.putAll(slot.panelsCache)
+        memberStatus.putAll(slot.memberStatus)
+        sessionUsage.putAll(slot.sessionUsage)
+        memberQuotas.putAll(slot.memberQuotas)
+        roomMemberModels.putAll(slot.roomMemberModels)
+        roomMemberTypes.putAll(slot.roomMemberTypes)
+        modelList.addAll(slot.modelList)
+        modelCurrent = slot.modelCurrent
+        backendQuota = slot.backendQuota
+        sessionConfigOptions.addAll(slot.sessionConfigOptions)
+        selectedMemberSession = slot.selectedMemberSession
+        drafts.putAll(slot.drafts)
+        attachmentDrafts.putAll(slot.attachmentDrafts)
+        quoteDrafts.putAll(slot.quoteDrafts)
+        replyDrafts.putAll(slot.replyDrafts)
+        processItems.putAll(slot.processItems)
+        processLoading.putAll(slot.processLoading)
+        processUnavailable.putAll(slot.processUnavailable)
+        processErrors.putAll(slot.processErrors)
+        processFetchSeq.putAll(slot.processFetchSeq)
+        processFetchFingerprints.putAll(slot.processFetchFingerprints)
+        fileTreeRoots = slot.fileTreeRoots
+        fileTreePath = slot.fileTreePath
+        fileTreeRootPath = slot.fileTreeRootPath
+        fileTreeRootName = slot.fileTreeRootName
+        fileTreeNodes.addAll(slot.fileTreeNodes)
+        filePreview = slot.filePreview
+        searchGroups.addAll(slot.searchGroups)
+        searchResults.addAll(slot.searchResults)
+        selectedSearchGroup = slot.selectedSearchGroup
+        subscribedTaskIds.addAll(slot.subscribedTaskIds)
+        taskIdSubRoomId = slot.taskIdSubRoomId
+        deliveryError = slot.deliveryError
+        deliveryHubId = slot.deliveryHubId
+        deliveryProtocol = slot.deliveryProtocol
+        deliveryMaxAgeMs = slot.deliveryMaxAgeMs
+        deliveryFiles.putAll(slot.deliveryFiles)
+        recoveryResetBase.putAll(slot.recoveryResetBase)
+        preparingScopes.addAll(slot.preparingScopes)
+        anchorScopeKey = slot.anchorScopeKey
+        latestServerAt = slot.latestServerAt
+        latestServerAtAt = slot.latestServerAtAt
+        maxHistIdSeen = slot.maxHistIdSeen
+        streamingTail = slot.streamingTail
+        pendingPromoteDraftSid = slot.pendingPromoteDraftSid
+        pendingPromoteDraftFromSeq = slot.pendingPromoteDraftFromSeq
+        pendingPromoteDraftFromHistoryId = slot.pendingPromoteDraftFromHistoryId
+        ntfyTopic = slot.ntfyTopic
+        ntfyUrl = slot.ntfyUrl
+        agentStatus = slot.agentStatus
+        hubLocalOnly = slot.hubLocalOnly
+        subscribedRoomId = slot.subscribedRoomId
+    }
+
+    /** 活跃 client 状态/断开回调（connect 前即挂，Connecting 态可见） */
+    private fun wireActiveCallbacks(client: HubClient, epoch: Int) {
+        client.onStateChanged = { state -> if (epoch == profileEpoch) connectionState = state }
+        client.onClosed = {
+            if (epoch == profileEpoch) {
+                flushStreamChunks()
+                deliveryReady = false
+                delivery.pause()
+                missionConnectionGeneration++
+                historyLoading = false
+                recoveryJob?.cancel()
+                eventJob?.cancel()
+                eventJob = null
+                connecting = false
+                agentStatus = if (connectionWanted) "reconnecting" else "offline"
+            }
+        }
+    }
+
+    /** 活跃 client 事件收集（onOpen / 槽位回放时挂） */
+    private fun collectActiveEvents(client: HubClient, epoch: Int, generation: Int) {
+        eventJob?.cancel()
+        eventJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            client.events.collect {
+                if (!currentConnection(epoch, generation)) return@collect
+                try {
+                    handleEvent(it)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w("agenthub", "handleEvent dropped", e)
+                }
+            }
+        }
+    }
+
+    /** 断开并回收某 profile 的槽位（profile 删除/显式断开时才调用） */
+    private fun dropSlot(key: String) {
+        slots.remove(key)?.let {
+            it.badgeJob?.cancel()
+            it.badgeSyncJob?.cancel()
+            it.client.disconnect()
+        }
+        hubBadges.remove(key)
+    }
+
+    private fun dropAllSlots() {
+        slots.keys.toList().forEach { dropSlot(it) }
+    }
+
+    fun disconnect() {
+        dropAllSlots()
+        resetConnection(clearSaved = true)
+    }
+
+    private fun resetConnection(clearSaved: Boolean, disconnectHub: Boolean = true) {
         saveComposition()
         if (::delivery.isInitialized) delivery.select(null)
         if (::deliveryRecovery.isInitialized) deliveryRecovery.clear()
@@ -2157,7 +2669,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         recoveryJob?.cancel()
         eventJob?.cancel()
         eventJob = null
-        hub.disconnect()
+        if (disconnectHub) hub.disconnect()
         if (clearSaved) {
             prefs.edit().remove("last").remove("last_v2").remove("background_stop_reason").apply()
             val app = getApplication<Application>()
@@ -2294,7 +2806,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         fun valid() = currentConnection(epoch, generation)
         if (!valid()) return@coroutineScope false
         try {
-            val info = hub.call("agent.info")
+            val info = hubCall("agent.info")
             if (!valid()) return@coroutineScope false
             onInfo(info)
             val ntfy = info["ntfy"] as? JsonObject
@@ -2309,7 +2821,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return@coroutineScope false
         }
         try {
-            val cResult = hub.call("connection.list")
+            val cResult = hubCall("connection.list")
             if (!valid()) return@coroutineScope false
             val cList = cResult["connections"]?.jsonArray ?: JsonArray(emptyList())
                 connections.clear()
@@ -2339,7 +2851,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val jobs = listOf(
         async {
             try {
-                val result = hub.call("session.list")
+                val result = hubCall("session.list")
                 if (!valid()) return@async
                 val list = result["sessions"]?.jsonArray ?: return@async
                 sessions.clear()
@@ -2371,7 +2883,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         },
         async {
             try {
-                val result = hub.call("role.list")
+                val result = hubCall("role.list")
                 if (!valid()) return@async
                 val list = result["roles"]?.jsonArray ?: return@async
                 roles.clear()
@@ -2395,7 +2907,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         async {
             try {
                 val connId = connections.firstOrNull()?.id
-                val result = if (connId != null) hub.call("skill.list", buildJsonObject { put("connectionId", connId) }) else hub.call("skill.list")
+                val result = if (connId != null) hubCall("skill.list", buildJsonObject { put("connectionId", connId) }) else hubCall("skill.list")
                 if (!valid()) return@async
                 val list = result["skills"]?.jsonArray ?: return@async
                 skills.clear()
@@ -2414,7 +2926,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         },
         async {
             try {
-                val result = hub.call("room.list")
+                val result = hubCall("room.list")
                 if (!valid()) return@async
                 val list = result["rooms"]?.jsonArray ?: return@async
                 rooms.clear()
@@ -2427,7 +2939,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         },
         async {
             try {
-                val result = hub.call("task.list")
+                val result = hubCall("task.list")
                 if (!valid()) return@async
                 val list = result["tasks"]?.jsonArray ?: return@async
                 val parsed = list.map { parseTask(it.jsonObject) }
@@ -2454,7 +2966,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val rev = missionEventRev
         missionLoading = true
         try {
-            val result = hub.call("mission.list")
+            val result = hubCall("mission.list")
             if (gen != missionConnectionGeneration || seq != missionListSeq) return false
             if (rev != missionEventRev) {
                 return retry && syncRefreshMissions(false)
@@ -2500,7 +3012,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val rev = decisionEventRev
         decisionLoading = true
         try {
-            val result = hub.call("decision.list")
+            val result = hubCall("decision.list")
             if (gen != missionConnectionGeneration || seq != decisionListSeq) return false
             if (rev != decisionEventRev) return retry && syncRefreshDecisions(false)
             val list = result["decisions"] as? JsonArray ?: return false
@@ -2552,7 +3064,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                hub.call("permission.respond", buildJsonObject {
+                hubCall("permission.respond", buildJsonObject {
                     put("requestId", d.requestId)
                     put("optionId", optionId)
                     put("scope", "once")
@@ -2571,7 +3083,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.review", buildJsonObject {
+                val result = hubCall("mission.review", buildJsonObject {
                     put("id", id)
                     put("index", index)
                     put("verdict", verdict)
@@ -2595,7 +3107,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.accept", buildJsonObject {
+                val result = hubCall("mission.accept", buildJsonObject {
                     put("id", id)
                     put("note", note)
                 })
@@ -2616,7 +3128,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.rework", buildJsonObject {
+                val result = hubCall("mission.rework", buildJsonObject {
                     put("id", id)
                     put("note", note)
                 })
@@ -2638,7 +3150,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.updateContract", buildJsonObject {
+                val result = hubCall("mission.updateContract", buildJsonObject {
                     put("id", id)
                     put("goal", goal)
                     put("acceptanceCriteria", JsonArray(acceptanceCriteria.map { JsonPrimitive(it) }))
@@ -2664,7 +3176,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.supplement", buildJsonObject {
+                val result = hubCall("mission.supplement", buildJsonObject {
                     put("id", id)
                     put("text", text)
                 })
@@ -2685,7 +3197,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.retry", buildJsonObject { put("id", id) })
+                val result = hubCall("mission.retry", buildJsonObject { put("id", id) })
                 if (gen != missionConnectionGeneration) return@launch
                 upsertMission(parseMission(result["mission"]!!.jsonObject))
                 missionError = null
@@ -2712,7 +3224,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                hub.call("task.create", buildJsonObject {
+                hubCall("task.create", buildJsonObject {
                     put("name", name)
                     put("targetType", "room")
                     put("targetId", roomId)
@@ -2768,7 +3280,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.create", buildJsonObject {
+                val result = hubCall("mission.create", buildJsonObject {
                     sourceId?.let { put("sourceId", it) }
                     put("start", start)
                     put("roomId", roomId)
@@ -2834,7 +3346,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.promote", buildJsonObject {
+                val result = hubCall("mission.promote", buildJsonObject {
                     sourceId?.let { put("sourceId", it) }
                     put("start", start)
                     put("sessionId", sessionId)
@@ -2852,7 +3364,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 (result["roomId"] as? JsonPrimitive)?.contentOrNull?.let { rid ->
                     if (rooms.none { it.roomId == rid }) {
                         runCatching {
-                            val rl = hub.call("room.list")
+                            val rl = hubCall("room.list")
                             rl["rooms"]?.jsonArray?.forEach { r ->
                                 val parsed = parseRoom(r.jsonObject)
                                 if (rooms.none { it.roomId == parsed.roomId }) rooms.add(parsed)
@@ -2874,7 +3386,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.start", buildJsonObject { put("id", id) })
+                val result = hubCall("mission.start", buildJsonObject { put("id", id) })
                 if (gen != missionConnectionGeneration) return@launch
                 upsertMission(parseMission(result["mission"]!!.jsonObject))
                 missionError = null
@@ -2892,7 +3404,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                hub.call("mission.delete", buildJsonObject { put("id", id); put("force", force) })
+                hubCall("mission.delete", buildJsonObject { put("id", id); put("force", force) })
                 if (gen != missionConnectionGeneration) return@launch
                 missions.removeAll { it.id == id }
                 missionError = null
@@ -2910,7 +3422,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val gen = missionConnectionGeneration
             try {
-                val result = hub.call("mission.stop", buildJsonObject { put("id", id) })
+                val result = hubCall("mission.stop", buildJsonObject { put("id", id) })
                 if (gen != missionConnectionGeneration) return@launch
                 upsertMission(parseMission(result["mission"]!!.jsonObject))
                 missionError = null
@@ -2933,7 +3445,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "stop" -> "mission.stop"
                     else -> "mission.goalControl"
                 }
-                val result = hub.call(method, buildJsonObject { put("id", id); put("action", action) })
+                val result = hubCall(method, buildJsonObject { put("id", id); put("action", action) })
                 if (gen != missionConnectionGeneration) return@launch
                 upsertMission(parseMission(result["mission"]!!.jsonObject))
                 missionError = null
@@ -3047,7 +3559,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadScheduledTasks() {
         viewModelScope.launch {
             try {
-                val result = hub.call("task.list")
+                val result = hubCall("task.list")
                 val list = result["tasks"]?.jsonArray ?: return@launch
                 val parsed = list.map { parseTask(it.jsonObject) }
                 scheduledTasks.clear()
@@ -3085,7 +3597,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         cronExpr?.let { put("expr", it) }
                     }
                 }
-                val result = hub.call("task.create", buildJsonObject {
+                val result = hubCall("task.create", buildJsonObject {
                     put("name", name)
                     put("targetType", targetType)
                     put("targetId", targetId)
@@ -3131,7 +3643,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         cronExpr?.let { put("expr", it) }
                     }
                 }
-                val result = hub.call("task.update", buildJsonObject {
+                val result = hubCall("task.update", buildJsonObject {
                     put("id", id)
                     put("name", name)
                     put("targetType", targetType)
@@ -3153,7 +3665,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteScheduledTask(id: String) {
         viewModelScope.launch {
             try {
-                hub.call("task.delete", buildJsonObject { put("id", id) })
+                hubCall("task.delete", buildJsonObject { put("id", id) })
                 scheduledTasks.removeAll { it.id == id }
             } catch (_: Exception) {
             }
@@ -3163,7 +3675,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleScheduledTask(id: String) {
         viewModelScope.launch {
             try {
-                val result = hub.call("task.toggle", buildJsonObject { put("id", id) })
+                val result = hubCall("task.toggle", buildJsonObject { put("id", id) })
                 val task = parseTask(result["task"]!!.jsonObject)
                 val idx = scheduledTasks.indexOfFirst { it.id == id }
                 if (idx >= 0) scheduledTasks[idx] = task
@@ -3190,7 +3702,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadTaskLogs() {
         viewModelScope.launch {
             try {
-                val result = hub.call("task.logs", buildJsonObject { put("limit", 200) })
+                val result = hubCall("task.logs", buildJsonObject { put("limit", 200) })
                 val list = result["logs"]?.jsonArray ?: return@launch
                 taskLogs.clear()
                 for (l in list) taskLogs.add(parseLog(l.jsonObject))
@@ -3202,7 +3714,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun clearTaskLogs() {
         viewModelScope.launch {
             try {
-                hub.call("task.clearLogs")
+                hubCall("task.clearLogs")
                 taskLogs.clear()
             } catch (_: Exception) {
             }
@@ -3217,7 +3729,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         viewModelScope.launch {
             try {
-                val result = hub.call("session.create", buildJsonObject {
+                val result = hubCall("session.create", buildJsonObject {
                     put("cwd", cwd)
                     put("name", name)
                     put("connectionId", connectionId)
@@ -3247,7 +3759,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun cloneSession(session: SessionInfo, onCloned: ((SessionInfo) -> Unit)? = null) {
         viewModelScope.launch {
             try {
-                val result = hub.call("session.clone", buildJsonObject {
+                val result = hubCall("session.clone", buildJsonObject {
                     put("sessionId", session.sessionId)
                 })
                 val o = result
@@ -3280,7 +3792,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         viewModelScope.launch {
             try {
-                hub.call("role.create", buildJsonObject {
+                hubCall("role.create", buildJsonObject {
                     put("name", name)
                     put("persona", persona)
                     if (cwd.isNotBlank()) put("cwd", cwd)
@@ -3296,7 +3808,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun createConnection(name: String, agent: String, address: String, cwd: String, token: String = "", local: Boolean = false) {
         viewModelScope.launch {
             try {
-                hub.call("connection.create", buildJsonObject {
+                hubCall("connection.create", buildJsonObject {
                     put("name", name)
                     put("agent", agent)
                     if (address.isNotBlank()) put("address", address)
@@ -3314,7 +3826,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteConnection(id: String) {
         viewModelScope.launch {
             try {
-                hub.call("connection.delete", buildJsonObject { put("id", id) })
+                hubCall("connection.delete", buildJsonObject { put("id", id) })
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -3325,7 +3837,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteRole(id: String) {
         viewModelScope.launch {
             try {
-                hub.call("role.delete", buildJsonObject { put("id", id) })
+                hubCall("role.delete", buildJsonObject { put("id", id) })
                 refreshAll()
             } catch (e: Exception) {
                 connectError = e.message
@@ -3358,7 +3870,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun createRoom(name: String, memberIds: List<String>, mode: String, config: RoomModeConfig) {
         viewModelScope.launch {
             try {
-                val result = hub.call("room.create", buildJsonObject {
+                val result = hubCall("room.create", buildJsonObject {
                     put("name", name)
                     put("sessionIds", buildJsonArray { memberIds.forEach { add(it) } })
                     put("mode", mode)
@@ -3400,7 +3912,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val trimmed = name.trim()
             if (trimmed.isBlank()) return@launch
             try {
-                hub.call("room.rename", buildJsonObject {
+                hubCall("room.rename", buildJsonObject {
                     put("roomId", room.roomId)
                     put("name", trimmed)
                 })
@@ -3421,7 +3933,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val trimmed = name.trim()
             if (trimmed.isBlank()) return@launch
             try {
-                val result = hub.call("room.update", buildJsonObject {
+                val result = hubCall("room.update", buildJsonObject {
                     put("roomId", room.roomId)
                     put("name", trimmed)
                     put("sessionIds", buildJsonArray { memberIds.forEach { add(it) } })
@@ -3462,7 +3974,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun cloneRoom(room: RoomInfo, newName: String, onCloned: ((RoomInfo) -> Unit)? = null) {
         viewModelScope.launch {
             try {
-                val result = hub.call("room.clone", buildJsonObject {
+                val result = hubCall("room.clone", buildJsonObject {
                     put("roomId", room.roomId)
                     put("newName", newName)
                 })
@@ -3498,7 +4010,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteRoom(room: RoomInfo) {
         viewModelScope.launch {
             try {
-                hub.call("room.delete", buildJsonObject {
+                hubCall("room.delete", buildJsonObject {
                     put("roomId", room.roomId)
                 })
                 dropScopeCache("room", room.roomId)
@@ -3513,7 +4025,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun archiveRoom(room: RoomInfo, archived: Boolean) {
         viewModelScope.launch {
             try {
-                hub.call("room.archive", buildJsonObject {
+                hubCall("room.archive", buildJsonObject {
                     put("roomId", room.roomId)
                     put("archived", archived)
                 })
@@ -3747,7 +4259,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun refreshArtifacts(roomId: String) {
         val generation = ++artifactRefreshGeneration
         try {
-            val result = hub.call("room.artifacts", buildJsonObject {
+            val result = hubCall("room.artifacts", buildJsonObject {
                 put("roomId", roomId)
                 // IFC：用户驱动的房内容拉取带授权标记——private 房不被门控拒绝
                 put("ifcAuthorized", true)
@@ -3772,7 +4284,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun refreshSessionArtifacts(sessionId: String) {
         val generation = ++artifactRefreshGeneration
         try {
-            val result = hub.call("session.artifacts", buildJsonObject { put("sessionId", sessionId) })
+            val result = hubCall("session.artifacts", buildJsonObject { put("sessionId", sessionId) })
             val artifacts = result["artifacts"]?.jsonArray?.map { parseArtifactInfo(it.jsonObject) } ?: emptyList()
             val events = result["events"]?.jsonArray?.map { parseEventInfo(it.jsonObject) } ?: emptyList()
             if (generation != artifactRefreshGeneration) return
@@ -4084,7 +4596,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun recoveryRpc(method: String, params: JsonObject): JsonObject {
         val generation = missionConnectionGeneration
         val epoch = profileEpoch
-        val result = hub.call(method, params)
+        val result = hubCall(method, params)
         check(currentConnection(epoch, generation)) { "recovery_stale" }
         return result
     }
@@ -4123,7 +4635,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (reply != null && (state == "terminal" || f == null ||
                     (f.clarificationId != reply && f.tasks.none { it.waitingFor == "user" && it.waitingHelpId == reply }))) return "context"
             if (record.waitUntilIdle && state == "none") {
-                val list = hub.call("session.list")["sessions"] as? JsonArray ?: return "sync"
+                val list = hubCall("session.list")["sessions"] as? JsonArray ?: return "sync"
                 if (!valid()) throw CancellationException("delivery_stale")
                 val memberIds = room.members.map { it.first }.toSet()
                 if (list.any {
@@ -4134,7 +4646,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         } else {
             recoverScope(record.scopeKey, false)
-            val list = hub.call("session.list")["sessions"] as? JsonArray ?: return "sync"
+            val list = hubCall("session.list")["sessions"] as? JsonArray ?: return "sync"
             if (!valid()) throw CancellationException("delivery_stale")
             val session = list.map { it.jsonObject }.find {
                 (it["sessionId"] as? JsonPrimitive)?.contentOrNull == target
@@ -4148,7 +4660,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun deliveryRpc(method: String, params: JsonObject): JsonObject {
         val sid = (params["sessionId"] as? JsonPrimitive)?.contentOrNull
         if (method == "prompt.send" && sid != null && !busyIds.contains(sid)) busyIds.add(sid)
-        return try { hub.call(method, params) }
+        return try { hubCall(method, params) }
         catch (e: Exception) {
             if (e is CancellationException) throw e
             if (hub.isConnected) refreshBusy()
@@ -4249,7 +4761,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val roomId = currentRoom?.roomId ?: return
         viewModelScope.launch {
             runCatching {
-                hub.call("room.topic.resolve", buildJsonObject {
+                hubCall("room.topic.resolve", buildJsonObject {
                     put("roomId", roomId); put("id", id)
                 })
             }
@@ -4496,7 +5008,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     )
 
     private suspend fun resumeOne(session: SessionInfo): SessionInfo? {
-        val result = hub.call("session.resume", buildJsonObject {
+        val result = hubCall("session.resume", buildJsonObject {
             put("sessionId", session.sessionId)
         })
         return if (result["resumed"]?.jsonPrimitive?.content?.toBoolean() == true) {
@@ -4537,7 +5049,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val trimmed = name.trim().replace("·", "-")
             if (trimmed.isBlank()) return@launch
             try {
-                hub.call("session.rename", buildJsonObject {
+                hubCall("session.rename", buildJsonObject {
                     put("sessionId", session.sessionId)
                     put("name", trimmed)
                 })
@@ -4855,7 +5367,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     put("ifcAuthorized", true)
                 }
                 val requestItems = historyReadItems(key).toSet()
-                val result = hub.call(method, params)
+                val result = hubCall(method, params)
                 if (scopeKey() != scopeAtStart || roomOpenSeq != seqAtStart || missionConnectionGeneration != genAtStart || historyViewSeq != viewSeq) return@launch
                 val entries = result["entries"]?.jsonArray ?: return@launch
                 val rows = entries.map { it.jsonObject }
@@ -4901,7 +5413,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     else -> return@launch
                 }
                 val requestItems = historyReadItems(scopeAtStart ?: return@launch).toSet()
-                val result = hub.call(method, buildJsonObject {
+                val result = hubCall(method, buildJsonObject {
                     put(idKey, id)
                     put("before", JsonPrimitive(beforeAt))
                     put("beforeId", JsonPrimitive(beforeId))
@@ -5038,10 +5550,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun fetchProcessItems(sessionId: String, startAt: Long, endAt: Long, running: Boolean): List<ChatItem> {
         if (sessionId.isEmpty()) throw IllegalStateException("no session")
         val result = if (running) {
-            hub.call("session.process", buildJsonObject { put("sessionId", sessionId) })
+            hubCall("session.process", buildJsonObject { put("sessionId", sessionId) })
         } else {
             try {
-                hub.call("session.history", buildJsonObject {
+                hubCall("session.history", buildJsonObject {
                     put("sessionId", sessionId)
                     if (startAt > 0) put("after", JsonPrimitive(startAt - 1))
                     put("limit", JsonPrimitive(500))
@@ -5049,7 +5561,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                hub.call("session.history", buildJsonObject {
+                hubCall("session.history", buildJsonObject {
                     put("sessionId", sessionId)
                     put("limit", JsonPrimitive(200))
                 })
@@ -5092,7 +5604,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun syncBusyIds() {
         if (!hub.isConnected) return
         try {
-            val result = hub.call("session.list")
+            val result = hubCall("session.list")
             val list = result["sessions"]?.jsonArray ?: return
             val sessionsList = mutableListOf<SessionInfo>()
             for (s in list) {
@@ -5138,7 +5650,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             searchResults.clear()
             selectedSearchGroup = null
             if (query.isBlank()) return
-            val result = hub.call("history.searchGroups", buildJsonObject {
+            val result = hubCall("history.searchGroups", buildJsonObject {
                 put("query", query)
                 put("limit", 30)
                 put("previewLimit", 1)
@@ -5181,7 +5693,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 selectedSearchGroup = group
                 searchResults.clear()
-                val result = hub.call("history.search", buildJsonObject {
+                val result = hubCall("history.search", buildJsonObject {
                     put("query", searchQuery)
                     put("scope", group.scope)
                     put("scopeId", group.scopeId)
@@ -5263,7 +5775,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun archiveSession(session: SessionInfo, archived: Boolean) {
         viewModelScope.launch {
             try {
-                hub.call("session.archive", buildJsonObject {
+                hubCall("session.archive", buildJsonObject {
                     put("sessionId", session.sessionId)
                     put("archived", archived)
                 })
@@ -5277,7 +5789,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteSession(session: SessionInfo) {
         viewModelScope.launch {
             try {
-                hub.call("session.delete", buildJsonObject {
+                hubCall("session.delete", buildJsonObject {
                     put("sessionId", session.sessionId)
                 })
                 dropScopeCache("session", session.sessionId)
@@ -5291,7 +5803,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteSessions(sessionIds: List<String>) {
         viewModelScope.launch {
             try {
-                hub.call("session.deleteBatch", buildJsonObject {
+                hubCall("session.deleteBatch", buildJsonObject {
                     put("sessionIds", buildJsonArray { sessionIds.forEach { add(it) } })
                 })
                 sessionIds.forEach { dropScopeCache("session", it) }
@@ -5305,7 +5817,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteRooms(roomIds: List<String>) {
         viewModelScope.launch {
             try {
-                hub.call("room.deleteBatch", buildJsonObject {
+                hubCall("room.deleteBatch", buildJsonObject {
                     put("roomIds", buildJsonArray { roomIds.forEach { add(it) } })
                 })
                 roomIds.forEach { dropScopeCache("room", it) }
@@ -5320,12 +5832,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (sessionIds.isNotEmpty()) {
-                    hub.call("session.deleteBatch", buildJsonObject {
+                    hubCall("session.deleteBatch", buildJsonObject {
                         put("sessionIds", buildJsonArray { sessionIds.forEach { add(it) } })
                     })
                 }
                 if (roomIds.isNotEmpty()) {
-                    hub.call("room.deleteBatch", buildJsonObject {
+                    hubCall("room.deleteBatch", buildJsonObject {
                         put("roomIds", buildJsonArray { roomIds.forEach { add(it) } })
                     })
                 }
@@ -5548,7 +6060,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val taskIds = buildJsonArray { add(taskId) }
-                hub.call("room.retryTasks", buildJsonObject {
+                hubCall("room.retryTasks", buildJsonObject {
                     put("roomId", room.roomId)
                     put("taskIds", taskIds)
                 })
@@ -5562,7 +6074,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val room = currentRoom ?: return
         viewModelScope.launch {
             try {
-                hub.call("room.retryTasks", buildJsonObject {
+                hubCall("room.retryTasks", buildJsonObject {
                     put("roomId", room.roomId)
                 })
             } catch (e: Exception) {
@@ -5575,7 +6087,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val room = currentRoom ?: return
         viewModelScope.launch {
             try {
-                hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
+                hubCall("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
                 flow = null
                 flowCache[room.roomId] = null
             } catch (e: Exception) {
@@ -5657,12 +6169,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (roomId != null) {
-                    hub.call("room.removeArtifact", buildJsonObject {
+                    hubCall("room.removeArtifact", buildJsonObject {
                         put("roomId", roomId)
                         put("artifactId", artifact.id)
                     })
                 } else {
-                    hub.call("session.removeArtifact", buildJsonObject {
+                    hubCall("session.removeArtifact", buildJsonObject {
                         put("sessionId", sessionId!!)
                         put("artifactId", artifact.id)
                     })
@@ -5681,14 +6193,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (roomId != null) {
-                    hub.call("room.clearArtifacts", buildJsonObject {
+                    hubCall("room.clearArtifacts", buildJsonObject {
                         put("roomId", roomId)
                         if (kind != null) put("kind", kind)
                     })
                 } else if (kind == "event") {
-                    hub.call("session.clearEvents", buildJsonObject { put("sessionId", sessionId!!) })
+                    hubCall("session.clearEvents", buildJsonObject { put("sessionId", sessionId!!) })
                 } else {
-                    hub.call("session.clearArtifacts", buildJsonObject { put("sessionId", sessionId!!) })
+                    hubCall("session.clearArtifacts", buildJsonObject { put("sessionId", sessionId!!) })
                 }
             } catch (e: Exception) {
                 chatItems.add(ChatItem.Error(++itemSeq, e.message ?: "clear failed"))
@@ -5704,12 +6216,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (roomId != null) {
-                    hub.call("room.removeEvent", buildJsonObject {
+                    hubCall("room.removeEvent", buildJsonObject {
                         put("roomId", roomId)
                         put("eventId", event.id)
                     })
                 } else {
-                    hub.call("session.removeEvent", buildJsonObject {
+                    hubCall("session.removeEvent", buildJsonObject {
                         put("sessionId", sessionId!!)
                         put("eventId", event.id)
                     })
@@ -5730,14 +6242,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 if (roomId != null) {
                     for (event in events) {
-                        hub.call("room.removeEvent", buildJsonObject {
+                        hubCall("room.removeEvent", buildJsonObject {
                             put("roomId", roomId)
                             put("eventId", event.id)
                         })
                     }
                 } else {
                     for (event in events) {
-                        hub.call("session.removeEvent", buildJsonObject {
+                        hubCall("session.removeEvent", buildJsonObject {
                             put("sessionId", sessionId!!)
                             put("eventId", event.id)
                         })
@@ -5757,12 +6269,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (roomId != null) {
-                    hub.call("room.clearEvents", buildJsonObject {
+                    hubCall("room.clearEvents", buildJsonObject {
                         put("roomId", roomId)
                         if (action != null) put("action", action)
                     })
                 } else {
-                    hub.call("session.clearEvents", buildJsonObject {
+                    hubCall("session.clearEvents", buildJsonObject {
                         put("sessionId", sessionId!!)
                         if (action != null) put("action", action)
                     })
@@ -5777,7 +6289,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val room = currentRoom ?: return
         viewModelScope.launch {
             try {
-                hub.call("room.blackboard.remove", buildJsonObject {
+                hubCall("room.blackboard.remove", buildJsonObject {
                     put("roomId", room.roomId)
                     put("id", entry.id)
                 })
@@ -5791,7 +6303,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val room = currentRoom ?: return
         viewModelScope.launch {
             try {
-                hub.call("room.blackboard.clear", buildJsonObject {
+                hubCall("room.blackboard.clear", buildJsonObject {
                     put("roomId", room.roomId)
                 })
             } catch (e: Exception) {
@@ -5812,7 +6324,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val S = stringsFor(lang)
             try {
                 val result = withContext(Dispatchers.IO) {
-                    hub.call("file.get", buildJsonObject {
+                    hubCall("file.get", buildJsonObject {
                         put("path", artifact.path)
                         if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
                     })
@@ -5843,7 +6355,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    hub.call("file.get", buildJsonObject {
+                    hubCall("file.get", buildJsonObject {
                         put("path", filePath)
                         if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
                     })
@@ -5878,7 +6390,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    hub.call("file.get", buildJsonObject {
+                    hubCall("file.get", buildJsonObject {
                         if (roomId != null) {
                             put("roomId", roomId)
                             put("artifactId", artifact.id)
@@ -5915,12 +6427,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     for (a in artifacts) {
                         if (roomId != null) {
-                            hub.call("room.removeArtifact", buildJsonObject {
+                            hubCall("room.removeArtifact", buildJsonObject {
                                 put("roomId", roomId)
                                 put("artifactId", a.id)
                             })
                         } else {
-                            hub.call("session.removeArtifact", buildJsonObject {
+                            hubCall("session.removeArtifact", buildJsonObject {
                                 put("sessionId", sessionId!!)
                                 put("artifactId", a.id)
                             })
@@ -5943,7 +6455,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    hub.call("file.delete", buildJsonObject {
+                    hubCall("file.delete", buildJsonObject {
                         put("path", filePath)
                         if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
                     })
@@ -5963,13 +6475,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 withContext(Dispatchers.IO) {
                     if (roomId != null) {
-                        hub.call("file.rename", buildJsonObject {
+                        hubCall("file.rename", buildJsonObject {
                             put("roomId", roomId)
                             put("from", from)
                             put("to", to)
                         })
                     } else {
-                        hub.call("session.file.rename", buildJsonObject {
+                        hubCall("session.file.rename", buildJsonObject {
                             put("sessionId", sessionId!!)
                             put("from", from)
                             put("to", to)
@@ -5995,18 +6507,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = withContext(Dispatchers.IO) {
                     if (path == null) {
                         if (isSession) {
-                            hub.call("session.file.roots", buildJsonObject { put("sessionId", contextId) })
+                            hubCall("session.file.roots", buildJsonObject { put("sessionId", contextId) })
                         } else {
-                            hub.call("room.file.roots", buildJsonObject { put("roomId", contextId) })
+                            hubCall("room.file.roots", buildJsonObject { put("roomId", contextId) })
                         }
                     } else {
                         if (isSession) {
-                            hub.call("session.file.list", buildJsonObject {
+                            hubCall("session.file.list", buildJsonObject {
                                 put("sessionId", contextId)
                                 put("path", path)
                             })
                         } else {
-                            hub.call("room.file.list", buildJsonObject {
+                            hubCall("room.file.list", buildJsonObject {
                                 put("roomId", contextId)
                                 put("path", path)
                             })
@@ -6078,7 +6590,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    hub.call("file.get", buildJsonObject {
+                    hubCall("file.get", buildJsonObject {
                         put("path", filePath)
                         if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
                     })
@@ -6126,7 +6638,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    hub.call("file.get", buildJsonObject {
+                    hubCall("file.get", buildJsonObject {
                         put("path", filePath)
                         if (roomId != null) put("roomId", roomId) else put("sessionId", sessionId!!)
                     })
@@ -6255,7 +6767,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         targets.forEach { sid ->
             viewModelScope.launch {
                 try {
-                    hub.call("session.cancel", buildJsonObject { put("sessionId", sid) })
+                    hubCall("session.cancel", buildJsonObject { put("sessionId", sid) })
                 } catch (_: Exception) {
                 }
             }
@@ -6267,7 +6779,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } == true) {
             viewModelScope.launch {
                 try {
-                    hub.call("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
+                    hubCall("room.flow.cancel", buildJsonObject { put("roomId", room.roomId) })
                 } catch (_: Exception) {
                 }
             }
@@ -6277,7 +6789,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun answerPermission(requestId: String, optionId: String, optionName: String, scope: String? = null) {
         viewModelScope.launch {
             try {
-                hub.call("permission.respond", buildJsonObject {
+                hubCall("permission.respond", buildJsonObject {
                     put("requestId", requestId)
                     put("optionId", optionId)
                     if (scope != null) put("scope", scope)
@@ -6301,7 +6813,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             try {
-                hub.call("permission.respond", buildJsonObject {
+                hubCall("permission.respond", buildJsonObject {
                     put("requestId", item.requestId)
                     put("optionId", optionId)
                     put("scope", scope)
@@ -6322,7 +6834,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun revokeDecision(item: ChatItem.Decision) {
         viewModelScope.launch {
             try {
-                hub.call("decision.revoke", buildJsonObject { put("decisionId", item.decisionId) })
+                hubCall("decision.revoke", buildJsonObject { put("decisionId", item.decisionId) })
                 val idx = chatItems.indexOfLast { it is ChatItem.Decision && it.decisionId == item.decisionId }
                 if (idx >= 0) {
                     val d = chatItems[idx] as ChatItem.Decision
@@ -6346,7 +6858,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val sid = currentSession?.sessionId ?: return@launch
                     buildJsonObject { put("sessionId", sid) }
                 }
-                val result = hub.call("member.status", params)
+                val result = hubCall("member.status", params)
                 result["members"]?.jsonArray?.forEach {
                     val o = it.jsonObject
                     val sid = o["sessionId"]?.jsonPrimitive?.contentOrNull ?: return@forEach
@@ -6376,7 +6888,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             try {
-                hub.call("elicitation.respond", buildJsonObject {
+                hubCall("elicitation.respond", buildJsonObject {
                     put("requestId", requestId)
                     put("action", action)
                     put("content", JsonObject(content))
@@ -7052,15 +7564,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 attentionItems.addAll(targets)
             }
         }
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            HubService.hubBadges.collect { map ->
+                serviceBadges.clear()
+                serviceBadges.putAll(map)
+            }
+        }
         prefs.registerOnSharedPreferenceChangeListener(backgroundPrefsListener)
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             HubService.runningState.collect { refreshBackgroundStatus() }
         }
         networkMonitoringAvailable = try {
-            NetworkReconnectMonitor(getApplication(), viewModelScope) { id -> hub.onNetworkChanged(id) }
-                .also { networkMonitor = it }.register()
+            NetworkReconnectMonitor(getApplication(), viewModelScope) { id ->
+                allClients().forEach { it.onNetworkChanged(id) }
+            }.also { networkMonitor = it }.register()
         } catch (_: Exception) { false }
-        hub.onNetworkChanged(networkMonitor?.currentNetworkId)
+        allClients().forEach { it.onNetworkChanged(networkMonitor?.currentNetworkId) }
         refreshBackgroundStatus()
         val v2Profiles = prefs.getStringSet("profiles_v2", emptySet())!!
         if (v2Profiles.isNotEmpty()) {

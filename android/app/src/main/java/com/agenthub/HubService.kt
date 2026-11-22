@@ -59,6 +59,16 @@ internal fun savedHubConnection(context: Context): Triple<String, String, String
     return connection.takeIf { it.first.isNotBlank() }
 }
 
+/** profiles_v2 持久化集 → 全部已存 profile（name\u0001address\u0001token\u0001publicToken） */
+internal fun savedProfiles(context: Context): List<ConnProfile> {
+    val prefs = context.getSharedPreferences("agent-hub", Context.MODE_PRIVATE)
+    return prefs.getStringSet("profiles_v2", emptySet()).orEmpty().mapNotNull { raw ->
+        val parts = raw.split("\u0001")
+        if (parts.size < 3 || parts[1].isBlank()) null
+        else ConnProfile(parts[0], parts[1], parts[2], parts.getOrElse(3) { "" })
+    }
+}
+
 class HubService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var hub: HubClient? = null
@@ -80,6 +90,7 @@ class HubService : Service() {
     private val attentionFlows = mutableMapOf<String, JsonObject?>()
     private val flowRevisions = mutableMapOf<String, Int>()
     private val attentionDecisions = mutableMapOf<String, JsonObject>()
+    private lateinit var linkManager: HubLinkManager
     private val prefs by lazy { getSharedPreferences("agent-hub", MODE_PRIVATE) }
 
     private val powerManager by lazy { getSystemService(Context.POWER_SERVICE) as PowerManager }
@@ -116,9 +127,16 @@ class HubService : Service() {
             // 占坑已 startForeground，富通知更新失败只降级（保留最小通知），不杀服务
             runningStatus.value = true
         }
+        linkManager = HubLinkManager(scope, newClient = {
+            HubClient(scope) { stringsFor(prefs.getString("lang", "zh") ?: "zh") }
+        })
+        scope.launch { linkManager.badges.collect { publishHubBadges() } }
         networkMonitoringAvailable = try {
             NetworkReconnectMonitor(this, scope) { id ->
-                if (!isDestroyed) hub?.onNetworkChanged(id)
+                if (!isDestroyed) {
+                    hub?.onNetworkChanged(id)
+                    linkManager.onNetworkChanged(id)
+                }
             }.also { networkMonitor = it }.register()
         } catch (_: Exception) { false }
         if (!networkMonitoringAvailable) prefs.edit().putString("background_stop_reason", "network_monitor").apply()
@@ -156,6 +174,8 @@ class HubService : Service() {
         if (isDestroyed) return
         isDestroyed = true
         runningStatus.value = false
+        if (::linkManager.isInitialized) linkManager.closeAll()
+        hubBadgesFlow.value = emptyMap()
         connectionGeneration++
         val edit = prefs.edit()
         if (reason != null) edit.putString("background_stop_reason", reason)
@@ -254,12 +274,41 @@ class HubService : Service() {
             attentionHubId = null
             attentionOrigin = deliveryOriginFor(profile.first, profile.second, profile.third)
             activeProfile = profile
+            noteActiveProfile(profile.first)
         }
+        reconcileLinks()
         hub?.let {
             if (!it.isConnected) it.kickReconnect()
             return
         }
         connect(profile)
+    }
+
+    /** 多 hub 后台链路对账：非活跃 profile 按 MRU 各挂一条 global 层链路（上限见 HubLinkManager） */
+    private fun reconcileLinks() {
+        if (!::linkManager.isInitialized) return
+        val targets = savedProfiles(this).mapNotNull { p ->
+            val url = try { buildWsUrl(p.address, p.token) } catch (_: Exception) { return@mapNotNull null }
+            LinkTarget(p.address, url, p.publicToken, deliveryOriginFor(p.address, p.token, p.publicToken))
+        }
+        linkManager.reconcile(targets, activeProfile?.first, loadLinkMru())
+        publishHubBadges()
+    }
+
+    private fun loadLinkMru(): List<String> =
+        (prefs.getString("links_mru", "") ?: "").split("").filter { it.isNotBlank() }
+
+    private fun noteActiveProfile(address: String) {
+        val mru = (listOf(address) + loadLinkMru()).distinct().take(8)
+        prefs.edit().putString("links_mru", mru.joinToString("")).apply()
+    }
+
+    private fun publishHubBadges() {
+        val map = LinkedHashMap<String, LinkBadge>()
+        activeProfile?.let { map[it.first] = LinkBadge(attentionStatus.value, isConnected) }
+        map.putAll(linkManager.badges.value)
+        hubBadgesFlow.value = map
+        android.util.Log.i("agenthub", "linkBadges ${map.entries.joinToString { "${it.key}:${it.value.targets.size}@${it.value.connected}" }}")
     }
 
     private fun connect(profile: Triple<String, String, String>) {
@@ -286,6 +335,7 @@ class HubService : Service() {
                 if (current()) {
                     connectionGeneration++
                     isConnected = true
+                    publishHubBadges()
                     attentionUnsupported = false
                     prefs.edit().putString("attention_status", "sync").apply()
                     prefs.edit().apply {
@@ -318,6 +368,7 @@ class HubService : Service() {
         if (isDestroyed) return
         connectionGeneration++
         isConnected = false
+        publishHubBadges()
         prefs.edit().putString("attention_status", "sync").apply()
         attentionReady = false
         attentionJob?.cancel()
@@ -411,6 +462,7 @@ class HubService : Service() {
             }
             updateForegroundNotification()
         }
+        publishHubBadges()
     }
 
     private fun handleEvent(raw: String) {
@@ -458,13 +510,24 @@ class HubService : Service() {
         flowRevisions.remove(roomId)
     }
 
+    private fun dropLink(address: String) {
+        if (::linkManager.isInitialized) linkManager.close(address)
+    }
+
     companion object {
         internal var instance: HubService? = null
         internal fun dropRoomAttention(roomId: String) = instance?.dropRoomAttention(roomId)
         private const val NOTIFICATION_ID = 1001
         private val runningStatus = MutableStateFlow(false)
         private val attentionStatus = MutableStateFlow<List<AttentionTarget>>(emptyList())
+        private val hubBadgesFlow = MutableStateFlow<Map<String, LinkBadge>>(emptyMap())
         internal val attentionState = attentionStatus.asStateFlow()
+        /** 全链路徽章：key=profile address，活跃 profile 在前，其后为非活跃后台链路 */
+        internal val hubBadges = hubBadgesFlow.asStateFlow()
+        /** 显式断开指定 profile 的后台链路（不删 profile；下次 reconcile 目标集仍含之可重建） */
+        internal fun dropLink(address: String) {
+            instance?.dropLink(address)
+        }
         val runningState = runningStatus.asStateFlow()
         val running: Boolean get() = runningStatus.value
     }

@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,6 +48,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.agenthub.ChatViewModel
 import com.agenthub.ConnProfile
@@ -176,15 +179,17 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
                         ProfileDrawerItem(
                             p = p,
                             active = active,
+                            badge = if (active) null else vm.badgeFor(p.address),
                             onClick = {
                                 onClose()
-                                vm.switchProfile(p)
+                                vm.swapTo(p)
                             },
                             onEdit = {
                                 editTarget = p
                                 showProfileDialog = true
                             },
                             onDelete = { deleteTarget = p },
+                            onDisconnectLink = { vm.disconnectLink(p.address) },
                         )
                     }
                 }
@@ -231,9 +236,11 @@ fun HubDrawer(vm: ChatViewModel, drawerState: DrawerState) {
 private fun ProfileDrawerItem(
     p: ConnProfile,
     active: Boolean,
+    badge: ChatViewModel.HubBadge?,
     onClick: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onDisconnectLink: () -> Unit,
 ) {
     val remote = p.address.startsWith("wss://")
     val containerColor = if (active) {
@@ -274,6 +281,23 @@ private fun ProfileDrawerItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (badge != null) {
+                Icon(
+                    Icons.Filled.Circle,
+                    contentDescription = null,
+                    tint = if (badge.connected) Color(0xFF2ECC71) else MaterialTheme.colorScheme.outlineVariant,
+                    modifier = Modifier.size(8.dp),
+                )
+                val pending = badge.waitingFor + badge.pendingDecisions
+                if (pending > 0) {
+                    val pendingLabel = LocalStrings.current.hubBadgePending.format(pending)
+                    Spacer(Modifier.width(6.dp))
+                    Badge(
+                        modifier = Modifier.semantics { contentDescription = pendingLabel },
+                    ) { Text(pending.toString()) }
+                }
+                Spacer(Modifier.width(8.dp))
+            }
             Box {
                 var expanded by remember { mutableStateOf(false) }
                 IconButton(onClick = { expanded = true }) {
@@ -290,6 +314,15 @@ private fun ProfileDrawerItem(
                             onEdit()
                         },
                     )
+                    if (!active && badge?.connected == true) {
+                        DropdownMenuItem(
+                            text = { Text(LocalStrings.current.disconnectLink) },
+                            onClick = {
+                                expanded = false
+                                onDisconnectLink()
+                            },
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text(LocalStrings.current.delete) },
                         onClick = {

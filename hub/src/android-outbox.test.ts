@@ -223,6 +223,7 @@ internal class TimelineBridge {
     var currentSession: SessionInfo? = null
     val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     val hub = TimelineHub()
+    suspend fun hubCall(method: String, params: JsonObject = buildJsonObject {}): JsonObject = hub.call(method, params)
     val deliveryRecovery = DeliveryRecovery(
         { method, params -> hub.call(method, params) },
         { key, rows, reset, cardsCurrent, requestItems -> applyRecoveredRows(key, rows, reset, cardsCurrent, requestItems = requestItems) }, { _, _ -> },
@@ -397,6 +398,7 @@ internal class BridgeHub {
         add(buildJsonObject { put("sessionId", "s1"); put("busy", false); put("offline", false) })
     }) }
     suspend fun call(method: String): JsonObject { beforeCall(); check(method == "session.list"); return sessions }
+    suspend fun call(method: String, params: JsonObject): JsonObject = call(method)
 }
 internal class NativeBridge {
     val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
@@ -426,6 +428,7 @@ internal class NativeBridge {
     fun flush() = flushStreamChunks()
     fun close() = viewModelScope.cancel()
     val hub = BridgeHub()
+    suspend fun hubCall(method: String, params: JsonObject = buildJsonObject {}): JsonObject = hub.call(method, params)
     var deliveryReady = true
     var missionConnectionGeneration = 1
     var profileEpoch = 1

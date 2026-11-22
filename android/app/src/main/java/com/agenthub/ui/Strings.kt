@@ -443,6 +443,8 @@ interface Strings {
     val deleteHubTitle: String
     val deleteHubMsg: String
     val disconnectCurrent: String
+    val disconnectLink: String
+    val hubBadgePending: String
     val more: String
     val save: String
     val sessionLabel: String
@@ -1159,6 +1161,8 @@ object ZhStrings : Strings {
     override val deleteHubTitle = "删除 Hub"
     override val deleteHubMsg = "确定删除「%s」？"
     override val disconnectCurrent = "断开当前"
+    override val disconnectLink = "断开链路"
+    override val hubBadgePending = "%d 项待处理"
     override val more = "更多"
     override val save = "保存"
     override val sessionLabel = "会话"
@@ -1883,6 +1887,8 @@ object EnStrings : Strings {
     override val deleteHubTitle = "Delete Hub"
     override val deleteHubMsg = "Delete \"%s\"?"
     override val disconnectCurrent = "Disconnect"
+    override val disconnectLink = "Disconnect link"
+    override val hubBadgePending = "%d pending"
     override val more = "More"
     override val save = "Save"
     override val sessionLabel = "Session"
