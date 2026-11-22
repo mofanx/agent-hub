@@ -93,8 +93,12 @@ npx tsx scripts/conductor-check.ts
 npx tsx scripts/room-check.ts
 npx tsx scripts/m1-check.ts
 
-# 安装 Android 调试包
+# 安装 Android 发布包（R8 混淆，与正式版一致）
 cd android
+./gradlew :app:assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk
+
+# 调试包（开发期可选，未混淆）
 ./gradlew assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -111,7 +115,7 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ```bash
 # 安装后启动验证：进程存活且无 FATAL
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/release/app-release.apk
 adb shell monkey -p com.agenthub -c android.intent.category.LAUNCHER 1
 sleep 4
 adb shell pidof com.agenthub          # 应输出 PID
@@ -120,6 +124,13 @@ adb logcat -d | grep -i FATAL          # 应无输出
 
 - Kotlin 成员属性/`by mutableStateOf` 委托按声明顺序初始化：`init {}` 块（如自动连接）若在构造期触达在其后声明的属性，会因委托字段未初始化而 NPE——崩溃只在真机启动时暴露，编译和单测都测不出来。
 - 历史教训：0.14.0 曾因 `missionFocusId` 等属性声明在 `init{}` 之后、被 `connect()→disconnect()` 提前访问导致启动即崩；修复方式是把声明上移到 `init` 块之前。
+
+## 真机性能/时序验证（隔离测试 hub）
+
+- 不碰生产 hub（8787）：另起测试 hub，`HUB_PORT=8790 HUB_DATA_DIR=/tmp/ahtest/a HUB_TOKEN=test-a DEVIN_BIN=npx DEVIN_ACP_ARGS="tsx scripts/fake-acp-agent.ts" FAKE_LOAD_MS=2000 node --import=tsx src/index.ts`。
+- fake agent：提示含 `STREAM`（约 3s 流式：thought→tool→message）/`LONG`（约 20s）；`FAKE_LOAD_MS` 模拟 devin session/load 时延；`session/resume` 返回 -32601（与 devin 一致）。
+- Android 打点：logcat tag `AHPERF`（swap.start/ws.open/swap.ready/open.start/open.paint/open.history/resume.done，release 同样输出）。
+- debug 包 `DebugControl` 广播（仅 debug 构建）：`switch_profile`、`open_session_rw`、`open_room_rw`、`send_session`、`timeline_all`（全量时间线，对照 hub DB `ORDER BY at, id` 做时序校验）。
 
 ## 本地 Agent 启动问题排查
 

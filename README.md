@@ -94,8 +94,9 @@ Hub 环境变量：`HUB_PORT`（默认 8787）、`HUB_TOKEN`、`HUB_TUNNEL=1`（
 
 ```bash
 cd android
-./gradlew assembleDebug
-adb install app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk
+# 调试包（开发期可选）：./gradlew assembleDebug && adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ### 3. 安装桌面客户端（Windows / Linux，可选）
