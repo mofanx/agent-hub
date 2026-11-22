@@ -2038,7 +2038,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (stale()) return "blocked";
         const sessions = (Array.isArray(res.sessions) ? res.sessions : []) as Record<string, unknown>[];
         const session = sessions.find((s) => s.sessionId === item.params.sessionId);
-        if (!session || session.offline === true) {
+        if (!session) {
           item.status = "failed";
           item.error = "context";
           item.sendError = "context";
@@ -3215,30 +3215,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       const client = get().client;
       if (!options?.readOnly) set({ missionExecutionTarget: null });
       const stale = () => seq !== roomOpenSeq || get().client !== client;
-      try {
-        await get().refreshAll();
-      } catch (e) {
-        if (!stale()) set({ connectError: String(e) });
-        return;
-      }
-      if (stale()) return;
-      const latestRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? room;
-      if (!options?.readOnly) {
-        const toResume = latestRoom.members
-          .map(([sid]) => get().sessions.find((s) => s.sessionId === sid && s.offline))
-          .filter((s): s is SessionInfo => s != null);
-        for (const s of toResume) {
-          try { await get().resumeOne(s); } catch {}
-        }
-        if (toResume.length > 0) {
-          try { await get().refreshAll(); } catch (e) {
-            if (!stale()) set({ connectError: String(e) });
-            return;
-          }
-        }
-      }
-      if (stale()) return;
-      const updatedRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? latestRoom;
+      const updatedRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? room;
 
       saveCurrentHistoryCache();
       saveCurrentScopeCounts();
@@ -3271,6 +3248,34 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (!stale() && options?.missionTarget && options.missionTarget.roomId === updatedRoom.roomId) {
         set({ missionExecutionTarget: options.missionTarget });
       }
+
+      const sameOpen = () => !stale() && get().currentRoom?.roomId === room.roomId;
+      void (async () => {
+        try {
+          await get().refreshAll();
+        } catch (e) {
+          if (!stale()) set({ connectError: String(e) });
+          return;
+        }
+        if (stale()) return;
+        if (!options?.readOnly) {
+          const latestRoom = get().rooms.find((r) => r.roomId === room.roomId) ?? updatedRoom;
+          const toResume = latestRoom.members
+            .map(([sid]) => get().sessions.find((s) => s.sessionId === sid && s.offline))
+            .filter((s): s is SessionInfo => s != null);
+          if (toResume.length > 0) {
+            await Promise.allSettled(toResume.map((s) => get().resumeOne(s)));
+            if (stale()) return;
+            try { await get().refreshAll(); } catch (e) {
+              if (!stale()) set({ connectError: String(e) });
+              return;
+            }
+          }
+        }
+        if (!sameOpen()) return;
+        const latest = get().rooms.find((r) => r.roomId === room.roomId);
+        if (latest) set({ currentRoom: latest });
+      })();
     },
 
     openMission: (id: string) => {
@@ -3335,15 +3340,23 @@ export const useHubStore = create<State & Actions>((set, get) => {
     },
 
     resumeSession: async (session: SessionInfo, autoOpen = true) => {
+      if (autoOpen) get().openChat(session);
+      const isCurrent = () => get().currentSession?.sessionId === session.sessionId;
       try {
         const updated = await get().resumeOne(session);
-        if (updated && autoOpen) {
-          get().openChat(updated);
-        } else if (!updated) {
+        if (!updated) {
           set({ connectError: stringsFor(get().lang).resumeFailed });
+          return;
+        }
+        if (!isCurrent()) return;
+        if (updated.sessionId !== session.sessionId) {
+          get().openChat(updated);
+        } else {
+          const cur = get().currentSession;
+          if (cur) set({ currentSession: { ...cur, offline: false } });
         }
       } catch (e) {
-        set({ connectError: String(e) });
+        set({ connectError: stringsFor(get().lang).resumeFailed });
       }
     },
 
@@ -4671,7 +4684,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       if (session) {
         const latest = get().sessions.find((s) => s.sessionId === session.sessionId) ?? session;
         if (latest.offline) {
-          await get().resumeSession(latest, true);
+          void get().resumeSession(latest, true);
         } else {
           get().openChat(latest);
         }

@@ -1,0 +1,53 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { renderMarkdown } from "../../desktop/src/hub/markdown.js";
+
+const labels = { copy: "Copy", copied: "Copied" };
+
+test("markdown escapes raw html blocks", () => {
+  const out = renderMarkdown('<img src=x onerror=alert(1)>', labels);
+  assert.doesNotMatch(out, /<img[^>]*onerror/i);
+  assert.match(out, /&lt;img/);
+});
+
+test("markdown escapes script tags", () => {
+  const out = renderMarkdown("<script>alert(1)</script>", labels);
+  assert.doesNotMatch(out, /<script/);
+});
+
+test("markdown blocks javascript: links", () => {
+  const out = renderMarkdown("[x](javascript:alert(1))", labels);
+  assert.doesNotMatch(out, /href="javascript:/i);
+});
+
+test("markdown blocks javascript: images", () => {
+  const out = renderMarkdown("![a](javascript:x)", labels);
+  assert.doesNotMatch(out, /src="javascript:/i);
+});
+
+test("markdown keeps safe https links", () => {
+  const out = renderMarkdown("[ok](https://a.com)", labels);
+  assert.match(out, /href="https:\/\/a\.com"/);
+});
+
+test("markdown renders emphasis", () => {
+  const out = renderMarkdown("**b**", labels);
+  assert.match(out, /<strong>b<\/strong>/);
+});
+
+test("markdown fenced code gets copy button", () => {
+  const out = renderMarkdown("```ts\nconst a = 1;\n```", labels);
+  assert.match(out, /class="code-block"/);
+  assert.match(out, /Copy/);
+});
+
+test("markdown tables get table-wrap", () => {
+  const out = renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |", labels);
+  assert.match(out, /table-wrap/);
+});
+
+test("markdown escapes inline html", () => {
+  const out = renderMarkdown("a <b>x</b> c", labels);
+  assert.doesNotMatch(out, /<b>x<\/b>/);
+  assert.match(out, /&lt;b&gt;/);
+});

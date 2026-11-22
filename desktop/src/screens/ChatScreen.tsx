@@ -1,5 +1,4 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { marked } from "marked";
 import {
   Activity,
   ArrowDown,
@@ -40,48 +39,13 @@ import { OutboxPanel } from "../components/OutboxPanel";
 import { stringsFor, toolStatusLabel, planEntryLabel, flowMessageHint, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, DecisionMeta, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
+import { renderMarkdown } from "../hub/markdown";
 import { MissionDraftCards } from "./MissionPanel";
 import { Avatar, agentColorClass } from "../components/Avatar";
 import { FilePicker } from "../components/FilePicker";
 import { modeLabel } from "./session-shared";
 
 type SidePanelKind = "files" | "flow" | "blackboard" | "artifact" | "event" | null;
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-const safeRenderer = {
-  html(text: string) {
-    return escapeHtml(text);
-  },
-};
-
-const fileRefExt = {
-  name: "fileRef",
-  level: "inline" as const,
-  start(src: string) {
-    const m = src.match(/(?:^|[\s（(，,;；:：])#(?=[^#\s])/);
-    return m ? (m.index ?? 0) + m[0].length - 1 : -1;
-  },
-  tokenizer(src: string) {
-    const rule = /^#([^#\s][^\s，,;；。!！?？\)\]\n]*)/;
-    const match = rule.exec(src);
-    if (match) {
-      return { type: "fileRef", raw: match[0], path: match[1].replace(/\/+$/, "") };
-    }
-    return undefined;
-  },
-  renderer(token: { raw: string; path: string }) {
-    return `<span class="file-pill" data-path="${escapeHtml(token.path)}">${escapeHtml(token.raw)}</span>`;
-  },
-};
-
-marked.use({ renderer: safeRenderer as Record<string, unknown>, gfm: true, extensions: [fileRefExt as never] });
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -2009,7 +1973,7 @@ const ChatMessage = memo(function ChatMessage({
     const hit = mdHtmlCache.get(item);
     if (hit && hit.key === key) return hit.html;
     const src = textOverride ?? item.text;
-    const html = highlight ? highlightHtml(renderMarkdown(src, S), highlight) : renderMarkdown(src, S);
+    const html = highlight ? highlightHtml(renderMarkdown(src, { copy: S.copy, copied: S.copied }), highlight) : renderMarkdown(src, { copy: S.copy, copied: S.copied });
     mdHtmlCache.set(item, { key, html });
     return html;
   };
@@ -3667,23 +3631,6 @@ function eventLabel(S: Strings, action?: string): string {
   if (action === "add") return S.eventActionAdd;
   if (action === "modify") return S.eventActionModify;
   return S.eventActionDefault;
-}
-
-function renderMarkdown(text: string, S: Strings): string {
-  try {
-    const html = marked.parse(text, { gfm: true }) as string;
-    const withScrollableTables = html
-      .replace(/<table([^>]*)>/g, '<div class="table-wrap"><table$1>')
-      .replace(/<\/table>/g, "</table></div>");
-    return withScrollableTables
-      .replace(
-        /<pre><code/g,
-        `<div class="code-block"><button class="copy-code" title="${S.copy}" onclick='const n=this.nextElementSibling;if(n){navigator.clipboard.writeText(n.textContent).catch(()=>{});this.textContent="${S.copied}";setTimeout(()=>this.textContent="${S.copy}",1500)}'>${S.copy}</button><pre><code`,
-      )
-      .replace(/<\/code><\/pre>/g, "</code></pre></div>");
-  } catch {
-    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\n/g, "<br>");
-  }
 }
 
 function FlowTaskItem({ task, showRetry, flowId }: { task: FlowTask; showRetry: boolean; flowId: string }) {
