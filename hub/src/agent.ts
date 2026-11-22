@@ -1746,7 +1746,12 @@ export class AcpAgent {
     await this.promptContent(sessionId, [{ type: "text", text }], opts);
   }
 
-  private enqueueFollowUp(sessionId: string, entry: SessionEntry, prompt: Array<Record<string, unknown>>): void {
+  private enqueueFollowUp(
+    sessionId: string,
+    entry: SessionEntry,
+    prompt: Array<Record<string, unknown>>,
+    notice = "成员忙碌，消息已排队",
+  ): void {
     const q = this.followUps.get(sessionId) ?? [];
     if (q.length < this.followUpLimit) {
       q.push(prompt);
@@ -1756,7 +1761,7 @@ export class AcpAgent {
         method: "session.notice",
         params: {
           sessionId,
-          message: `成员忙碌，消息已排队（队列 ${q.length}/${this.followUpLimit}）`,
+          message: `${notice}（队列 ${q.length}/${this.followUpLimit}）`,
         },
       });
     } else {
@@ -1765,7 +1770,7 @@ export class AcpAgent {
         method: "session.notice",
         params: {
           sessionId,
-          message: `成员忙碌队列已满（${this.followUpLimit} 条），该消息已丢弃`,
+          message: `${notice}：队列已满（${this.followUpLimit} 条），该消息已丢弃`,
         },
       });
     }
@@ -1806,7 +1811,7 @@ export class AcpAgent {
           })
           .catch((err: unknown) => {
             logWarn("steer", `mid-turn prompt rejected for ${entry.name}: ${String(err)} — fallback to followUp`);
-            this.enqueueFollowUp(sessionId, entry, prompt);
+            this.enqueueFollowUp(sessionId, entry, prompt, "插话未送达，已转排队");
           });
         const set = (entry.steerInFlight ??= new Set());
         set.add(steerReq);

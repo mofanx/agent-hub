@@ -51,3 +51,19 @@ test("markdown escapes inline html", () => {
   assert.doesNotMatch(out, /<b>x<\/b>/);
   assert.match(out, /&lt;b&gt;/);
 });
+
+test("markdown renders #path as file pill", () => {
+  const out = renderMarkdown("改下 #src/foo/bar.ts 这里", labels);
+  assert.match(out, /<span class="file-pill" data-path="src\/foo\/bar\.ts">#src\/foo\/bar\.ts<\/span>/);
+});
+
+test("markdown file pill strips trailing slash at CJK boundary", () => {
+  const out = renderMarkdown("看 #dir/sub/ 。", labels);
+  assert.match(out, /data-path="dir\/sub"/);
+});
+
+test("markdown file pill escapes quotes in path", () => {
+  const out = renderMarkdown('#a"<b>', labels);
+  assert.doesNotMatch(out, /data-path="[^"]*</);
+  assert.match(out, /data-path="a&quot;&lt;b&gt;/);
+});

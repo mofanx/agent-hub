@@ -2126,6 +2126,32 @@ describe("AcpAgent integration (in-memory stream)", () => {
     }
   });
 
+  it("mid-turn 插话被拒回退：notice 诚实报插话未送达，不再双提示", async () => {
+    let call = 0;
+    const { hub, agentConn, events } = setup({
+      agentCapabilities: { _meta: { "cognition.ai/midTurnPrompts": true } } as acp.AgentCapabilities,
+      promptHandler: () => {
+        call++;
+        if (call === 1) return new Promise<acp.PromptResponse>(() => {});
+        return Promise.reject(new Error("steer rejected"));
+      },
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      await hub.prompt("s1", "first");
+      await hub.promptContent("s1", [{ type: "text", text: "steer" }]);
+      await waitFor(() => events.find((e) => e.method === "session.notice" && String((e.params as { message?: unknown }).message).includes("排队")));
+      const notices = events
+        .filter((e) => e.method === "session.notice")
+        .map((e) => String((e.params as { message?: unknown }).message));
+      assert.ok(notices.some((m) => m.includes("插话未送达")), `回退提示应说明插话未送达: ${JSON.stringify(notices)}`);
+      assert.equal(notices.filter((m) => m.includes("成员忙碌")).length, 0, "转排队后不应再报成员忙碌");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
   it("无 midTurnPrompts 能力 → busy 仍走 followUp 队列", async () => {
     const { hub, agentConn, events, prompts } = setup({
       promptHandler: () => new Promise<acp.PromptResponse>(() => {}),
