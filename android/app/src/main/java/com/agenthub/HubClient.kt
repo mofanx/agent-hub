@@ -99,10 +99,15 @@ class HubClient(
 
     fun connect(url: String, publicToken: String = "", onOpen: () -> Unit, onFailure: (String) -> Unit) {
         actor {
-            this@HubClient.url = url
-            this@HubClient.publicToken = publicToken
             onOpenCallback = onOpen
             onFailureCallback = onFailure
+            // 链路接管：socket 已连且地址一致——不重连不二次握手，直接激活回调
+            if (isConnected && this@HubClient.url == url && this@HubClient.publicToken == publicToken) {
+                onOpen()
+                return@actor
+            }
+            this@HubClient.url = url
+            this@HubClient.publicToken = publicToken
             shouldReconnect = true
             reconnectDelayMs = 1000L
             reconnectJob?.cancel()

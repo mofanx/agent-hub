@@ -158,6 +158,19 @@ internal class HubLinkManager(
         closeLink(key)
     }
 
+    /** 链路移交活跃侧（ViewModel 免握手接管）：摘除管理回调与同步任务、清死态，
+     *  返回可直接复用的 socket；该 key 即刻不占名额，徽章下线。 */
+    fun take(key: String): HubClient? {
+        val link = links.remove(key) ?: return null
+        link.syncJob?.cancel()
+        link.retryJob?.cancel()
+        link.client.onEvent = null
+        link.client.onClosed = null
+        deadUntil.remove(key)
+        publishBadges()
+        return link.client
+    }
+
     private fun closeLink(key: String) {
         val link = links.remove(key) ?: return
         link.syncJob?.cancel()

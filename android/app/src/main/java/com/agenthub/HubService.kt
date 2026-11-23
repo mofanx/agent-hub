@@ -71,6 +71,9 @@ internal fun savedProfiles(context: Context): List<ConnProfile> {
 
 class HubService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /** 链路 client 的进程级 scope：不随 onDestroy 取消——take() 移交的 socket 须在
+     *  service 死后仍存活；未移交链路的回收不依赖本 scope，走 closeAll→disconnect 逐清理。 */
+    private val linkScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var hub: HubClient? = null
     private var isConnected = false
     private var isDestroyed = false
@@ -128,7 +131,7 @@ class HubService : Service() {
             runningStatus.value = true
         }
         linkManager = HubLinkManager(scope, newClient = {
-            HubClient(scope) { stringsFor(prefs.getString("lang", "zh") ?: "zh") }
+            HubClient(linkScope) { stringsFor(prefs.getString("lang", "zh") ?: "zh") }
         })
         scope.launch { linkManager.badges.collect { publishHubBadges() } }
         networkMonitoringAvailable = try {
@@ -509,6 +512,9 @@ class HubService : Service() {
         if (::linkManager.isInitialized) linkManager.close(address)
     }
 
+    private fun takeLink(address: String): HubClient? =
+        if (::linkManager.isInitialized) linkManager.take(address) else null
+
     companion object {
         internal var instance: HubService? = null
         internal fun dropRoomAttention(roomId: String) = instance?.dropRoomAttention(roomId)
@@ -523,6 +529,8 @@ class HubService : Service() {
         internal fun dropLink(address: String) {
             instance?.dropLink(address)
         }
+        /** 移交指定 profile 的后台链路 socket 给活跃侧（返回 null 表示无链路可接管） */
+        internal fun takeLink(address: String): HubClient? = instance?.takeLink(address)
         val runningState = runningStatus.asStateFlow()
         val running: Boolean get() = runningStatus.value
     }

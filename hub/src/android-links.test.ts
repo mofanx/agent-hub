@@ -12,6 +12,7 @@ const cases = [
   "reconcile_removes_stale", "sync_badge_flow", "event_decision_badge",
   "disconnect_keeps_badge", "token_change_rebuilds", "close_all",
   "dead_link_yields", "dead_link_refill", "dead_link_revives",
+  "link_takeover", "takeover_survives_scope",
 ];
 
 function cachedJar(group: string, name: string, version: string): string | undefined {
@@ -81,7 +82,7 @@ test("Android HubLinkManager: real JVM source with fake WebSockets", { timeout: 
     throw error;
   }
   assert.deepEqual(result.split(/\r?\n/).filter((line) => line.startsWith("PASS ")).map((line) => line.slice(5)), cases);
-  assert.match(result, /^RESULT cases=12$/m);
+  assert.match(result, /^RESULT cases=14$/m);
   t.diagnostic(result.trim());
 });
 
@@ -110,6 +111,7 @@ object ZhStrings : Strings {
 const kotlinFixture = String.raw`
 import com.agenthub.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.*
 import okio.ByteString
@@ -151,10 +153,12 @@ suspend fun flush() { repeat(5) { yield() } }
 
 internal class Env(context: CoroutineContext, maxLinks: Int = 3, deadThreshold: Int = 5, deadCooldownMs: Long = 120_000) {
     val scope = CoroutineScope(context.minusKey(Job) + SupervisorJob() + EmptyCoroutineContext)
+    // 镜像生产 linkScope：进程级——service(scope) 取消不影响已建链路 client
+    val linkScope = CoroutineScope(context.minusKey(Job) + SupervisorJob() + EmptyCoroutineContext)
     val sockets = mutableListOf<FakeWS>()
     var now = 0L
     val manager = HubLinkManager(scope, {
-        HubClient(scope, { req, l -> FakeWS(req, l).also { sockets.add(it) } })
+        HubClient(linkScope, { req, l -> FakeWS(req, l).also { sockets.add(it) } })
     }, maxLinks = maxLinks, staggerMs = 0, retryMs = 60_000,
         deadThreshold = deadThreshold, deadCooldownMs = deadCooldownMs, nowMs = { now })
 
@@ -176,7 +180,7 @@ internal class Env(context: CoroutineContext, maxLinks: Int = 3, deadThreshold: 
         until { manager.link(linkKey)?.ready == true }
     }
 
-    suspend fun dispose() { manager.closeAll(); flush(); scope.cancel(); flush() }
+    suspend fun dispose() { manager.closeAll(); flush(); scope.cancel(); linkScope.cancel(); flush() }
 }
 
 internal fun hubHandler(hubId: String, flow: JsonObject? = null, decisions: JsonArray = buildJsonArray {}): (String, JsonObject) -> JsonObject = { method, params ->
@@ -419,6 +423,66 @@ fun main() = runBlocking {
             ws.open()
             env.sync("dead", ws, hubHandler("hub-dead"))
             check(env.manager.link("dead")?.connected == true && env.manager.link("dead")?.losses == 0)
+        } finally { env.dispose() }
+    }
+
+    case("link_takeover") {
+        // ViewModel 免握手接管：take 摘除管理回调并移交 socket；client.connect 对已连+同址幂等激活
+        val env = Env(coroutineContext)
+        try {
+            env.manager.reconcile(listOf(env.target("h1")), null, emptyList())
+            val ws = env.linkSocket("h1")
+            ws.open()
+            env.sync("h1", ws, hubHandler("hub-1"))
+            check(env.manager.badges.value["h1"]!!.connected)
+            val socketCount = env.sockets.size
+            val client = env.manager.take("h1")!!
+            check(client.isConnected)
+            check(env.sockets.size == socketCount)
+            check(env.manager.link("h1") == null)
+            until { !env.manager.badges.value.containsKey("h1") }
+            // 接管后 connect(url, token 相同)：幂等激活——onOpen 直触发、零新 socket
+            var opened = false
+            client.connect("wss://fixture.invalid/h1", "pub-h1", onOpen = { opened = true }, onFailure = {})
+            until { opened }
+            check(env.sockets.size == socketCount) { "接管 connect 不应新建 socket" }
+            // 断开后事件不再回流 manager（回调已摘除）
+            ws.fail()
+            flush()
+            check(env.manager.link("h1") == null)
+        } finally { env.dispose() }
+    }
+
+    case("takeover_survives_scope") {
+        // 接管后 service scope 整体取消（onDestroy→scope.cancel 模拟）：
+        // 被 take 的 client 事件泵/RPC/重连调度不得随 scope 死亡
+        val env = Env(coroutineContext)
+        try {
+            env.manager.reconcile(listOf(env.target("h1")), null, emptyList())
+            val ws = env.linkSocket("h1")
+            ws.open()
+            env.sync("h1", ws, hubHandler("hub-1"))
+            val client = env.manager.take("h1")!!
+            env.scope.cancel()
+            flush()
+            // 事件泵：server 推事件 → SharedFlow 发射不被 emissionJob 冻结
+            var got = false
+            val collector = async { client.events.first(); got = true }
+            flush()   // 等订阅注册，防事件先于 collector 到达被丢
+            ws.message(buildJsonObject { put("method", "pong"); put("params", buildJsonObject {}) })
+            until { got }
+            collector.cancel()
+            // RPC：scope 死后 call 不抛 disposed，能正常收发
+            val deferred = async { client.call("agent.info", buildJsonObject {}) }
+            until { ws.cursor < ws.sent.size }   // 等请求真正发出再应答
+            ws.answer(hubHandler("hub-1"))
+            check(deferred.await()["hubId"]?.jsonPrimitive?.content == "hub-1") { "scope 死后 RPC 应可用" }
+            // 重连调度：断线后 reconnectJob 仍产新 socket
+            val socketCount = env.sockets.size
+            ws.fail()
+            until { env.sockets.size > socketCount }
+            env.sockets.last().open()
+            until { client.isConnected }
         } finally { env.dispose() }
     }
 

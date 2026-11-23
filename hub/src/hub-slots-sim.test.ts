@@ -25,8 +25,10 @@ class SimClient {
   state: "connected" | "disconnected" | "reconnecting" = "disconnected";
   subs: Obj[] = [];
   disconnected = 0;
+  handshakes = 0;
   constructor(public url: string) {}
-  connect() { this.state = "connected"; }
+  /** Kotlin connect 幂等分支镜像：已连 socket 直接激活，零握手 */
+  connect() { if (this.state === "connected") return; this.state = "connected"; this.handshakes++; }
   disconnect() { this.state = "disconnected"; this.disconnected++; }
   subscribe(params: Obj) { this.subs.push(params); }
 }
@@ -97,12 +99,20 @@ function makeVm() {
     refreshBadge(key);
   };
 
+  /** HubLinkManager.take 镜像：摘出后台链路 socket 移交活跃侧（该 key 脱离 service 管理） */
+  const takeServiceLink = (key: string) => {
+    const c = serviceLinks.get(key);
+    if (c) serviceLinks.delete(key);
+    return c ?? null;
+  };
+
   const connect = (address: string) => {
     const prev = vm.currentAddress;
     if (prev && prev !== address && vm.connectionWanted) parkToSlot(prev);
     const restored = vm.slots.get(address) ?? null;
     if (restored) vm.slots.delete(address);
-    vm.hub = restored?.client ?? new SimClient(`ws://${address}`);
+    const adopted = (!restored && prev !== address) ? takeServiceLink(address) : null;
+    vm.hub = restored?.client ?? adopted ?? new SimClient(`ws://${address}`);
     clearHubState();
     vm.connectionWanted = true;
     vm.currentAddress = address;
@@ -113,6 +123,7 @@ function makeVm() {
       restored.client.subscribe({ tier: "detail" });
       vm.hubBadges.delete(address);
     } else {
+      vm.hubBadges.delete(address);
       vm.hub.connect();
       vm.hub.subscribe({ tier: "detail" });
       vm.agentStatus = "connected";
@@ -169,7 +180,7 @@ function makeVm() {
     for (const it of items) if (it.replyText == null && match(it.author)) { it.replyText = it.author; it.settled = true; }
   };
 
-  return { vm, connect, parkToSlot, slotBadgeEvent, disconnectProfile, disconnectLink, deleteProfile, deleteProfileBuggy, disconnectAll, badgeOf, serviceLinks, linkFor, upsertProfile, settleIdleLive };
+  return { vm, connect, parkToSlot, slotBadgeEvent, disconnectProfile, disconnectLink, deleteProfile, deleteProfileBuggy, disconnectAll, badgeOf, serviceLinks, linkFor, takeServiceLink, upsertProfile, settleIdleLive };
 }
 
 test("切走再切回：槽位整槽回放，client 复用零握手零断开", () => {
@@ -334,6 +345,27 @@ test("badgeFor：slot 徽章优先于 service 链路徽章，活跃 profile 不�
   assert.equal(badgeFor("hubE"), null, "未知 profile 无徽章");
 });
 
+/** 无槽有链：接管 service 链路 socket——免握手升级 detail，key 脱离 linkManager，槽位优先于链路 */
+test("接管 service 链路：无槽切换免握手激活，链路旁路不入槽", () => {
+  const { vm, connect, linkFor, serviceLinks } = makeVm();
+  connect("hubA");
+  const clientB = linkFor("hubB");
+  clientB.connect();                          // service 后台链路已连（徽章绿、槽位空）
+  assert.equal(clientB.handshakes, 1);
+  connect("hubB");
+  assert.equal(vm.hub, clientB, "活跃 client 为接管对象");
+  assert.equal(clientB.handshakes, 1, "接管零新握手（connect 幂等激活）");
+  assert.equal(clientB.disconnected, 0, "接管不断线");
+  assert.equal(serviceLinks.has("hubB"), false, "key 已脱离 linkManager");
+  assert.equal(clientB.subs.at(-1)?.tier, "detail", "接管后升级 detail 订阅");
+  assert.equal(vm.slots.has("hubB"), false, "接管不入槽");
+
+  // 槽位优先于链路：hubC 既有槽又有链——走槽位回放，链路原样保留（active 排除交由 reconcile）
+  connect("hubC");                            // hubB 压槽
+  const clientB2 = vm.slots.get("hubB")!.client;
+  assert.equal(clientB2, clientB, "接管对象照常可压槽");
+});
+
 /** Kotlin/UI 源码接线断言：swapTo 入口、badgeFor 合并、显式断开、双语、语义诚实 */
 test("Android 多 hub 徽章接线：swapTo/badgeFor/disconnectLink/双语/无时间线预渲染", () => {
   const vm = fs.readFileSync(path.join(androidSrc, "ChatViewModel.kt"), "utf8");
@@ -361,9 +393,24 @@ test("Android 多 hub 徽章接线：swapTo/badgeFor/disconnectLink/双语/无�
   const onDisc = linkMgr.slice(linkMgr.indexOf("private fun onLinkDisconnected("), linkMgr.indexOf("private fun publishBadges("));
   assert.match(onDisc, /publishBadges\(\)/, "断连时重发布 connected=false");
   assert.match(linkMgr, /fun close\(key: String\)/, "公开 close 供显式断链");
+  assert.match(linkMgr, /fun take\(key: String\)/, "公开 take 供活跃侧接管 socket");
+  const takeBody = linkMgr.slice(linkMgr.indexOf("fun take("), linkMgr.indexOf("\n    private fun", linkMgr.indexOf("fun take(")));
+  assert.match(takeBody, /onEvent = null/, "take 摘除事件回调");
+  assert.match(takeBody, /publishBadges\(\)/, "take 后徽章下线");
 
-  // HubService：徽章 map 带 LinkBadge + dropLink 伴生入口
+  // HubService：徽章 map 带 LinkBadge + dropLink 伴生入口 + takeLink 移交入口
   assert.match(service, /fun dropLink\(address: String\)/, "service dropLink 入口");
+  assert.match(service, /fun takeLink\(address: String\)/, "service takeLink 移交入口");
+  assert.match(service, /HubClient\(linkScope\)/, "链路 client 挂进程级 linkScope——接管后不随 service 死");
+
+  // ChatViewModel.connect：槽位→接管→新建三段式；接管路径不得 disconnect 已连 socket
+  const conn = vm.slice(vm.indexOf("fun connect(address: String"), vm.indexOf("wireActiveCallbacks(client, epoch)"));
+  assert.match(conn, /HubService\.takeLink\(address\)/, "connect 尝试接管后台链路");
+  assert.match(conn, /disconnectHub = restored == null && adopted == null/, "接管 socket 不被 resetConnection 断开");
+
+  // HubClient.connect：已连+同址幂等激活（接管免握手的底层保证）
+  const client = fs.readFileSync(path.join(androidSrc, "HubClient.kt"), "utf8");
+  assert.match(client, /isConnected && this@HubClient\.url == url/, "connect 幂等激活分支");
 
   // HubDrawer：行点击=swapTo（不断开）、徽章读取 badgeFor、菜单显式断开、无双语外硬编码
   assert.match(drawer, /vm\.swapTo\(p\)/, "行点击走 swapTo 换绑");

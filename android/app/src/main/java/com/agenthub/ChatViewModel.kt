@@ -1977,9 +1977,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             restored.client.disconnect()
             restored = null
         }
-        val client = restored?.client ?: HubClient(viewModelScope) { stringsFor(lang) }
+        // 无槽位时接管 service 后台链路 socket：已连则免握手直接激活（connect 内幂等分支）
+        val adopted = if (restored == null && prevKey != address) HubService.takeLink(address) else null
+        if (adopted != null) PerfTrace.mark("ws.adopt", "addr=$address connected=${adopted.isConnected}")
+        val client = restored?.client ?: adopted ?: HubClient(viewModelScope) { stringsFor(lang) }
         hub = client
-        resetConnection(clearSaved = savedHubConnection(getApplication()) != profile, disconnectHub = restored == null)
+        resetConnection(clearSaved = savedHubConnection(getApplication()) != profile, disconnectHub = restored == null && adopted == null)
         deliveryOrigin = deliveryOriginFor(address, token, publicToken)
         delivery.select(deliveryOrigin)
         val epoch = profileEpoch
@@ -2016,6 +2019,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             startDeliveryRecovery(epoch, generation)
             return
         }
+        hubBadges.remove(address)
         val url = buildWsUrl(address, token)
         client.connect(url, publicToken,
             onOpen = {
