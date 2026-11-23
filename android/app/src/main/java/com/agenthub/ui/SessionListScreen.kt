@@ -2164,6 +2164,10 @@ private fun RoomCard(
                             )
                         }
                         DropdownMenuItem(
+                            text = { Text(if (vm.pinnedRoomAt.containsKey(r.roomId)) S.unpin else S.pin) },
+                            onClick = { vm.toggleRoomPin(r.roomId); showMenu.value = false },
+                        )
+                        DropdownMenuItem(
                             text = { Text(S.rename) },
                             onClick = { onRename(); showMenu.value = false },
                         )
