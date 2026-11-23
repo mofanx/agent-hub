@@ -529,6 +529,7 @@ interface Strings {
     val networkMonitoringUnavailable: String
     val backgroundConnectionUnavailable: String
     val backgroundConnectionTimeout: String
+    val backgroundRecovering: String
     val notifChannelReply: String
     val notifChannelReplyDesc: String
     val notifChannelApproval: String
@@ -1256,6 +1257,7 @@ object ZhStrings : Strings {
     override val networkMonitoringUnavailable = "网络变化监听不可用，锁屏期间提醒可能延迟"
     override val backgroundConnectionUnavailable = "后台连接已停止，锁屏期间可能收不到提醒"
     override val backgroundConnectionTimeout = "后台连接已被系统省电机制停止，锁屏期间可能收不到提醒"
+    override val backgroundRecovering = "正在恢复后台连接与待办提醒…"
     override val notifChannelReply = "Agent 回复"
     override val notifChannelReplyDesc = "Agent 任务完成或回复消息时提醒"
     override val notifChannelApproval = "待你处理"
@@ -1983,6 +1985,7 @@ object EnStrings : Strings {
     override val networkMonitoringUnavailable = "Network monitoring unavailable; alerts may be delayed while locked"
     override val backgroundConnectionUnavailable = "Background connection stopped; alerts may be missed while locked"
     override val backgroundConnectionTimeout = "Background connection stopped by the system; alerts may be missed while locked"
+    override val backgroundRecovering = "Restoring background connection & alerts…"
     override val notifChannelReply = "Agent reply"
     override val notifChannelReplyDesc = "Notify when the agent finishes a task or replies"
     override val notifChannelApproval = "Needs attention"

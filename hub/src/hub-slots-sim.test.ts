@@ -366,6 +366,66 @@ test("接管 service 链路：无槽切换免握手激活，链路旁路不入�
   assert.equal(clientB2, clientB, "接管对象照常可压槽");
 });
 
+/** diffMergeList 镜像：同步回包按 key 增量合并——未变项实例零写回不重组、变更原位替换、
+ *  乱序移动、消失删除。防 clear+addAll 整表重灌的列表闪烁与滚动跳动。 */
+function diffMerge<T, K>(list: T[], incoming: T[], key: (t: T) => K) {
+  const eq = (a: T, b: T) => a === b || JSON.stringify(a) === JSON.stringify(b);
+  if (list.length === incoming.length && list.every((v, i) => eq(v, incoming[i]!))) return;
+  const incomingKeys = new Set(incoming.map(key));
+  for (let j = list.length - 1; j >= 0; j--) if (!incomingKeys.has(key(list[j]!))) list.splice(j, 1);
+  let i = 0;
+  while (i < incoming.length) {
+    const want = incoming[i]!;
+    if (i < list.length && key(list[i]!) === key(want)) {
+      if (!eq(list[i]!, want)) list[i] = want;
+      i++;
+      continue;
+    }
+    const found = list.findIndex((it) => key(it) === key(want));
+    if (found > i) {
+      const moved = list.splice(found, 1)[0]!;
+      list.splice(i, 0, eq(moved, want) ? moved : want);
+    } else {
+      list.splice(i, 0, want);
+    }
+    i++;
+  }
+  while (list.length > incoming.length) list.pop();
+}
+
+test("diffMerge：全量同步增量合并——未变项保实例零写回，变更/乱序/增删逐项对齐", () => {
+  type Item = { id: string; v: number };
+  const k = (t: Item) => t.id;
+  const A = { id: "a", v: 1 }, B = { id: "b", v: 2 }, C = { id: "c", v: 3 };
+
+  // 全等：零写回——所有项保留原实例（LazyColumn 位置项不重组）
+  const list = [A, B, C];
+  diffMerge(list, [{ id: "a", v: 1 }, { id: "b", v: 2 }, { id: "c", v: 3 }], k);
+  assert.deepEqual(list, [A, B, C]);
+  assert.ok(list[0] === A && list[1] === B && list[2] === C, "未变项必须保实例");
+
+  // 单点变更：仅该项原位替换为新实例，其余保实例
+  const B2 = { id: "b", v: 22 };
+  diffMerge(list, [{ id: "a", v: 1 }, B2, { id: "c", v: 3 }], k);
+  assert.deepEqual(list, [A, B2, C]);
+  assert.ok(list[0] === A && list[2] === C, "未变项仍保实例");
+  assert.equal(list[1].v, 22);
+
+  // 乱序：移动不复制——结果顺序精确对齐 incoming
+  diffMerge(list, [{ id: "c", v: 3 }, { id: "a", v: 1 }, B2], k);
+  assert.deepEqual(list, [C, A, B2]);
+  assert.ok(list[0] === C && list[1] === A, "移动项保实例");
+
+  // 增删：消失项删、新项插入正确位
+  const D = { id: "d", v: 4 };
+  diffMerge(list, [D, { id: "c", v: 3 }], k);
+  assert.deepEqual(list, [D, C]);
+
+  // 清空：incoming 空 → 全删
+  diffMerge(list, [], k);
+  assert.deepEqual(list, []);
+});
+
 /** Kotlin/UI 源码接线断言：swapTo 入口、badgeFor 合并、显式断开、双语、语义诚实 */
 test("Android 多 hub 徽章接线：swapTo/badgeFor/disconnectLink/双语/无时间线预渲染", () => {
   const vm = fs.readFileSync(path.join(androidSrc, "ChatViewModel.kt"), "utf8");
@@ -411,6 +471,20 @@ test("Android 多 hub 徽章接线：swapTo/badgeFor/disconnectLink/双语/无�
   // HubClient.connect：已连+同址幂等激活（接管免握手的底层保证）
   const client = fs.readFileSync(path.join(androidSrc, "HubClient.kt"), "utf8");
   assert.match(client, /isConnected && this@HubClient\.url == url/, "connect 幂等激活分支");
+
+  // 二阶段增量刷新：syncRefreshAll 列表走 diffMergeList，不整表重灌
+  const syncAll = vm.slice(vm.indexOf("private suspend fun syncRefreshAll("), vm.indexOf("private suspend fun syncRefreshMissions"));
+  assert.match(syncAll, /diffMergeList\(sessions,/, "sessions 增量合并");
+  assert.match(syncAll, /diffMergeList\(rooms,/, "rooms 增量合并");
+  assert.match(syncAll, /diffMergeList\(connections,/, "connections 增量合并");
+  assert.doesNotMatch(syncAll, /sessions\.clear\(\)|rooms\.clear\(\)/, "主列表不再 clear 重灌");
+
+  // 横幅合并：service_stopped 恢复在途→统一恢复文案；待办同步同条软横幅
+  const banner = vm.slice(vm.indexOf("fun backgroundConnectionBanner("), vm.indexOf("fun backgroundConnectionWarning("));
+  assert.match(banner, /"service_stopped" -> if \(backgroundRunning\) S\.backgroundRecovering/, "恢复在途单横幅");
+  assert.match(banner, /attentionRecoveryState != null -> S\.backgroundRecovering/, "待办同步并入恢复横幅");
+  assert.match(strings, /val backgroundRecovering: String/, "接口声明 backgroundRecovering");
+  assert.equal((strings.match(/override val backgroundRecovering =/g) || []).length, 2, "backgroundRecovering 双语");
 
   // HubDrawer：行点击=swapTo（不断开）、徽章读取 badgeFor、菜单显式断开、无双语外硬编码
   assert.match(drawer, /vm\.swapTo\(p\)/, "行点击走 swapTo 换绑");

@@ -1252,8 +1252,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         notificationsEnabled = Notifier.notificationsAvailable(getApplication(), Notifier.CHANNEL_PERMISSION)
     }
 
-    /** (文案, 硬错)——硬错=需要用户改配置/手动介入(auth/policy/invalid_config/start_restricted/service_stopped)，
-     * 软态=可自愈或仅提醒(timeout/sync/network_monitor/permission 等)，横幅据此分色与点击行为 */
+    /** (文案, 硬错)——硬错=需要用户改配置/手动介入(auth/policy/invalid_config/start_restricted/未恢复的 service_stopped)，
+     * 软态=可自愈或仅提醒(timeout/recovering/network_monitor/permission 等)，横幅据此分色与点击行为 */
     fun backgroundConnectionBanner(): Pair<String, Boolean>? {
         val S = stringsFor(lang)
         when (connectionState) {
@@ -1268,14 +1268,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "invalid_config" -> S.connectionInvalidAddress to true
             "timeout" -> S.backgroundConnectionTimeout to false
             "network_monitor" -> S.networkMonitoringUnavailable to false
-            "start_restricted", "service_stopped" -> S.backgroundConnectionUnavailable to true
+            "start_restricted" -> S.backgroundConnectionUnavailable to true
+            // 恢复生命周期单横幅：服务已拉起（恢复在途）走统一恢复文案，
+            // 与后续待办同步同条软横幅——不再红『已停止』→紫『恢复提醒』两段跳变
+            "service_stopped" -> if (backgroundRunning) S.backgroundRecovering to false
+                else S.backgroundConnectionUnavailable to true
             else -> when {
                 !networkMonitoringAvailable -> S.networkMonitoringUnavailable to false
                 connectionWanted && savedHubConnection(getApplication()) != null && !backgroundRunning ->
                     S.backgroundConnectionUnavailable to false
                 connectionWanted && !notificationsEnabled -> S.attentionLabels.getValue("permission") to false
                 connectionWanted && attentionRecoveryState == "unsupported" -> S.attentionLabels.getValue("unsupported") to false
-                connectionWanted && attentionRecoveryState != null -> S.attentionLabels.getValue("sync") to false
+                connectionWanted && attentionRecoveryState != null -> S.backgroundRecovering to false
                 else -> null
             }
         }
@@ -2812,6 +2816,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 列表增量合并：按 key 对齐 incoming 顺序——未变项保持原实例零写回（不触发重组），
+     *  变更项原位替换，乱序项移动，消失项删除。避免 clear+addAll 整表重灌的闪烁与滚动跳动。 */
+    private fun <T, K> diffMergeList(list: MutableList<T>, incoming: List<T>, key: (T) -> K) {
+        if (list == incoming) return
+        val incomingKeys = incoming.mapTo(HashSet()) { key(it) }
+        list.removeAll { key(it) !in incomingKeys }
+        var i = 0
+        while (i < incoming.size) {
+            val want = incoming[i]
+            if (i < list.size && key(list[i]) == key(want)) {
+                if (list[i] != want) list[i] = want
+                i++
+                continue
+            }
+            val found = list.indexOfFirst { key(it) == key(want) }
+            if (found > i) {
+                val moved = list.removeAt(found)
+                list.add(i, if (moved == want) moved else want)
+            } else {
+                list.add(i, want)
+            }
+            i++
+        }
+        while (list.size > incoming.size) list.removeAt(list.size - 1)
+    }
+
     private suspend fun syncRefreshAll(
         generation: Int = missionConnectionGeneration,
         epoch: Int = profileEpoch,
@@ -2840,22 +2870,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val cResult = connReq.await().getOrThrow()
             if (!valid()) return@coroutineScope false
             val cList = cResult["connections"]?.jsonArray ?: JsonArray(emptyList())
-                connections.clear()
-                for (c in cList) {
+                diffMergeList(connections, cList.map { c ->
                     val o = c.jsonObject
-                    connections.add(
-                        ConnectionInfo(
-                            o["id"]!!.jsonPrimitive.content,
-                            o["name"]!!.jsonPrimitive.content,
-                            o["agent"]!!.jsonPrimitive.content,
-                            o["token"]?.jsonPrimitive?.content ?: "",
-                            o["address"]?.jsonPrimitive?.content ?: "",
-                            o["cwd"]?.jsonPrimitive?.content ?: "",
-                            o["online"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-                            o["local"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-                        )
+                    ConnectionInfo(
+                        o["id"]!!.jsonPrimitive.content,
+                        o["name"]!!.jsonPrimitive.content,
+                        o["agent"]!!.jsonPrimitive.content,
+                        o["token"]?.jsonPrimitive?.content ?: "",
+                        o["address"]?.jsonPrimitive?.content ?: "",
+                        o["cwd"]?.jsonPrimitive?.content ?: "",
+                        o["online"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                        o["local"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                     )
-                }
+                }) { it.id }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             }
@@ -2870,10 +2897,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hubCall("session.list")
                 if (!valid()) return@async
                 val list = result["sessions"]?.jsonArray ?: return@async
-                sessions.clear()
+                val parsed = ArrayList<SessionInfo>(list.size)
                 for (s in list) {
                     val o = s.jsonObject
-                    sessions.add(
+                    parsed.add(
                         SessionInfo(
                             o["sessionId"]!!.jsonPrimitive.content,
                             o["cwd"]!!.jsonPrimitive.content,
@@ -2891,6 +2918,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
                 }
+                diffMergeList(sessions, parsed) { it.sessionId }
                 syncBusyIdsFromList(sessions, settle = true)
                 sessionsReady = true
             } catch (e: Exception) {
@@ -2902,10 +2930,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hubCall("role.list")
                 if (!valid()) return@async
                 val list = result["roles"]?.jsonArray ?: return@async
-                roles.clear()
-                for (r in list) {
+                diffMergeList(roles, list.map { r ->
                     val o = r.jsonObject
-                    roles.add(RoleInfo(
+                    RoleInfo(
                         o["id"]!!.jsonPrimitive.content,
                         o["name"]!!.jsonPrimitive.content,
                         o["persona"]!!.jsonPrimitive.content,
@@ -2914,8 +2941,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["address"]?.jsonPrimitive?.content,
                         o["connectionId"]?.jsonPrimitive?.content,
                         o["builtin"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-                    ))
-                }
+                    )
+                }) { it.id }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             }
@@ -2926,16 +2953,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = if (connId != null) hubCall("skill.list", buildJsonObject { put("connectionId", connId) }) else hubCall("skill.list")
                 if (!valid()) return@async
                 val list = result["skills"]?.jsonArray ?: return@async
-                skills.clear()
-                for (s in list) {
+                diffMergeList(skills, list.map { s ->
                     val o = s.jsonObject
-                    skills.add(SkillInfo(
+                    SkillInfo(
                         o["name"]?.jsonPrimitive?.content ?: "",
                         o["description"]?.jsonPrimitive?.content ?: "",
                         o["location"]?.jsonPrimitive?.content ?: "",
                         o["scope"]?.jsonPrimitive?.content ?: "user",
-                    ))
-                }
+                    )
+                }) { it.name }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             }
@@ -2945,8 +2971,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hubCall("room.list")
                 if (!valid()) return@async
                 val list = result["rooms"]?.jsonArray ?: return@async
-                rooms.clear()
-                for (r in list) rooms.add(parseRoom(r.jsonObject))
+                diffMergeList(rooms, list.map { parseRoom(it.jsonObject) }) { it.roomId }
                 currentRoom?.let { cur -> rooms.find { it.roomId == cur.roomId }?.let { currentRoom = it } }
                 roomsReady = true
             } catch (e: Exception) {
@@ -2958,9 +2983,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val result = hubCall("task.list")
                 if (!valid()) return@async
                 val list = result["tasks"]?.jsonArray ?: return@async
-                val parsed = list.map { parseTask(it.jsonObject) }
-                scheduledTasks.clear()
-                scheduledTasks.addAll(parsed)
+                diffMergeList(scheduledTasks, list.map { parseTask(it.jsonObject) }) { it.id }
                 tasksReady = true
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
