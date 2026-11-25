@@ -1547,6 +1547,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         obj["connectionId"]?.jsonPrimitive?.contentOrNull?.let { roomMemberConns[sid] = it }
                     }
                     roomMemberConns.keys.removeAll { it !in roomMemberModels.keys }
+                    roomMemberTypes.keys.removeAll { it !in roomMemberModels.keys }
                     // 显示第一个成员的模型作为概览
                     modelCurrent = roomMemberModels.values.firstOrNull()?.third ?: ""
                     if (roomMemberTypes.entries.any { (sid, type) ->
@@ -1762,6 +1763,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 obj["connectionId"]?.jsonPrimitive?.contentOrNull?.let { roomMemberConns[sid] = it }
             }
             roomMemberConns.keys.removeAll { it !in roomMemberModels.keys }
+            roomMemberTypes.keys.removeAll { it !in roomMemberModels.keys }
             // 默认选第一个成员
             val firstSid = roomMemberModels.keys.firstOrNull()
             selectedMemberSession = firstSid
@@ -2978,6 +2980,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
                 }
+                // memberQuotas 键空间混用 sessionId/connectionId（member.quota 事件双键写入）：
+                // 按两者全集 retain（含暂无 session 的存活连接），剔除孤儿键不误删连接级键
+                val quotaLiveIds = HashSet<String>()
+                parsed.forEach { quotaLiveIds.add(it.sessionId); it.connectionId?.let(quotaLiveIds::add) }
+                connections.forEach { quotaLiveIds.add(it.id) }
+                memberQuotas.keys.removeAll { it !in quotaLiveIds }
                 diffMergeList(sessions, parsed) { it.sessionId }
                 syncBusyIdsFromList(sessions, settle = true)
                 sessionsReady = true
@@ -5790,6 +5798,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
             }
+            val quotaLiveIds = HashSet<String>()
+            sessionsList.forEach { quotaLiveIds.add(it.sessionId); it.connectionId?.let(quotaLiveIds::add) }
+            connections.forEach { quotaLiveIds.add(it.id) }
+            memberQuotas.keys.removeAll { it !in quotaLiveIds }
             syncBusyIdsFromList(sessionsList, settle = true)
         } catch (_: Exception) {
         }
