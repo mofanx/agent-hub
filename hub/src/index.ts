@@ -26,7 +26,7 @@ import { sanitizeInline } from "./sanitize.js";
 import { startTunnel } from "./tunnel.js";
 import { webSocketStream, multiplexWebSocketStream, isControlFrame, isAnnounceFrame, type ControlFrame } from "./stream.js";
 import { startPerfMonitor } from "./monitor.js";
-import { AGENT_DEFS, spawnAgentProcess } from "./agent-defs.js";
+import { AGENT_DEFS, spawnAgentProcess, capsForType } from "./agent-defs.js";
 import { ModelManager, modelConfigOption, type ModelInfo, type BackendConfig, type ModelBackend } from "./model.js";
 import {
   getDevinQuota,
@@ -356,6 +356,7 @@ function enrichRoom(room: Room): Record<string, unknown> {
       ...m,
       displayName: rooms.displayNameFor(m),
       status: memberStatusOf(m.sessionId),
+      connectionId: sessionMetas.get(m.sessionId)?.connectionId,
       quota: quotaFor({
         sessionId: m.sessionId,
         connectionId: sessionMetas.get(m.sessionId)?.connectionId,
@@ -561,6 +562,7 @@ async function startLocalAgent(connection: Connection): Promise<void> {
     onToolCall,
     connection.agent === "devin",
     onTurnProgress,
+    capsForType(connection.agent),
   );
 
   agents.set(connection.id, a);
@@ -1204,6 +1206,7 @@ function listAllSessions(): {
         archived: meta?.archived ?? false,
         status: (s.busy ? "generating" : "online") as PresenceStatus,
         quota: quotaFor({ sessionId: s.sessionId, connectionId }),
+        caps: a.caps(),
       };
     });
   });
@@ -1220,6 +1223,7 @@ function listAllSessions(): {
       origin: originFor(m),
       status: "offline" as PresenceStatus,
       quota: quotaFor({ sessionId: m.sessionId, connectionId: m.connectionId }),
+      caps: capsForType(modelManager.backendTypeOf(m.agent ?? "devin")),
     }));
   return [...online, ...offline];
 }
@@ -1308,6 +1312,7 @@ function flushTurnProcess(sessionId: string, status: "done" | "failed" | "interr
     status,
     roomModeManager.flowIdForTurn(sessionId, roomId),
     missionManager.missionIdForTurn(sessionId, roomId),
+    sessionMetas.get(sessionId)?.connectionId,
   );
   if (!opLedger.commit(`process:${roomId}:${meta.processId}`, "process")) return flushAt;
   const at = flushAt;
@@ -2208,7 +2213,13 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           .prompt(s.sessionId, personaPrompt)
           .catch((err) => logWarn("persona", `inject failed: ${String(err)}`));
       }
-      return { ...s, agent: connection.agent, connectionId: connection.id, roleId: finalRoleId };
+      return {
+        ...s,
+        agent: connection.agent,
+        connectionId: connection.id,
+        roleId: finalRoleId,
+        caps: agent.caps(),
+      };
     }
     case "session.clone": {
       const sourceSessionId = String(req.params?.sessionId ?? "");
@@ -2240,6 +2251,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           agent: connection.agent,
           connectionId: connection.id,
           roleId: source.roleId,
+          caps: agent.caps(),
         };
       }
 
@@ -2284,6 +2296,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
         agent: connection.agent,
         connectionId: connection.id,
         roleId: source.roleId,
+        caps: agent.caps(),
       };
     }
     case "session.configOptions": {
@@ -2850,6 +2863,7 @@ async function handleRequest(req: RequestMessage, relayed = false): Promise<unkn
           backend,
           backendType: modelManager.backendTypeOf(backend),
           model: current.uid,
+          connectionId: meta?.connectionId,
           quota: quotaFor({ sessionId: m.sessionId, connectionId: meta?.connectionId }),
         };
       });
@@ -3906,7 +3920,7 @@ function handleWorker(ws: WebSocket, req: import("http").IncomingMessage): void 
   }
   console.log(`[hub] worker connected for ${connection.name} (${connectionId})`);
   const stream = webSocketStream(ws);
-  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall, false, onTurnProgress);
+  const a = new AcpAgent(connection.name, stream, onAgentEvent, undefined, undefined, onTurnEnd, onFileWrite, onToolCall, false, onTurnProgress, capsForType(connection.agent));
   agents.set(connectionId, a);
   a.ensureStarted().then(() => {
     roomModeManager.resumeFlows();
@@ -4043,6 +4057,7 @@ function handleMultiplexWorker(ws: WebSocket, baseConnection: Connection): void 
         onToolCall,
         false,
         onTurnProgress,
+        capsForType(virtualConn.agent),
       );
       agents.set(virtualId, a);
       virtualAgents.set(ch.id, a);

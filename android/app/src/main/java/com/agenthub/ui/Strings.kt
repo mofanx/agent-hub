@@ -139,6 +139,7 @@ interface Strings {
     val processUnavailable: String
     val processLoading: String
     val processEmpty: String
+    val processToolCallUnsupported: String
     val viewProcess: String
     val waitingDispatch: String
     val sendAsSupplement: String
@@ -839,6 +840,7 @@ object ZhStrings : Strings {
     override val processUnavailable = "过程已不可用"
     override val processLoading = "加载过程…"
     override val processEmpty = "暂无过程记录"
+    override val processToolCallUnsupported = "此后端不支持工具过程上报"
     override val viewProcess = "查看过程"
     override val waitingDispatch = "等待派发"
     override val sendAsSupplement = "普通新消息将补充到当前流程"
@@ -1567,6 +1569,7 @@ object EnStrings : Strings {
     override val processUnavailable = "Process unavailable"
     override val processLoading = "Loading process…"
     override val processEmpty = "No process items"
+    override val processToolCallUnsupported = "This backend does not report tool process"
     override val viewProcess = "View process"
     override val waitingDispatch = "Waiting for dispatch"
     override val sendAsSupplement = "New messages add context to the current flow"

@@ -94,6 +94,7 @@ export interface Strings {
   processLoading: string;
   processUnavailable: string;
   processEmpty: string;
+  processToolCallUnsupported: string;
   taskWaitingDispatch: string;
   /** 派发卡：已派发 %s 个子任务 */
   dispatchCardFmt: string;
@@ -861,6 +862,7 @@ const zh: Strings = {
   processLoading: "加载过程…",
   processUnavailable: "过程不可用（会话已失效或 Hub 不支持）",
   processEmpty: "暂无过程记录",
+  processToolCallUnsupported: "此后端不支持工具过程上报",
   taskWaitingDispatch: "等待派发",
   dispatchCardFmt: "已派发 %s 个子任务",
   viewProcess: "查看过程",
@@ -1627,6 +1629,7 @@ const en: Strings = {
   processLoading: "Loading process…",
   processUnavailable: "Process unavailable (session gone or unsupported)",
   processEmpty: "No process records yet",
+  processToolCallUnsupported: "This backend does not report tool process",
   taskWaitingDispatch: "Waiting for dispatch",
   dispatchCardFmt: "Dispatched %s subtasks",
   viewProcess: "View process",

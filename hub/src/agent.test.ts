@@ -14,6 +14,7 @@ import {
   sliceTextFile,
   type HubEvent,
 } from "./agent.js";
+import { capsForType, type AgentCaps } from "./agent-defs.js";
 
 describe("normalizeElicitationFields", () => {
   it("按 properties 顺序生成字段并标记 required", () => {
@@ -187,6 +188,8 @@ describe("AcpAgent integration (in-memory stream)", () => {
     loadStayGated?: boolean;
     localDevinAuth?: boolean;
     authGate?: Promise<void>;
+    capsBase?: AgentCaps;
+    initMeta?: Record<string, unknown>;
     onTurnEnd?: (
       sessionId: string,
       text: string,
@@ -224,6 +227,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
           protocolVersion: acp.PROTOCOL_VERSION,
           agentCapabilities: options?.agentCapabilities ?? {},
           ...(options?.authMethods ? { authMethods: options.authMethods } : {}),
+          ...(options?.initMeta ? { _meta: options.initMeta } : {}),
         };
       })
       .onRequest(acp.methods.agent.authenticate, async ({ params }) => {
@@ -323,6 +327,7 @@ describe("AcpAgent integration (in-memory stream)", () => {
       undefined,
       options?.localDevinAuth ?? false,
       options?.onTurnProgress,
+      options?.capsBase,
     );
     return { agentConn, hub, events, pipes, authCalls, prompts, forkCalls, resumeCalls, loadCalls, setConfigCalls, order, deferredResolvers, seenClientCapabilities, closeCalls };
   }
@@ -2281,6 +2286,127 @@ describe("AcpAgent integration (in-memory stream)", () => {
       noCap.hub.close();
       noCap.agentConn.close();
     }
+  });
+
+  it("caps：未协商时返回静态种子副本（离线兜底路径）", async () => {
+    const { hub, agentConn } = setup({
+      capsBase: { resume: true, quota: true, auth: "agentAuth" },
+    });
+    try {
+      assert.deepEqual(hub.caps(), { resume: true, quota: true, auth: "agentAuth" });
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("caps：无静态种子时未协商返回空对象", async () => {
+    const { hub, agentConn } = setup();
+    try {
+      assert.deepEqual(hub.caps(), {});
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("caps：initialize 实测覆盖静态声明，probe 为主", async () => {
+    const { hub, agentConn } = setup({
+      capsBase: { fork: false, quota: true },
+      agentCapabilities: {
+        sessionCapabilities: { fork: {}, close: {} },
+        _meta: { "cognition.ai/midTurnPrompts": true },
+      } as unknown as acp.AgentCapabilities,
+      initMeta: {
+        steering: { supported: true },
+        goal: { version: 1, controlMethod: "_goal", actions: ["set", "clear"] },
+      },
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      const caps = hub.caps();
+      assert.equal(caps.fork, true, "probe fork=true 覆盖静态 false");
+      assert.equal(caps.close, true);
+      assert.equal(caps.midTurn, true);
+      assert.equal(caps.steer, true);
+      assert.equal(caps.nativeGoal, true);
+      assert.equal(caps.quota, true, "无 probe 字段保留静态种子值");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("caps：initialize 未声明的能力实测为 false，覆盖静态 true", async () => {
+    const { hub, agentConn } = setup({
+      capsBase: { fork: true, steer: true },
+    });
+    try {
+      await hub.createSession("/tmp", "s");
+      const caps = hub.caps();
+      assert.equal(caps.fork, false, "initialize 未声明 fork → 实测 false 覆盖静态 true");
+      assert.equal(caps.steer, false);
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("caps：resume -32601 单向锁存，静态 resume:true 被收窄", async () => {
+    const { hub, agentConn } = setup({
+      capsBase: { resume: true },
+      resumeError: acp.RequestError.methodNotFound("session/resume"),
+    });
+    try {
+      const ok = await hub.resumeSession("hist1", "/tmp", "旧会话");
+      assert.equal(ok, true);
+      assert.equal(hub.caps().resume, false, "resumeUnsupported 锁存后 caps.resume=false");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("caps：session/resume 成功正向放宽静态 resume:false", async () => {
+    const { hub, agentConn } = setup({
+      capsBase: { resume: false },
+    });
+    try {
+      const ok = await hub.resumeSession("hist1", "/tmp", "旧会话");
+      assert.equal(ok, true);
+      assert.equal(hub.caps().resume, true, "resume 实测成功放宽静态 false");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("caps：缺字段不输出——客户端可区分未知与不支持", async () => {
+    const { hub, agentConn } = setup({ capsBase: { quota: true } });
+    try {
+      await hub.createSession("/tmp", "s");
+      const caps = hub.caps();
+      assert.equal(caps.quota, true);
+      assert.equal(caps.resume, undefined, "无静态声明且无实测 → 字段缺省");
+      assert.equal(caps.toolCall, undefined);
+      assert.equal("resume" in caps, false, "缺省字段不占位，宽容回退判定靠 undefined");
+    } finally {
+      hub.close();
+      agentConn.close();
+    }
+  });
+
+  it("capsForType：deepseek 返回证据静态表，未知类型返回 undefined", () => {
+    assert.deepEqual(capsForType("deepseek"), {
+      resume: false,
+      configOptions: false,
+      toolCall: false,
+      quota: false,
+      auth: "apiKeyEnv",
+    });
+    assert.equal(capsForType("devin")?.quota, true);
+    assert.equal(capsForType("custom"), undefined);
+    assert.equal(capsForType("never-heard-of"), undefined);
   });
 
 });

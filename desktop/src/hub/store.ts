@@ -34,6 +34,7 @@ import type {
   SearchGroup,
   SearchHit,
   SessionConfigOption,
+  SessionCaps,
   SessionInfo,
   SkillInfo,
   SlashCommand,
@@ -132,7 +133,7 @@ interface State {
   memberQuotas: Record<string, BackendQuota>;
   editRoomTarget: RoomInfo | null;
   /** 群聊模式：成员模型信息（sessionId -> { name, backend, model }） */
-  roomMemberModels: Record<string, { name: string; backend: string; backendType?: string; model: string }>;
+  roomMemberModels: Record<string, { name: string; backend: string; backendType?: string; model: string; connectionId?: string }>;
   /** 群聊模式：当前选中的成员标签 sessionId */
   selectedMemberSession: string | null;
   backends: BackendConfig[];
@@ -708,6 +709,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       author: base.author,
       processId: String(m.processId ?? ""),
       sessionId: String(m.sessionId ?? ""),
+      connectionId: typeof m.connectionId === "string" ? m.connectionId : undefined,
       turnStartAt: typeof m.turnStartAt === "number" ? m.turnStartAt : undefined,
       turnEndAt: typeof m.turnEndAt === "number" ? m.turnEndAt : undefined,
       steps: Array.isArray(m.steps)
@@ -1329,8 +1331,10 @@ export const useHubStore = create<State & Actions>((set, get) => {
         bumpTurn(settledTurns, sid, 1);
         // 本回合 assistant 任一条含 mission 块即算产出——时间戳界桩免疫历史 promote 卡残留
         settlePromoteIfPending(sid, promoteDraftProduced(sid));
-        const sess = get().sessions.find((s) => s.sessionId === sid);
-        if ((sess?.backendType ?? sess?.agent) === "devin") {
+        const turnConn = get().roomMemberModels[sid]?.connectionId ?? get().currentRoom?.memberConns?.[sid]
+          ?? (get().currentSession?.sessionId === sid ? get().currentSession?.connectionId : null);
+        const sess = get().sessions.find((s) => s.sessionId === sid && (!turnConn || !s.connectionId || s.connectionId === turnConn));
+        if (sess?.caps?.quota ?? ((sess?.backendType ?? sess?.agent) === "devin")) {
           void get().refreshBackendQuota();
         }
         if (params.usage) {
@@ -2191,6 +2195,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
     name: String(o.name ?? ""),
     busy: o.busy === true,
     agent: String(o.agent ?? "devin"),
+    backendType: o.backendType ? String(o.backendType) : undefined,
+    caps: o.caps && typeof o.caps === "object" ? (o.caps as SessionCaps) : undefined,
     address: String(o.address ?? ""),
     connectionId: o.connectionId ? String(o.connectionId) : null,
     offline: o.offline === true,
@@ -2207,9 +2213,12 @@ export const useHubStore = create<State & Actions>((set, get) => {
   };
 
   const parseRoom = (o: Record<string, unknown>): RoomInfo => {
+    const memberConns: Record<string, string> = {};
     const members = ((o.members as unknown[] | undefined) ?? []).map((it) => {
       const m = it as Record<string, unknown>;
-      return [String(m.sessionId ?? ""), String(m.name ?? "")] as [string, string];
+      const sid = String(m.sessionId ?? "");
+      if (m.connectionId) memberConns[sid] = String(m.connectionId);
+      return [sid, String(m.name ?? "")] as [string, string];
     });
     const stringOrNull = (v: unknown) => (v ? String(v) : null);
     const numberOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -2242,6 +2251,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
     return {
       roomId: String(o.roomId ?? ""),
       name: String(o.name ?? ""),
+      memberConns,
       mode: String(o.mode ?? "mention"),
       activeSpeaker: stringOrNull(o.activeSpeaker),
       subMode: stringOrNull(o.subMode),
@@ -3055,6 +3065,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
           connectionId: result.connectionId ? String(result.connectionId) : null,
           offline: false,
           archived: false,
+          caps: result.caps && typeof result.caps === "object" ? (result.caps as SessionCaps) : undefined,
         };
         get().noteCwd(cwd);
         set({ sessions: [...get().sessions, session] });
@@ -3207,7 +3218,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
       get().refreshArtifacts({ sessionId: session.sessionId });
       void get().refreshMemberStatus();
       void get().refreshSessionUsage(session.sessionId);
-      if ((session.backendType ?? session.agent) === "devin") void get().refreshBackendQuota();
+      if (session.caps?.quota ?? ((session.backendType ?? session.agent) === "devin")) void get().refreshBackendQuota();
     },
 
     openRoom: async (room: RoomInfo, anchorAt?: number, options?: { readOnly?: boolean; missionTarget?: MissionExecutionTarget }) => {
@@ -3534,6 +3545,7 @@ export const useHubStore = create<State & Actions>((set, get) => {
               connectionId: res.connectionId ? String(res.connectionId) : session.connectionId,
               offline: false,
               archived: false,
+              caps: res.caps && typeof res.caps === "object" ? (res.caps as SessionCaps) : undefined,
             };
             get().openChat(newSession);
             try {
@@ -4703,7 +4715,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
       } else {
         await get().refreshModelList();
         set({ showModelPicker: true, selectedMemberSession: null });
-        void get().refreshBackendQuota();
+        const sess = get().currentSession;
+        if (sess?.caps?.quota ?? ((sess?.backendType ?? sess?.agent) === "devin")) void get().refreshBackendQuota();
       }
     },
 
@@ -4758,11 +4771,18 @@ export const useHubStore = create<State & Actions>((set, get) => {
       try {
         const result = await getOrCall<Record<string, unknown>>("room.memberModels", { roomId: room.roomId });
         if (get().currentRoom?.roomId !== room.roomId) return;
-        const members = (result.members as Array<{ sessionId: string; name: string; backend: string; backendType?: string; model: string }>) ?? [];
-        const map: Record<string, { name: string; backend: string; backendType?: string; model: string }> = {};
-        for (const m of members) map[m.sessionId] = { name: m.name, backend: m.backend, backendType: m.backendType ?? m.backend, model: m.model };
+        const members = (result.members as Array<{ sessionId: string; name: string; backend: string; backendType?: string; model: string; connectionId?: string }>) ?? [];
+        const map: Record<string, { name: string; backend: string; backendType?: string; model: string; connectionId?: string }> = {};
+        for (const m of members) map[m.sessionId] = { name: m.name, backend: m.backend, backendType: m.backendType ?? m.backend, model: m.model, ...(m.connectionId ? { connectionId: m.connectionId } : {}) };
         set({ roomMemberModels: map });
-        if (Object.values(map).some((m) => m.backendType === "devin")) void get().refreshBackendQuota();
+        const sessions = get().sessions;
+        const memberConns = room.memberConns ?? {};
+        if (Object.entries(map).some(([sid, m]) => {
+          const conn = m.connectionId ?? memberConns[sid];
+          return sessions.find((s) => s.sessionId === sid && (!conn || !s.connectionId || s.connectionId === conn))?.caps?.quota ?? (m.backendType === "devin");
+        })) {
+          void get().refreshBackendQuota();
+        }
       } catch (e) {
         set({ connectError: String(e) });
       }

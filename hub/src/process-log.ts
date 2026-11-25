@@ -6,6 +6,8 @@ export type DispatchTaskItem = { id?: string | undefined; to?: string | undefine
 export type ProcessCardMeta = {
   processId: string;
   sessionId: string;
+  /** 会话归属连接：同 sessionId 跨连接碰撞时客户端 caps/归属查找的双键维度 */
+  connectionId?: string;
   turnStartAt: number;
   turnEndAt: number;
   steps: ProcessStep[];
@@ -33,6 +35,7 @@ export function buildProcessMeta(
   status: ProcessStatus,
   flowId?: string,
   missionId?: string,
+  connectionId?: string,
 ): ProcessCardMeta {
   const steps = buf.map((i) => {
     const step: ProcessStep = { kind: i.kind };
@@ -59,6 +62,7 @@ export function buildProcessMeta(
   if (taskId) meta.taskId = taskId;
   if (flowId) meta.flowId = flowId;
   if (missionId) meta.missionId = missionId;
+  if (connectionId) meta.connectionId = connectionId;
   return meta;
 }
 

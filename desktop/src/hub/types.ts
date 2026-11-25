@@ -40,6 +40,20 @@ export interface ConnectionInfo {
   lastSeen?: number;
 }
 
+/** 能力契约（渲染契约）：undefined=未知字段宽容回退旧判定，false=诚实空态，true=支持 */
+export interface SessionCaps {
+  resume?: boolean;
+  configOptions?: boolean;
+  toolCall?: boolean;
+  fork?: boolean;
+  close?: boolean;
+  steer?: boolean;
+  midTurn?: boolean;
+  nativeGoal?: boolean;
+  quota?: boolean;
+  auth?: "none" | "apiKeyEnv" | "agentAuth";
+}
+
 export interface SessionInfo {
   sessionId: string;
   cwd: string;
@@ -47,6 +61,7 @@ export interface SessionInfo {
   busy: boolean;
   agent: string;
   backendType?: string;
+  caps?: SessionCaps;
   address: string;
   connectionId: string | null;
   offline: boolean;
@@ -263,6 +278,8 @@ export interface RoomInfo {
   mode: string;
   conductorId: string | null;
   members: [string, string][];
+  /** sessionId → 归属连接 id：同 sessionId 跨连接碰撞时 caps 查找的双键维度 */
+  memberConns?: Record<string, string>;
   archived: boolean;
   /** 当前房间中正在发言的 sessionId */
   activeSpeaker?: string | null;
@@ -432,6 +449,8 @@ export type ChatItem =
       /** 过程卡配对键（dedupe/状态更新）；空串不配对 */
       processId: string;
       sessionId: string;
+      /** 会话归属连接：同 sessionId 跨连接碰撞时 caps 查找的双键维度 */
+      connectionId?: string;
       turnStartAt?: number;
       turnEndAt?: number;
       steps: number;

@@ -8,6 +8,46 @@ export type AgentDef = {
   env?: Record<string, string>;
 };
 
+/**
+ * 后端能力契约——渲染契约：仅约束客户端 UI 可见性与空态文案；
+ * hub 行为判定（steer 排队、resume 回退、fork 降级等）永远走实例实测值，不读此处。
+ * 最终一致字段：随 session.list 拉取下发，无推送通道，重连后变化以下次 pull 为准。
+ * undefined=未知（宽容回退旧行为），false=实测不支持（诚实空态），true=实测支持。
+ */
+export type AgentCaps = {
+  resume?: boolean;
+  configOptions?: boolean;
+  toolCall?: boolean;
+  fork?: boolean;
+  close?: boolean;
+  steer?: boolean;
+  midTurn?: boolean;
+  nativeGoal?: boolean;
+  quota?: boolean;
+  auth?: "none" | "apiKeyEnv" | "agentAuth";
+};
+
+/**
+ * 静态种子：离线/未协商期兜底，只填有实测证据的格子——
+ * deepseek 的 false 组源自 README 能力契约与初始化实测；devin 的 quota/auth 源自
+ * quota.ts 与 localDevinAuth 既有事实。其余类型留空（在线时 probe 值覆盖）。
+ * 注意：此表是唯一会过期的部分——新后端到货或上游能力变化时只更新本表。
+ */
+export const STATIC_CAPS: Record<string, AgentCaps> = {
+  devin: { resume: true, quota: true, auth: "agentAuth" },
+  deepseek: {
+    resume: false,
+    configOptions: false,
+    toolCall: false,
+    quota: false,
+    auth: "apiKeyEnv",
+  },
+};
+
+export function capsForType(type: string): AgentCaps | undefined {
+  return STATIC_CAPS[type];
+}
+
 const DSH_NPM_PACKAGE = "@deepseek-ai/dsh@0.2.0-rc.2";
 
 /**

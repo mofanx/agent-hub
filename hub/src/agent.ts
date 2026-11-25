@@ -8,6 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import { logWarn } from "./logger.js";
 import { safetyFloorVerdict } from "./safety-floor.js";
 import { goalCapabilities, goalUpdate, type GoalAction, type GoalCapabilities, type GoalSnapshot } from "./native-goal.js";
+import type { AgentCaps } from "./agent-defs.js";
 
 /** prompt 发送可选参数：busy 时是否允许入 agent 层队列、ACK 看门狗预算覆盖 */
 export type PromptOpts = {
@@ -782,6 +783,7 @@ export class AcpAgent {
   private supportsMidTurnPrompts = false;
   private supportsSessionClose = false;
   private resumeUnsupported = false;
+  private resumeSupported = false;
   /** steer-queue：busy 时 followUp FIFO（上限 5，溢出丢弃），finishTurn 后合并为单 turn drain */
   private followUps = new Map<string, Array<Record<string, unknown>[]>>();
   private readonly followUpLimit = 5;
@@ -809,10 +811,35 @@ export class AcpAgent {
     private readonly onToolCall?: (sessionId: string, kind: string, title: string, paths: string[]) => void,
     private readonly localDevinAuth = false,
     private readonly onTurnProgress?: (sessionId: string, fullText: string) => void,
+    private readonly capsBase?: AgentCaps,
   ) {}
 
   get isReady(): boolean {
     return this.ready;
+  }
+
+  /**
+   * 能力契约（渲染契约）：静态种子 ∪ initialize 实测——probe 为主。
+   * 未协商时仅返回静态种子；已协商时 fork/close/steer/midTurn/nativeGoal 以实测为准，
+   * resume 双向实测：resumeUnsupported 单向锁存收窄，resumeSupported 正向放宽静态声明。
+   * 仅约束客户端 UI 可见性与空态；hub 行为判定仍走实例字段，不读此方法。
+   */
+  caps(): AgentCaps {
+    const base = this.capsBase;
+    if (!this.ready) return base ? { ...base } : {};
+    return {
+      ...base,
+      fork: this.supportsSessionFork,
+      close: this.supportsSessionClose,
+      steer: this.supportsSteering,
+      midTurn: this.supportsMidTurnPrompts,
+      nativeGoal: this.nativeGoalCapabilities != null,
+      ...(this.resumeUnsupported
+        ? { resume: false }
+        : this.resumeSupported || base?.resume !== undefined
+          ? { resume: this.resumeSupported || base?.resume === true }
+          : {}),
+    };
   }
 
   close(): void {
@@ -1028,6 +1055,7 @@ export class AcpAgent {
     this.supportsMidTurnPrompts = false;
     this.supportsSessionClose = false;
     this.resumeUnsupported = false;
+    this.resumeSupported = false;
     this.ctx = null;
     this.conn = null;
     this.sessionConfigOptions.clear();
@@ -1700,6 +1728,7 @@ export class AcpAgent {
         );
         this.recordConfigOptions(sessionId, (resp as { configOptions?: unknown }).configOptions);
         this.sessions.set(sessionId, { cwd, name, busy: false, stoppable: false, turnText: "" });
+        this.resumeSupported = true;
         return true;
       } catch (err) {
         if (this.wasAuthHandled(err) || this.isAuthRequired(err)) {

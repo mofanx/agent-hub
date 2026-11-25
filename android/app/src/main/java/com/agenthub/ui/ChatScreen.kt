@@ -181,6 +181,8 @@ import com.agenthub.ContextUsage
 import com.agenthub.ElicitationField
 import com.agenthub.FlowTask
 import com.agenthub.TokenUsage
+import com.agenthub.quotaCapable
+import com.agenthub.sessionCapsFor
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -799,10 +801,13 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                     val quota = vm.backendQuota
                     val hasDevinMember = if (isRoom) {
                         vm.currentRoom?.members?.any {
-                            vm.roomMemberTypes[it.first] == "devin"
+                            quotaCapable(
+                                sessionCapsFor(vm.sessions, it.first, vm.roomMemberConns[it.first] ?: vm.currentRoom?.memberConns?.get(it.first)),
+                                vm.roomMemberTypes[it.first],
+                            )
                         } == true
                     } else {
-                        (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin"
+                        quotaCapable(vm.currentSession?.caps, vm.currentSession?.backendType ?: vm.currentSession?.agent)
                     }
                     val effQuota = (vm.memberQuotas.values.firstOrNull { it.available }) ?: quota
                     val quotaText = if (effQuota?.available == true && hasDevinMember) {
@@ -927,7 +932,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                                 }
                             }
                             val sessQuota = vm.currentSession?.let { vm.memberQuotas[it.sessionId] } ?: quota
-                            if (sessQuota?.available == true && (vm.currentSession?.backendType ?: vm.currentSession?.agent) == "devin") {
+                            if (sessQuota?.available == true && quotaCapable(vm.currentSession?.caps, vm.currentSession?.backendType ?: vm.currentSession?.agent)) {
                                 Column(horizontalAlignment = Alignment.End) {
                                     sessQuota.daily?.let {
                                         Text(
@@ -2269,6 +2274,8 @@ private fun ProcessCardBlock(
     val unavailable = vm.processUnavailable[key] == true
     val failed = vm.processErrors[key]
     val running = item.turnEndAt <= 0L || item.status == "running"
+    // caps 渲染契约：toolCall 显式 false → 诚实空态；null/缺失 → 维持原加载路径
+    val toolCallUnsupported = sessionCapsFor(vm.sessions, item.sessionId, item.connectionId)?.toolCall == false
     val isDispatch = item.cardType == "dispatch" || item.dispatchTasks.isNotEmpty() || item.dispatchCount > 0
     val dispatchCount = item.dispatchTasks.size.takeIf { it > 0 } ?: item.dispatchCount
     val textColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2284,7 +2291,7 @@ private fun ProcessCardBlock(
             Column(Modifier.padding(12.dp)) {
                 TextButton(onClick = {
                     expanded = !expanded
-                    if (expanded && !isDispatch) vm.loadProcessCard(item)
+                    if (expanded && !isDispatch && !toolCallUnsupported) vm.loadProcessCard(item)
                 }) {
                     Text(
                         (if (expanded) "▾ " else "▸ ") +
@@ -2330,6 +2337,11 @@ private fun ProcessCardBlock(
                 } else if (expanded) {
                     Spacer(Modifier.height(4.dp))
                     when {
+                        toolCallUnsupported -> Text(
+                            S.processToolCallUnsupported,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = textColor,
+                        )
                         !children.isNullOrEmpty() -> children.reversed().forEach { child ->
                             RawChatBubble(
                                 child,

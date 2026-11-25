@@ -234,6 +234,7 @@ sealed class ChatItem {
         val missionId: String? = null,
         override val author: String,
         override val at: Long = java.lang.System.currentTimeMillis(),
+        val connectionId: String? = null,
     ) : ChatItem() {
         override val text: String get() = steps.joinToString("\n") { it.title ?: it.text.orEmpty() }
     }
@@ -333,7 +334,52 @@ data class SessionInfo(
     val archived: Boolean = false,
     val stoppable: Boolean = false,
     val backendType: String? = null,
+    val caps: SessionCaps? = null,
 )
+
+/** 能力契约（渲染契约）：null=未知字段宽容回退旧判定，false=诚实空态，true=支持 */
+data class SessionCaps(
+    val resume: Boolean? = null,
+    val configOptions: Boolean? = null,
+    val toolCall: Boolean? = null,
+    val fork: Boolean? = null,
+    val close: Boolean? = null,
+    val steer: Boolean? = null,
+    val midTurn: Boolean? = null,
+    val nativeGoal: Boolean? = null,
+    val quota: Boolean? = null,
+    val auth: String? = null,
+)
+
+/** quota 能力判定：caps.quota 优先，caps/字段缺失时宽容回退旧 backendType=="devin" 判定 */
+internal fun quotaCapable(caps: SessionCaps?, typeFallback: String?): Boolean =
+    caps?.quota ?: (typeFallback == "devin")
+
+/** 同 sessionId 跨连接碰撞时按 connectionId 精确归属；connId 未知或对端未带 connId 时回退首个 sessionId 匹配（旧行为） */
+internal fun sessionFor(sessions: List<SessionInfo>, sessionId: String, connectionId: String?): SessionInfo? =
+    sessions.firstOrNull {
+        it.sessionId == sessionId && (connectionId == null || it.connectionId == null || it.connectionId == connectionId)
+    }
+
+internal fun sessionCapsFor(sessions: List<SessionInfo>, sessionId: String, connectionId: String?): SessionCaps? =
+    sessionFor(sessions, sessionId, connectionId)?.caps
+
+fun parseSessionCaps(el: JsonElement?): SessionCaps? {
+    val o = el as? JsonObject ?: return null
+    fun bool(key: String) = o[key]?.jsonPrimitive?.booleanOrNull
+    return SessionCaps(
+        resume = bool("resume"),
+        configOptions = bool("configOptions"),
+        toolCall = bool("toolCall"),
+        fork = bool("fork"),
+        close = bool("close"),
+        steer = bool("steer"),
+        midTurn = bool("midTurn"),
+        nativeGoal = bool("nativeGoal"),
+        quota = bool("quota"),
+        auth = o["auth"]?.jsonPrimitive?.contentOrNull,
+    )
+}
 
 data class SearchHit(
     val scope: String,
@@ -359,6 +405,8 @@ data class RoomInfo(
     val members: List<Pair<String, String>>,
     /** sessionId → hub 拼接展示名（name·agent·origin）；旧 hub 缺省回退 members 原名 */
     val memberDisplay: Map<String, String> = emptyMap(),
+    /** sessionId → 归属连接 id：同 sessionId 跨连接碰撞时 caps/归属查找的双键维度 */
+    val memberConns: Map<String, String> = emptyMap(),
     val archived: Boolean = false,
     val subMode: String? = null,
     val activeSpeaker: String? = null,
@@ -1159,6 +1207,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 群聊模式：成员模型信息 sessionId -> (name, backend, model) */
     val roomMemberModels = mutableStateMapOf<String, Triple<String, String, String>>()
     val roomMemberTypes = mutableStateMapOf<String, String>() // sessionId → backendType（配额判定用，与 backend id 区分）
+    val roomMemberConns = mutableStateMapOf<String, String>() // sessionId → connectionId（caps 双键查找用）
     /** 群聊模式：当前选中的成员 sessionId */
     var selectedMemberSession by mutableStateOf<String?>(null)
     /** 当前选中会话的非模型 ACP 配置项（mode/thought_level 等） */
@@ -1495,14 +1544,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         val model = obj["model"]?.jsonPrimitive?.content ?: ""
                         roomMemberModels[sid] = Triple(name, backend, model)
                         roomMemberTypes[sid] = backendType
+                        obj["connectionId"]?.jsonPrimitive?.contentOrNull?.let { roomMemberConns[sid] = it }
                     }
+                    roomMemberConns.keys.removeAll { it !in roomMemberModels.keys }
                     // 显示第一个成员的模型作为概览
                     modelCurrent = roomMemberModels.values.firstOrNull()?.third ?: ""
-                    if (roomMemberTypes.values.any { it == "devin" }) refreshBackendQuota()
+                    if (roomMemberTypes.entries.any { (sid, type) ->
+                        quotaCapable(sessionCapsFor(sessions, sid, roomMemberConns[sid]), type)
+                    }) refreshBackendQuota()
                 } else {
                     val session = currentSession ?: return@launch
                     val backend = session.agent
-                    if ((session.backendType ?: backend) == "devin") refreshBackendQuota()
+                    if (quotaCapable(session.caps, session.backendType ?: backend)) refreshBackendQuota()
                     val result = hubCall("model.current", buildJsonObject {
                         put("backend", backend)
                         put("sessionId", session.sessionId)
@@ -1639,7 +1692,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 单聊模式
                 try {
                     val backend = currentSession?.agent ?: "devin"
-                    if ((currentSession?.backendType ?: backend) == "devin") refreshBackendQuota()
+                    if (quotaCapable(currentSession?.caps, currentSession?.backendType ?: backend)) refreshBackendQuota()
                     val sid = currentSession?.sessionId
                     val result = hubCall("model.list", buildJsonObject {
                         put("backend", backend)
@@ -1706,7 +1759,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val model = obj["model"]?.jsonPrimitive?.content ?: ""
                 roomMemberModels[sid] = Triple(name, backend, model)
                 roomMemberTypes[sid] = backendType
+                obj["connectionId"]?.jsonPrimitive?.contentOrNull?.let { roomMemberConns[sid] = it }
             }
+            roomMemberConns.keys.removeAll { it !in roomMemberModels.keys }
             // 默认选第一个成员
             val firstSid = roomMemberModels.keys.firstOrNull()
             selectedMemberSession = firstSid
@@ -1728,7 +1783,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun loadModelListForMember(sessionId: String) {
         val info = roomMemberModels[sessionId] ?: return
         val backend = info.second
-        if ((roomMemberTypes[sessionId] ?: backend) == "devin") refreshBackendQuota()
+        if (quotaCapable(sessionCapsFor(sessions, sessionId, roomMemberConns[sessionId]), roomMemberTypes[sessionId] ?: backend)) refreshBackendQuota()
         try {
             val result = hubCall("model.list", buildJsonObject {
                 put("backend", backend)
@@ -1931,6 +1986,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         result["connectionId"]?.jsonPrimitive?.content ?: session.connectionId,
                         result["roleId"]?.jsonPrimitive?.content ?: session.roleId,
                         stoppable = false,
+                        caps = parseSessionCaps(result["caps"]),
                     )
                     sessions.add(newSession)
                     chatCache["session:${newSession.sessionId}"] =
@@ -2262,6 +2318,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var memberQuotas = mapOf<String, BackendQuota>()
         var roomMemberModels = mapOf<String, Triple<String, String, String>>()
         var roomMemberTypes = mapOf<String, String>()
+        var roomMemberConns = mapOf<String, String>()
         var modelList = listOf<ModelInfo>()
         var modelCurrent = ""
         var backendQuota: BackendQuota? = null
@@ -2372,6 +2429,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         slot.memberQuotas = memberQuotas.toMap()
         slot.roomMemberModels = roomMemberModels.toMap()
         slot.roomMemberTypes = roomMemberTypes.toMap()
+        slot.roomMemberConns = roomMemberConns.toMap()
         slot.modelList = modelList.toList()
         slot.modelCurrent = modelCurrent
         slot.backendQuota = backendQuota
@@ -2569,6 +2627,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         memberQuotas.putAll(slot.memberQuotas)
         roomMemberModels.putAll(slot.roomMemberModels)
         roomMemberTypes.putAll(slot.roomMemberTypes)
+        roomMemberConns.putAll(slot.roomMemberConns)
         modelList.addAll(slot.modelList)
         modelCurrent = slot.modelCurrent
         backendQuota = slot.backendQuota
@@ -2914,6 +2973,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             o["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                             backendType = o["backendType"]?.jsonPrimitive?.content,
+                            caps = parseSessionCaps(o["caps"]),
                         )
                     )
                     parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
@@ -3785,6 +3845,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["connectionId"]?.jsonPrimitive?.content,
                     o["roleId"]?.jsonPrimitive?.content,
                     stoppable = false,
+                    caps = parseSessionCaps(o["caps"]),
                 )
                 noteCwd(cwd)
                 sessions.add(session)
@@ -3812,6 +3873,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     o["connectionId"]?.jsonPrimitive?.content ?: session.connectionId,
                     o["roleId"]?.jsonPrimitive?.content ?: session.roleId,
                     stoppable = false,
+                    caps = parseSessionCaps(o["caps"]),
                 )
                 sessions.add(newSession)
                 onCloned?.invoke(newSession)
@@ -4077,13 +4139,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun parseRoom(o: JsonObject): RoomInfo {
         val memberDisplay = mutableMapOf<String, String>()
+        val memberConns = mutableMapOf<String, String>()
         val members = o["members"]!!.jsonArray.map {
             val m = it.jsonObject
-            parseReportedQuota(m["quota"])?.let { memberQuotas[m["sessionId"]!!.jsonPrimitive.content] = it }
-            (m["displayName"] as? JsonPrimitive)?.contentOrNull
-                ?.let { d -> memberDisplay[m["sessionId"]!!.jsonPrimitive.content] = d }
-            m["sessionId"]!!.jsonPrimitive.content to
-                m["name"]!!.jsonPrimitive.content
+            val sid = m["sessionId"]!!.jsonPrimitive.content
+            parseReportedQuota(m["quota"])?.let { memberQuotas[sid] = it }
+            (m["displayName"] as? JsonPrimitive)?.contentOrNull?.let { d -> memberDisplay[sid] = d }
+            (m["connectionId"] as? JsonPrimitive)?.contentOrNull?.let { c -> memberConns[sid] = c }
+            sid to m["name"]!!.jsonPrimitive.content
         }
         val debateSidesArr = o["debateSides"]?.jsonArray
         val debateSides = if (debateSidesArr != null && debateSidesArr.size >= 2) {
@@ -4096,6 +4159,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             conductorId = o["conductorId"]?.jsonPrimitive?.content,
             members = members,
             memberDisplay = memberDisplay,
+            memberConns = memberConns,
             archived = o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
             subMode = o["subMode"]?.jsonPrimitive?.contentOrNull,
             activeSpeaker = o["activeSpeaker"]?.jsonPrimitive?.contentOrNull,
@@ -5323,6 +5387,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             missionId = data["missionId"]?.jsonPrimitive?.contentOrNull,
             author = author,
             at = at,
+            connectionId = data["connectionId"]?.jsonPrimitive?.contentOrNull,
         )
 
     // 持久化 author 为 "名字 (来源)"，live 项用房内成员名，两者视为同一作者
@@ -5720,6 +5785,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         o["archived"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         o["stoppable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
                         backendType = o["backendType"]?.jsonPrimitive?.content,
+                        caps = parseSessionCaps(o["caps"]),
                     )
                 )
                 parseReportedQuota(o["quota"])?.let { memberQuotas[o["sessionId"]!!.jsonPrimitive.content] = it }
@@ -7099,7 +7165,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         chatItems[idx] = (chatItems[idx] as ChatItem.Assistant).copy(usage = usage)
                     }
                 }
-                if (sessions.firstOrNull { it.sessionId == sid }?.let { it.backendType ?: it.agent } == "devin") {
+                val turnConn = roomMemberConns[sid] ?: currentRoom?.memberConns?.get(sid)
+                    ?: currentSession?.takeIf { it.sessionId == sid }?.connectionId
+                if (sessionFor(sessions, sid, turnConn)?.let { quotaCapable(it.caps, it.backendType ?: it.agent) } == true) {
                     refreshBackendQuota()
                 }
                 // 本回合任一条 assistant 含 mission 块即算产出——双界桩界定（live 序号 +

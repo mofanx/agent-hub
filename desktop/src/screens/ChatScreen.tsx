@@ -229,9 +229,17 @@ export function ChatScreen() {
   const activeSessionId = store.currentRoom?.activeSpeaker || store.currentSession?.sessionId || "";
   const contextUsage = activeSessionId ? store.sessionUsage[activeSessionId] : undefined;
   const quota = store.backendQuota;
+  // caps 渲染契约：quota 优先读 caps.quota，caps/字段缺失回退旧 backendType=="devin" 判定；
+  // 同 sessionId 跨连接碰撞时 connectionId 双键归属，connId 未知回退首个 sessionId 匹配
+  const quotaCapableOf = (sid?: string, typeFallback?: string, connId?: string) =>
+    store.sessions.find((s) => s.sessionId === sid && (!connId || !s.connectionId || s.connectionId === connId))?.caps?.quota ?? (typeFallback === "devin");
   const hasDevinMember = store.currentRoom
-    ? store.currentRoom.members.some(([sid]) => (store.roomMemberModels[sid]?.backendType ?? store.roomMemberModels[sid]?.backend) === "devin")
-    : (store.currentSession?.backendType ?? store.currentSession?.agent) === "devin";
+    ? store.currentRoom.members.some(([sid]) => quotaCapableOf(
+        sid,
+        store.roomMemberModels[sid]?.backendType ?? store.roomMemberModels[sid]?.backend,
+        store.roomMemberModels[sid]?.connectionId ?? store.currentRoom?.memberConns?.[sid],
+      ))
+    : (store.currentSession?.caps?.quota ?? ((store.currentSession?.backendType ?? store.currentSession?.agent) === "devin"));
   const remoteQuota = Object.values(store.memberQuotas ?? {}).find((q) => q?.available);
   const effQuota = remoteQuota ?? quota;
   const quotaParts = effQuota?.available
@@ -2261,6 +2269,10 @@ function ProcessCard({
   const [items, setItems] = useState<ChatItem[] | null>(null);
   const isDispatch = item.dispatchCount !== undefined;
   const running = item.status === "running";
+  // caps 渲染契约：toolCall 显式 false → 诚实空态；undefined/缺失 → 维持原加载路径；
+  // 同 sessionId 跨连接碰撞时 connectionId 双键归属，connId 未知回退首个 sessionId 匹配
+  const toolCallUnsupported = store.sessions.find((s) =>
+    s.sessionId === item.sessionId && (!item.connectionId || !s.connectionId || s.connectionId === item.connectionId))?.caps?.toolCall === false;
   const label = isDispatch
     ? S.dispatchCardFmt.replace("%s", String(item.dispatchCount))
     : S.processCardFmt.replace("%s", formatAuthor(item.author || "?", S)).replace("%s", String(item.steps));
@@ -2268,7 +2280,7 @@ function ProcessCard({
   const toggle = async () => {
     const next = !expanded;
     setExpanded(next);
-    if (!next || isDispatch || items !== null || loading) return;
+    if (!next || isDispatch || items !== null || loading || toolCallUnsupported) return;
     setLoading(true);
     setItems(
       await store.fetchProcessItems(item.sessionId, {
@@ -2314,6 +2326,8 @@ function ProcessCard({
                 <div className="process-step-line">{S.processUnavailable}</div>
               )}
             </div>
+          ) : toolCallUnsupported ? (
+            <div className="process-step-line">{S.processToolCallUnsupported}</div>
           ) : loading ? (
             <div className="process-step-line">{S.processLoading}</div>
           ) : items === null ? (
@@ -4235,10 +4249,16 @@ function ModelPicker() {
         )}
         {(() => {
           const q = store.backendQuota;
+          const pickerConn = isRoom
+            ? (memberModels[selectedMember ?? ""]?.connectionId ?? store.currentRoom?.memberConns?.[selectedMember ?? ""])
+            : undefined;
+          const pickerCaps = isRoom
+            ? store.sessions.find((s) => s.sessionId === selectedMember && (!pickerConn || !s.connectionId || s.connectionId === pickerConn))?.caps
+            : store.currentSession?.caps;
           const pickerBackend = isRoom
             ? (memberModels[selectedMember ?? ""]?.backendType ?? memberModels[selectedMember ?? ""]?.backend)
             : (store.currentSession?.backendType ?? store.currentSession?.agent);
-          if (pickerBackend !== "devin" || !q?.available) return null;
+          if (!(pickerCaps?.quota ?? (pickerBackend === "devin")) || !q?.available) return null;
           const windows = [
             [S.quotaToday, q.daily],
             [S.quotaWeek, q.weekly],

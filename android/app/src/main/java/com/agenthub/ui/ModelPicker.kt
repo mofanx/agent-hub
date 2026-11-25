@@ -51,6 +51,8 @@ import androidx.compose.ui.window.Dialog
 import com.agenthub.ChatViewModel
 import com.agenthub.ModelInfo
 import com.agenthub.QuotaWindow
+import com.agenthub.quotaCapable
+import com.agenthub.sessionCapsFor
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -117,7 +119,10 @@ fun ModelPickerDialog(vm: ChatViewModel, onDismiss: () -> Unit = { vm.showModelP
 
     val pickerBackend = if (isRoom) memberModels[selectedMember]?.second else vm.currentSession?.agent
     val quota = vm.backendQuota
-    val showQuota = pickerBackend == "devin" && quota?.available == true
+    // caps 渲染契约：quota 优先读 caps.quota，caps/字段缺失回退旧 type=="devin" 判定
+    val pickerCaps = if (isRoom) sessionCapsFor(vm.sessions, selectedMember ?: "", vm.roomMemberConns[selectedMember] ?: vm.currentRoom?.memberConns?.get(selectedMember)) else vm.currentSession?.caps
+    val pickerType = if (isRoom) vm.roomMemberTypes[selectedMember] ?: pickerBackend else vm.currentSession?.backendType ?: pickerBackend
+    val showQuota = quotaCapable(pickerCaps, pickerType) && quota?.available == true
     val configTargetSid = if (isRoom) selectedMember else vm.currentSession?.sessionId
     val hasConfig = configTargetSid != null && vm.sessionConfigOptions.isNotEmpty()
     val activeFilters = (if (isRoom) 0 else selectedBackends.size) +
