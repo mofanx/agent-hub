@@ -7672,6 +7672,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 i++
             }
         }
+        // LazyColumn key 去重兜底：merge 漏网使同 id 条目并存时保留先出现者——
+        // 重复 key 会让 LazyColumn 静默错渲染（槽位存在但零高度空白，旧条目间歇中招）
+        val seen = HashSet<String>()
+        result.retainAll { seen.add(it.id) }
         return result
     }
 
