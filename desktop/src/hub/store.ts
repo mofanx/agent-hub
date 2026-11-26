@@ -15,6 +15,7 @@ import type {
   EventInfo,
   FlowArtifact,
   FlowCardSnapshot,
+  MissionCardSnapshot,
   FlowInfo,
   ModelInfo,
   ModelBackend,
@@ -682,6 +683,33 @@ export const useHubStore = create<State & Actions>((set, get) => {
         const snapshot = { ...m, flowId, tasks } as unknown as FlowCardSnapshot;
         return { kind: "flow", at, historyId, author, flowId, snapshot };
       }
+      case "mission": {
+        // 工单锚卡：text 为轻快照 JSON（goal/status/criteria verdict 汇总）
+        let m: Record<string, unknown> = {};
+        try { m = JSON.parse(text) as Record<string, unknown>; } catch { /* keep */ }
+        const missionId = String(m.missionId ?? "");
+        if (!missionId) return null;
+        const criteria = Array.isArray(m.criteria)
+          ? m.criteria.map((c) => {
+              const o = (c ?? {}) as Record<string, unknown>;
+              return {
+                index: typeof o.index === "number" ? o.index : 0,
+                text: String(o.text ?? ""),
+                verdict: String(o.verdict ?? "unverified"),
+                ...(typeof o.note === "string" && o.note ? { note: o.note } : {}),
+              };
+            })
+          : [];
+        const snapshot = {
+          v: 1,
+          missionId,
+          goal: String(m.goal ?? ""),
+          status: String(m.status ?? "draft"),
+          ...(typeof m.reasonCode === "string" ? { reasonCode: m.reasonCode } : {}),
+          criteria,
+        } satisfies MissionCardSnapshot;
+        return { kind: "mission", at, historyId, author, missionId, snapshot };
+      }
       default:
         return null;
     }
@@ -750,6 +778,8 @@ export const useHubStore = create<State & Actions>((set, get) => {
         return `plan|${it.author}|${it.entries.join("\n")}`;
       case "flow":
         return `flow|${it.flowId}`;
+      case "mission":
+        return `mission|${it.missionId}`;
       case "assistant":
       case "thought":
         return `${it.kind}|id:${it.id}`;
@@ -1470,14 +1500,16 @@ export const useHubStore = create<State & Actions>((set, get) => {
         if (!room || room.roomId !== roomId) break;
         // Hub 广播 {roomId, entry:{id,at,kind,author,text}}，meta JSON 在 entry.text
         const item = entryToChatItem((params.entry ?? params) as Record<string, unknown>);
-        if (!item || (item.kind !== "process" && item.kind !== "flow")) break;
+        if (!item || (item.kind !== "process" && item.kind !== "flow" && item.kind !== "mission")) break;
         const items = [...scopeItems("room", roomId)];
         const idx =
           item.kind === "process" && item.processId
             ? items.findIndex((it) => it.kind === "process" && it.processId === item.processId)
             : item.kind === "flow"
               ? items.findIndex((it) => it.kind === "flow" && it.flowId === item.flowId)
-              : -1;
+              : item.kind === "mission"
+                ? items.findIndex((it) => it.kind === "mission" && it.missionId === item.missionId)
+                : -1;
         if (idx >= 0) items[idx] = {
           ...item, at: items[idx]!.historyId == null ? item.at : items[idx]!.at ?? item.at,
         };

@@ -727,6 +727,12 @@ export interface Strings {
   missionReworkNote: string;
   missionSupplement: string;
   missionSupplementHint: string;
+  missionAnchorProgress: string;
+  more: string;
+  missionNoteOptional: string;
+  missionReworkChipWrong: string;
+  missionReworkChipMissing: string;
+  missionReworkChipOfftrack: string;
   missionEditContract: string;
   missionNotProvided: string;
   missionSelfReport: string;
@@ -1494,6 +1500,12 @@ const zh: Strings = {
   missionReworkNote: "返工原因（必填）",
   missionSupplement: "补充说明",
   missionSupplementHint: "补充已记录，当前在途执行不保证采纳；需要时停止后返工。",
+  missionAnchorProgress: "%d/%d 已验",
+  more: "更多",
+  missionNoteOptional: "附言（可选）",
+  missionReworkChipWrong: "结果不对",
+  missionReworkChipMissing: "缺验证",
+  missionReworkChipOfftrack: "方向偏",
   missionEditContract: "编辑契约",
   missionNotProvided: "未提供",
   missionSelfReport: "成员自报",
@@ -2261,6 +2273,12 @@ const en: Strings = {
   missionReworkNote: "Rework reason (required)",
   missionSupplement: "Add supplement",
   missionSupplementHint: "Supplement recorded; in-flight execution is not guaranteed to adopt it — stop and rework if needed.",
+  missionAnchorProgress: "%d/%d verified",
+  more: "More",
+  missionNoteOptional: "Note (optional)",
+  missionReworkChipWrong: "Wrong result",
+  missionReworkChipMissing: "Missing evidence",
+  missionReworkChipOfftrack: "Off track",
   missionEditContract: "Edit contract",
   missionNotProvided: "Not provided",
   missionSelfReport: "Self-reported",

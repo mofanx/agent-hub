@@ -498,7 +498,25 @@ export type ChatItem =
       historyId?: number;
       meta: DecisionMeta;
       author: string;
+    }
+  | {
+      kind: "mission";
+      at?: number;
+      historyId?: number;
+      missionId: string;
+      snapshot: MissionCardSnapshot;
+      author: string;
     };
+
+/** 工单锚卡（kind:"mission" 房史条目的 text JSON）：轻快照，活态按 missionId join missions */
+export type MissionCardSnapshot = {
+  v: number;
+  missionId: string;
+  goal: string;
+  status: string;
+  reasonCode?: string;
+  criteria: { index: number; text: string; verdict: string; note?: string }[];
+};
 
 /** 决策卡（kind:"decision" 房史条目的 text JSON）：permission/elicitation 统一审批 */
 export type DecisionMeta = {

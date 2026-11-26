@@ -36,7 +36,7 @@ import {
 } from "lucide-react";
 import { useHubStore, isLiveRoomControl } from "../hub/store";
 import { OutboxPanel } from "../components/OutboxPanel";
-import { stringsFor, toolStatusLabel, planEntryLabel, flowMessageHint, type Strings } from "../hub/strings";
+import { stringsFor, toolStatusLabel, planEntryLabel, flowMessageHint, missionStatusLabel, type Strings } from "../hub/strings";
 import type { ArtifactInfo, BlackboardInfo, ChatItem, DecisionMeta, ElicitationField, ElicitationValue, EventInfo, FileTreeNode, FileTreeRoot, FlowArtifact, FlowTask, TokenUsage, ContextUsage, ModelInfo } from "../hub/types";
 import { FileTreePanel } from "./FileTreePanel";
 import { renderMarkdown } from "../hub/markdown";
@@ -2199,6 +2199,9 @@ const ChatMessage = memo(function ChatMessage({
     case "flow":
       return <FlowCard item={item} currentMatchClass={currentMatchClass} />;
 
+    case "mission":
+      return <MissionCard item={item} />;
+
     default:
       return null;
   }
@@ -2208,6 +2211,7 @@ const ChatMessage = memo(function ChatMessage({
 const itemKey = (it: ChatItem, i: number): string => {
   const rec = it as { kind?: string; flowId?: string; processId?: string; historyId?: number; id?: number };
   if (rec.kind === "flow" && rec.flowId) return `flow:${rec.flowId}`;
+  if ((rec as { missionId?: string }).missionId && rec.kind === "mission") return `mission:${(rec as { missionId?: string }).missionId}`;
   if (rec.kind === "process" && rec.processId) return `process:${rec.processId}`;
   if (rec.historyId != null) return `h${rec.historyId}`;
   return rec.id ? `k${rec.id}` : `x${i}`;
@@ -2833,6 +2837,158 @@ function DecisionCard({ meta }: { meta: DecisionMeta }) {
               {S.decisionRevoke}
             </button>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 房史工单锚卡（kind:"mission" 条目）：活态按 missionId join store.missions，内嵌快照兜底。
+ *  折叠默认：status+goal+「N/M 已验·成员自报」；验收=一次点击（附言可选），返工=chips+必填说明。 */
+function MissionCard({ item }: { item: ChatItem & { kind: "mission" } }) {
+  const store = useHubStore();
+  const S = stringsFor(store.lang);
+  const live = store.missions.find((m) => m.id === item.missionId);
+  const status = live?.status ?? item.snapshot.status;
+  const goal = live?.goal || item.snapshot.goal;
+  const criteria = live
+    ? live.acceptanceCriteria.map((text, i) => {
+        const rv = live.reviews.find((r) => r.index === i);
+        return { index: i, text, verdict: rv?.verdict ?? "unverified", note: rv?.note ?? "" };
+      })
+    : item.snapshot.criteria.map((c) => ({ ...c, note: c.note ?? "" }));
+  const passed = criteria.filter((c) => c.verdict === "pass").length;
+  const [expanded, setExpanded] = useState(false);
+  const [showNote, setShowNote] = useState(false);
+  const [note, setNote] = useState("");
+  const [showRework, setShowRework] = useState(false);
+  const [reworkNote, setReworkNote] = useState("");
+  const [showMore, setShowMore] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const canAct = live != null;
+  const run = async (f: () => Promise<unknown>) => {
+    setBusy(true);
+    try { await f(); } finally { setBusy(false); }
+  };
+  const verdictLabel = (v: string) =>
+    v === "pass" ? S.missionReviewPass : v === "fail" ? S.missionReviewFail : S.missionReviewUnverified;
+  return (
+    <div className={`decision-card mission-card`} data-mission-id={item.missionId}>
+      <div className="decision-head">
+        <span className="decision-type">{S.missionSection}</span>
+        <span className="decision-title">{missionStatusLabel(S, status)}</span>
+      </div>
+      <div className="decision-context">{goal}</div>
+      {criteria.length > 0 && (
+        <div className="decision-scope">
+          <button className="secondary tiny" onClick={() => setExpanded((v) => !v)}>
+            {S.missionAnchorProgress.replace("%d", String(passed)).replace("%d", String(criteria.length))} · {S.missionSelfReport}
+          </button>
+          {expanded && (
+            <div className="decision-context">
+              {criteria.map((c) => (
+                <div key={c.index}>
+                  {c.index + 1}. {c.text} — {verdictLabel(c.verdict)}{c.note ? ` · ${c.note}` : ""}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="decision-options">
+        {status === "awaiting-acceptance" && (
+          <>
+            <button
+              className="primary tiny"
+              disabled={!canAct || busy}
+              onClick={() => void run(() => store.acceptMission(item.missionId, note.trim()))}
+            >
+              {S.missionAccept}
+            </button>
+            <button className="secondary tiny" disabled={!canAct} onClick={() => setShowRework((v) => !v)}>
+              {S.missionRework}
+            </button>
+          </>
+        )}
+        {status === "draft" && (
+          <button
+            className="primary tiny"
+            disabled={!canAct || busy}
+            onClick={() => { if (confirm(`${S.missionStartConfirm}\n\n${goal}\n${S.missionRiskNotice}`)) void run(() => store.startMission(item.missionId)); }}
+          >
+            {S.missionStart}
+          </button>
+        )}
+        <button className="secondary tiny" onClick={() => setShowMore((v) => !v)}>{S.more}</button>
+        {status === "awaiting-acceptance" && !showNote && (
+          <button className="secondary tiny" onClick={() => setShowNote(true)}>{S.missionNoteOptional}</button>
+        )}
+      </div>
+      {status === "awaiting-acceptance" && showNote && (
+        <input
+          className="decision-note"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder={S.missionNoteOptional}
+        />
+      )}
+      {showMore && (
+        <div className="decision-options">
+          {(status === "running" || status === "waiting-user" || status === "awaiting-acceptance" || live?.flowId != null) && (
+            <button className="secondary tiny" disabled={!canAct} onClick={() => void store.openMissionExecution(item.missionId)}>
+              {S.missionViewRoom}
+            </button>
+          )}
+          <button className="secondary tiny" disabled={!canAct} onClick={() => store.openMission(item.missionId)}>
+            {S.missionSchedule}
+          </button>
+          {(status === "awaiting-acceptance" || status === "failed" || status === "stopped") && (
+            <button className="secondary tiny" disabled={!canAct} onClick={() => setShowRework(true)}>
+              {S.missionRework}
+            </button>
+          )}
+          {(status === "running" || status === "waiting-user" || status === "awaiting-acceptance") && (
+            <button className="secondary tiny" disabled={!canAct || busy} onClick={() => { if (confirm(S.missionStopConfirm)) void run(() => store.stopMission(item.missionId)); }}>
+              {S.missionStop}
+            </button>
+          )}
+          <button
+            className="secondary tiny"
+            disabled={!canAct || busy}
+            onClick={() => {
+              if (status === "awaiting-acceptance") { alert(S.missionDeleteBlocked); return; }
+              const active = status === "running" || status === "waiting-user";
+              if (confirm(`${S.missionDeleteConfirm}${active ? `\n${S.missionDeleteActiveHint}` : ""}`))
+                void run(() => store.deleteMission(item.missionId, active));
+            }}
+          >
+            {S.missionDelete}
+          </button>
+        </div>
+      )}
+      {showRework && (
+        <div className="decision-context">
+          <div className="decision-options">
+            {[S.missionReworkChipWrong, S.missionReworkChipMissing, S.missionReworkChipOfftrack].map((chip) => (
+              <button key={chip} className="secondary tiny" onClick={() => setReworkNote(chip)}>{chip}</button>
+            ))}
+          </div>
+          <input
+            className="decision-note"
+            value={reworkNote}
+            onChange={(e) => setReworkNote(e.target.value)}
+            placeholder={S.missionReworkNote}
+          />
+          <button
+            className="secondary tiny"
+            disabled={!reworkNote.trim() || !canAct || busy}
+            onClick={() => void run(async () => {
+              const ok = await store.reworkMission(item.missionId, reworkNote.trim());
+              if (ok) { setShowRework(false); setReworkNote(""); }
+            })}
+          >
+            {S.missionRework}
+          </button>
         </div>
       )}
     </div>
