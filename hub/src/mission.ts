@@ -129,6 +129,8 @@ type MissionRecord = Omit<Mission, "flow"> & {
   turnErrors: { sid: string; message: string }[];
   lastPhase: string;
   lastFlowSig: string;
+  /** 消息内联锚卡：kind:"mission" 房史条目 rowId（原位覆写定位） */
+  anchorRowId?: number | undefined;
 };
 
 export type MissionDeps = {
@@ -370,6 +372,7 @@ function validateRecord(raw: unknown): MissionRecord {
   if (m.sourceId !== undefined) inner.sourceId = missionSourceId(m.sourceId);
   if (str(m.baselineFlowId) !== undefined) inner.baselineFlowId = str(m.baselineFlowId);
   if (str(m.reasonCode) !== undefined) inner.reasonCode = str(m.reasonCode);
+  if (num(m.anchorRowId) !== undefined) inner.anchorRowId = num(m.anchorRowId);
   if (m.execution !== undefined) {
     const e = m.execution as MissionExecution;
     if (!e || typeof e.id !== "string" || !e.id || typeof e.sessionId !== "string" || !e.sessionId ||
@@ -595,10 +598,67 @@ export class MissionManager {
   private commit(m: MissionRecord): MissionSnapshot {
     m.revision += 1;
     m.updatedAt = Date.now();
+    this.syncAnchor(m);
     this.persist();
     const snap = snapshot(m);
     this.deps.broadcast("mission.update", { mission: snap });
     return snap;
+  }
+
+  /** 锚卡快照序列化签名：同内容跳过重写+重播（hash 脏检查同 flow-card） */
+  private anchorSigs = new Map<string, string>();
+
+  /** 消息内联锚卡：create/promote/任意状态变更在 commit 内收敛——
+   *  无锚条目（新建/条目被清理）→ append kind:"mission"；有锚 → updateEntry 原位覆写
+   *  + room.process 信封重播。负载为轻快照：goal/status/reasonCode/criteria verdict 汇总，
+   *  客户端按 missionId join 活态渲染，旧端遇未知 kind 自然 drop。 */
+  private syncAnchor(m: MissionRecord): void {
+    // 测试/裁剪宿主可能只提供部分 store——缺能力时跳过锚同步，工单本体不受影响
+    if (
+      typeof this.deps.store.append !== "function" ||
+      typeof this.deps.store.updateEntry !== "function" ||
+      typeof this.deps.store.entryAt !== "function"
+    ) return;
+    const text = JSON.stringify({
+      v: 1,
+      missionId: m.id,
+      goal: m.goal,
+      status: m.status,
+      ...(m.reasonCode ? { reasonCode: m.reasonCode } : {}),
+      criteria: m.acceptanceCriteria.map((c, index) => {
+        const rv = m.reviews.find((r) => r.index === index);
+        return {
+          index,
+          text: c,
+          verdict: rv?.verdict ?? "unverified",
+          ...(rv?.note ? { note: rv.note } : {}),
+        };
+      }),
+    });
+    if (this.anchorSigs.get(m.id) === text) return;
+    const emit = (rowId: number, at: number): void =>
+      this.deps.broadcast("room.process", {
+        roomId: m.roomId,
+        entry: { id: rowId, at, kind: "mission", author: "", text, missionId: m.id },
+      });
+    const storedAt = m.anchorRowId !== undefined ? this.deps.store.entryAt(m.anchorRowId) : undefined;
+    if (m.anchorRowId !== undefined && storedAt !== undefined) {
+      this.deps.store.updateEntry(m.anchorRowId, text);
+      this.anchorSigs.set(m.id, text);
+      emit(m.anchorRowId, storedAt);
+      return;
+    }
+    const rowId = this.deps.store.append("room", m.roomId, {
+      at: Date.now(),
+      kind: "mission",
+      author: "",
+      text,
+      missionId: m.id,
+    });
+    if (rowId < 0) return;
+    m.anchorRowId = rowId;
+    this.anchorSigs.set(m.id, text);
+    emit(rowId, this.deps.store.entryAt(rowId) ?? Date.now());
   }
 
   private activeFor(roomId: string): MissionRecord | undefined {

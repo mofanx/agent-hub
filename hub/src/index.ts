@@ -1061,11 +1061,12 @@ const wakeSelfSuppress = new Map<string, number>();
 /** ntfy 触达兜底：仅客户端全部离线时推（有客户端时走 WS 已可达）。
  *  正文只含房名+事件类型；NTFY_TOPIC 未配置时恒不推。 */
 const ntfyPusher = new NtfyPusher(ntfyConfigFromEnv());
-function notifyOffline(roomId: string | undefined, kind: NtfyKind, detail?: string): void {
+function notifyOffline(roomId: string | undefined, kind: NtfyKind, detail?: string, missionId?: string): void {
   if (restoringRuntime || !roomId) return;
   const room = rooms.get(roomId);
   void ntfyPusher
-    .notifyIfOffline(roomId, room?.name ?? roomId, kind, clients.size, detail)
+    .notifyIfOffline(roomId, room?.name ?? roomId, kind, clients.size, detail,
+      missionId ? `&missionId=${encodeURIComponent(missionId)}` : undefined)
     .catch((e) => logError(`ntfy ${kind}`, e));
 }
 
@@ -1098,7 +1099,7 @@ function pushMissionAttention(m: { id?: string; roomId?: string; status?: string
   const sig = `${String(m.status)}:${m.reasonCode ?? ""}`;
   if (m.id && lastMissionAttention.get(m.id) === sig) return;
   if (m.id) lastMissionAttention.set(m.id, sig);
-  if (m.roomId) notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode));
+  if (m.roomId) notifyOffline(m.roomId, "attention", reasonLabel(m.reasonCode), m.id);
 }
 
 function scheduleAaReminder(id: string, roomId: string): void {
@@ -1106,7 +1107,7 @@ function scheduleAaReminder(id: string, roomId: string): void {
   const t = setTimeout(() => {
     aaReminders.delete(id);
     if (missionManager.get(id)?.status === "awaiting-acceptance")
-      notifyOffline(roomId, "attention", reasonLabel("awaiting-acceptance"));
+      notifyOffline(roomId, "attention", reasonLabel("awaiting-acceptance"), id);
   }, AWAITING_ACCEPTANCE_REMINDER_MS);
   t.unref?.();
   aaReminders.set(id, t);

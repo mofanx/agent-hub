@@ -33,7 +33,7 @@ export type SessionMeta = {
 
 export type HistoryEntry = {
   at: number;
-  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow" | "decision";
+  kind: "user" | "assistant" | "system" | "thought" | "tool" | "plan" | "error" | "process" | "flow" | "decision" | "mission";
   author: string;
   text: string;
   clientMessageId?: string | undefined;

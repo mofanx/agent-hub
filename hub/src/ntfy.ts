@@ -65,6 +65,7 @@ export class NtfyPusher {
     kind: NtfyKind,
     clientCount: number,
     detail?: string,
+    clickQuery?: string,
   ): Promise<boolean> {
     if (!this.config.enabled || clientCount > 0) return false;
     if (!this.limiter.admit(roomId, this.config.maxPerHour)) return false;
@@ -76,7 +77,7 @@ export class NtfyPusher {
           Title: `[agent-hub] ${label}`,
           Priority: "4",
           Tags: kind === "attention" ? "bell" : "white_check_mark",
-          Click: `agenthub://attention?roomId=${encodeURIComponent(roomId)}`,
+          Click: `agenthub://attention?roomId=${encodeURIComponent(roomId)}${clickQuery ?? ""}`,
           ...(this.config.token
             ? { Authorization: `Bearer ${this.config.token}` }
             : {}),

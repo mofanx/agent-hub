@@ -625,6 +625,37 @@ describe("mission", () => {
     assert.equal(snap.baselineFlowId, undefined);
   });
 
+  it("kind:mission 锚卡：create 落条目+信封、commit 原位覆写重播", async () => {
+    const h = makeHarness();
+    const m = makeMission(h);
+    const anchors = () =>
+      h.broadcasts.filter(
+        (b) => b.method === "room.process" && (b.params.entry as { kind?: string })?.kind === "mission",
+      );
+    assert.equal(anchors().length, 1, "create 广播一次锚卡信封");
+    const e1 = anchors()[0]!.params.entry as { id: number; at: number; text: string; missionId?: string };
+    assert.equal(e1.missionId, m.id);
+    const meta1 = JSON.parse(e1.text) as {
+      missionId: string; goal: string; status: string; criteria: { verdict: string }[];
+    };
+    assert.equal(meta1.missionId, m.id);
+    assert.equal(meta1.goal, "ship feature X");
+    assert.equal(meta1.status, "draft");
+    assert.deepEqual(meta1.criteria.map((c) => c.verdict), ["unverified", "unverified"]);
+    assert.equal(h.store.entry(e1.id)!.kind, "mission", "落库条目 kind=mission");
+    await h.manager.start(m.id);
+    assert.equal(anchors().length, 2, "状态变更再重播一次");
+    const e2 = anchors().at(-1)!.params.entry as { id: number; at: number; text: string };
+    assert.equal(e2.id, e1.id, "原位覆写：rowId/at 不变");
+    assert.equal(e2.at, e1.at);
+    assert.equal((JSON.parse(e2.text) as { status: string }).status, "running");
+    assert.equal(
+      (JSON.parse(h.store.entry(e1.id)!.text) as { status: string }).status,
+      "running",
+      "落库条目同步覆写",
+    );
+  });
+
   it("syncFlow 不认领他源 flow；仅 missionId 匹配才绑定", async () => {
     const h = makeHarness(undefined, "conductor");
     h.setDispatch(async () => {

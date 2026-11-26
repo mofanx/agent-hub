@@ -388,6 +388,12 @@ internal sealed class ChatItem {
     data class Decision(override val id: Long, val requestId: String, val status: String = "",
         val decisionId: String = "", val decisionType: String = "", val answerLabel: String? = null) : ChatItem()
     data class Elicitation(override val id: Long, val requestId: String, val answered: String? = null) : ChatItem()
+    data class MissionCriterion(val index: Int, val text: String, val verdict: String, val note: String)
+    data class Mission(override val id: Long, val missionId: String, val goal: String, val status: String,
+        val criteria: List<MissionCriterion>, val reasonCode: String? = null,
+        override val author: String = "", override val at: Long = 0) : ChatItem() {
+        override val text: String get() = goal
+    }
 }
 object Base64 {
     const val DEFAULT = 0
