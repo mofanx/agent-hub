@@ -2241,7 +2241,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ———— 多 hub 槽位换绑 ————    // ———— 多 hub 槽位换绑 ————
+    // ———— 多 hub 槽位换绑 ————
     /** 休眠 profile 徽章：attention/waitingFor/在线态摘要，不预渲染时间线 */
     data class HubBadge(var waitingFor: Int = 0, var pendingDecisions: Int = 0, var connected: Boolean = false)
     val hubBadges = mutableStateMapOf<String, HubBadge>()
@@ -4487,7 +4487,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         scopeItems(key) + if (scopeKey() == key && anchorScopeKey == key) chatItems else emptyList()
 
     private fun isActiveChatItem(it: ChatItem, key: String = ""): Boolean = when (it) {
-        is ChatItem.User -> it.sendStatus in setOf("pending", "sending", "uncertain", "failed") ||
+        is ChatItem.User -> it.sendStatus in setOf("pending", "sending", "uncertain", "failed", "undelivered") ||
             (historyIdOf(it) == null && it.clientMessageId != null &&
                 deliveryRecords.none { r -> r.clientMessageId == it.clientMessageId && r.scopeKey == key })
         is ChatItem.Flow -> it.snapshot.phase !in setOf("done", "cancelled")
@@ -4557,7 +4557,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val items = scopeItems(record.scopeKey).toMutableList()
         val index = items.indexOfFirst { it is ChatItem.User && it.clientMessageId == record.clientMessageId }
         val previous = items.getOrNull(index) as? ChatItem.User
-        val status = if (record.status == "pending" && record.deferred) "deferred" else record.status
+        val status = if (record.status == "pending" && record.deferred) "undelivered" else record.status
         val bubble = previous?.copy(
             historyId = record.historyId ?: previous.historyId,
             sendStatus = status,

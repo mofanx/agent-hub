@@ -337,13 +337,13 @@ internal class DeliveryOutbox(
                 val resentKeys = mutableSetOf<String>()
                 while (current(gen, o, h)) {
                     val first = mutex.withLock { head(o, h, scopeKey, skipped) } ?: break
+                    val bk = "$key|${first.clientMessageId}"
+                    val wait = (retryAt[bk] ?: 0L) - now()
+                    if (wait > 0) {
+                        scheduleRetry(scopeKey, wait)
+                        skipped.add(first.clientMessageId); continue
+                    }
                     if (first.status in setOf("uncertain", "sending")) {
-                        val bk = "$key|${first.clientMessageId}"
-                        val wait = (retryAt[bk] ?: 0L) - now()
-                        if (wait > 0) {
-                            scheduleRetry(scopeKey, wait)
-                            skipped.add(first.clientMessageId); continue
-                        }
                         val outcome = if (first.clientMessageId in resentKeys) QueryOutcome.RETRY
                             else statusQuery(first, gen, o, h)
                         when (outcome) {
@@ -571,7 +571,12 @@ internal class DeliveryOutbox(
             val removed = hits.map { it.clientMessageId }.toSet()
             val scopes = hits.map { it.scopeKey }.toSet()
             if (!persist(records_.filter { !removed.contains(it.clientMessageId) })) return@l false
-            hits.forEach { onRecord(it.copy(status = "dismissed")) }
+            hits.forEach {
+                val bk = "${wkey(it.scopeKey)}|${it.clientMessageId}"
+                retryAt.remove(bk)
+                retryStep.remove(bk)
+                onRecord(it.copy(status = "dismissed"))
+            }
             scopes.forEach { drain(it) }
             true
         }

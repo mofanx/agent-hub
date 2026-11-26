@@ -1108,7 +1108,7 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
                             Text(
                                 S.deliveryLabels[item.sendStatus].orEmpty(),
                                 Modifier.fillMaxWidth().clickable { vm.showDeliveryManager = true }.padding(horizontal = 16.dp, vertical = 2.dp),
-                                color = if (item.sendStatus in setOf("failed", "uncertain")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (item.sendStatus in setOf("failed", "uncertain", "undelivered")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.labelSmall,
                             )
                         }
@@ -1366,7 +1366,8 @@ pendingClarification?.let { clarFlow ->
                 )
             }
             val outboxPending = vm.deliveryRecords.count {
-                vm.currentDelivery(it) && it.status in setOf("pending", "uncertain", "failed")
+                vm.currentDelivery(it) && (it.status in setOf("uncertain", "failed") ||
+                    (it.status == "pending" && it.deferred))
             }
             if (outboxPending > 0) {
                 Text(

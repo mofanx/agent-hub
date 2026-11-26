@@ -872,7 +872,7 @@ object ZhStrings : Strings {
     override val ntfyOpenApp = "打开订阅页"
     override val deliveryAttachmentFmt = "\n附件：%s\n%s"
     override val deliveryLabels = mapOf(
-        "title" to "消息送达状态", "pending" to "待发送", "deferred" to "等待恢复并校准上下文",
+        "title" to "消息送达状态", "pending" to "待发送",
         "sending" to "发送中", "sent" to "已送达", "uncertain" to "未送达，点重试",
         "failed" to "未送达，点重试", "dismissed" to "已移除，不再发送", "preparing" to "正在准备发送",
         "undelivered" to "未送达，点重试", "retrySend" to "重试", "abandon" to "放弃",
@@ -1608,7 +1608,7 @@ object EnStrings : Strings {
     override val ntfyOpenApp = "Open subscribe page"
     override val deliveryAttachmentFmt = "\nAttachment: %s\n%s"
     override val deliveryLabels = mapOf(
-        "title" to "Delivery status", "pending" to "Pending", "deferred" to "Waiting for recovery and context validation",
+        "title" to "Delivery status", "pending" to "Pending",
         "sending" to "Sending", "sent" to "Delivered", "uncertain" to "Undelivered — tap to retry",
         "failed" to "Undelivered — tap to retry", "dismissed" to "Removed; will not send", "preparing" to "Preparing message",
         "undelivered" to "Undelivered — tap to retry", "retrySend" to "Retry", "abandon" to "Discard",

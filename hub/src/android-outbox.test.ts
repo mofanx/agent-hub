@@ -731,7 +731,8 @@ fun main() = runBlocking {
         check(e.calls.isEmpty())
         check(e.box.dismiss("a"))
         check(e.box.records.single().status == "pending" && e.calls.isEmpty())
-        e.validator = { null }; e.box.resume(); until { e.box.records.isEmpty() }
+        // busy 退避闸生效：推进域时钟过窗后 resume 才能重验放行
+        e.validator = { null }; e.clock += 3_000; e.box.resume(); until { e.box.records.isEmpty() }
         check(e.sends().map { cid(it.second) } == listOf("b"))
     }
     scenario("codec") {
