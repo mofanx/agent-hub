@@ -75,9 +75,12 @@ internal class DeliveryOutbox(
     private var maxAgeMs_ = 24L * 3600_000
     private var records_: List<DeliveryRecord> = emptyList()
     private val workers = mutableMapOf<String, Job>()
-    private val statusQueried = mutableSetOf<String>()
-    private val manualChecks = mutableSetOf<String>()
     private val wakeups = mutableSetOf<String>()
+    private val retryAt = mutableMapOf<String, Long>()
+    private val retryStep = mutableMapOf<String, Int>()
+    private val retryJobs = mutableMapOf<String, Job>()
+    private val retryJobAt = mutableMapOf<String, Long>()
+    private val backoffDelays = longArrayOf(2_000, 5_000, 15_000, 60_000)
 
     val records: List<DeliveryRecord> get() = records_
     var error: String? = null
@@ -234,10 +237,11 @@ internal class DeliveryOutbox(
     private fun current(gen: Int, o: String?, h: String?): Boolean =
         gen == epoch && ready_ && scope.isActive && o == origin_ && h == hubId_
 
-    private fun head(o: String?, h: String?, scopeKey: String): DeliveryRecord? =
+    private fun head(o: String?, h: String?, scopeKey: String, skip: Set<String> = emptySet()): DeliveryRecord? =
         records_.firstOrNull {
             it.origin == o && it.hubId == h && it.scopeKey == scopeKey &&
-                it.status != "sent" && it.status != "dismissed"
+                it.status !in setOf("sent", "dismissed", "failed") &&
+                it.clientMessageId !in skip
         }
 
     private fun replace(record: DeliveryRecord) =
@@ -267,8 +271,11 @@ internal class DeliveryOutbox(
         workers.values.forEach { it.cancel() }
         workers.clear()
         wakeups.clear()
-        statusQueried.clear()
-        manualChecks.clear()
+        retryJobs.values.forEach { it.cancel() }
+        retryJobs.clear()
+        retryJobAt.clear()
+        retryAt.clear()
+        retryStep.clear()
         return CoroutineScope(scope.coroutineContext.minusKey(Job)).launch {
             mutex.withLock {
                 val before = records_
@@ -300,6 +307,21 @@ internal class DeliveryOutbox(
 
     private fun wkey(scopeKey: String) = identityKey(origin_, hubId_, scopeKey)
 
+    private fun scheduleRetry(scopeKey: String, delayMs: Long) {
+        if (!ready_ || !scope.isActive) return
+        val key = wkey(scopeKey)
+        val at = now() + delayMs
+        retryJobAt[key]?.let { if (it <= at) return else retryJobs.remove(key)?.cancel() }
+        retryJobAt[key] = at
+        retryJobs[key] = scope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            if (retryJobs.remove(key) != null) {
+                retryJobAt.remove(key)
+                drain(scopeKey)
+            }
+        }
+    }
+
     private fun drain(scopeKey: String) {
         if (!ready_ || !scope.isActive) return
         val key = wkey(scopeKey)
@@ -309,49 +331,85 @@ internal class DeliveryOutbox(
         val job = scope.launch(start = CoroutineStart.LAZY) {
             var inFlight: DeliveryRecord? = null
             try {
+                // skipped：本轮已退避/过龄的记录，放行后续 pending，防止头阻死锁
+                val skipped = mutableSetOf<String>()
+                // resentKeys：本轮已按 not_found 重发过的记录，仍 uncertain 则退避而非紧查询
+                val resentKeys = mutableSetOf<String>()
                 while (current(gen, o, h)) {
-                    val first = mutex.withLock { head(o, h, scopeKey) } ?: break
-                    val manual = manualChecks.remove(first.clientMessageId)
-                    if (first.status == "failed" && !(manual && first.attempted)) break
-                    if (first.attempted || first.status in setOf("uncertain", "sending")) {
-                        val queryKey = "$gen:${first.clientMessageId}"
-                        if (!manual && queryKey in statusQueried) break
-                        statusQueried.add(queryKey)
-                        if (statusQuery(first, gen, o, h)) continue else break
+                    val first = mutex.withLock { head(o, h, scopeKey, skipped) } ?: break
+                    if (first.status in setOf("uncertain", "sending")) {
+                        val bk = "$key|${first.clientMessageId}"
+                        val wait = (retryAt[bk] ?: 0L) - now()
+                        if (wait > 0) {
+                            scheduleRetry(scopeKey, wait)
+                            skipped.add(first.clientMessageId); continue
+                        }
+                        val outcome = if (first.clientMessageId in resentKeys) QueryOutcome.RETRY
+                            else statusQuery(first, gen, o, h)
+                        when (outcome) {
+                            QueryOutcome.RETRY -> {
+                                // 过龄记录：允许一次状态查询消解，但不再续退避，留给用户一键决定
+                                if (now() - first.createdAt <= maxAgeMs_) {
+                                    val step = retryStep[bk] ?: 0
+                                    retryStep[bk] = step + 1
+                                    val delay = backoffDelays[minOf(step, backoffDelays.size - 1)]
+                                    retryAt[bk] = now() + delay
+                                    scheduleRetry(scopeKey, delay)
+                                }
+                                skipped.add(first.clientMessageId)
+                            }
+                            QueryOutcome.RESEND -> {
+                                resentKeys.add(first.clientMessageId)
+                                retryAt.remove(bk); retryStep.remove(bk)
+                            }
+                            QueryOutcome.SENT -> { retryAt.remove(bk); retryStep.remove(bk) }
+                        }
+                        continue
                     }
-                    if (first.status != "pending") break
+                    if (first.status != "pending") { skipped.add(first.clientMessageId); continue }
                     val age = now() - first.createdAt
                     if (age < 0 || age > maxAgeMs_ || (!first.replayable && first.deferred)) {
                         mutex.withLock {
-                            if (current(gen, o, h) && head(o, h, scopeKey) == first) {
+                            if (current(gen, o, h) && head(o, h, scopeKey, skipped) == first) {
                                 val expired = first.copy(status = "failed",
                                     error = if (!first.replayable && first.deferred) "attachments" else "expired")
                                 if (persist(replace(expired))) onRecord(expired)
                             }
                         }
-                        break
+                        continue
                     }
                     val verdict = try { validate(first) }
                         catch (e: CancellationException) { throw e }
                         catch (_: Exception) { "unavailable" }
-                    var blocked = false
+                    var fatal = false
                     val r = mutex.withLock {
-                        if (!current(gen, o, h) || head(o, h, scopeKey) != first) return@withLock null
+                        if (!current(gen, o, h) || head(o, h, scopeKey, skipped) != first) return@withLock null
                         if (verdict != null) {
-                            blocked = true
                             val updated = if (verdict in setOf("busy", "unavailable"))
                                 first.copy(deferred = true, error = if (verdict == "busy") null else verdict)
                             else first.copy(status = "failed", error = verdict)
-                            if (persist(replace(updated))) onRecord(updated)
+                            if (persist(replace(updated))) onRecord(updated) else fatal = true
                             return@withLock null
                         }
                         val sending = first.copy(status = "sending", attempted = true, error = null)
-                        if (!persist(replace(sending))) { blocked = true; return@withLock null }
+                        if (!persist(replace(sending))) { fatal = true; return@withLock null }
                         inFlight = sending
                         onRecord(sending)
                         sending
                     }
-                    if (r == null) { if (blocked) break else continue }
+                    if (r == null) {
+                        if (fatal) break
+                        if (verdict in setOf("busy", "unavailable")) {
+                            val bk = "$key|${first.clientMessageId}"
+                            val step = retryStep[bk] ?: 0
+                            retryStep[bk] = step + 1
+                            val wait = backoffDelays[minOf(step, backoffDelays.size - 1)]
+                            retryAt[bk] = now() + wait
+                            scheduleRetry(scopeKey, wait)
+                            skipped.add(first.clientMessageId)
+                        }
+                        continue
+                    }
                     if (!current(gen, o, h)) break
                     var response: JsonObject? = null
                     var rejected = false
@@ -359,21 +417,18 @@ internal class DeliveryOutbox(
                     catch (e: CancellationException) { throw e }
                     catch (_: HubRpcException) { rejected = true }
                     catch (_: Exception) { }
-                    val accepted = mutex.withLock {
+                    mutex.withLock {
                         if (!current(gen, o, h) || records_.none {
                             it.clientMessageId == r.clientMessageId && it.status == "sending"
-                        }) return@withLock false
+                        }) return@withLock
                         if (jStr(response ?: JsonObject(emptyMap()), "deliveryStatus") == "accepted") {
                             accept(r, response?.let { jLong(it, "historyId") })
-                            true
                         } else {
                             fact(r.copy(status = if (rejected) "failed" else "uncertain",
                                 error = if (rejected) "context" else null))
-                            false
                         }
                     }
                     inFlight = null
-                    if (!accepted) break
                 }
             } finally {
                 withContext(NonCancellable) {
@@ -389,7 +444,7 @@ internal class DeliveryOutbox(
                 val first = head(o, h, scopeKey)
                 if (owned && current(gen, o, h)) {
                     val requested = wakeups.remove(key)
-                    if (first != null && (requested || first.clientMessageId in manualChecks)) drain(scopeKey)
+                    if (first != null && requested) drain(scopeKey)
                 }
             }
         }
@@ -412,7 +467,9 @@ internal class DeliveryOutbox(
         persist(records_.filter { it.status != "sent" })
     }
 
-    private suspend fun statusQuery(head: DeliveryRecord, gen: Int, o: String?, h: String?): Boolean {
+    private enum class QueryOutcome { SENT, RESEND, RETRY }
+
+    private suspend fun statusQuery(head: DeliveryRecord, gen: Int, o: String?, h: String?): QueryOutcome {
         val target = buildJsonObject {
             put("method", head.method)
             if (head.method == "room.message") put("roomId", jStr(head.params, "roomId") ?: "") else put("sessionId", jStr(head.params, "sessionId") ?: "")
@@ -425,18 +482,19 @@ internal class DeliveryOutbox(
             ds = res["deliveryStatus"]?.jsonPrimitive?.contentOrNull
             hid = res["historyId"]?.jsonPrimitive?.longOrNull
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { }
+        catch (e: Exception) { return QueryOutcome.RETRY }
         return mutex.withLock {
-            if (!current(gen, o, h)) return@withLock false
-            val cur = records_.firstOrNull { it.clientMessageId == head.clientMessageId } ?: return@withLock false
-            if (ds == "accepted") {
-                accept(cur, hid)
-                true
-            } else {
-                if (cur.status != "uncertain") {
-                    fact(cur.copy(status = "uncertain", attempted = true))
+            if (!current(gen, o, h)) return@withLock QueryOutcome.RETRY
+            val cur = records_.firstOrNull { it.clientMessageId == head.clientMessageId } ?: return@withLock QueryOutcome.SENT
+            when {
+                // accepted 或已落史（historyId 存在）：判送达
+                ds == "accepted" || (hid != null && hid > 0) -> { accept(cur, hid); QueryOutcome.SENT }
+                // hub 无回执：回退 pending 自动重发（runClientMessage 幂等兜底）
+                ds == "not_found" -> { fact(cur.copy(status = "pending", error = null)); QueryOutcome.RESEND }
+                else -> {
+                    if (cur.status != "uncertain") fact(cur.copy(status = "uncertain", attempted = true))
+                    QueryOutcome.RETRY
                 }
-                false
             }
         }
     }
@@ -452,7 +510,8 @@ internal class DeliveryOutbox(
                 records_.any { it.clientMessageId == record.clientMessageId }) return fail("context")
             val before = records_.filter { it.status != "sent" }
             val earlier = before.any {
-                it.origin == record.origin && it.hubId == record.hubId && it.scopeKey == record.scopeKey
+                it.origin == record.origin && it.hubId == record.hubId && it.scopeKey == record.scopeKey &&
+                    it.status != "failed" && it.status != "dismissed"
             }
             if (!record.replayable && (!ready_ || earlier || record.deferred)) return fail("attachments")
             if (before.size >= 50 || before.count {
@@ -481,12 +540,22 @@ internal class DeliveryOutbox(
         return true
     }
 
-    fun check(cid: String) {
-        if (!ready_ || !scope.isActive) return
+    fun retry(cid: String) {
+        if (!scope.isActive) return
         val r = records_.firstOrNull { it.clientMessageId == cid && it.origin == origin_ && it.hubId == hubId_ } ?: return
-        if (r.status == "sending" || (!r.attempted && r.status != "uncertain")) return
-        manualChecks.add(cid)
-        drain(r.scopeKey)
+        if (r.status in setOf("sending", "sent", "dismissed")) return
+        val bk = "${wkey(r.scopeKey)}|$cid"
+        scope.launch {
+            mutex.withLock {
+                retryAt.remove(bk)
+                retryStep.remove(bk)
+                val cur = records_.firstOrNull { it.clientMessageId == cid } ?: return@withLock
+                if (cur.status in setOf("uncertain", "failed")) {
+                    fact(cur.copy(status = "pending", error = null))
+                }
+            }
+            drain(r.scopeKey)
+        }
     }
 
     suspend fun dismiss(cid: String, includeParked: Boolean = false): Boolean =
@@ -502,7 +571,6 @@ internal class DeliveryOutbox(
             val removed = hits.map { it.clientMessageId }.toSet()
             val scopes = hits.map { it.scopeKey }.toSet()
             if (!persist(records_.filter { !removed.contains(it.clientMessageId) })) return@l false
-            manualChecks.removeAll(removed)
             hits.forEach { onRecord(it.copy(status = "dismissed")) }
             scopes.forEach { drain(it) }
             true

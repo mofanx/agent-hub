@@ -2241,15 +2241,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun retryDeliveryRecovery() {
-        if (!hub.isConnected) {
-            currentProfile?.let { connect(it.address, it.token, it.publicToken, it.name) }
-            return
-        }
-        if (deliveryReady) refreshAll() else startDeliveryRecovery()
-    }
-
-    // ———— 多 hub 槽位换绑 ————
+    // ———— 多 hub 槽位换绑 ————    // ———— 多 hub 槽位换绑 ————
     /** 休眠 profile 徽章：attention/waitingFor/在线态摘要，不预渲染时间线 */
     data class HubBadge(var waitingFor: Int = 0, var pendingDecisions: Int = 0, var connected: Boolean = false)
     val hubBadges = mutableStateMapOf<String, HubBadge>()
@@ -6116,7 +6108,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun currentDelivery(record: DeliveryRecord) = record.origin == deliveryOrigin && record.hubId == deliveryHubId
 
-    fun checkDelivery(id: String) { viewModelScope.launch { delivery.check(id) } }
+    fun retryDelivery(id: String) { delivery.retry(id) }
 
     fun dismissDeliveries(ids: Set<String>, includeParked: Boolean = false) {
         viewModelScope.launch { delivery.dismissMany(ids, includeParked) }

@@ -351,47 +351,58 @@ internal fun AttentionManager(vm: ChatViewModel) {
 internal fun DeliveryManager(vm: ChatViewModel) {
     if (!vm.showDeliveryManager) return
     val S = LocalStrings.current
-    val clipboard = LocalClipboard.current
-    val scope = rememberCoroutineScope()
     var parked by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<String?>(null) }
-    val rows = vm.deliveryRecords.filter { parked || vm.currentDelivery(it) }
+    val rows = vm.deliveryRecords.filter {
+        (parked || vm.currentDelivery(it)) && it.status != "sent" && it.status != "dismissed"
+    }
+    // 同文同 scope 多记录：标注不同 clientMessageId 便于区分
+    val dupKeys = rows.groupBy { it.scopeKey to it.text }.filter { it.value.size > 1 }.keys
     AlertDialog(
         onDismissRequest = { vm.showDeliveryManager = false },
         title = { Text(S.deliveryLabels.getValue("title")) },
         text = {
             Column {
                 vm.deliveryError?.let { Text(S.deliveryLabels[it] ?: S.deliveryLabels.getValue("context"), color = MaterialTheme.colorScheme.error) }
-                TextButton(onClick = { vm.retryDeliveryRecovery() }) { Text(S.deliveryLabels.getValue("retry")) }
-                TextButton(onClick = { parked = !parked }) {
-                    Text(S.deliveryLabels.getValue("include"), fontWeight = if (parked) FontWeight.Bold else FontWeight.Normal)
-                }
                 LazyColumn(Modifier.heightIn(max = 380.dp)) {
                     if (rows.isEmpty()) item { Text(S.deliveryLabels.getValue("empty")) }
                     items(rows, key = { it.clientMessageId }) { record ->
+                        val current = vm.currentDelivery(record)
                         Column(Modifier.padding(vertical = 8.dp)) {
                             Text(listOf(record.profileLabel, record.scopeLabel).filter { it.isNotBlank() }.joinToString(" / "))
                             Text(record.text, maxLines = 4, overflow = TextOverflow.Ellipsis)
                             if (record.attachmentNames.isNotEmpty()) Text(record.attachmentNames.joinToString())
                             Text(
-                                S.deliveryLabels[if (record.status == "pending" && record.deferred) "deferred" else record.status].orEmpty(),
+                                when {
+                                    record.status == "sending" || (record.status == "pending" && !record.deferred) ->
+                                        S.deliveryLabels.getValue("sending")
+                                    else -> S.deliveryLabels.getValue("undelivered")
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                             )
-                            if (!vm.currentDelivery(record)) Text(S.deliveryLabels.getValue("parked"))
+                            if ((record.scopeKey to record.text) in dupKeys) {
+                                Text(
+                                    S.deliveryLabels["dupTag"]?.format(record.clientMessageId.takeLast(6)).orEmpty(),
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                            if (!current) Text(S.deliveryLabels.getValue("parked"))
                             record.error?.let { Text(S.deliveryLabels[it] ?: S.deliveryLabels.getValue("context")) }
-                            FlowRow {
-                                TextButton(onClick = { scope.launch {
-                                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(S.copy, record.text)))
-                                } }) { Text(S.copy) }
-                                if (vm.currentDelivery(record) && record.status != "sending" && record.attempted) {
-                                    TextButton(onClick = { vm.checkDelivery(record.clientMessageId) }) { Text(S.deliveryLabels.getValue("check")) }
+                            if (current) FlowRow {
+                                TextButton(enabled = record.status != "sending",
+                                    onClick = { vm.retryDelivery(record.clientMessageId) }) {
+                                    Text(S.deliveryLabels.getValue("retrySend"))
                                 }
-                                TextButton(enabled = record.status != "sending", onClick = { removing = record.clientMessageId }) {
-                                    Text(S.deliveryLabels.getValue("remove"))
+                                TextButton(enabled = record.status != "sending",
+                                    onClick = { removing = record.clientMessageId }) {
+                                    Text(S.deliveryLabels.getValue("abandon"))
                                 }
                             }
                         }
                     }
+                }
+                TextButton(onClick = { parked = !parked }) {
+                    Text(S.deliveryLabels.getValue("include"), fontWeight = if (parked) FontWeight.Bold else FontWeight.Normal)
                 }
             }
         },
@@ -1354,13 +1365,17 @@ pendingClarification?.let { clarFlow ->
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                 )
             }
-            val outboxPending = vm.deliveryRecords.count { vm.currentDelivery(it) && it.status == "pending" }
+            val outboxPending = vm.deliveryRecords.count {
+                vm.currentDelivery(it) && it.status in setOf("pending", "uncertain", "failed")
+            }
             if (outboxPending > 0) {
                 Text(
                     S.outboxPendingFmt.format(outboxPending),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                    modifier = Modifier
+                        .clickable { vm.showDeliveryManager = true }
+                        .padding(horizontal = 16.dp, vertical = 2.dp),
                 )
             }
             // 活跃编排中输入语义提示：普通消息补充进当前 flow，或在特定阶段结束并开新一轮；

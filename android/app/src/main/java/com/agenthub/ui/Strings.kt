@@ -863,7 +863,7 @@ object ZhStrings : Strings {
         "unsupported" to "当前 Hub 不支持可恢复的待办提醒，请先更新 Hub", "empty" to "当前没有待处理事项",
     )
     override val connReconnecting = "重连中…"
-    override val outboxPendingFmt = "%d 条待发送"
+    override val outboxPendingFmt = "%d 条未送达"
     override val hubLocalOnlyHint = "Hub 仅监听本机回环（dev-token），远程接入需在 Hub 设置正式 token"
     override val memorySection = "记忆"
     override val eventWakeTag = "事件唤醒"
@@ -873,17 +873,19 @@ object ZhStrings : Strings {
     override val deliveryAttachmentFmt = "\n附件：%s\n%s"
     override val deliveryLabels = mapOf(
         "title" to "消息送达状态", "pending" to "待发送", "deferred" to "等待恢复并校准上下文",
-        "sending" to "发送中", "sent" to "Hub 已接收", "uncertain" to "不确定是否送达，点这里重发",
-        "failed" to "未送达，点此重发或放弃", "dismissed" to "已移除，不再发送", "preparing" to "正在准备发送",
+        "sending" to "发送中", "sent" to "已送达", "uncertain" to "未送达，点重试",
+        "failed" to "未送达，点重试", "dismissed" to "已移除，不再发送", "preparing" to "正在准备发送",
+        "undelivered" to "未送达，点重试", "retrySend" to "重试", "abandon" to "放弃",
+        "dupTag" to "重复记录 #%s",
         "sync" to "断线恢复中，消息不会自动补发", "storage" to "本地保存失败，请保留草稿并检查存储空间",
         "corrupt" to "本地消息记录出错，自动发送已暂停",
         "context" to "原流程、工单或答复对象已变化，请重新确认",
         "unsupported" to "此连接不支持可靠排队，请联网发送或升级 Hub",
         "attachments" to "附件不能离线或忙时重放，请核对文件后重新附加",
         "expired" to "消息已过期或设备时间异常，请重新确认", "full" to "待发送队列已满，请先清理或缩短消息",
-        "check" to "查询接收状态", "remove" to "移除记录", "include" to "显示其他连接的记录",
-        "confirm" to "移除不会撤销已经执行的操作。结果不确定时，请先核查任务状态，再决定是否重新发送。",
-        "empty" to "没有待处理的发送记录", "retry" to "重新同步", "parked" to "其他连接，已隔离",
+        "remove" to "放弃", "include" to "显示其他连接的记录",
+        "confirm" to "放弃不会撤销已经执行的操作。结果不确定时，请先核查任务状态，再决定是否重新发送。",
+        "empty" to "没有待处理的发送记录", "parked" to "其他连接，已隔离",
     )
     override val flowStartsNewHint = "此阶段普通新消息会结束当前流程并开启新一轮"
     override val dispatchCollapsedFmt = "已派发 %d 个子任务"
@@ -1597,7 +1599,7 @@ object EnStrings : Strings {
         "unsupported" to "This Hub does not support recoverable reminders. Update the Hub first", "empty" to "No items need your attention",
     )
     override val connReconnecting = "Reconnecting…"
-    override val outboxPendingFmt = "%d pending"
+    override val outboxPendingFmt = "%d undelivered"
     override val hubLocalOnlyHint = "Hub only listens on loopback (dev-token) — set a real token on the Hub for remote access"
     override val memorySection = "Memory"
     override val eventWakeTag = "Event wake"
@@ -1607,17 +1609,19 @@ object EnStrings : Strings {
     override val deliveryAttachmentFmt = "\nAttachment: %s\n%s"
     override val deliveryLabels = mapOf(
         "title" to "Delivery status", "pending" to "Pending", "deferred" to "Waiting for recovery and context validation",
-        "sending" to "Sending", "sent" to "Received by Hub", "uncertain" to "Delivery unconfirmed — tap to resend",
-        "failed" to "Not delivered — tap to resend or discard", "dismissed" to "Removed; will not send", "preparing" to "Preparing message",
+        "sending" to "Sending", "sent" to "Delivered", "uncertain" to "Undelivered — tap to retry",
+        "failed" to "Undelivered — tap to retry", "dismissed" to "Removed; will not send", "preparing" to "Preparing message",
+        "undelivered" to "Undelivered — tap to retry", "retrySend" to "Retry", "abandon" to "Discard",
+        "dupTag" to "Duplicate #%s",
         "sync" to "Still recovering — messages won't auto-replay", "storage" to "Local save failed. Keep your draft and check storage",
         "corrupt" to "Local delivery store error — auto-send paused",
         "context" to "The original flow, Mission, or reply target changed. Review before sending",
         "unsupported" to "Reliable queuing is unavailable. Send online or upgrade the Hub",
         "attachments" to "Attachments cannot replay offline or while busy. Verify and attach the files again",
         "expired" to "Message expired or device clock changed. Review before sending", "full" to "Pending queue full — clean up or shorten the message",
-        "check" to "Check receipt", "remove" to "Remove record", "include" to "Show other connections",
-        "confirm" to "Removal does not undo executed actions. For unknown outcomes, check task state before sending again.",
-        "empty" to "No delivery records to resolve", "retry" to "Synchronize again", "parked" to "Other connection; isolated",
+        "remove" to "Discard", "include" to "Show other connections",
+        "confirm" to "Discarding does not undo executed actions. For unknown outcomes, check task state before sending again.",
+        "empty" to "No delivery records to resolve", "parked" to "Other connection; isolated",
     )
     override val flowStartsNewHint = "At this stage, a new message ends the current flow and starts a new one"
     override val dispatchCollapsedFmt = "Dispatched %d subtasks"

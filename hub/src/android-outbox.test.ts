@@ -27,7 +27,7 @@ test("Android 任务产物标签换行并限制单行，避免窄标签撑出整
 });
 
 const cases = [
-  "durability", "fifo", "uncertain_barrier", "identity_fences", "dismiss_and_bulk",
+  "durability", "fifo", "uncertain_autoresolve", "identity_fences", "dismiss_and_bulk",
   "context_and_busy", "codec", "bounds_and_snapshot", "attachment_tombstone",
   "receipt_cleanup_failure", "lifecycle_and_fast_worker", "expiry_and_protocol",
   "recovery_watermarks", "recovery_reset_and_draft", "recovery_fences",
@@ -56,7 +56,7 @@ test("Android sender wiring: durable acceptance, recovery gate, original bubbles
   const strings = fs.readFileSync(path.join(native, "ui/Strings.kt"), "utf8");
   const init = vm.slice(vm.lastIndexOf("\n    init {"));
   assert.ok(init.indexOf("delivery = DeliveryOutbox(") < init.indexOf("prefs.registerOnSharedPreferenceChangeListener"));
-  const recovery = vm.slice(vm.indexOf("private fun startDeliveryRecovery("), vm.indexOf("fun retryDeliveryRecovery("));
+  const recovery = vm.slice(vm.indexOf("private fun startDeliveryRecovery("), vm.indexOf("data class HubBadge"));
   assert.ok(recovery.indexOf("syncRefreshAll(") < recovery.indexOf("recoverScope(key)"));
   assert.ok(recovery.indexOf("recoverScope(key)") < recovery.indexOf("deliveryReady = true"));
   assert.ok(recovery.indexOf("deliveryReady = true") < recovery.indexOf("delivery.resume()"));
@@ -651,7 +651,7 @@ fun main() = runBlocking {
         gate.complete(Unit); until { e.box.records.isEmpty() }
         check(e.sends().map { cid(it.second) } == listOf("a", "b"))
     }
-    scenario("uncertain_barrier") {
+    scenario("uncertain_autoresolve") {
         val e = env(); e.bind(true)
         var receipt = "not_found"
         e.receiver = { method, p ->
@@ -660,12 +660,13 @@ fun main() = runBlocking {
         }
         check(e.box.enqueue(rec("a"))); until { e.updates["a"]?.status == "uncertain" }
         check(e.box.enqueue(rec("b"))); e.box.resume()
-        until { e.queries().size == 1 }; repeat(3) { e.box.resume(); flush() }
-        check(e.queries().size == 1)
-        check(e.sends().map { cid(it.second) } == listOf("a"))
-        receipt = "accepted"; e.box.check("a"); until { e.box.records.isEmpty() }
+        // uncertain 不再是屏障：a 自动消解（not_found→回退重发），仍 uncertain 则退避，b 正常送达
+        until { e.updates["b"]?.status == "sent" }
+        check(e.sends().map { cid(it.second) } == listOf("a", "a", "b"))
+        // 退避窗口后自动续查：accepted → 判 sent
+        receipt = "accepted"; e.clock += 3_000; until { e.box.records.isEmpty() }
         check(e.queries().size == 2)
-        check(e.sends().map { cid(it.second) } == listOf("a", "b"))
+        check(e.sends().map { cid(it.second) } == listOf("a", "a", "b"))
     }
     scenario("identity_fences") {
         val e = env(); val gate = e.gate(); e.bind(true)
@@ -719,22 +720,18 @@ fun main() = runBlocking {
         check(single.sends().map { cid(it.second) } == listOf("b"))
     }
     scenario("context_and_busy") {
-        val e = env(); e.bind(true); e.validator = { "context" }
-        check(e.box.enqueue(rec("a"))); until { e.updates["a"]?.status == "failed" }
-        check(e.box.enqueue(rec("b"))); flush()
-        check(e.calls.isEmpty())
-        val stored = e.gate(); var busySeen = false
-        e.validator = { busySeen = true; "busy" }
-        e.writer = { raw ->
-            if (busySeen && Json.parseToJsonElement(raw).jsonObject["entries"]!!.jsonArray.any {
-                it.jsonObject["status"]!!.jsonPrimitive.content == "pending"
-            }) stored.await()
-            true
+        val e = env(); e.bind(true); var busySeen = false
+        e.validator = {
+            if (it.clientMessageId == "a") "context"
+            else { busySeen = true; "busy" }
         }
+        check(e.box.enqueue(rec("a"))); until { e.updates["a"]?.status == "failed" }
+        // failed 不再头阻：b 直接 validate → busy → deferred 待自动退避
+        check(e.box.enqueue(rec("b"))); until { busySeen }
+        check(e.calls.isEmpty())
         check(e.box.dismiss("a"))
-        until { busySeen }
         check(e.box.records.single().status == "pending" && e.calls.isEmpty())
-        e.validator = { null }; e.box.resume(); stored.complete(Unit); until { e.box.records.isEmpty() }
+        e.validator = { null }; e.box.resume(); until { e.box.records.isEmpty() }
         check(e.sends().map { cid(it.second) } == listOf("b"))
     }
     scenario("codec") {
@@ -797,9 +794,13 @@ fun main() = runBlocking {
         check(e.box.records.single().params["content"] != null)
         val restored = env(saved)
         check(restored.box.records.single().attempted && restored.box.records.single().status == "uncertain")
-        restored.receiver = { m, _ -> check(m == "client.message.status"); status("not_found") }
-        restored.bind(true); until { restored.queries().size == 1 }; flush()
-        check(restored.sends().isEmpty() && restored.box.records.single().status == "uncertain")
+        restored.receiver = { m, _ ->
+            if (m == "client.message.status") status("not_found") else accepted()
+        }
+        // not_found → 回退 pending 自动重发；附件不可重放 → failed(attachments) 留给用户一键决定
+        restored.bind(true); until { restored.box.records.single().status == "failed" }
+        check(restored.sends().isEmpty() && restored.box.records.single().error == "attachments"
+            && restored.queries().size == 1)
         val offline = env(); offline.bind()
         check(!offline.box.enqueue(rec("offline-image", binary = true)) && offline.box.records.isEmpty())
         val interrupted = env(); interrupted.bind(true)
