@@ -448,6 +448,15 @@ fun ChatScreen(vm: ChatViewModel, onMenuClick: () -> Unit = {}) {
         if (index >= 0) listState.scrollToItem(index) else vm.attentionNavError = "gone"
         vm.attentionRequestId = null
     }
+    LaunchedEffect(sessionKey, vm.attentionMissionId, messages.size) {
+        val mid = vm.attentionMissionId ?: return@LaunchedEffect
+        val index = messages.indexOfFirst { message ->
+            ((message as? ChatListItem.Other)?.item as? ChatItem.Mission)?.missionId == mid
+        }
+        // 历史无锚工单：静默容错（已开房，MissionSection 兜底可见）
+        if (index >= 0) listState.scrollToItem(index)
+        vm.attentionMissionId = null
+    }
     val isAtTop by remember { derivedStateOf { messages.isNotEmpty() && listState.firstVisibleItemIndex >= messages.lastIndex - 2 } }
 
     var activeDownload by remember { mutableStateOf<DownloadRequest?>(null) }
@@ -3141,6 +3150,8 @@ private fun RawChatBubble(
             vm,
             isCurrentMatch = isCurrentMatch,
         )
+
+        is ChatItem.Mission -> MissionAnchorCard(item, vm, LocalStrings.current)
 
     }
 }

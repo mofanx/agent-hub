@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.agenthub.ChatViewModel
+import com.agenthub.ChatItem
 import com.agenthub.Mission
 import com.agenthub.MissionReview
 import com.agenthub.RoomInfo
@@ -886,5 +887,189 @@ private fun MissionDraftCard(draft: kotlinx.serialization.json.JsonObject, vm: C
                 ) { Text(S.missionCreateAndStart) }
             }
         }
+    }
+}
+
+// ---- 房史工单锚卡（kind:"mission" 条目） ----
+
+/** 消息内联工单卡：锚定房史流；活态按 missionId join vm.missions，内嵌快照仅兜底。
+ *  折叠默认：status+goal+「N/M 已验」+主按钮；展开见 criteria 明细（verdict/note 旁注 agent 报告）。
+ *  验收=一次点击（附言可选收起），返工=chips+必填说明（说明即 worker 下段 prompt）。 */
+@Composable
+fun MissionAnchorCard(item: ChatItem.Mission, vm: ChatViewModel, S: Strings) {
+    val live = vm.missions.firstOrNull { it.id == item.missionId }
+    val status = live?.status ?: item.status
+    val goal = live?.goal?.takeIf { it.isNotBlank() } ?: item.goal
+    val criteria = if (live != null) {
+        live.acceptanceCriteria.mapIndexed { i, text ->
+            val rv = live.reviews.find { it.index == i }
+            ChatItem.MissionCriterion(i, text, rv?.verdict ?: "unverified", rv?.note ?: "")
+        }
+    } else item.criteria
+    val passed = criteria.count { it.verdict == "pass" }
+    var expanded by rememberSaveable(item.missionId) { mutableStateOf(false) }
+    var showNote by rememberSaveable(item.missionId) { mutableStateOf(false) }
+    var note by rememberSaveable(item.missionId) { mutableStateOf("") }
+    var showRework by rememberSaveable(item.missionId) { mutableStateOf(false) }
+    var reworkNote by rememberSaveable(item.missionId) { mutableStateOf("") }
+    var menu by remember { mutableStateOf(false) }
+    var confirmStop by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var confirmStart by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    val canAct = live != null
+
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(S.missionSection, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(6.dp))
+                Text(missionStatusLabel(S, status), style = MaterialTheme.typography.labelSmall, color = missionColor(status))
+            }
+            Text(goal, style = MaterialTheme.typography.bodySmall, maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
+            if (criteria.isNotEmpty()) {
+                Text(
+                    "${S.missionAnchorProgress.format(passed, criteria.size)} · ${S.missionSelfReport}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.clickable { expanded = !expanded }.padding(vertical = 4.dp),
+                )
+                if (expanded) {
+                    criteria.forEach { c ->
+                        val vl = when (c.verdict) {
+                            "pass" -> S.missionReviewPass
+                            "fail" -> S.missionReviewFail
+                            else -> S.missionReviewUnverified
+                        }
+                        Text(
+                            "${c.index + 1}. ${c.text} — $vl${c.note.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            androidx.compose.foundation.layout.FlowRow {
+                if (status == "awaiting-acceptance") {
+                    Button(
+                        enabled = canAct && !busy,
+                        onClick = { busy = true; vm.acceptMission(item.missionId, note.trim()) { busy = false } },
+                    ) { Text(S.missionAccept) }
+                    TextButton(onClick = { showRework = !showRework }, enabled = canAct) { Text(S.missionRework) }
+                }
+                if (status == "draft") {
+                    Button(enabled = canAct && !busy, onClick = { confirmStart = true }) { Text(S.missionStart) }
+                }
+                Box {
+                    TextButton(onClick = { menu = true }) { Text(S.more) }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        if (status in listOf("running", "waiting-user", "awaiting-acceptance") || live?.flowId != null) {
+                            DropdownMenuItem(text = { Text(S.missionViewRoom) }, onClick = {
+                                menu = false; vm.openMissionExecution(item.missionId)
+                            }, enabled = canAct)
+                        }
+                        DropdownMenuItem(text = { Text(S.missionSchedule) }, onClick = {
+                            menu = false; vm.openMission(item.missionId)
+                        }, enabled = canAct)
+                        if (status in listOf("awaiting-acceptance", "failed", "stopped")) {
+                            DropdownMenuItem(text = { Text(S.missionRework) }, onClick = {
+                                menu = false; showRework = true
+                            }, enabled = canAct)
+                        }
+                        if (status in listOf("running", "waiting-user", "awaiting-acceptance")) {
+                            DropdownMenuItem(text = { Text(S.missionStop, color = MaterialTheme.colorScheme.error) }, onClick = {
+                                menu = false; confirmStop = true
+                            }, enabled = canAct)
+                        }
+                        DropdownMenuItem(text = { Text(S.missionDelete, color = MaterialTheme.colorScheme.error) }, onClick = {
+                            menu = false; confirmDelete = true
+                        }, enabled = canAct)
+                    }
+                }
+            }
+            if (status == "awaiting-acceptance") {
+                if (!showNote) {
+                    Text(
+                        S.missionNoteOptional,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.clickable { showNote = true }.padding(vertical = 2.dp),
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = note,
+                        onValueChange = { note = it },
+                        label = { Text(S.missionNoteOptional) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            if (showRework) {
+                androidx.compose.foundation.layout.FlowRow {
+                    for (chip in listOf(S.missionReworkChipWrong, S.missionReworkChipMissing, S.missionReworkChipOfftrack)) {
+                        TextButton(onClick = { reworkNote = chip }) { Text(chip) }
+                    }
+                }
+                OutlinedTextField(
+                    value = reworkNote,
+                    onValueChange = { reworkNote = it },
+                    label = { Text(S.missionReworkNote) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextButton(
+                    enabled = reworkNote.isNotBlank() && canAct && !busy,
+                    onClick = {
+                        busy = true
+                        vm.reworkMission(item.missionId, reworkNote.trim()) { ok ->
+                            busy = false
+                            if (ok != null) { showRework = false; reworkNote = "" }
+                        }
+                    },
+                ) { Text(S.missionRework) }
+            }
+        }
+    }
+    if (confirmStart) {
+        AlertDialog(
+            onDismissRequest = { confirmStart = false },
+            title = { Text(S.missionStart) },
+            text = { Text("${S.missionStartConfirm}\n\n$goal\n${S.missionRiskNotice}") },
+            confirmButton = {
+                TextButton(onClick = {
+                    busy = true; vm.startMission(item.missionId) { busy = false }; confirmStart = false
+                }) { Text(S.missionStart) }
+            },
+            dismissButton = { TextButton(onClick = { confirmStart = false }) { Text(S.cancel) } },
+        )
+    }
+    if (confirmStop) {
+        AlertDialog(
+            onDismissRequest = { confirmStop = false },
+            title = { Text(S.missionStop) },
+            text = { Text(S.missionStopConfirm) },
+            confirmButton = {
+                TextButton(onClick = {
+                    busy = true; vm.stopMission(item.missionId) { busy = false }; confirmStop = false
+                }) { Text(S.missionStop, color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmStop = false }) { Text(S.cancel) } },
+        )
+    }
+    if (confirmDelete) {
+        val active = status == "running" || status == "waiting-user"
+        val blocked = status == "awaiting-acceptance"
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text(S.missionDelete) },
+            text = { Text(if (blocked) S.missionDeleteBlocked else "${S.missionDeleteConfirm}${if (active) "\n${S.missionDeleteActiveHint}" else ""}") },
+            confirmButton = {
+                if (!blocked) {
+                    TextButton(onClick = {
+                        busy = true; vm.deleteMission(item.missionId, force = active) { busy = false }; confirmDelete = false
+                    }) { Text(S.missionDelete, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(S.cancel) } },
+        )
     }
 }

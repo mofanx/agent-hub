@@ -249,6 +249,21 @@ sealed class ChatItem {
         override val text: String get() =
             snapshot.goal ?: snapshot.tasks.joinToString("\n") { "@${it.name} ${it.task}" }
     }
+    /** 锚卡验收标准：hub kind:"mission" 锚条目快照单条（verdict 来自 reviews 汇总） */
+    data class MissionCriterion(val index: Int, val text: String, val verdict: String, val note: String)
+    /** 目标工单锚卡：kind:"mission" 房史条目；活态按 missionId join vm.missions，内嵌快照仅兜底 */
+    data class Mission(
+        override val id: Long,
+        val missionId: String,
+        val goal: String,
+        val status: String,
+        val criteria: List<MissionCriterion>,
+        val reasonCode: String? = null,
+        override val author: String = "",
+        override val at: Long = 0L,
+    ) : ChatItem() {
+        override val text: String get() = goal
+    }
 }
 
 /** 聊天列表里的可显示项：单个消息会按 Markdown 块展开为多个 ChatListItem.Message。 */
@@ -853,6 +868,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     internal val attentionItems = mutableStateListOf<AttentionTarget>()
     var showAttentionManager by mutableStateOf(false)
     var attentionRequestId by mutableStateOf<String?>(null)
+    /** 工单锚卡定位：attention 深链 navMissionId → 开房后滚动到对应 ChatItem.Mission */
+    var attentionMissionId by mutableStateOf<String?>(null)
     var attentionNavError by mutableStateOf<String?>(null)
     private var pendingAttention: Map<String, String>? = null
     var connectionState by mutableStateOf(HubConnectionState.Disconnected)
@@ -2818,11 +2835,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         target.extras["navOrigin"] == deliveryOrigin && target.extras["navHubId"] == deliveryHubId
 
     fun openAttentionTarget(extras: Map<String, String>) {
-        if (extras["navOrigin"].isNullOrBlank() || extras["navHubId"].isNullOrBlank()) {
+        // ntfy 深链只带 navRoomId/navMissionId：补齐当前连接身份（仍不匹配才 wrong_connection）
+        val enriched = extras.toMutableMap()
+        if (enriched["navOrigin"].isNullOrBlank()) enriched["navOrigin"] = deliveryOrigin
+        if (enriched["navHubId"].isNullOrBlank()) deliveryHubId?.let { enriched["navHubId"] = it }
+        if (enriched["navOrigin"].isNullOrBlank() || enriched["navHubId"].isNullOrBlank()) {
             attentionNavError = "wrong_connection"
             return
         }
-        pendingAttention = extras.toMap()
+        pendingAttention = enriched
         openPendingAttention()
     }
 
@@ -2842,7 +2863,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         attentionNavError = null
         attentionRequestId = null
         // 处理后本地销记：导航成功即从徽标移除该待办（仍真实待办的会在下次 reconcile 补回）
-        val navKeys = listOf("navRoomId", "navFlowId", "navTaskId", "navHelpId", "navDecisionId", "navRequestId", "navBatchKey")
+        val navKeys = listOf("navRoomId", "navFlowId", "navTaskId", "navHelpId", "navDecisionId", "navRequestId", "navBatchKey", "navMissionId")
         attentionItems.removeAll { t -> navKeys.all { k -> (target[k] ?: "") == (t.extras[k] ?: "") } }
         val roomId = target["navRoomId"]
         val anchor = target["navAt"]?.toLongOrNull()?.takeIf { it > 0 }
@@ -2850,7 +2871,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (roomId != null) {
             val room = rooms.find { it.roomId == roomId }
             if (room == null) { attentionNavError = "gone"; return }
-            openRoom(room, anchorAt = if (target["navDecisionId"] != null) anchor else null, readOnly = true) {
+            val navMission = target["navMissionId"]
+            openRoom(room, anchorAt = if (target["navDecisionId"] != null || navMission != null) anchor else null, readOnly = true) {
+                // 工单锚卡定位：锚条目缺失（旧工单）时静默开房容错，由 MissionSection 兜底
+                attentionMissionId = navMission
                 missionExecutionTarget = if (target["navFlowId"] == null) null else MissionExecutionTarget(
                     missionId = "", roomId = roomId, flowId = target["navFlowId"], taskId = target["navTaskId"],
                     dispatchedAt = target["navDispatchedAt"]?.toLongOrNull()?.takeIf { it > 0 }, nonce = System.nanoTime(),
@@ -4586,6 +4610,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             a is ChatItem.User && b is ChatItem.User ->
                 a.clientMessageId != null && a.clientMessageId == b.clientMessageId
             a is ChatItem.Flow && b is ChatItem.Flow -> a.flowId.isNotEmpty() && a.flowId == b.flowId
+            a is ChatItem.Mission && b is ChatItem.Mission -> a.missionId == b.missionId
             a is ChatItem.Process && b is ChatItem.Process -> a.processId.isNotEmpty() && a.processId == b.processId
             a is ChatItem.Decision && b is ChatItem.Decision -> a.decisionId.isNotEmpty() && a.decisionId == b.decisionId
             a is ChatItem.Elicitation && b is ChatItem.Elicitation -> a.requestId.isNotEmpty() && a.requestId == b.requestId
@@ -4602,7 +4627,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (original != null && requestItems != null && !requestItems.contains(original) &&
                 parsed !is ChatItem.Assistant && parsed !is ChatItem.User) return@mapNotNull original
             when {
-                requestItems == null && !cardsCurrent && (parsed is ChatItem.Flow || parsed is ChatItem.Decision) -> original ?: parsed
+                requestItems == null && !cardsCurrent && (parsed is ChatItem.Flow || parsed is ChatItem.Decision || parsed is ChatItem.Mission) -> original ?: parsed
                 parsed is ChatItem.User && original is ChatItem.User -> original.copy(historyId = id, historyAt = parsed.at, at = parsed.at)
                 parsed is ChatItem.Assistant && original is ChatItem.Assistant -> {
                     val pid = historyIdOf(parsed)
@@ -5280,6 +5305,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "decision" -> {
                 try {
                     parseDecisionMeta(itemId, Json.parseToJsonElement(text).jsonObject, author, at)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            "mission" -> {
+                try {
+                    val meta = Json.parseToJsonElement(text).jsonObject
+                    val mid = meta["missionId"]?.jsonPrimitive?.contentOrNull ?: return null
+                    ChatItem.Mission(
+                        itemId,
+                        mid,
+                        meta["goal"]?.jsonPrimitive?.contentOrNull ?: "",
+                        meta["status"]?.jsonPrimitive?.contentOrNull ?: "draft",
+                        meta["criteria"]?.jsonArray?.mapNotNull { c ->
+                            val o = c.jsonObject
+                            ChatItem.MissionCriterion(
+                                o["index"]?.jsonPrimitive?.intOrNull ?: 0,
+                                o["text"]?.jsonPrimitive?.contentOrNull ?: "",
+                                o["verdict"]?.jsonPrimitive?.contentOrNull ?: "unverified",
+                                o["note"]?.jsonPrimitive?.contentOrNull ?: "",
+                            )
+                        } ?: emptyList(),
+                        meta["reasonCode"]?.jsonPrimitive?.contentOrNull,
+                        author,
+                        at,
+                    )
                 } catch (_: Exception) {
                     null
                 }
@@ -7399,6 +7450,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val raw = p["mission"] as? JsonObject ?: return
                     missionEventRev++
                     upsertMission(parseMission(raw))
+                    // 锚条目经房史 append/updateEntry 同步——global 事件先到时轻拉尾部补显形
+                    scheduleTailRecover()
                 } catch (_: Exception) {
                 }
             }

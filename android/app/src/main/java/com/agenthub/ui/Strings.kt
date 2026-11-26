@@ -635,6 +635,11 @@ interface Strings {
     val missionReworkNote: String
     val missionSupplement: String
     val missionSupplementHint: String
+    val missionAnchorProgress: String
+    val missionNoteOptional: String
+    val missionReworkChipWrong: String
+    val missionReworkChipMissing: String
+    val missionReworkChipOfftrack: String
     val missionEditContract: String
     val missionAutoRetries: String
     val missionAutoRetriesHint: String
@@ -1363,6 +1368,11 @@ object ZhStrings : Strings {
     override val missionRework = "返工"
     override val missionReworkNote = "返工原因（必填）"
     override val missionSupplement = "补充说明"
+    override val missionAnchorProgress = "%d/%d 已验"
+    override val missionNoteOptional = "附言（可选）"
+    override val missionReworkChipWrong = "结果不对"
+    override val missionReworkChipMissing = "缺验证"
+    override val missionReworkChipOfftrack = "方向偏"
     override val missionSupplementHint = "补充已记录，当前在途执行不保证采纳；需要时停止后返工。"
     override val missionEditContract = "编辑契约"
     override val missionAutoRetries = "失败自动重试"
@@ -2092,6 +2102,11 @@ object EnStrings : Strings {
     override val missionRework = "Rework"
     override val missionReworkNote = "Rework reason (required)"
     override val missionSupplement = "Add supplement"
+    override val missionAnchorProgress = "%d/%d verified"
+    override val missionNoteOptional = "Note (optional)"
+    override val missionReworkChipWrong = "Wrong result"
+    override val missionReworkChipMissing = "Missing evidence"
+    override val missionReworkChipOfftrack = "Off track"
     override val missionSupplementHint = "Supplement recorded; in-flight execution is not guaranteed to adopt it — stop and rework if needed."
     override val missionEditContract = "Edit contract"
     override val missionAutoRetries = "Auto retry on failure"

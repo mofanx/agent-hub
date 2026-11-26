@@ -93,7 +93,7 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         if (!intent.getStringExtra("navRoomId").isNullOrEmpty() || !intent.getStringExtra("navSessionId").isNullOrEmpty()) {
             val keys = listOf("navOrigin", "navHubId", "navRoomId", "navSessionId", "navFlowId", "navTaskId",
-                "navDispatchedAt", "navDecisionId", "navRequestId", "navAt", "navHelpId", "navBatchKey")
+                "navDispatchedAt", "navDecisionId", "navRequestId", "navAt", "navHelpId", "navBatchKey", "navMissionId")
             vm.openAttentionTarget(keys.mapNotNull { key -> intent.getStringExtra(key)?.let { key to it } }.toMap())
             return
         }
@@ -102,7 +102,11 @@ class MainActivity : ComponentActivity() {
             // ntfy Click 深链：agenthub://attention?roomId=… → 走待办定位；connect 链接照旧导入
             if (data.host == "attention") {
                 val rid = data.getQueryParameter("roomId")
-                vm.openAttentionTarget(if (rid.isNullOrEmpty()) emptyMap() else mapOf("navRoomId" to rid))
+                val extras = buildMap {
+                    if (!rid.isNullOrEmpty()) put("navRoomId", rid)
+                    data.getQueryParameter("missionId")?.takeIf { it.isNotEmpty() }?.let { put("navMissionId", it) }
+                }
+                vm.openAttentionTarget(extras)
             } else {
                 vm.importConnectUri(data.toString())
             }
